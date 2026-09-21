@@ -1,4 +1,3 @@
-use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -10,27 +9,35 @@ use super::util;
 
 /// A capture whose GPU copy was recorded during a given frame; its host
 /// readback runs once that frame's fence signals (see
-/// `Renderer::render_frame`), so the staging buffer is provably done being
-/// written by then.
+/// `Renderer::render_frame`).
+pub struct ProbeScreenshotReply {
+    pub frame: usize,
+    pub actual_frame_captured_at: String,
+    pub frame_readback_completed_at: String,
+}
+
 struct PendingCapture {
     frame: usize,
+    recorded_at: String,
     buffer: vk::Buffer,
     allocation: Allocation,
     width: u32,
     height: u32,
     bgra: bool,
+    target: Option<(PathBuf, Sender<Result<ProbeScreenshotReply, String>>)>,
 }
 
 /// Vanilla F2 (`Screenshot.grab`): copies the presented swapchain image into a
 /// host buffer, then encodes a PNG off-thread.
 pub struct ScreenshotCapture {
     armed: bool,
+    target: Option<(PathBuf, Sender<Result<ProbeScreenshotReply, String>>)>,
     pending: Vec<PendingCapture>,
     /// Encodes spawned but not yet drained from `result_rx`.
     in_flight: u32,
     game_dir: PathBuf,
-    result_tx: Sender<Result<String, String>>,
-    result_rx: Receiver<Result<String, String>>,
+    result_tx: Sender<Option<Result<String, String>>>,
+    result_rx: Receiver<Option<Result<String, String>>>,
 }
 
 impl ScreenshotCapture {
@@ -38,6 +45,7 @@ impl ScreenshotCapture {
         let (result_tx, result_rx) = channel();
         Self {
             armed: false,
+            target: None,
             pending: Vec::new(),
             in_flight: 0,
             game_dir,
@@ -51,6 +59,19 @@ impl ScreenshotCapture {
         self.armed = true;
     }
 
+    pub fn arm_to(
+        &mut self,
+        path: PathBuf,
+    ) -> Result<Receiver<Result<ProbeScreenshotReply, String>>, String> {
+        if self.saving() {
+            return Err("Another screenshot is in flight".into());
+        }
+        let (tx, rx) = channel();
+        self.target = Some((path, tx));
+        self.armed = true;
+        Ok(rx)
+    }
+
     /// A capture is somewhere between armed and written to disk; drives the
     /// HUD saving indicator.
     pub fn saving(&self) -> bool {
@@ -61,7 +82,7 @@ impl ScreenshotCapture {
     pub fn drain_results(&mut self) -> Vec<Result<String, String>> {
         let results: Vec<_> = self.result_rx.try_iter().collect();
         self.in_flight = self.in_flight.saturating_sub(results.len() as u32);
-        results
+        results.into_iter().flatten().collect()
     }
 
     /// If armed, record the image->buffer copy into `cmd` after the final
@@ -164,11 +185,13 @@ impl ScreenshotCapture {
 
         self.pending.push(PendingCapture {
             frame,
+            recorded_at: chrono::Utc::now().to_rfc3339(),
             buffer,
             allocation,
             width: extent.width,
             height: extent.height,
             bgra: is_bgra(format),
+            target: self.target.take(),
         });
     }
 
@@ -208,18 +231,34 @@ impl ScreenshotCapture {
         device.destroy_buffer(cap.buffer, None);
         allocator.lock().unwrap().free(cap.allocation).ok();
 
-        let Some(pixels) = pixels else {
-            let _ = self
-                .result_tx
-                .send(Err("screenshot buffer was not host-visible".into()));
-            return;
-        };
-
         let tx = self.result_tx.clone();
         let (w, h, bgra) = (cap.width, cap.height, cap.bgra);
         let dir = self.game_dir.join("screenshots");
         std::thread::spawn(move || {
-            let _ = tx.send(encode_and_write(&pixels, w, h, bgra, &dir));
+            let result = pixels
+                .ok_or_else(|| "screenshot buffer was not host-visible".to_string())
+                .and_then(|pixels| {
+                    encode_and_write(
+                        &pixels,
+                        w,
+                        h,
+                        bgra,
+                        &dir,
+                        cap.target.as_ref().map(|t| t.0.as_path()),
+                    )
+                });
+            if let Some((_, reply)) = cap.target {
+                let completed = chrono::Utc::now().to_rfc3339();
+                let reply_result = result.map(|_| ProbeScreenshotReply {
+                    frame: cap.frame,
+                    actual_frame_captured_at: cap.recorded_at,
+                    frame_readback_completed_at: completed,
+                });
+                let _ = reply.send(reply_result);
+                let _ = tx.send(None);
+            } else {
+                let _ = tx.send(Some(result));
+            }
         });
     }
 
@@ -243,6 +282,7 @@ fn encode_and_write(
     height: u32,
     bgra: bool,
     dir: &Path,
+    target: Option<&Path>,
 ) -> Result<String, String> {
     // Vanilla screenshots are opaque RGB; drop alpha and reorder BGRA if needed.
     let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
@@ -254,7 +294,10 @@ fn encode_and_write(
         }
     }
 
-    let (path, name) = next_filename(dir)?;
+    let (path, name) = match target {
+        Some(path) => (path.to_path_buf(), path.to_string_lossy().into_owned()),
+        None => next_filename(dir)?,
+    };
     write_png(&path, &rgb, width, height)?;
     Ok(name)
 }
@@ -289,11 +332,49 @@ fn timestamp() -> String {
 }
 
 fn write_png(path: &Path, rgb: &[u8], width: u32, height: u32) -> Result<(), String> {
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut encoder = png::Encoder::new(BufWriter::new(file), width, height);
+    let mut bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut bytes, width, height);
     encoder.set_color(png::ColorType::Rgb);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
     writer.write_image_data(rgb).map_err(|e| e.to_string())?;
-    Ok(())
+    writer.finish().map_err(|e| e.to_string())?;
+    crate::util::write_atomic(path, &bytes).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_png_atomic_success_failure_and_f2_name() {
+        let dir = crate::test_util::test_temp_dir("probe_png");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("case.png");
+        let pixel = [3, 2, 1, 255];
+        encode_and_write(&pixel, 1, 1, true, &dir, Some(&path)).unwrap();
+        let image = image::open(&path).unwrap().to_rgb8();
+        assert_eq!(image.as_raw(), &[1, 2, 3]);
+        assert!(
+            encode_and_write(
+                &pixel,
+                1,
+                1,
+                false,
+                &dir,
+                Some(&dir.join("missing/case.png"))
+            )
+            .is_err()
+        );
+        let f2 = encode_and_write(&pixel, 1, 1, false, &dir, None).unwrap();
+        assert!(dir.join(f2).is_file());
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|e| !e
+                .unwrap()
+                .path()
+                .to_string_lossy()
+                .ends_with(".tmp"))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

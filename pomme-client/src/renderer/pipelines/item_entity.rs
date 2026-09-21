@@ -582,10 +582,20 @@ fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
         let region = uv_map.get_region(&quad.texture);
         let u_span = region.u_max - region.u_min;
         let v_span = region.v_max - region.v_min;
-        let tint = if matches!(quad.tint, crate::world::block::registry::Tint::None) {
-            crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED
-        } else {
-            crate::renderer::chunk::mesher::pack_tint_shifted([0.569, 0.741, 0.349])
+        let tint = match quad.tint {
+            crate::world::block::registry::Tint::None => {
+                crate::renderer::chunk::mesher::PACKED_WHITE_SHIFTED
+            }
+            crate::world::block::registry::Tint::Fixed(rgb) => {
+                crate::renderer::chunk::mesher::pack_tint_shifted([
+                    rgb[0] as f32 / 255.0,
+                    rgb[1] as f32 / 255.0,
+                    rgb[2] as f32 / 255.0,
+                ])
+            }
+            // Inventory/item rendering has no biome or block-state context;
+            // keep the existing neutral fallback for dynamic tints.
+            _ => crate::renderer::chunk::mesher::pack_tint_shifted([0.569, 0.741, 0.349]),
         };
         let normal = pack_normal(cardinal_normal(&quad.positions));
 

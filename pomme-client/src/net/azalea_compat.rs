@@ -9,9 +9,9 @@ use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::sound::CustomSound;
 use azalea_protocol::packets::ProtocolPacket;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
-use azalea_registry::Holder;
 use azalea_registry::builtin::SoundEvent;
 use azalea_registry::identifier::Identifier;
+use azalea_registry::{DataRegistry, Holder};
 use glam::DVec3;
 use pomme_protocol::packets::{Direction, PacketTable, Phase};
 use pomme_protocol::wire;
@@ -955,7 +955,11 @@ fn translate_set_time_774() {
         panic!("wrong packet");
     };
     assert_eq!(p.game_time, 12000);
-    let clock = p.clock_updates.values().next().unwrap();
+    let (_, clock) = p
+        .clock_updates
+        .iter()
+        .find(|(id, _)| id.protocol_id() == 0)
+        .unwrap();
     assert_eq!(clock.total_ticks, 6000);
     assert_eq!(clock.rate, 1.0);
 }
@@ -1831,7 +1835,11 @@ fn translate_set_time_767() {
         panic!("wrong packet");
     };
     assert_eq!(p.game_time, 12000);
-    let clock = p.clock_updates.values().next().unwrap();
+    let (_, clock) = p
+        .clock_updates
+        .iter()
+        .find(|(id, _)| id.protocol_id() == 0)
+        .unwrap();
     assert_eq!(clock.total_ticks, 6000);
     assert_eq!(clock.rate, 0.0);
 }

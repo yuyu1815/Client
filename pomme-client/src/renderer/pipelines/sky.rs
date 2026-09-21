@@ -77,7 +77,9 @@ const SUNRISE_COLOR_KEYFRAMES: &[(f32, i32)] = &[
     (23757.0, -1310226637),
 ];
 
-const BASE_SKY_COLOR: [f32; 3] = [0.478, 0.659, 1.0];
+// Java 26.2 plains/debug-world SKY_COLOR is ARGB 0xFF78A7FF.
+// Keep this in the shared sky equation; do not tune screenshots per backend.
+const BASE_SKY_COLOR: [f32; 3] = [120.0 / 255.0, 167.0 / 255.0, 1.0];
 
 // EasingType.symmetricCubicBezier(0.362, 0.241)
 const SKY_ANGLE_BEZIER: (f32, f32, f32, f32) = (0.362, 0.241, 0.638, 0.759);
@@ -111,6 +113,12 @@ pub struct SkyState {
     pub game_time: u64,
     pub rain_level: f32,
     pub thunder_level: f32,
+    /// Server clock state, not the frame interpolation fraction.
+    pub clock_id: Option<u32>,
+    pub clock_partial_tick: f32,
+    pub clock_rate: f32,
+    /// Last authoritative packet values, kept separate from local prediction.
+    pub last_network_clock: Option<(u32, u64, f32, f32)>,
     pub partial_tick: f32,
 }
 
@@ -121,12 +129,50 @@ impl SkyState {
             game_time: 6000,
             rain_level: 0.0,
             thunder_level: 0.0,
+            // Set from the server dimension type; unknown dimensions remain
+            // unknown instead of guessing a registry ordinal.
+            clock_id: None,
+            clock_partial_tick: 0.0,
+            // Unknown dimensions must not invent a moving default clock before
+            // the server identifies one (legacy set_time establishes id 0).
+            clock_rate: 0.0,
+            last_network_clock: None,
             partial_tick: 0.0,
         }
     }
 
+    pub fn apply_clock_update(&mut self, id: u32, total_ticks: u64, partial_tick: f32, rate: f32) {
+        if !partial_tick.is_finite() || !rate.is_finite() || rate < 0.0 {
+            tracing::warn!(
+                id,
+                partial_tick,
+                rate,
+                "Ignoring invalid world-clock update"
+            );
+            return;
+        }
+        self.clock_id = Some(id);
+        self.last_network_clock = Some((id, total_ticks, partial_tick, rate));
+        self.day_time = total_ticks;
+        self.clock_partial_tick = partial_tick.rem_euclid(1.0);
+        self.clock_rate = rate;
+    }
+
+    pub fn advance_clock_tick(&mut self) {
+        if self.clock_id.is_none() {
+            return;
+        }
+        self.clock_partial_tick += self.clock_rate;
+        let full_ticks = self.clock_partial_tick.floor();
+        self.day_time = self.day_time.wrapping_add(full_ticks as u64);
+        self.clock_partial_tick -= full_ticks;
+    }
+
     pub fn day_tick(&self) -> f32 {
-        (self.day_time % TICKS_PER_DAY as u64) as f32 + self.partial_tick
+        ((self.day_time % TICKS_PER_DAY as u64) as f32
+            + self.clock_partial_tick
+            + self.partial_tick * self.clock_rate)
+            .rem_euclid(TICKS_PER_DAY)
     }
 
     /// Clamped rain level (server-driven). Vanilla `setRainLevel` stores prev
@@ -148,6 +194,27 @@ impl SkyState {
             |c| blend_to_gray(c, 0.6, 0.75),
             |c| blend_to_gray(c, 0.24, 0.94),
         )
+    }
+
+    /// Java 26.2's atmospheric clear color for the normal overworld.
+    /// `FOG_COLOR` is 0xC0D8FF, then AtmosphericFogEnvironment mixes it with
+    /// SKY_COLOR using the sky-fog end and render-distance chunk count.
+    /// Other dimensions keep their existing path until their attribute inputs
+    /// are wired instead of being silently treated as overworld.
+    pub fn clear_color_linear(&self, dimension: &str, render_distance_chunks: u32) -> [f32; 3] {
+        let sky = self.sky_color();
+        if dimension != "minecraft:overworld" {
+            return sky.map(srgb_to_linear);
+        }
+        let fog = [192.0 / 255.0, 216.0 / 255.0, 1.0];
+        let sky_fog_end = (512.0_f32 / 16.0).min(render_distance_chunks as f32);
+        let t = (sky_fog_end / 32.0).clamp(0.0, 1.0);
+        let sky_color_mix = 1.0 - (0.25 + 0.75 * t).powf(0.25);
+        lerp_rgb(fog, sky, sky_color_mix).map(srgb_to_linear)
+    }
+
+    pub fn sky_color_linear(&self) -> [f32; 3] {
+        self.sky_color().map(srgb_to_linear)
     }
 
     /// Cloud tint (rgba): vanilla base is white at 0.8 alpha, darkened toward
@@ -461,7 +528,7 @@ impl SkyPipeline {
             sample_float_keyframes(day_tick, STAR_BRIGHTNESS_KEYFRAMES, TICKS_PER_DAY)
                 * (1.0 - sky.rain());
 
-        let dome = sky.sky_color();
+        let dome = sky.sky_color_linear();
         let sky_color = [dome[0], dome[1], dome[2], 1.0];
 
         let sunrise_argb = sample_argb_keyframes(day_tick, SUNRISE_COLOR_KEYFRAMES, TICKS_PER_DAY);
@@ -706,6 +773,14 @@ fn sample_rgb_keyframes(tick: f32, keyframes: &[(f32, [f32; 3])], period: f32) -
         v0[1] + (v1[1] - v0[1]) * frac,
         v0[2] + (v1[2] - v0[2]) * frac,
     ]
+}
+
+fn srgb_to_linear(channel: f32) -> f32 {
+    if channel <= 0.04045 {
+        channel / 12.92
+    } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn lerp_rgb(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
@@ -1155,4 +1230,73 @@ fn create_pipelines(
     device.destroy_shader_module(frag_module, None);
 
     (pipelines[0], pipelines[1])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SkyState;
+
+    #[test]
+    fn world_clock_rate_controls_prediction_and_wraps_day() {
+        let mut frozen = SkyState::default_day();
+        frozen.apply_clock_update(0, 6_000, 0.0, 0.0);
+        for _ in 0..20 {
+            frozen.advance_clock_tick();
+        }
+        assert_eq!(frozen.day_time, 6_000);
+        assert_eq!(frozen.clock_partial_tick, 0.0);
+
+        let mut normal = SkyState::default_day();
+        normal.apply_clock_update(0, 6_000, 0.0, 1.0);
+        normal.advance_clock_tick();
+        assert_eq!(normal.day_time, 6_001);
+        normal.apply_clock_update(0, 6_000, 0.0, 0.0);
+        assert_eq!(normal.day_time, 6_000);
+        assert_eq!(normal.clock_rate, 0.0);
+
+        let mut fractional = SkyState::default_day();
+        fractional.apply_clock_update(0, 6_000, 0.0, 0.25);
+        for _ in 0..3 {
+            fractional.advance_clock_tick();
+        }
+        assert_eq!(fractional.day_time, 6_000);
+        fractional.advance_clock_tick();
+        assert_eq!(fractional.day_time, 6_001);
+
+        let mut wrapped = SkyState::default_day();
+        wrapped.apply_clock_update(0, 23_999, 0.0, 1.0);
+        wrapped.advance_clock_tick();
+        assert_eq!(wrapped.day_tick(), 0.0);
+    }
+
+    #[test]
+    fn world_clock_partial_tick_is_used_without_extra_rate_when_frozen() {
+        let mut sky = SkyState::default_day();
+        sky.apply_clock_update(0, 6_000, 0.25, 0.0);
+        sky.partial_tick = 0.5;
+        assert!((sky.day_tick() - 6000.25).abs() < 1e-6);
+        assert_eq!(sky.clock_rate, 0.0);
+    }
+
+    #[test]
+    fn overworld_clear_color_matches_java_srgb_fog_contract() {
+        let sky = SkyState::default_day();
+        let clear = sky.clear_color_linear("minecraft:overworld", 10);
+        let expected_r = super::srgb_to_linear(180.0 / 255.0);
+        let expected_g = super::srgb_to_linear(207.0 / 255.0);
+        assert!((clear[0] - expected_r).abs() < 0.01, "red={}", clear[0]);
+        assert!((clear[1] - expected_g).abs() < 0.01, "green={}", clear[1]);
+        assert_eq!(
+            sky.clear_color_linear("minecraft:the_nether", 10),
+            sky.sky_color_linear()
+        );
+    }
+
+    #[test]
+    fn unknown_dimension_clock_does_not_predict() {
+        let mut sky = SkyState::default_day();
+        sky.advance_clock_tick();
+        assert_eq!(sky.day_time, 6_000);
+        assert_eq!(sky.clock_rate, 0.0);
+    }
 }

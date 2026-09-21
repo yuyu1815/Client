@@ -4,7 +4,9 @@ use std::path::Path;
 use azalea_block::BlockState;
 use serde::{Deserialize, Serialize};
 
-pub const BLOCK_CACHE_FILE: &str = "block_cache_v3.json";
+// v5 invalidates v4 caches: Tint::Fixed changes the serialized/rendered
+// meaning.
+pub const BLOCK_CACHE_FILE: &str = "block_cache_v5.json";
 
 use super::model;
 use super::model::BakedModel;
@@ -16,6 +18,8 @@ pub enum Tint {
     Grass,
     Foliage,
     DryFoliage,
+    /// Fixed vanilla block color, independent of biome.
+    Fixed([u8; 3]),
     /// Power-level color, resolved at mesh time from the state's `power`.
     Redstone,
 }
@@ -170,6 +174,30 @@ impl BlockRegistry {
 
     pub fn get_textures(&self, state: BlockState) -> Option<&FaceTextures> {
         self.textures.get(super::block_id(state))
+    }
+
+    /// Probe-only summary of the already-baked data used by the renderer.
+    pub(crate) fn debug_model_snapshot(&self, state: BlockState) -> serde_json::Value {
+        let baked = self.get_baked_model(state).map(|model| {
+            serde_json::json!({
+                "quadCount": model.quads.len(),
+                "tintedQuadCount": model.quads.iter().filter(|quad| quad.tint != Tint::None).count(),
+                "quads": model.quads,
+                "isFullCube": model.is_full_cube,
+                "occludes": model.occludes,
+            })
+        });
+        let multipart_quad_count = self
+            .get_multipart_quads(state)
+            .map(|quads| quads.len())
+            .unwrap_or(0);
+        serde_json::json!({
+            "block": super::block_id(state),
+            "properties": super::block_properties(state).entries().collect::<HashMap<_, _>>(),
+            "faceTextures": self.get_textures(state).and_then(|textures| serde_json::to_value(textures).ok()),
+            "baked": baked,
+            "multipartQuadCount": multipart_quad_count,
+        })
     }
 
     pub fn get_baked_model(&self, state: BlockState) -> Option<&BakedModel> {

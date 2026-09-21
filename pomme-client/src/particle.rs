@@ -509,6 +509,11 @@ impl ParticleStore {
                 Tint::Grass => grass_color(&climate, &self.grass_colormap, x, z),
                 Tint::Foliage => foliage_color(&climate, &self.foliage_colormap),
                 Tint::DryFoliage => dry_foliage_color(&climate, &self.dry_foliage_colormap),
+                Tint::Fixed(rgb) => [
+                    rgb[0] as f32 / 255.0,
+                    rgb[1] as f32 / 255.0,
+                    rgb[2] as f32 / 255.0,
+                ],
                 // Redstone is state-derived, resolved by the caller.
                 Tint::None | Tint::Redstone => [1.0; 3],
             }

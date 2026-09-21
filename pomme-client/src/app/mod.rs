@@ -2,6 +2,8 @@ pub mod core;
 pub mod input;
 pub mod level_load;
 pub mod phases;
+pub mod probe;
+pub(crate) mod render_debug;
 pub mod state_slot;
 
 use std::mem::ManuallyDrop;
@@ -149,13 +151,23 @@ impl App {
         presence: Option<crate::discord::DiscordPresence>,
         user: UserData,
         quick_access_multiplayer: Option<String>,
+        probe_root: Option<std::path::PathBuf>,
     ) -> Self {
+        let pending_skin_uuid = user.has_profile.then_some(user.uuid);
+        let mut core = AppCore::new(version, data_dirs, tokio_rt, presence, user);
+        if let Some(root) = probe_root {
+            core.probe = Some(probe::Probe::new(root, quick_access_multiplayer.clone()));
+            core.display_mode = core::DisplayMode::Windowed;
+            core.menu.fov = 70;
+            core.menu.view_bobbing = false;
+            core.menu.show_autosave_indicator = false;
+        }
         Self {
             phase: StateSlot::new(AppPhase::Setup {
                 quick_access_multiplayer,
-                pending_skin_uuid: user.has_profile.then_some(user.uuid),
+                pending_skin_uuid,
             }),
-            core: AppCore::new(version, data_dirs, tokio_rt, presence, user),
+            core,
             occluded: false,
             fps_limiter: FramerateLimiter::new(),
         }
@@ -210,7 +222,11 @@ impl ApplicationHandler for App {
                     .or_else(|| event_loop.available_monitors().next());
                 let window_attrs = Window::default_attributes()
                     .with_title("Pomme")
-                    .with_inner_size(winit::dpi::LogicalSize::new(854, 480))
+                    .with_inner_size(if self.core.probe.is_some() {
+                        winit::dpi::Size::Physical(winit::dpi::PhysicalSize::new(1280, 720))
+                    } else {
+                        winit::dpi::Size::Logical(winit::dpi::LogicalSize::new(854.0, 480.0))
+                    })
                     .with_fullscreen(self.core.display_mode.fullscreen_for(monitor))
                     .with_visible(false)
                     .with_window_icon(window_icon);
@@ -324,6 +340,19 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Dedicated unattended captures must not consume desktop/controller input.
+        if self.core.probe.is_some()
+            && matches!(
+                event,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::CursorMoved { .. }
+                    | WindowEvent::ModifiersChanged(_)
+            )
+        {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                 // A world saves on the way out, so the window stays up for it
@@ -683,6 +712,16 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
+                if self
+                    .core
+                    .probe
+                    .as_ref()
+                    .is_some_and(probe::Probe::exit_requested)
+                {
+                    tracing::info!("Probe exit request; shutting down normally");
+                    event_loop.exit();
+                    return;
+                }
                 if matches!(self.phase.get(), AppPhase::Setup { .. }) {
                     return;
                 }
@@ -704,7 +743,8 @@ impl ApplicationHandler for App {
 
                 let core = &mut self.core;
 
-                let should_apply_cursor_grab = core.input.update(&mut self.phase);
+                let should_apply_cursor_grab =
+                    core.probe.is_none() && core.input.update(&mut self.phase);
                 if should_apply_cursor_grab
                     && let AppPhase::InGame { gfx, game, .. } = self.phase.get_mut()
                 {
@@ -913,7 +953,8 @@ impl ApplicationHandler for App {
         _device_id: DeviceId,
         event: DeviceEvent,
     ) {
-        if let DeviceEvent::MouseMotion { delta } = event
+        if self.core.probe.is_none()
+            && let DeviceEvent::MouseMotion { delta } = event
             && self.core.input.is_cursor_captured()
             && matches!(self.phase.get(), AppPhase::InGame { game,.. } if !game.paused && !game.dead && !game.death_screen_open && !game.gui_open() && !game.chat.is_open())
         {

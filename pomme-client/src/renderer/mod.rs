@@ -6,6 +6,7 @@ pub mod entity_model;
 pub(crate) mod packing;
 pub mod pipelines;
 mod screenshot;
+pub use screenshot::ProbeScreenshotReply;
 pub(crate) mod shader;
 mod swapchain;
 pub(crate) mod util;
@@ -104,6 +105,7 @@ fn preview_box_rect(rect: [f32; 4], extent: vk::Extent2D) -> Option<vk::Rect2D> 
 #[allow(clippy::large_enum_variant)]
 enum RenderMode<'a> {
     World {
+        show_hand: bool,
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
@@ -111,6 +113,7 @@ enum RenderMode<'a> {
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         sky: SkyState,
+        fog_color: [f32; 3],
         entities: &'a [EntityRenderInfo],
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
         block_entities: &'a [BlockEntityRenderInfo],
@@ -978,6 +981,36 @@ impl Renderer {
         self.screenshot.arm();
     }
 
+    pub fn request_probe_screenshot(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Result<std::sync::mpsc::Receiver<Result<screenshot::ProbeScreenshotReply, String>>, String>
+    {
+        self.screenshot.arm_to(path)
+    }
+
+    pub fn probe_gpu_info(&self) -> (u32, u32) {
+        let props = self.ctx.physical_device.get_properties();
+        (props.vendor_id, props.driver_version)
+    }
+
+    /// Probe-only access to the model data already selected by the renderer.
+    pub(crate) fn probe_model_debug(&self, state: BlockState) -> serde_json::Value {
+        self.registry.debug_model_snapshot(state)
+    }
+
+    /// Probe-only capture of the actual swapchain color contract and the clear
+    /// value passed to the world render path. This does not alter rendering.
+    pub(crate) fn probe_render_debug(&self, clear_color: [f32; 3]) -> serde_json::Value {
+        serde_json::json!({
+            "swapchainFormat": format!("{:?}", self.swapchain.format.format),
+            "colorSpace": format!("{:?}", self.swapchain.format.color_space),
+            "clearColor": clear_color,
+            "shaderColorEncoding": "linear floats -> B8G8R8A8_SRGB framebuffer encode",
+            "atlasSampling": "shader texture sampling; atlas preserves sRGB texels",
+        })
+    }
+
     /// Drain finished screenshots: `Ok(relative filename)` or `Err(message)`.
     /// The caller turns each into a chat line.
     pub fn take_screenshot_messages(&mut self) -> Vec<Result<String, String>> {
@@ -1076,12 +1109,14 @@ impl Renderer {
         &mut self,
         window: &Window,
         hide_cursor: bool,
+        show_hand: bool,
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
         held_item: Option<(String, f32)>,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
+        dimension: &str,
         sky: SkyState,
         entities: &[EntityRenderInfo],
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
@@ -1111,13 +1146,14 @@ impl Renderer {
         let clear_col = if eyes_in_water {
             camera::WATER_FOG_COLOR
         } else {
-            sky.sky_color()
+            sky.clear_color_linear(dimension, render_distance)
         };
         self.render_frame(
             window,
             hide_cursor,
             [clear_col[0], clear_col[1], clear_col[2], 1.0],
             RenderMode::World {
+                show_hand,
                 overlay,
                 swing_progress,
                 use_anim,
@@ -1125,6 +1161,7 @@ impl Renderer {
                 destroy_info,
                 show_chunk_borders,
                 sky,
+                fog_color: clear_col,
                 entities,
                 item_entities,
                 block_entities,
@@ -1455,18 +1492,14 @@ impl Renderer {
         let render_finished = self.render_finished_per_image[image_index as usize];
 
         if let RenderMode::World {
-            ref sky,
+            fog_color,
             render_distance,
             eyes_in_water,
             ..
         } = mode
         {
-            let uniform = CameraUniform::new(
-                &self.camera,
-                sky.sky_color(),
-                render_distance,
-                eyes_in_water,
-            );
+            let uniform =
+                CameraUniform::new(&self.camera, fog_color, render_distance, eyes_in_water);
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
@@ -1660,6 +1693,7 @@ impl Renderer {
 
         match &mode {
             RenderMode::World {
+                show_hand,
                 overlay,
                 swing_progress,
                 use_anim,
@@ -1667,6 +1701,7 @@ impl Renderer {
                 destroy_info,
                 show_chunk_borders,
                 sky,
+                fog_color: _,
                 entities,
                 item_entities,
                 block_entities,
@@ -1788,7 +1823,8 @@ impl Renderer {
                 };
                 cmd.clear_attachments(&[clear_attachment], &[clear_rect]);
 
-                if self.camera.mode == camera::CameraMode::FirstPerson
+                if *show_hand
+                    && self.camera.mode == camera::CameraMode::FirstPerson
                     && self.camera.top_down().is_none()
                 {
                     let aspect = sw / sh.max(1.0);

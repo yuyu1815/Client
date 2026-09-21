@@ -273,6 +273,7 @@ pub struct BiomeClimate {
     pub grass_color_modifier: GrassColorModifier,
     pub foliage_color_override: Option<[f32; 3]>,
     pub dry_foliage_color_override: Option<[f32; 3]>,
+    pub water_color_override: Option<[f32; 3]>,
 }
 
 impl Default for BiomeClimate {
@@ -284,6 +285,7 @@ impl Default for BiomeClimate {
             grass_color_modifier: GrassColorModifier::None,
             foliage_color_override: None,
             dry_foliage_color_override: None,
+            water_color_override: None,
         }
     }
 }
@@ -304,6 +306,11 @@ fn tint_color(
         Tint::Grass => pack_tint_shifted(grass),
         Tint::Foliage => pack_tint_shifted(foliage),
         Tint::DryFoliage => pack_tint_shifted(dry_foliage),
+        Tint::Fixed(rgb) => pack_tint_shifted([
+            rgb[0] as f32 / 255.0,
+            rgb[1] as f32 / 255.0,
+            rgb[2] as f32 / 255.0,
+        ]),
         Tint::Redstone => pack_tint_shifted(redstone()),
     }
 }
@@ -826,6 +833,7 @@ impl MeshDispatcher {
             cardinal_lighting: self.cardinal_lighting,
             min_y: chunk_store.min_y(),
             height: chunk_store.height(),
+            debug_world: chunk_store.debug_world,
         }
     }
 
@@ -1136,6 +1144,7 @@ struct ChunkStoreSnapshot {
     cardinal_lighting: CardinalLighting,
     min_y: i32,
     height: u32,
+    debug_world: Option<crate::world::block::DebugWorld>,
 }
 
 impl ChunkStoreSnapshot {
@@ -1160,7 +1169,7 @@ impl ChunkStoreSnapshot {
         };
 
         let c: parking_lot::RwLockReadGuard<'_, azalea_world::Chunk> = chunk_lock.read();
-        chunk::block_state_from_section(&c, x, y, z, self.min_y)
+        chunk::block_state_from_section(&c, x, y, z, self.min_y, self.debug_world)
     }
 
     fn min_y(&self) -> i32 {
@@ -1220,6 +1229,14 @@ impl ChunkStoreSnapshot {
 
     fn dry_foliage_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
         blend_color(x, z, |bx, bz| self.dry_foliage_color_at(bx, y, bz))
+    }
+
+    fn water_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+        blend_color(x, z, |bx, bz| {
+            self.climate_at(bx, y, bz)
+                .water_color_override
+                .unwrap_or([0.247, 0.463, 0.894])
+        })
     }
 
     fn get_light(&self, x: i32, y: i32, z: i32) -> f32 {
@@ -1597,6 +1614,28 @@ fn mesh_chunk_snapshot(
                     }
                     emit_missing_cube(sink, block_pos, snapshot, registry, uv_map, bx, by, bz);
                 }
+
+                // Vanilla renders a water fluid state in addition to the block
+                // model for waterlogged blocks (stairs, propagules, etc.).
+                if matches!(kind, BlockKind::Solid)
+                    && matches!(
+                        crate::world::block::fluid(state).kind,
+                        crate::world::block::FluidKind::Water
+                    )
+                {
+                    emit_fluid(
+                        sink,
+                        BlockKind::Water,
+                        block_pos,
+                        state,
+                        snapshot,
+                        registry,
+                        uv_map,
+                        bx,
+                        by,
+                        bz,
+                    );
+                }
                 by += step;
             }
             local_x += step;
@@ -1766,6 +1805,7 @@ fn emit_cube_faces(
     }
 }
 
+#[derive(Clone, Copy)]
 enum BlockKind {
     Air,
     Water,
@@ -1789,12 +1829,194 @@ fn classify_block(state: azalea_block::BlockState) -> BlockKind {
     }
 }
 
-// TODO: biome-based water color
-// TODO: per-corner height averaging for smooth water surfaces
-// TODO: flowing water texture (water_flow) with direction-based rotation
-// TODO: per-level height for flowing water (level / 9.0 per corner)
+// Vanilla FluidRenderer constants and calculations. Keep these in the shared
+// emitter so water, lava, bubble columns, and waterlogged states agree.
+const FLUID_TOP_EPSILON: f32 = 0.001;
 
-const FLUID_MAX_HEIGHT: f32 = 8.0 / 9.0;
+/// Vanilla FluidRenderer.getHeight for a renderer corner.
+fn fluid_height_with_above(
+    current: crate::world::block::Fluid,
+    above: crate::world::block::Fluid,
+) -> f32 {
+    if current.kind == crate::world::block::FluidKind::Empty {
+        0.0
+    } else if crate::world::block::same_fluid(current, above) {
+        1.0
+    } else {
+        current.height().clamp(0.0, 1.0)
+    }
+}
+
+fn fluid_height_at(
+    snapshot: &ChunkStoreSnapshot,
+    bx: i32,
+    by: i32,
+    bz: i32,
+    current: crate::world::block::Fluid,
+) -> f32 {
+    fluid_height_with_above(
+        current,
+        crate::world::block::fluid(snapshot.get_block_state(bx, by + 1, bz)),
+    )
+}
+
+fn fluid_render_height(
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    bx: i32,
+    by: i32,
+    bz: i32,
+    kind: crate::world::block::Fluid,
+) -> f32 {
+    let state = snapshot.get_block_state(bx, by, bz);
+    let fluid = crate::world::block::fluid(state);
+    if crate::world::block::same_fluid(kind, fluid) {
+        fluid_height_with_above(
+            kind,
+            crate::world::block::fluid(snapshot.get_block_state(bx, by + 1, bz)),
+        )
+    } else if registry.occludes_neighbor(state) {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+fn add_weighted_fluid_height(weighted: &mut [f32; 2], height: f32) {
+    if height >= 0.8 {
+        weighted[0] += height * 10.0;
+        weighted[1] += 10.0;
+    } else if height >= 0.0 {
+        weighted[0] += height;
+        weighted[1] += 1.0;
+    }
+}
+
+fn calculate_average_fluid_height(
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    kind: crate::world::block::Fluid,
+    self_height: f32,
+    height_a: f32,
+    height_b: f32,
+    corner_x: i32,
+    corner_y: i32,
+    corner_z: i32,
+) -> f32 {
+    if height_a >= 1.0 || height_b >= 1.0 {
+        return 1.0;
+    }
+    let mut weighted = [0.0, 0.0];
+    if height_a > 0.0 || height_b > 0.0 {
+        let corner = fluid_render_height(snapshot, registry, corner_x, corner_y, corner_z, kind);
+        if corner >= 1.0 {
+            return 1.0;
+        }
+        add_weighted_fluid_height(&mut weighted, corner);
+    }
+    add_weighted_fluid_height(&mut weighted, self_height);
+    add_weighted_fluid_height(&mut weighted, height_a);
+    add_weighted_fluid_height(&mut weighted, height_b);
+    weighted[0] / weighted[1]
+}
+
+fn fluid_flow_vector(
+    snapshot: &ChunkStoreSnapshot,
+    current: crate::world::block::Fluid,
+    bx: i32,
+    by: i32,
+    bz: i32,
+) -> [f32; 2] {
+    let mut flow = [0.0f32; 2];
+    for (dx, dz) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+        let state = snapshot.get_block_state(bx + dx, by, bz + dz);
+        let neighbor = crate::world::block::fluid(state);
+        if !crate::world::block::same_fluid(current, neighbor) {
+            continue;
+        }
+        let mut height = neighbor.height();
+        if height == 0.0 && !crate::world::block::is_air(state) {
+            let below =
+                crate::world::block::fluid(snapshot.get_block_state(bx + dx, by - 1, bz + dz));
+            if crate::world::block::same_fluid(current, below) {
+                height = below.height();
+            }
+        }
+        if height > 0.0 {
+            let delta = current.height() - height;
+            flow[0] += dx as f32 * delta;
+            flow[1] += dz as f32 * delta;
+        }
+    }
+    let length = flow[0].hypot(flow[1]);
+    if length > 0.0 {
+        [flow[0] / length, flow[1] / length]
+    } else {
+        [0.0, 0.0]
+    }
+}
+
+fn fluid_top_uv_values(flow: [f32; 2]) -> [[f32; 2]; 4] {
+    if flow == [0.0, 0.0] {
+        return [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+    }
+    let angle = flow[1].atan2(flow[0]) - std::f32::consts::FRAC_PI_2;
+    let s = angle.sin() * 0.25;
+    let c = angle.cos() * 0.25;
+    [
+        [0.5 + (-c - s), 0.5 + (-c + s)],
+        [0.5 + (-c + s), 0.5 + (c + s)],
+        [0.5 + (c + s), 0.5 + (c - s)],
+        [0.5 + (c - s), 0.5 + (-c - s)],
+    ]
+}
+
+fn fluid_top_uvs(
+    uv_map: &AtlasUVMap,
+    kind: BlockKind,
+    flow: [f32; 2],
+) -> (AtlasRegion, [[f32; 2]; 4]) {
+    let flow_region = if matches!(kind, BlockKind::Water) {
+        uv_map.get_region("water_flow")
+    } else {
+        uv_map.get_region("lava_flow")
+    };
+    let still = if matches!(kind, BlockKind::Water) {
+        uv_map.get_region("water_still")
+    } else {
+        uv_map.get_region("lava_still")
+    };
+    if flow == [0.0, 0.0] {
+        (still, fluid_top_uv_values(flow))
+    } else {
+        (flow_region, fluid_top_uv_values(flow))
+    }
+}
+
+fn should_render_backward_up_face(
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    fluid_state: azalea_block::BlockState,
+    bx: i32,
+    by: i32,
+    bz: i32,
+) -> bool {
+    let fluid = crate::world::block::fluid(fluid_state);
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            if dx == 0 && dz == 0 {
+                continue;
+            }
+            let state = snapshot.get_block_state(bx + dx, by, bz + dz);
+            if !crate::world::block::same_fluid(fluid, crate::world::block::fluid(state))
+                && !registry.occludes_neighbor(state)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 #[allow(clippy::too_many_arguments)]
 fn block_face_tex_tint(
@@ -1810,7 +2032,7 @@ fn block_face_tex_tint(
     match classify_block(state) {
         BlockKind::Water => (
             uv_map.get_region("water_still"),
-            pack_tint_shifted([0.247, 0.463, 0.894]),
+            pack_tint_shifted(snapshot.water_tint(bx, by, bz)),
         ),
         BlockKind::Lava => (uv_map.get_region("lava_still"), PACKED_WHITE_SHIFTED),
         _ => {
@@ -1851,10 +2073,22 @@ fn emit_fluid(
     by: i32,
     bz: i32,
 ) {
-    let (region, tint) =
-        block_face_tex_tint(state, Direction::Up, uv_map, snapshot, registry, bx, by, bz);
-
-    // Water is translucent (separate blended pass); lava is opaque.
+    let fluid_state = if matches!(kind, BlockKind::Water)
+        && !matches!(
+            crate::world::block::block_id(state),
+            "water" | "bubble_column"
+        ) {
+        crate::world::block::water_source_state()
+    } else {
+        state
+    };
+    let current = crate::world::block::fluid(fluid_state);
+    let height_self = fluid_height_at(snapshot, bx, by, bz, current);
+    let tint = if matches!(kind, BlockKind::Water) {
+        pack_tint_shifted(snapshot.water_tint(bx, by, bz))
+    } else {
+        PACKED_WHITE_SHIFTED
+    };
     let MeshSink {
         vertices,
         solid,
@@ -1868,48 +2102,206 @@ fn emit_fluid(
     };
 
     for dir in &CUBE_FACE_DIRS {
-        let offset = dir.offset();
-        let neighbor = snapshot.get_block_state(bx + offset[0], by + offset[1], bz + offset[2]);
-
-        if matches!(classify_block(neighbor), BlockKind::Water | BlockKind::Lava)
-            || registry.occludes_neighbor(neighbor)
+        let [dx, dy, dz] = dir.offset();
+        let neighbor_state = snapshot.get_block_state(bx + dx, by + dy, bz + dz);
+        let neighbor = crate::world::block::fluid(neighbor_state);
+        if crate::world::block::same_fluid(current, neighbor)
+            || registry.occludes_neighbor(neighbor_state)
+            || registry.occludes_neighbor(fluid_state)
         {
             continue;
         }
 
-        let (mut positions, uvs) = cube_face_geometry(*dir);
-        let light = snapshot.cardinal_lighting.by_face(*dir);
-
+        let north = fluid_render_height(snapshot, registry, bx, by, bz - 1, current);
+        let south = fluid_render_height(snapshot, registry, bx, by, bz + 1, current);
+        let west = fluid_render_height(snapshot, registry, bx - 1, by, bz, current);
+        let east = fluid_render_height(snapshot, registry, bx + 1, by, bz, current);
+        let (north_west, north_east, south_west, south_east) = if height_self >= 1.0 {
+            (1.0, 1.0, 1.0, 1.0)
+        } else {
+            (
+                calculate_average_fluid_height(
+                    snapshot,
+                    registry,
+                    current,
+                    height_self,
+                    north,
+                    west,
+                    bx - 1,
+                    by,
+                    bz - 1,
+                ),
+                calculate_average_fluid_height(
+                    snapshot,
+                    registry,
+                    current,
+                    height_self,
+                    north,
+                    east,
+                    bx + 1,
+                    by,
+                    bz - 1,
+                ),
+                calculate_average_fluid_height(
+                    snapshot,
+                    registry,
+                    current,
+                    height_self,
+                    south,
+                    west,
+                    bx - 1,
+                    by,
+                    bz + 1,
+                ),
+                calculate_average_fluid_height(
+                    snapshot,
+                    registry,
+                    current,
+                    height_self,
+                    south,
+                    east,
+                    bx + 1,
+                    by,
+                    bz + 1,
+                ),
+            )
+        };
         if matches!(dir, Direction::Up) {
-            // A water/lava block above would have culled this face already, so
-            // the surface always sits at the lowered fluid height.
-            for p in &mut positions {
-                p[1] = FLUID_MAX_HEIGHT;
+            if registry.occludes_neighbor(neighbor_state) {
+                continue;
             }
-
-            emit_face_into(
-                vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
+            let positions = [
+                [0.0, north_west - FLUID_TOP_EPSILON, 0.0],
+                [0.0, south_west - FLUID_TOP_EPSILON, 1.0],
+                [1.0, south_east - FLUID_TOP_EPSILON, 1.0],
+                [1.0, north_east - FLUID_TOP_EPSILON, 0.0],
+            ];
+            let (region, uvs) = fluid_top_uvs(
+                uv_map,
+                kind,
+                fluid_flow_vector(snapshot, current, bx, by, bz),
             );
-
-            // Vanilla's backward up-face: the surface seen from below (underwater
-            // looking up). Reversed winding so it survives back-face culling.
-            let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
-            let rev_uvs = [uvs[0], uvs[3], uvs[2], uvs[1]];
             emit_face_into(
                 vertices,
                 indices,
                 block_pos,
-                &rev_positions,
-                &rev_uvs,
-                [light; 4],
+                &positions,
+                &uvs,
+                [snapshot.cardinal_lighting.up; 4],
                 region,
                 tint,
             );
+            if should_render_backward_up_face(snapshot, registry, fluid_state, bx, by, bz) {
+                let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
+                let rev_uvs = [uvs[0], uvs[3], uvs[2], uvs[1]];
+                emit_face_into(
+                    vertices,
+                    indices,
+                    block_pos,
+                    &rev_positions,
+                    &rev_uvs,
+                    [snapshot.cardinal_lighting.up; 4],
+                    region,
+                    tint,
+                );
+            }
             continue;
         }
 
+        let bottom = if matches!(dir, Direction::Down) {
+            0.001
+        } else {
+            0.0
+        };
+        let (h0, h1, positions) = match dir {
+            Direction::Down => {
+                let (mut positions, uvs) = cube_face_geometry(*dir);
+                for position in &mut positions {
+                    position[1] = bottom;
+                }
+                emit_face_into(
+                    vertices,
+                    indices,
+                    block_pos,
+                    &positions,
+                    &uvs,
+                    [snapshot.cardinal_lighting.down; 4],
+                    if matches!(kind, BlockKind::Water) {
+                        uv_map.get_region("water_still")
+                    } else {
+                        uv_map.get_region("lava_still")
+                    },
+                    tint,
+                );
+                continue;
+            }
+            Direction::North => (
+                north_west,
+                north_east,
+                [
+                    [0.0, 0.0, 0.001],
+                    [1.0, 0.0, 0.001],
+                    [1.0, 0.0, 0.001],
+                    [0.0, 0.0, 0.001],
+                ],
+            ),
+            Direction::South => (
+                south_east,
+                south_west,
+                [
+                    [1.0, 0.0, 0.999],
+                    [0.0, 0.0, 0.999],
+                    [0.0, 0.0, 0.999],
+                    [1.0, 0.0, 0.999],
+                ],
+            ),
+            Direction::West => (
+                south_west,
+                north_west,
+                [
+                    [0.001, 0.0, 1.0],
+                    [0.001, 0.0, 0.0],
+                    [0.001, 0.0, 0.0],
+                    [0.001, 0.0, 1.0],
+                ],
+            ),
+            Direction::East => (
+                north_east,
+                south_east,
+                [
+                    [0.999, 0.0, 0.0],
+                    [0.999, 0.0, 1.0],
+                    [0.999, 0.0, 1.0],
+                    [0.999, 0.0, 0.0],
+                ],
+            ),
+            Direction::Up => unreachable!(),
+        };
+        let mut positions = positions;
+        positions[0][1] = h0;
+        positions[1][1] = h1;
+        positions[2][1] = bottom;
+        positions[3][1] = bottom;
+        let region = if matches!(kind, BlockKind::Water) {
+            uv_map.get_region("water_flow")
+        } else {
+            uv_map.get_region("lava_flow")
+        };
+        let uvs = [
+            [0.0, (1.0 - h0).clamp(0.0, 1.0) * 0.5],
+            [0.5, (1.0 - h1).clamp(0.0, 1.0) * 0.5],
+            [0.5, 0.5],
+            [0.0, 0.5],
+        ];
         emit_face_into(
-            vertices, indices, block_pos, &positions, &uvs, [light; 4], region, tint,
+            vertices,
+            indices,
+            block_pos,
+            &positions,
+            &uvs,
+            [snapshot.cardinal_lighting.by_face(*dir); 4],
+            region,
+            tint,
         );
     }
 }
@@ -1972,12 +2364,7 @@ fn emit_lod_cube(
     let is_fluid = matches!(classify_block(state), BlockKind::Water | BlockKind::Lava);
     // We have to do this otherwise there becomes a visible seam at the LOD border
     let fluid_top = if is_fluid {
-        let above = snapshot.get_block_state(bx, by + 1, bz);
-        if matches!(classify_block(above), BlockKind::Water | BlockKind::Lava) {
-            1.0
-        } else {
-            FLUID_MAX_HEIGHT
-        }
+        fluid_height_at(snapshot, bx, by, bz, crate::world::block::fluid(state))
     } else {
         1.0
     };
@@ -2250,7 +2637,10 @@ pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4
 
 #[cfg(test)]
 mod terrain_uv_tests {
-    use super::{pack_sprite_uv, unpack_sprite_uv};
+    use super::{
+        add_weighted_fluid_height, fluid_height_with_above, fluid_top_uv_values, pack_sprite_uv,
+        unpack_sprite_uv,
+    };
 
     fn wrapped(x: f32) -> f32 {
         x - x.floor()
@@ -2277,5 +2667,42 @@ mod terrain_uv_tests {
         let a = unpack_sprite_uv(pack_sprite_uv(0.25));
         let b = unpack_sprite_uv(pack_sprite_uv(1.25));
         assert!((wrapped(a) - wrapped(b)).abs() <= 1.0 / 4095.0);
+    }
+
+    #[test]
+    fn level_height_corner_weight_matches_vanilla_thresholds() {
+        let mut weighted = [0.0, 0.0];
+        add_weighted_fluid_height(&mut weighted, 0.8888889);
+        add_weighted_fluid_height(&mut weighted, 0.5);
+        assert!((weighted[0] / weighted[1] - 0.85353535).abs() < 1e-6);
+    }
+
+    #[test]
+    fn source_uses_still_uv_and_flow_rotates_uv() {
+        let still = fluid_top_uv_values([0.0, 0.0]);
+        assert_eq!(still, [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+        let flow = fluid_top_uv_values([1.0, 0.0]);
+        assert!((flow[0][0] - 0.75).abs() < 1e-6);
+        assert!((flow[0][1] - 0.25).abs() < 1e-6);
+        assert_ne!(flow, still);
+    }
+
+    #[test]
+    fn same_fluid_above_fills_side_height_without_changing_own_height() {
+        let water = crate::world::block::Fluid {
+            kind: crate::world::block::FluidKind::Water,
+            amount: 8,
+            falling: false,
+        };
+        let thin = crate::world::block::Fluid { amount: 3, ..water };
+        let empty = crate::world::block::Fluid {
+            kind: crate::world::block::FluidKind::Empty,
+            amount: 0,
+            falling: false,
+        };
+        assert_eq!(fluid_height_with_above(water, empty), 8.0 / 9.0);
+        assert_eq!(fluid_height_with_above(water, water), 1.0);
+        assert_eq!(fluid_height_with_above(thin, water), 1.0);
+        assert_eq!(fluid_height_with_above(thin, empty), 3.0 / 9.0);
     }
 }

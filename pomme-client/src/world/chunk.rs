@@ -122,6 +122,7 @@ impl ChunkLightData {
 }
 
 pub struct ChunkStore {
+    pub debug_world: Option<super::block::DebugWorld>,
     pub chunk_storage: ChunkStorage,
     pub partial_storage: PartialChunkStorage,
     pub light_data: std::collections::HashMap<(i32, i32), Arc<ChunkLightData>>,
@@ -139,6 +140,7 @@ impl ChunkStore {
 
     pub fn new_with_dimension(view_distance: u32, height: u32, min_y: i32) -> Self {
         Self {
+            debug_world: None,
             chunk_storage: ChunkStorage::new(height, min_y),
             // The grid silently drops out-of-range chunks and is never resized,
             // so floor it at the max view distance (~0.5 MB of Option slots).
@@ -245,7 +247,14 @@ impl ChunkStore {
             return BlockState::AIR;
         };
         let chunk = chunk_lock.read();
-        block_state_from_section(&chunk, x, y, z, self.chunk_storage.min_y())
+        block_state_from_section(
+            &chunk,
+            x,
+            y,
+            z,
+            self.chunk_storage.min_y(),
+            self.debug_world,
+        )
     }
 
     pub fn height(&self) -> u32 {
@@ -300,24 +309,37 @@ impl ChunkStore {
     /// Registry id of the biome at a block position (matches the mesher's biome
     /// lookup). Returns 0 when the chunk is missing.
     pub fn biome_id(&self, x: i32, y: i32, z: i32) -> u32 {
+        self.biome_id_checked(x, y, z).unwrap_or(0)
+    }
+
+    /// Probe callers must distinguish absent biome data from registry entry
+    /// zero.
+    pub fn biome_id_checked(&self, x: i32, y: i32, z: i32) -> Option<u32> {
         let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
-        let Some(chunk_lock) = self.get_chunk(&chunk_pos) else {
-            return 0;
-        };
+        let chunk_lock = self.get_chunk(&chunk_pos)?;
         let chunk = chunk_lock.read();
         let biome_pos = azalea_core::position::ChunkBiomePos {
             x: (x.rem_euclid(16) / 4) as u8,
             y,
             z: (z.rem_euclid(16) / 4) as u8,
         };
-        let biome = chunk
+        chunk
             .get_biome(biome_pos, self.chunk_storage.min_y())
-            .unwrap_or_default();
-        u32::from(biome)
+            .map(u32::from)
     }
 }
 
-pub fn block_state_from_section(chunk: &Chunk, x: i32, y: i32, z: i32, min_y: i32) -> BlockState {
+pub fn block_state_from_section(
+    chunk: &Chunk,
+    x: i32,
+    y: i32,
+    z: i32,
+    min_y: i32,
+    debug_world: Option<super::block::DebugWorld>,
+) -> BlockState {
+    if let Some(debug) = debug_world {
+        return debug.state(x, y, z);
+    }
     // div_euclid so below-world y maps out of range (-> AIR) instead of
     // truncating into section 0; vanilla getSectionIndex floors.
     let section_idx = (y - min_y).div_euclid(16) as usize;
@@ -339,6 +361,70 @@ pub fn block_state_from_section(chunk: &Chunk, x: i32, y: i32, z: i32, min_y: i3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_debug_world_override_is_shared_not_a_dump_substitution() {
+        super::super::block::init("26.2");
+        let debug = super::super::block::DebugWorld::new();
+        let mut chunk = Chunk::default();
+        let netherrack = super::super::block::first_state_of("netherrack").unwrap();
+        let _ = chunk.get_and_set_block_state(
+            &azalea_core::position::ChunkBlockPos { x: 0, y: 69, z: 0 },
+            netherrack,
+            0,
+        );
+        assert_eq!(
+            block_state_from_section(&chunk, 0, 69, 0, 0, None),
+            netherrack
+        );
+        assert_eq!(
+            block_state_from_section(&chunk, 0, 69, 0, 0, Some(debug)),
+            BlockState::AIR
+        );
+        assert_eq!(
+            block_state_from_section(&chunk, 1, 70, 3, 0, None),
+            BlockState::AIR
+        );
+        assert_eq!(
+            super::super::block::block_id(block_state_from_section(
+                &chunk,
+                1,
+                70,
+                3,
+                0,
+                Some(debug)
+            )),
+            "stone"
+        );
+        let log = debug.state(3, 70, 1);
+        assert_eq!(super::super::block::block_id(log), "stripped_acacia_log");
+        assert_eq!(
+            super::super::block::block_properties(log).get("axis"),
+            Some("x")
+        );
+        assert_eq!(
+            super::super::block::block_id(debug.state(-10, 60, -10)),
+            "barrier"
+        );
+        assert_eq!(
+            super::super::block::block_properties(debug.state(0, 60, 0)).get("waterlogged"),
+            Some("false")
+        );
+        for (x, y, z) in [
+            (0, 70, 0),
+            (-1, 70, 3),
+            (2, 70, 3),
+            (1, 69, 3),
+            (1, 71, 3),
+            (1, 70, 363),
+            (i32::MAX, 70, i32::MAX),
+        ] {
+            assert_eq!(debug.state(x, y, z), BlockState::AIR);
+        }
+        let mut missing = ChunkStore::new(2);
+        missing.debug_world = Some(debug);
+        assert_eq!(missing.get_block_state(1, 70, 3), BlockState::AIR);
+    }
 
     #[test]
     fn column_neighborhood_is_the_full_three_by_three() {

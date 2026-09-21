@@ -336,6 +336,7 @@ fn serverbound_player_input(state: &PlayerInputState) -> ServerboundPlayerInput 
 }
 
 pub struct AppCore {
+    pub probe: Option<crate::app::probe::Probe>,
     pub user: UserData,
     pub presence: Option<DiscordPresence>,
     pub display_mode: DisplayMode,
@@ -350,6 +351,10 @@ pub struct AppCore {
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
     pub time_tick_accumulator: f32,
+    /// Mirrors vanilla TickRateManager's authoritative freeze/step state.
+    pub server_tick_rate: f32,
+    pub server_tick_frozen: bool,
+    pub server_tick_steps: u32,
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
     pub unfocused_since: Option<Instant>,
@@ -449,6 +454,18 @@ fn resolve_head_profile(profile: HeadProfile, tab_list: &TabList) -> HeadProfile
     }
 }
 
+fn time_update_clock(
+    clock_id: Option<u32>,
+    legacy: bool,
+    updates: &[(u32, u64, f32, f32)],
+) -> Option<(u32, u64, f32, f32)> {
+    let id = clock_id.or(legacy.then_some(0))?;
+    updates
+        .iter()
+        .copied()
+        .find(|(update_id, ..)| *update_id == id)
+}
+
 impl AppCore {
     pub fn new(
         version: String,
@@ -484,6 +501,7 @@ impl AppCore {
         let (head_tx, head_rx) = crossbeam_channel::unbounded();
 
         Self {
+            probe: None,
             user,
             presence,
             display_mode,
@@ -498,6 +516,9 @@ impl AppCore {
             audio,
             tick_accumulator: 0.0,
             time_tick_accumulator: 0.0,
+            server_tick_rate: 20.0,
+            server_tick_frozen: false,
+            server_tick_steps: 0,
             unfocused_since: None,
             mouse_grabbed: false,
             os_grab_stale: false,
@@ -1112,17 +1133,25 @@ impl AppCore {
                         .set_biome_climate(Arc::clone(&game.biome_climate));
                 }
                 NetworkEvent::DimensionInfo {
+                    is_debug,
                     height,
                     min_y,
                     has_skylight,
                     cardinal_light,
+                    clock_id,
                 } => {
                     tracing::info!(
-                        "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}, cardinal_light={cardinal_light:?}"
+                        "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}, cardinal_light={cardinal_light:?}, debug={is_debug}, clock_id={clock_id:?}"
                     );
+                    game.sky_state.clock_id = clock_id;
+                    game.sky_state.clock_partial_tick = 0.0;
+                    game.sky_state.clock_rate = 0.0;
+                    game.sky_state.last_network_clock = None;
                     game.cardinal_light = cardinal_light;
                     game.chunk_store =
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
+                    game.chunk_store.debug_world =
+                        is_debug.then(crate::world::block::DebugWorld::new);
                     game.light_engine =
                         crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
                     game.position_set = false;
@@ -1889,13 +1918,54 @@ impl AppCore {
                         dirty_sections_for_block(&mut priority_remesh, b.x, b.y, b.z, min_y, n);
                     }
                 }
+                NetworkEvent::TickingState {
+                    tick_rate,
+                    is_frozen,
+                } => {
+                    if tick_rate.is_finite() && tick_rate >= 1.0 {
+                        self.server_tick_rate = tick_rate;
+                    } else {
+                        tracing::warn!(tick_rate, "Ignoring invalid server ticking rate");
+                    }
+                    self.server_tick_frozen = is_frozen;
+                    if !is_frozen {
+                        self.server_tick_steps = 0;
+                    }
+                    tracing::info!(tick_rate, is_frozen, "Server ticking state");
+                }
+                NetworkEvent::TickingStep { tick_steps } => {
+                    self.server_tick_steps = tick_steps;
+                    tracing::info!(tick_steps, "Server frozen tick steps");
+                }
                 NetworkEvent::TimeUpdate {
                     game_time,
-                    day_time,
+                    clock_updates,
+                    legacy,
                 } => {
                     game.sky_state.game_time = game_time;
-                    if let Some(dt) = day_time {
-                        game.sky_state.day_time = dt;
+                    let selected_clock_id = game.sky_state.clock_id;
+                    let clock_id = selected_clock_id.or(legacy.then_some(0));
+                    if let Some((clock_id, total_ticks, partial_tick, rate)) =
+                        time_update_clock(selected_clock_id, legacy, &clock_updates)
+                    {
+                        game.sky_state.apply_clock_update(
+                            clock_id,
+                            total_ticks,
+                            partial_tick,
+                            rate,
+                        );
+                    } else if let Some(clock_id) = clock_id {
+                        tracing::debug!(
+                            clock_id,
+                            legacy,
+                            updates = clock_updates.len(),
+                            "Authoritative time update omitted the dimension clock"
+                        );
+                    } else if !clock_updates.is_empty() {
+                        tracing::debug!(
+                            updates = clock_updates.len(),
+                            "Ignoring time update for unknown dimension clock"
+                        );
                     }
                 }
                 NetworkEvent::WeatherUpdate { event, param } => {
@@ -3062,7 +3132,7 @@ mod tests {
     use super::{
         CursorOp, DeathRoute, HeadProfile, accepted_player_chat_tag, cursor_step, death_route,
         player_input_state, resolve_head_profile, server_view_distance_update,
-        serverbound_player_input,
+        serverbound_player_input, time_update_clock,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
     use crate::net::chat_security::SignedChatBody;
@@ -3090,6 +3160,16 @@ mod tests {
             }],
         );
         tab_list
+    }
+
+    #[test]
+    fn legacy_time_uses_synthetic_clock_zero_but_modern_unknown_does_not() {
+        let updates = [(1, 99, 0.0, 1.0), (0, 6000, 0.0, 0.0)];
+        assert_eq!(
+            time_update_clock(None, true, &updates),
+            Some((0, 6000, 0.0, 0.0))
+        );
+        assert_eq!(time_update_clock(None, false, &updates), None);
     }
 
     #[test]

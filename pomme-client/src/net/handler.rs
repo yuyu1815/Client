@@ -6,7 +6,7 @@ use azalea_core::sound::CustomSound;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use azalea_registry::builtin::{EntityKind, SoundEvent};
 use azalea_registry::identifier::Identifier;
-use azalea_registry::{Holder, Registry};
+use azalea_registry::{DataRegistry, Holder, Registry};
 use crossbeam_channel::Sender;
 
 use super::NetworkEvent;
@@ -36,12 +36,46 @@ fn dialog_holder_reference(
 /// Dimension info from a login/respawn registry entry. Fields that Azalea does
 /// not model directly live in its flattened extras. Missing `has_skylight`
 /// defaults to true; missing `cardinal_light` defaults to vanilla's `default`.
+fn dimension_clock_id(
+    registries: &RegistryHolder,
+    dim: &azalea_core::registry_holder::dimension_type::DimensionKindElement,
+) -> Option<u32> {
+    let Some(clock_name) = dim
+        ._extra
+        .get("default_clock")
+        .and_then(|tag| tag.string())
+        .map(|value| value.to_string())
+    else {
+        tracing::debug!("Dimension has no default_clock; world clock is unknown");
+        return None;
+    };
+    // 26.2's official registry key is minecraft:world_clock. Resolve the
+    // server-provided entry order; never infer an ID from a dimension name.
+    let Some(registry) = registries.extra.get(&Identifier::new("world_clock")) else {
+        tracing::warn!("Server omitted minecraft:world_clock registry; world clock is unknown");
+        return None;
+    };
+    let Some(id) = registry
+        .map
+        .iter()
+        .position(|(key, _)| key.to_string() == clock_name)
+    else {
+        tracing::warn!(clock = %clock_name, "Dimension default_clock is absent from minecraft:world_clock");
+        return None;
+    };
+    Some(id as u32)
+}
+
 fn dimension_info(
     dim: &azalea_core::registry_holder::dimension_type::DimensionKindElement,
+    is_debug: bool,
+    clock_id: Option<u32>,
 ) -> NetworkEvent {
     NetworkEvent::DimensionInfo {
+        is_debug,
         height: dim.height,
         min_y: dim.min_y,
+        clock_id,
         has_skylight: dim
             ._extra
             .get("has_skylight")
@@ -72,7 +106,11 @@ pub fn handle_game_packet(
     match packet {
         ClientboundGamePacket::Login(p) => {
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
-                let _ = event_tx.try_send(dimension_info(dim));
+                let _ = event_tx.try_send(dimension_info(
+                    dim,
+                    p.common.is_debug,
+                    dimension_clock_id(registry_holder, dim),
+                ));
             }
             let _ = event_tx.try_send(NetworkEvent::DimensionName {
                 name: p.common.dimension.to_string(),
@@ -561,11 +599,35 @@ pub fn handle_game_packet(
         ClientboundGamePacket::BlockChangedAck(p) => {
             let _ = event_tx.try_send(NetworkEvent::BlockChangedAck { seq: p.seq });
         }
+        ClientboundGamePacket::TickingState(p) => {
+            let _ = event_tx.try_send(NetworkEvent::TickingState {
+                tick_rate: p.tick_rate,
+                is_frozen: p.is_frozen,
+            });
+        }
+        ClientboundGamePacket::TickingStep(p) => {
+            let _ = event_tx.try_send(NetworkEvent::TickingStep {
+                tick_steps: p.tick_steps,
+            });
+        }
         ClientboundGamePacket::SetTime(p) => {
-            let day_time = p.clock_updates.values().next().map(|c| c.total_ticks);
+            let clock_updates = p
+                .clock_updates
+                .iter()
+                .map(|(clock, state)| {
+                    (
+                        clock.protocol_id(),
+                        state.total_ticks,
+                        state.partial_tick,
+                        state.rate,
+                    )
+                })
+                .collect();
             let _ = event_tx.try_send(NetworkEvent::TimeUpdate {
                 game_time: p.game_time,
-                day_time,
+                clock_updates,
+                legacy: crate::version::session_protocol()
+                    < pomme_protocol::version::NATIVE.protocol,
             });
         }
         ClientboundGamePacket::SetChunkCacheRadius(p) => {
@@ -953,7 +1015,11 @@ pub fn handle_game_packet(
                 keep_attribute_modifiers: p.data_to_keep & 1 != 0,
             });
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
-                let _ = event_tx.try_send(dimension_info(dim));
+                let _ = event_tx.try_send(dimension_info(
+                    dim,
+                    p.common.is_debug,
+                    dimension_clock_id(registry_holder, dim),
+                ));
             }
             let _ = event_tx.try_send(NetworkEvent::DimensionName {
                 name: p.common.dimension.to_string(),
@@ -1649,7 +1715,7 @@ mod dimension_info_tests {
     use crate::world::block::model::CardinalLightType;
 
     #[test]
-    fn dimension_info_reads_vanilla_cardinal_light_type() {
+    fn probe_dimension_info_preserves_debug_and_cardinal_light() {
         let dim = azalea_core::registry_holder::dimension_type::DimensionKindElement {
             height: 384,
             min_y: -64,
@@ -1668,10 +1734,14 @@ mod dimension_info_tests {
             min_y,
             has_skylight,
             cardinal_light,
-        } = dimension_info(&dim)
+            is_debug,
+            clock_id,
+        } = dimension_info(&dim, true, None)
         else {
             panic!("dimension_info returned the wrong event variant");
         };
+        assert!(is_debug);
+        assert_eq!(clock_id, None);
         assert_eq!(height, 384);
         assert_eq!(min_y, -64);
         assert!(has_skylight);
@@ -1679,7 +1749,7 @@ mod dimension_info_tests {
     }
 
     #[test]
-    fn dimension_info_defaults_cardinal_light_to_vanilla_default() {
+    fn probe_dimension_info_defaults_to_normal_world_and_cardinal_light() {
         let dim = azalea_core::registry_holder::dimension_type::DimensionKindElement {
             height: 384,
             min_y: -64,
@@ -1690,12 +1760,14 @@ mod dimension_info_tests {
         let NetworkEvent::DimensionInfo {
             has_skylight,
             cardinal_light,
+            is_debug,
             ..
-        } = dimension_info(&dim)
+        } = dimension_info(&dim, false, None)
         else {
             panic!("dimension_info returned the wrong event variant");
         };
         assert!(has_skylight);
+        assert!(!is_debug);
         assert_eq!(cardinal_light, CardinalLightType::Default);
     }
 }

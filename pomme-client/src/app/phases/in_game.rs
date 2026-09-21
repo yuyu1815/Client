@@ -318,6 +318,10 @@ pub struct MeshedCol {
 }
 
 impl GameState {
+    pub(crate) fn probe_lightmap_brightness(&self) -> f32 {
+        eye_lightmap_brightness(self)
+    }
+
     pub fn new(
         renderer: &Renderer,
         resource_packs: &ResourcePackManager,
@@ -1321,6 +1325,43 @@ fn column_frustum_tier(
     }
 }
 
+pub(crate) const fn server_tick_runs(frozen: bool, steps: u32) -> bool {
+    !frozen || steps > 0
+}
+
+pub(crate) fn server_time_tick_period(rate: f32) -> f32 {
+    if rate.is_finite() && rate >= 1.0 {
+        1.0 / rate
+    } else {
+        TICK_RATE
+    }
+}
+
+pub(crate) fn advance_server_time(
+    accumulator: &mut f32,
+    dt: f32,
+    tick_rate: f32,
+    frozen: bool,
+    steps: &mut u32,
+    sky: &mut SkyState,
+) -> u32 {
+    let period = server_time_tick_period(tick_rate);
+    *accumulator = (*accumulator + dt.max(0.0)).min(1.0);
+    let mut ticks = 0;
+    while *accumulator + 1e-6 >= period {
+        if server_tick_runs(frozen, *steps) {
+            sky.advance_clock_tick();
+            sky.game_time = sky.game_time.wrapping_add(1);
+            if frozen {
+                *steps -= 1;
+            }
+        }
+        *accumulator = (*accumulator - period).max(0.0);
+        ticks += 1;
+    }
+    ticks
+}
+
 /// Bit for one section index, 0 outside a column's 32 addressable sections (a
 /// camera outside build height resolves to such an index).
 fn section_bit(si: i32) -> u32 {
@@ -1869,6 +1910,9 @@ pub fn update_game(
     connection: &ConnectionHandle,
     game: &mut GameState,
 ) -> GameUpdateResult {
+    if core.probe.is_some() {
+        game.hide_gui = true;
+    }
     // Snapshot last frame's phase timings before this frame overwrites them: they
     // align with `raw_dt`, which measures the previous frame's full duration.
     let frame_start = std::time::Instant::now();
@@ -1894,9 +1938,10 @@ pub fn update_game(
     // with no screen open pauses the game, which also releases the cursor
     // (otherwise a system overlay like Win-key search opens over a still
     // captured cursor). TODO: F3+P toggle (options.pauseOnLostFocus).
-    if core
-        .unfocused_since
-        .is_some_and(|t| t.elapsed().as_millis() > 500)
+    if core.probe.is_none()
+        && core
+            .unfocused_since
+            .is_some_and(|t| t.elapsed().as_millis() > 500)
         && game.input_live()
         && !game.dead
     {
@@ -1921,14 +1966,17 @@ pub fn update_game(
     game.mesh_dispatcher
         .set_camera_position(*game.player.position);
 
-    // Sky time ticks unconditionally so it keeps flowing in menus;
-    // server SetTime packets reconcile drift.
-    core.time_tick_accumulator = (core.time_tick_accumulator + dt).min(1.0);
-    while core.time_tick_accumulator >= TICK_RATE {
-        game.sky_state.day_time = game.sky_state.day_time.wrapping_add(1);
-        game.sky_state.game_time = game.sky_state.game_time.wrapping_add(1);
-        core.time_tick_accumulator -= TICK_RATE;
-    }
+    // Predict the server world clock between SetTime packets. A zero rate is
+    // authoritative pause; fractional rates accumulate in clock_partial_tick.
+    // This cadence is separate from the 20 Hz player/input loop below.
+    advance_server_time(
+        &mut core.time_tick_accumulator,
+        dt,
+        core.server_tick_rate,
+        core.server_tick_frozen,
+        &mut core.server_tick_steps,
+        &mut game.sky_state,
+    );
 
     if game.input_live() && game.chunk_load_bench.is_none() {
         gfx.renderer
@@ -3257,12 +3305,21 @@ pub fn update_game(
         });
     }
 
-    let sky_partial_tick = (core.time_tick_accumulator / TICK_RATE).clamp(0.0, 1.0);
+    let sky_partial_tick = if core.server_tick_frozen {
+        0.0
+    } else {
+        (core.time_tick_accumulator / server_time_tick_period(core.server_tick_rate))
+            .clamp(0.0, 1.0)
+    };
     let sky = crate::renderer::SkyState {
         day_time: game.sky_state.day_time,
         game_time: game.sky_state.game_time,
         rain_level: game.sky_state.rain_level,
         thunder_level: game.sky_state.thunder_level,
+        clock_id: game.sky_state.clock_id,
+        clock_partial_tick: game.sky_state.clock_partial_tick,
+        clock_rate: game.sky_state.clock_rate,
+        last_network_clock: game.sky_state.last_network_clock,
         partial_tick: sky_partial_tick,
     };
     if game.show_chunk_borders {
@@ -3386,18 +3443,25 @@ pub fn update_game(
         }
     }
 
+    if let Some(mut probe) = core.probe.take() {
+        probe.poll(core, &mut gfx.renderer, game, &sky);
+        core.probe = Some(probe);
+    }
+
     // Recompute after this frame's state changes (a finished benchmark releases
     // the cursor mid-frame), so the renderer doesn't re-hide it from a stale value.
     let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
         hide_cursor,
+        !game.hide_gui,
         elements,
         swing_progress,
         use_anim,
         held_item,
         destroy_info,
         game.show_chunk_borders,
+        game.dimension.as_str(),
         sky,
         &entity_renders,
         &item_renders,
@@ -4310,7 +4374,50 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_red_overlay, section_bit, section_bits};
+    use super::{
+        advance_server_time, has_red_overlay, section_bit, section_bits, server_tick_runs,
+    };
+    use crate::renderer::SkyState;
+
+    #[test]
+    fn frozen_ticks_only_run_when_step_budget_exists() {
+        assert!(server_tick_runs(false, 0));
+        assert!(server_tick_runs(false, 3));
+        assert!(!server_tick_runs(true, 0));
+        assert!(server_tick_runs(true, 1));
+    }
+
+    #[test]
+    fn server_clock_uses_10_20_and_40_tick_cadences() {
+        for (rate, expected) in [(10.0, 10u32), (20.0, 20), (40.0, 40)] {
+            let mut sky = SkyState::default_day();
+            sky.apply_clock_update(0, 0, 0.0, 1.0);
+            let mut accumulator = 0.0;
+            let mut steps = 0;
+            assert_eq!(
+                advance_server_time(&mut accumulator, 1.0, rate, false, &mut steps, &mut sky,),
+                expected
+            );
+            assert_eq!(sky.day_time, u64::from(expected));
+        }
+    }
+
+    #[test]
+    fn frozen_clock_stops_and_step_budget_is_consumed_at_server_cadence() {
+        let mut sky = SkyState::default_day();
+        sky.apply_clock_update(0, 0, 0.0, 1.0);
+        let mut accumulator = 0.0;
+        let mut steps = 0;
+        advance_server_time(&mut accumulator, 1.0, 20.0, true, &mut steps, &mut sky);
+        assert_eq!(sky.day_time, 0);
+        steps = 2;
+        assert_eq!(
+            advance_server_time(&mut accumulator, 0.1, 20.0, true, &mut steps, &mut sky,),
+            2
+        );
+        assert_eq!(sky.day_time, 2);
+        assert_eq!(steps, 0);
+    }
 
     #[test]
     fn section_bits_cover_the_indices_and_ignore_the_rest() {

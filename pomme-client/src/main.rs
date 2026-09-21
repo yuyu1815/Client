@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 // Per-thread-heap allocator (see Cargo.toml): keeps the chunk-mesh worker
 // pool's cross-thread Vec churn from serializing on the system heap's global
 // lock and stalling the main thread.
@@ -137,6 +139,7 @@ fn main() {
         presence,
         user,
         args.quick_access_multiplayer,
+        args.render_probe_root,
     )
     .run()
     {

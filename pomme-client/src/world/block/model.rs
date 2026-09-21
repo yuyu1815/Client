@@ -1648,14 +1648,15 @@ fn is_non_occluding(block_name: &str) -> bool {
 fn determine_tint(block_name: &str) -> Tint {
     if block_name == "redstone_wire" {
         Tint::Redstone
+    } else if block_name == "spruce_leaves" {
+        Tint::Fixed([0x61, 0x99, 0x61])
+    } else if block_name == "birch_leaves" {
+        Tint::Fixed([0x80, 0xA7, 0x55])
     } else if GRASS_TINTED.contains(&block_name) {
         Tint::Grass
     } else if DRY_FOLIAGE_TINTED.contains(&block_name) {
         Tint::DryFoliage
-    } else if FOLIAGE_TINTED.contains(&block_name) || block_name.ends_with("_leaves") {
-        // TODO: spruce_leaves and birch_leaves use fixed constant colors in
-        // vanilla (BlockColors), not biome foliage; the `_leaves` suffix rule
-        // mistints them.
+    } else if FOLIAGE_TINTED.contains(&block_name) {
         Tint::Foliage
     } else {
         Tint::None
@@ -1690,6 +1691,27 @@ mod tests {
     }
 
     /// Quads must stay CCW viewed from outside for backface culling.
+    #[test]
+    fn determine_tint_matches_vanilla_leaf_table() {
+        let cases = [
+            ("oak_leaves", Tint::Foliage),
+            ("dark_oak_leaves", Tint::Foliage),
+            ("jungle_leaves", Tint::Foliage),
+            ("acacia_leaves", Tint::Foliage),
+            ("mangrove_leaves", Tint::Foliage),
+            ("vine", Tint::Foliage),
+            ("spruce_leaves", Tint::Fixed([0x61, 0x99, 0x61])),
+            ("birch_leaves", Tint::Fixed([0x80, 0xA7, 0x55])),
+            ("cherry_leaves", Tint::None),
+            ("azalea_leaves", Tint::None),
+            ("flowering_azalea_leaves", Tint::None),
+            ("pale_oak_leaves", Tint::None),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(determine_tint(name), expected, "{name}");
+        }
+    }
+
     #[test]
     fn face_winding_is_ccw_from_outside() {
         for dir in DIRS {

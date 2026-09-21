@@ -69,10 +69,14 @@ pub enum NetworkEvent {
     /// `LEVEL_CHUNKS_LOAD_START`: the server has started sending the level.
     LevelChunksLoadStart,
     DimensionInfo {
+        is_debug: bool,
         height: u32,
         min_y: i32,
         has_skylight: bool,
         cardinal_light: crate::world::block::model::CardinalLightType,
+        /// Server registry ID selected from this dimension type's
+        /// `default_clock`.
+        clock_id: Option<u32>,
     },
     ChunkLoaded {
         pos: ChunkPos,
@@ -305,7 +309,20 @@ pub enum NetworkEvent {
     },
     TimeUpdate {
         game_time: u64,
-        day_time: Option<u64>,
+        /// `(world-clock registry id, total ticks, partial tick, rate)`.
+        clock_updates: Vec<(u32, u64, f32, f32)>,
+        /// Pre-26.2 `set_time` was translated to synthetic clock id 0.
+        legacy: bool,
+    },
+    /// Authoritative `/tick` state. Vanilla applies this to TickRateManager;
+    /// it is separate from a world clock's own rate.
+    TickingState {
+        tick_rate: f32,
+        is_frozen: bool,
+    },
+    /// Authoritative number of ticks to execute while frozen (`/tick step`).
+    TickingStep {
+        tick_steps: u32,
     },
     WeatherUpdate {
         event: azalea_protocol::packets::game::c_game_event::EventType,

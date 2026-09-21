@@ -29,4 +29,8 @@ pub struct LaunchArgs {
 
     #[arg(long)]
     pub quick_access_multiplayer: Option<String>,
+
+    /// Dedicated render probe request/results directory (opt-in).
+    #[arg(long)]
+    pub render_probe_root: Option<std::path::PathBuf>,
 }

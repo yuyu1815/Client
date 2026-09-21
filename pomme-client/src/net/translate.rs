@@ -4031,7 +4031,8 @@ fn skip_paletted_container(
 /// `gameTime` plus a world-clock map: one entry for clock id 0 carrying
 /// `dayTime` as its total ticks and a rate of 1 or 0 for `tickDayTime`
 /// (vanilla `ClockNetworkState`: var-long totalTicks, float partialTick,
-/// float rate). Pomme reads day time from the first map entry.
+/// float rate). The synthetic id 0 is selected only by the legacy protocol
+/// fallback.
 fn translate_set_time(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let game_time = payload.get(..8)?;
     let day_time = u64::from_be_bytes(payload.get(8..16)?.try_into().ok()?);

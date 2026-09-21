@@ -64,7 +64,14 @@ impl LightBlockGetter for StoreWorld<'_> {
             return self.bedrock;
         };
         let chunk = chunk.read();
-        block_state_from_section(&chunk, pos.x, pos.y, pos.z, self.min_y)
+        block_state_from_section(
+            &chunk,
+            pos.x,
+            pos.y,
+            pos.z,
+            self.min_y,
+            self.store.debug_world,
+        )
     }
 
     fn clear_cache(&self) {
