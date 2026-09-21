@@ -182,6 +182,7 @@ pub struct Renderer {
     width: u32,
     height: u32,
     last_timings: RenderTimings,
+    startup_menu_presented: bool,
 }
 
 impl Renderer {
@@ -192,6 +193,7 @@ impl Renderer {
         vsync: bool,
         panorama_dir: &Path,
     ) -> Result<Self, RendererError> {
+        crate::app::startup_mark("renderer_start");
         let FontSources {
             jar_assets_dir,
             asset_index,
@@ -207,8 +209,10 @@ impl Renderer {
                 BlockRegistry::load(&jar_assets_dir, &asset_index, &game_dir, None)
             })
         };
+        crate::app::startup_mark("renderer_registry_spawned");
 
         let ctx = VulkanContext::new(&window)?;
+        crate::app::startup_mark("renderer_vulkan_ready");
 
         let swapchain_state = Swapchain::new(
             &ctx,
@@ -220,6 +224,7 @@ impl Renderer {
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
+        crate::app::startup_mark("renderer_swapchain_ready");
         let font_layer_limit = ctx
             .physical_device
             .get_properties()
@@ -236,6 +241,7 @@ impl Renderer {
             font_layer_limit,
         )
         .map_err(RendererError::Font)?;
+        crate::app::startup_mark("renderer_menu_pipeline_ready");
 
         let sw = size.width.max(1) as f32;
         let sh = size.height.max(1) as f32;
@@ -248,11 +254,14 @@ impl Renderer {
         splash(&mut menu_pipeline, 0.0, "Loading block models...");
 
         let camera = Camera::new(swapchain_state.aspect_ratio());
+        crate::app::startup_mark("renderer_registry_wait");
         let registry = registry_handle
             .join()
             .expect("block registry thread panicked");
+        crate::app::startup_mark("renderer_registry_ready");
 
         splash(&mut menu_pipeline, 0.2, "Building texture atlas...");
+        crate::app::startup_mark("renderer_atlas_start");
 
         let generated_item_textures: HashSet<&str> = registry.flat_item_textures().collect();
         let texture_names: HashSet<&str> = registry
@@ -271,8 +280,10 @@ impl Renderer {
             &generated_item_textures,
             None,
         )?;
+        crate::app::startup_mark("renderer_atlas_ready");
 
         splash(&mut menu_pipeline, 0.5, "Creating pipelines...");
+        crate::app::startup_mark("renderer_pipelines_start");
 
         let chunk_pipeline = ChunkPipeline::new(
             &ctx.device,
@@ -346,6 +357,7 @@ impl Renderer {
             &ctx.allocator,
             pipelines::panorama::resolve_panorama_faces(panorama_dir, jar_assets_dir, asset_index),
         );
+        crate::app::startup_mark("renderer_pipelines_ready");
 
         splash(&mut menu_pipeline, 0.9, "Finalizing...");
 
@@ -439,6 +451,7 @@ impl Renderer {
         );
 
         splash(&mut menu_pipeline, 0.95, "Caching item meshes...");
+        crate::app::startup_mark("renderer_gui_item_atlas_start");
 
         let initial_slot_px =
             pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(sw, sh, 0));
@@ -450,6 +463,7 @@ impl Renderer {
             &menu_pipeline,
             initial_slot_px,
         );
+        crate::app::startup_mark("renderer_gui_item_atlas_ready");
 
         let gui_item_pipeline = pipelines::gui_item::GuiItemPipeline::new(
             &ctx.device,
@@ -459,7 +473,9 @@ impl Renderer {
             &atlas,
             jar_assets_dir,
         );
+        crate::app::startup_mark("renderer_gui_item_pipeline_ready");
 
+        crate::app::startup_mark("renderer_warm_item_meshes_start");
         warm_item_meshes(
             &ctx.device,
             &ctx.allocator,
@@ -467,6 +483,8 @@ impl Renderer {
             &atlas.uv_map,
             &registry,
         );
+        crate::app::startup_mark("renderer_warm_item_meshes_ready");
+        crate::app::startup_mark("renderer_ready");
 
         Ok(Self {
             ctx,
@@ -503,6 +521,7 @@ impl Renderer {
             width: swapchain_extent.width,
             height: swapchain_extent.height,
             last_timings: RenderTimings::default(),
+            startup_menu_presented: false,
         })
     }
 
@@ -1185,7 +1204,7 @@ impl Renderer {
         cursor: (f32, f32),
         show_skin: bool,
     ) -> Result<(), RendererError> {
-        self.render_frame(
+        let result = self.render_frame(
             window,
             false,
             [0.0, 0.0, 0.0, 1.0],
@@ -1196,7 +1215,12 @@ impl Renderer {
                 cursor,
                 show_skin,
             },
-        )
+        );
+        if result.is_ok() && !self.startup_menu_presented {
+            self.startup_menu_presented = true;
+            crate::app::startup_mark("first_menu_present");
+        }
+        result
     }
 
     pub fn reload_assets(

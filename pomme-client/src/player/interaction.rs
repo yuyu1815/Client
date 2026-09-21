@@ -201,7 +201,7 @@ impl InteractionState {
         state: BlockState,
         player_pos: DVec3,
         chunks: &ChunkStore,
-        audio: &AudioEngine,
+        audio: &mut AudioEngine,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
@@ -355,7 +355,7 @@ impl InteractionState {
         input: &InputState,
         chunks: &ChunkStore,
         sender: &PacketSender,
-        audio: &AudioEngine,
+        audio: &mut AudioEngine,
         player_pos: DVec3,
         player_aabb: Aabb,
         eye_pos: DVec3,
@@ -550,7 +550,7 @@ impl InteractionState {
         &mut self,
         chunks: &ChunkStore,
         sender: &PacketSender,
-        audio: &AudioEngine,
+        audio: &mut AudioEngine,
         input: &InputState,
         player_pos: DVec3,
         on_ground: bool,
@@ -615,7 +615,7 @@ impl InteractionState {
         &mut self,
         chunks: &ChunkStore,
         sender: &PacketSender,
-        audio: &AudioEngine,
+        audio: &mut AudioEngine,
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
@@ -662,7 +662,7 @@ impl InteractionState {
     fn start_use_item(
         &mut self,
         sender: &PacketSender,
-        audio: &AudioEngine,
+        audio: &mut AudioEngine,
         chunks: &ChunkStore,
         player_pos: DVec3,
         player_aabb: Aabb,
@@ -755,7 +755,7 @@ impl InteractionState {
     fn use_item(
         &mut self,
         sender: &PacketSender,
-        audio: &AudioEngine,
+        audio: &mut AudioEngine,
         chunks: &ChunkStore,
         player_pos: DVec3,
         eye_pos: DVec3,
@@ -851,7 +851,7 @@ impl InteractionState {
     pub fn tick_dead_living_state(
         &mut self,
         held_stack: Option<&ItemStackData>,
-        audio: &AudioEngine,
+        audio: &mut AudioEngine,
         chunks: &ChunkStore,
         player_pos: DVec3,
         eye_pos: DVec3,
@@ -887,7 +887,7 @@ impl InteractionState {
     fn update_using_item(
         &mut self,
         held_stack: Option<&ItemStackData>,
-        audio: &AudioEngine,
+        audio: &mut AudioEngine,
         chunks: &ChunkStore,
         player_pos: DVec3,
         eye_pos: DVec3,
@@ -940,7 +940,7 @@ impl InteractionState {
     /// separate server packets.
     pub fn complete_using(
         &mut self,
-        audio: &AudioEngine,
+        audio: &mut AudioEngine,
         particles: &mut ParticleStore,
         chunks: &ChunkStore,
         player_pos: DVec3,
@@ -1026,7 +1026,7 @@ impl InteractionState {
         hit: BlockHitResult,
         chunks: &ChunkStore,
         sender: &PacketSender,
-        audio: &AudioEngine,
+        audio: &mut AudioEngine,
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
@@ -1111,7 +1111,7 @@ impl InteractionState {
         hit: BlockHitResult,
         chunks: &ChunkStore,
         sender: &PacketSender,
-        audio: &AudioEngine,
+        audio: &mut AudioEngine,
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
@@ -1360,7 +1360,7 @@ fn first_rule_value<T: Copy>(
 /// Plays a block's mining hit sound, matching vanilla
 /// `MultiPlayerGameMode.continueDestroyBlock`: volume `(volume + 1) / 8`, pitch
 /// `pitch * 0.5`.
-fn play_hit_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
+fn play_hit_sound(audio: &mut AudioEngine, state: BlockState, pos: BlockPos) {
     let s = block_sounds(state);
     play_block_sound(
         audio,
@@ -1373,7 +1373,7 @@ fn play_hit_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
 
 /// Plays a block's break sound, matching vanilla `LevelEventHandler` event
 /// 2001: volume `(volume + 1) / 2`, pitch `pitch * 0.8`.
-pub fn play_break_sound(audio: &AudioEngine, state: BlockState, pos: BlockPos) {
+pub fn play_break_sound(audio: &mut AudioEngine, state: BlockState, pos: BlockPos) {
     let s = block_sounds(state);
     play_block_sound(
         audio,
@@ -1402,7 +1402,7 @@ fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Op
 fn emit_consume_effects(
     active: &ActiveUse,
     particle_count: u32,
-    audio: &AudioEngine,
+    audio: &mut AudioEngine,
     particles: &mut ParticleStore,
     chunks: &ChunkStore,
     player_pos: DVec3,
@@ -1439,7 +1439,7 @@ fn emit_consume_effects(
 
 /// Plays a block sound event at the block centre in the BLOCKS category with a
 /// random variant. No-op for an empty event (a silent `SoundType` slot).
-fn play_block_sound(audio: &AudioEngine, event: &str, pos: BlockPos, volume: f32, pitch: f32) {
+fn play_block_sound(audio: &mut AudioEngine, event: &str, pos: BlockPos, volume: f32, pitch: f32) {
     if event.is_empty() {
         return;
     }

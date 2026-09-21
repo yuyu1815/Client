@@ -474,6 +474,7 @@ impl AppCore {
         presence: Option<DiscordPresence>,
         user: UserData,
     ) -> Self {
+        crate::app::startup_mark("appcore_start");
         let resource_packs = ResourcePackManager::new(&data_dirs.game_dir);
 
         let mut menu = MainMenu::new(
@@ -491,6 +492,7 @@ impl AppCore {
 
         menu.load_splash(&data_dirs.jar_assets_dir, &asset_index);
 
+        crate::app::startup_mark("audio_engine_start");
         let audio = crate::audio::AudioEngine::new(
             &data_dirs.jar_assets_dir,
             asset_index.clone(),
@@ -2096,7 +2098,11 @@ impl AppCore {
                         && let Some(state) = crate::world::block::try_state(data)
                     {
                         if !crate::world::block::is_air(state) {
-                            crate::player::interaction::play_break_sound(&self.audio, state, pos);
+                            crate::player::interaction::play_break_sound(
+                                &mut self.audio,
+                                state,
+                                pos,
+                            );
                         }
                         game.particle_store.add_destroy_block_effect(
                             pos,
@@ -2206,7 +2212,7 @@ impl AppCore {
                     // ticks off entity flags (TODO, with third-person items).
                     if id == game.player.entity_id {
                         game.interaction.complete_using(
-                            &self.audio,
+                            &mut self.audio,
                             &mut game.particle_store,
                             &game.chunk_store,
                             game.player.position.into(),
@@ -2661,7 +2667,7 @@ impl AppCore {
                 .cloned();
             game.interaction.tick_dead_living_state(
                 held_stack.as_ref(),
-                &self.audio,
+                &mut self.audio,
                 &game.chunk_store,
                 game.player.position.into(),
                 game.player.eye_pos().into(),
@@ -2850,7 +2856,7 @@ impl AppCore {
             input,
             &game.chunk_store,
             &connection.packet_tx,
-            &self.audio,
+            &mut self.audio,
             game.player.position.into(),
             player_aabb,
             game.player.eye_pos().into(),

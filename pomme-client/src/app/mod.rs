@@ -7,7 +7,7 @@ pub(crate) mod render_debug;
 pub mod state_slot;
 
 use std::mem::ManuallyDrop;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
@@ -40,6 +40,16 @@ pub enum WindowError {
 
     #[error("renderer error: {0}")]
     Renderer(#[from] renderer::RendererError),
+}
+
+static STARTUP_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+pub(crate) fn startup_mark(phase: &'static str) {
+    let elapsed_us = STARTUP_EPOCH
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_micros() as u64;
+    tracing::info!(target: "startup", phase, elapsed_us, "startup phase");
 }
 
 const TICK_RATE: f32 = 1.0 / 20.0;

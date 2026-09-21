@@ -110,15 +110,20 @@ impl Api {
 
         let mut errors = Vec::new();
         for path in candidates {
-            let display = path.display().to_string();
+            let candidate_display = path.display().to_string();
+            crate::app::startup_mark("openal_dll_load_attempt");
+            tracing::debug!(target: "startup", candidate = %candidate_display, "OpenAL library candidate");
             // SAFETY: Loading a shared library is inherently unsafe because its
             // initialization code is outside Rust's control. We only try
             // packaged/system OpenAL library names and keep the returned Library
             // alive for the lifetime of every copied symbol pointer.
             let library = match unsafe { Library::new(&path) } {
-                Ok(library) => library,
+                Ok(library) => {
+                    tracing::debug!(target: "startup", candidate = %candidate_display, "OpenAL library loaded");
+                    library
+                }
                 Err(e) => {
-                    errors.push(format!("{display}: {e}"));
+                    errors.push(format!("{candidate_display}: {e}"));
                     continue;
                 }
             };
@@ -126,7 +131,9 @@ impl Api {
                 Ok(api) => return Ok(api),
                 // A stub system library must not shadow the staged one.
                 Err(e) => {
-                    errors.push(format!("{display}: OpenAL symbols were incomplete: {e}"));
+                    errors.push(format!(
+                        "{candidate_display}: OpenAL symbols were incomplete: {e}"
+                    ));
                 }
             }
         }
@@ -300,7 +307,10 @@ pub(super) struct Context {
 
 impl Context {
     pub fn open_default(use_hrtf: bool) -> Result<Self, String> {
+        crate::app::startup_mark("openal_api_load_start");
         let api = Api::load()?;
+        crate::app::startup_mark("openal_api_loaded");
+        crate::app::startup_mark("openal_device_open_start");
         // SAFETY: A null name requests OpenAL's default playback device.
         let device = unsafe { (api.alc_open_device)(std::ptr::null()) };
         if device.is_null() {
@@ -312,6 +322,7 @@ impl Context {
             unsafe { (api.alc_close_device)(device) };
             return Err(e);
         }
+        crate::app::startup_mark("openal_device_opened");
 
         Self::create_for_device(api, device, use_hrtf)
     }
@@ -369,6 +380,7 @@ impl Context {
         // SAFETY: device is live and attributes is terminated by 0 as required by
         // alcCreateContext.
         let context = unsafe { (api.alc_create_context)(device, attributes.as_ptr()) };
+        crate::app::startup_mark("openal_context_created");
         if context.is_null() {
             let error = match api.alc_error(device, "create context") {
                 Ok(()) => "alcCreateContext returned null".to_string(),
@@ -387,6 +399,7 @@ impl Context {
             unsafe { (api.alc_close_device)(device) };
             return Err("alcMakeContextCurrent failed".to_string());
         }
+        crate::app::startup_mark("openal_context_current");
         if let Err(e) = api.alc_error(device, "make context current") {
             // SAFETY: this thread just made the context current; detach it before
             // destruction.

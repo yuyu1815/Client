@@ -100,20 +100,26 @@ fn main() {
         eprintln!("Failed to rotate logs: {e}. latest.log will probably be overwritten.");
     }
     let _guard = logging::init(&log_dir);
+    app::startup_mark("main_start");
 
     // Block-state tables must be loaded before any world/render code runs.
+    app::startup_mark("block_tables_start");
     world::block::init(version);
+    app::startup_mark("block_tables_ready");
 
+    app::startup_mark("data_dirs_verify_start");
     if let Err(e) = data_dirs.verify() {
         eprintln!("Failed to verify directories: {e}");
         std::process::exit(1);
     }
     data_dirs.ensure_game_dir().ok();
     tracing::info!("Installation directory: {}", data_dirs.game_dir.display());
+    app::startup_mark("data_dirs_ready");
 
     // A single connection needs only a few async workers; the default runtime
     // spawns one per core and floods them decoding the chunk-load burst, starving
     // the render/mesh threads. Cap it so those cores stay free.
+    app::startup_mark("runtime_create_start");
     let rt = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
@@ -121,17 +127,25 @@ fn main() {
             .build()
             .expect("Failed to create tokio runtime"),
     );
+    app::startup_mark("runtime_ready");
     {
         let _runtime = rt.enter();
+        app::startup_mark("profile_prefetch_start");
         crate::net::chat_security::ProfileKeyServices::prefetch();
+        app::startup_mark("profile_prefetch_returned");
     }
 
+    app::startup_mark("user_data_start");
     let user = UserData::from_args(args.username, args.uuid, args.access_token);
+    app::startup_mark("user_data_ready");
 
+    app::startup_mark("discord_start");
     let presence = crate::discord::DiscordPresence::start(version)
         .inspect_err(|e| tracing::warn!("Discord rich presence unavailable: {e}"))
         .ok();
+    app::startup_mark("discord_returned");
 
+    app::startup_mark("app_new_start");
     if let Err(e) = App::new(
         version.to_owned(),
         data_dirs,

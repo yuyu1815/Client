@@ -582,13 +582,16 @@ static SERVICES: Mutex<ServicesState> = Mutex::new(ServicesState::NotStarted);
 
 impl ProfileKeyServices {
     pub fn prefetch() {
+        crate::app::startup_mark("profile_prefetch_lock_start");
         {
             let mut state = SERVICES.lock();
             if !matches!(*state, ServicesState::NotStarted) {
+                crate::app::startup_mark("profile_prefetch_already_started");
                 return;
             }
             *state = ServicesState::Loading;
         }
+        crate::app::startup_mark("profile_prefetch_lock_ready");
         tokio::spawn(async {
             let services = match Self::fetch().await {
                 Ok(services) => Some(Arc::new(services)),
@@ -599,6 +602,7 @@ impl ProfileKeyServices {
             };
             *SERVICES.lock() = ServicesState::Loaded(services);
         });
+        crate::app::startup_mark("profile_prefetch_spawned");
     }
 
     /// The services keys, once loaded (vanilla

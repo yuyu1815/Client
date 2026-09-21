@@ -174,7 +174,8 @@ enum AudioCommand {
     Shutdown,
 }
 
-#[derive(Debug)]
+type AudioInitResult = Result<(String, (usize, usize)), String>;
+
 enum AudioEvent {
     Finished(u64),
     /// Balances one entity-bound play command, whether the sound ended, was
@@ -183,11 +184,20 @@ enum AudioEvent {
     EntitySoundEnded(i32),
 }
 
+#[derive(Clone, Copy)]
+struct ListenerState {
+    position: [f32; 3],
+    forward: [f32; 3],
+    up: [f32; 3],
+}
+
 /// Plays menu and in-world sounds using a dedicated OpenAL worker thread.
 /// The public facade contains no native handles; OpenAL device/context/source/
 /// buffer state is created, used, and dropped only by the worker.
 pub struct AudioEngine {
     command_tx: Option<Sender<AudioCommand>>,
+    pending_command_tx: Option<Sender<AudioCommand>>,
+    startup_rx: Receiver<AudioInitResult>,
     event_rx: Receiver<AudioEvent>,
     worker: Option<JoinHandle<()>>,
     jar_assets_dir: PathBuf,
@@ -205,6 +215,7 @@ pub struct AudioEngine {
     menu_music_active: bool,
     next_song_delay_ticks: i32,
     music_tick_accumulator: f32,
+    listener: Option<ListenerState>,
 }
 
 impl AudioEngine {
@@ -214,13 +225,16 @@ impl AudioEngine {
         packs: &ResourcePackManager,
         volumes: [f32; SoundCategory::COUNT],
     ) -> Self {
+        crate::app::startup_mark("sounds_index_start");
         let sounds = SoundsIndex::load(jar_assets_dir, &asset_index, packs);
+        crate::app::startup_mark("sounds_index_ready");
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         // The worker reports with `try_send`, and a dropped `Finished` would
         // park the menu-music delay at `i32::MAX` forever.
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (init_tx, init_rx) = crossbeam_channel::bounded(1);
 
+        crate::app::startup_mark("audio_worker_spawn_start");
         let worker = std::thread::Builder::new()
             .name("Pomme Sound engine".to_string())
             .spawn(move || {
@@ -237,29 +251,11 @@ impl AudioEngine {
                 AudioWorker::new(context, volumes, command_rx, event_tx).run();
             });
 
-        let (command_tx, worker) = match worker {
-            Ok(handle) => match init_rx.recv() {
-                Ok(Ok((version, (static_limit, streaming_limit)))) => {
-                    tracing::info!(
-                        "OpenAL audio initialized ({version}; {static_limit} static, {streaming_limit} streaming sources)"
-                    );
-                    (Some(command_tx), Some(handle))
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(
-                        "audio disabled: failed to initialize OpenAL ({e}). \
-                         Releases ship the library next to the binary; for a dev \
-                         build run `just openal` to stage it."
-                    );
-                    let _ = handle.join();
-                    (None, None)
-                }
-                Err(e) => {
-                    tracing::warn!("audio disabled: OpenAL worker exited during startup ({e})");
-                    let _ = handle.join();
-                    (None, None)
-                }
-            },
+        let (pending_command_tx, worker) = match worker {
+            Ok(handle) => {
+                crate::app::startup_mark("audio_worker_spawned");
+                (Some(command_tx), Some(handle))
+            }
             Err(e) => {
                 tracing::warn!("audio disabled: failed to start audio worker ({e})");
                 (None, None)
@@ -267,7 +263,9 @@ impl AudioEngine {
         };
 
         Self::attached(
-            command_tx,
+            None,
+            pending_command_tx,
+            init_rx,
             event_rx,
             worker,
             jar_assets_dir.to_path_buf(),
@@ -278,8 +276,11 @@ impl AudioEngine {
     }
 
     /// Wraps an already-running (or absent) worker.
+    #[allow(clippy::too_many_arguments)]
     fn attached(
         command_tx: Option<Sender<AudioCommand>>,
+        pending_command_tx: Option<Sender<AudioCommand>>,
+        startup_rx: Receiver<AudioInitResult>,
         event_rx: Receiver<AudioEvent>,
         worker: Option<JoinHandle<()>>,
         jar_assets_dir: PathBuf,
@@ -289,6 +290,8 @@ impl AudioEngine {
     ) -> Self {
         Self {
             command_tx,
+            pending_command_tx,
+            startup_rx,
             event_rx,
             worker,
             jar_assets_dir,
@@ -303,6 +306,7 @@ impl AudioEngine {
             menu_music_active: false,
             next_song_delay_ticks: MENU_MUSIC_STARTING_DELAY_TICKS,
             music_tick_accumulator: 0.0,
+            listener: None,
         }
     }
 
@@ -312,8 +316,12 @@ impl AudioEngine {
     fn for_test() -> (Self, Sender<AudioEvent>, Receiver<AudioCommand>) {
         let (command_tx, command_rx) = crossbeam_channel::unbounded();
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (startup_tx, startup_rx) = crossbeam_channel::bounded(1);
+        drop(startup_tx);
         let engine = Self::attached(
             Some(command_tx),
+            None,
+            startup_rx,
             event_rx,
             None,
             PathBuf::new(),
@@ -322,6 +330,25 @@ impl AudioEngine {
             [1.0; SoundCategory::COUNT],
         );
         (engine, event_tx, command_rx)
+    }
+
+    #[cfg(test)]
+    fn starting_for_test() -> (Self, Sender<AudioInitResult>, Receiver<AudioCommand>) {
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        let (_event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (startup_tx, startup_rx) = crossbeam_channel::bounded(1);
+        let engine = Self::attached(
+            None,
+            Some(command_tx),
+            startup_rx,
+            event_rx,
+            None,
+            PathBuf::new(),
+            None,
+            SoundsIndex::default(),
+            [1.0; SoundCategory::COUNT],
+        );
+        (engine, startup_tx, command_rx)
     }
 
     pub fn set_volumes(&mut self, volumes: [f32; SoundCategory::COUNT]) {
@@ -359,10 +386,16 @@ impl AudioEngine {
     pub fn set_listener(&mut self, pos: Position, y_rot_deg: f32, x_rot_deg: f32) {
         self.poll_events();
         let (forward, up) = listener_vectors(y_rot_deg, x_rot_deg);
-        self.send(AudioCommand::SetListener {
+        let listener = ListenerState {
             position: [pos.x as f32, pos.y as f32, pos.z as f32],
             forward,
             up,
+        };
+        self.listener = Some(listener);
+        self.send(AudioCommand::SetListener {
+            position: listener.position,
+            forward: listener.forward,
+            up: listener.up,
         });
     }
 
@@ -378,13 +411,13 @@ impl AudioEngine {
         )
     }
 
-    pub fn play_ui_click(&self) {
+    pub fn play_ui_click(&mut self) {
         self.play_ui_sound(UI_CLICK_EVENT, UI_CLICK_VOLUME, 1.0);
     }
 
     /// Plays a non-positional UI sound using Vanilla's relative, no-attenuation
     /// `SimpleSoundInstance.forUI` semantics.
-    pub fn play_ui_sound(&self, event: &str, volume: f32, pitch: f32) {
+    pub fn play_ui_sound(&mut self, event: &str, volume: f32, pitch: f32) {
         let Some(sound) = self.resolve_event(event, None) else {
             return;
         };
@@ -409,7 +442,7 @@ impl AudioEngine {
     /// Plays a positional world sound. OpenAL owns spatialization and distance
     /// attenuation; Pomme passes Vanilla-equivalent source parameters only.
     pub fn play_world_sound(
-        &self,
+        &mut self,
         sound_ref: &SoundRef,
         category: u8,
         pos: Position,
@@ -446,7 +479,7 @@ impl AudioEngine {
     /// Returns whether the sound resolved and was handed to the worker.
     #[allow(clippy::too_many_arguments)]
     fn play_positioned_sound(
-        &self,
+        &mut self,
         sound_ref: &SoundRef,
         category: u8,
         pos: Position,
@@ -488,13 +521,12 @@ impl AudioEngine {
             attenuation_distance: Some(instance_volume.max(1.0) * sound.attenuation_distance),
             entity_id,
             report_completion: false,
-        }));
-        self.command_tx.is_some()
+        }))
     }
 
     /// Every entity move packet reaches this, so entities with no sound of
     /// their own are filtered out before the worker scans for a match.
-    pub fn update_entity_sound_position(&self, entity_id: i32, pos: Position) {
+    pub fn update_entity_sound_position(&mut self, entity_id: i32, pos: Position) {
         if !self.entity_sound_targets.contains_key(&entity_id) {
             return;
         }
@@ -549,9 +581,46 @@ impl AudioEngine {
         });
     }
 
+    fn poll_startup(&mut self) {
+        if self.command_tx.is_some() || self.pending_command_tx.is_none() {
+            return;
+        }
+        match self.startup_rx.try_recv() {
+            Ok(Ok((version, (static_limit, streaming_limit)))) => {
+                tracing::info!(
+                    "OpenAL audio initialized ({version}; {static_limit} static, {streaming_limit} streaming sources)"
+                );
+                crate::app::startup_mark("audio_ready");
+                self.command_tx = self.pending_command_tx.take();
+                self.send(AudioCommand::SetVolumes(self.volumes));
+                if let Some(listener) = self.listener {
+                    self.send(AudioCommand::SetListener {
+                        position: listener.position,
+                        forward: listener.forward,
+                        up: listener.up,
+                    });
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "audio disabled: failed to initialize OpenAL ({e}). \
+                     Releases ship the library next to the binary; for a dev \
+                     build run `just openal` to stage it."
+                );
+                self.pending_command_tx = None;
+            }
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                tracing::warn!("audio disabled: OpenAL worker exited during startup");
+                self.pending_command_tx = None;
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => {}
+        }
+    }
+
     /// Drains everything the worker has reported. Both phases call this every
     /// frame, so it must stay independent of whether menu music is running.
     pub fn poll_events(&mut self) {
+        self.poll_startup();
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 AudioEvent::Finished(id) => {
@@ -597,7 +666,7 @@ impl AudioEngine {
             return;
         };
         let id = self.allocate_id();
-        self.send(AudioCommand::Play(PlayCommand {
+        if self.send(AudioCommand::Play(PlayCommand {
             id,
             sound_id: sound.sound_id,
             path: sound.path,
@@ -611,9 +680,10 @@ impl AudioEngine {
             attenuation_distance: None,
             entity_id: None,
             report_completion: true,
-        }));
-        self.music_id = Some(id);
-        self.next_song_delay_ticks = i32::MAX;
+        })) {
+            self.music_id = Some(id);
+            self.next_song_delay_ticks = i32::MAX;
+        }
     }
 
     fn resolve_sound(&self, sound: &SoundRef, seed: Option<u64>) -> Option<ResolvedSound> {
@@ -640,24 +710,42 @@ impl AudioEngine {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn send(&self, command: AudioCommand) {
-        if let Some(tx) = self.command_tx.as_ref()
-            && tx.send(command).is_err()
-        {
-            tracing::debug!("audio worker is unavailable");
+    fn send(&mut self, command: AudioCommand) -> bool {
+        let Some(tx) = self.command_tx.as_ref() else {
+            return false;
+        };
+        if tx.send(command).is_ok() {
+            return true;
         }
+        tracing::debug!("audio worker is unavailable; disabling audio");
+        self.command_tx = None;
+        self.pending_command_tx = None;
+        self.entity_sound_targets.clear();
+        self.music_id = None;
+        false
     }
 }
 
 impl Drop for AudioEngine {
     fn drop(&mut self) {
-        if let Some(tx) = self.command_tx.take() {
+        if let Some(tx) = self
+            .command_tx
+            .take()
+            .or_else(|| self.pending_command_tx.take())
+        {
             let _ = tx.send(AudioCommand::Shutdown);
         }
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
-            tracing::warn!("audio worker panicked during shutdown");
+        if let Some(worker) = self.worker.take() {
+            if worker.is_finished() {
+                if worker.join().is_err() {
+                    tracing::warn!("audio worker panicked during shutdown");
+                }
+            } else {
+                // The worker owns every OpenAL handle and all data reachable
+                // from it. Detach a still-initializing worker so UI shutdown
+                // never waits for a driver call; its Shutdown remains queued.
+                drop(worker);
+            }
         }
     }
 }
@@ -1246,6 +1334,116 @@ mod tests {
     }
 
     #[test]
+    fn startup_delay_does_not_block_or_queue_commands() {
+        let (mut engine, startup, commands) = AudioEngine::starting_for_test();
+        engine.sounds = SoundsIndex::for_test_event("ui.test");
+
+        engine.play_ui_sound("ui.test", 1.0, 1.0);
+        assert!(commands.try_recv().is_err());
+
+        startup
+            .send(Ok(("test-openal".to_string(), (32, 4))))
+            .unwrap();
+        engine.poll_events();
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(AudioCommand::SetVolumes(_))
+        ));
+
+        engine.play_ui_sound("ui.test", 1.0, 1.0);
+        assert!(matches!(commands.try_recv(), Ok(AudioCommand::Play(_))));
+    }
+
+    #[test]
+    fn pending_reload_does_not_queue_worker_command() {
+        let (mut engine, _startup, commands) = AudioEngine::starting_for_test();
+        let root =
+            std::env::temp_dir().join(format!("pomme-audio-pending-reload-{}", std::process::id()));
+        let packs = ResourcePackManager::new(&root);
+        engine.reload_assets(&packs);
+        assert!(commands.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ready_resends_latest_volume_and_listener_state() {
+        let (mut engine, startup, commands) = AudioEngine::starting_for_test();
+        let mut volumes = [1.0; SoundCategory::COUNT];
+        volumes[SoundCategory::Ui as usize] = 0.25;
+        engine.set_volumes(volumes);
+        engine.set_listener(Position::new(1.0, 2.0, 3.0), 90.0, 30.0);
+
+        startup
+            .send(Ok(("test-openal".to_string(), (32, 4))))
+            .unwrap();
+        engine.poll_events();
+
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(AudioCommand::SetVolumes(actual)) if actual == volumes
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(AudioCommand::SetListener { position, forward, up })
+                if position == [1.0, 2.0, 3.0]
+                    && forward == listener_vectors(90.0, 30.0).0
+                    && up == listener_vectors(90.0, 30.0).1
+        ));
+    }
+
+    #[test]
+    fn startup_failure_disables_audio_without_queueing() {
+        let (mut engine, startup, commands) = AudioEngine::starting_for_test();
+        engine.sounds = SoundsIndex::for_test_event("ui.test");
+        startup.send(Err("test failure".to_string())).unwrap();
+        engine.poll_events();
+
+        engine.play_ui_sound("ui.test", 1.0, 1.0);
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn startup_disconnect_disables_audio() {
+        let (mut engine, startup, commands) = AudioEngine::starting_for_test();
+        engine.sounds = SoundsIndex::for_test_event("ui.test");
+        drop(startup);
+        engine.poll_events();
+
+        engine.play_ui_sound("ui.test", 1.0, 1.0);
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn ready_send_failure_disables_audio_without_tracking_state() {
+        let (mut engine, _events, commands) = AudioEngine::for_test();
+        engine.sounds = SoundsIndex::for_test_event("entity.test");
+        drop(commands);
+
+        engine.play_entity_sound(
+            &SoundRef::event("entity.test"),
+            CATEGORY_PLAYERS,
+            EntitySoundTarget {
+                id: 7,
+                pos: Position::new(0.0, 0.0, 0.0),
+            },
+            1.0,
+            1.0,
+            0,
+        );
+        assert!(engine.entity_sound_targets.is_empty());
+        assert!(engine.command_tx.is_none());
+
+        let (mut music, _events, commands) = AudioEngine::for_test();
+        music.sounds = SoundsIndex::for_test_event("music.menu");
+        music.menu_music_active = true;
+        music.next_song_delay_ticks = 1;
+        drop(commands);
+        music.update_menu_music(SOUND_TICK_SECONDS);
+        assert!(music.music_id.is_none());
+        assert!(music.command_tx.is_none());
+    }
+
+    #[test]
     fn entity_sound_end_report_stops_position_forwarding() {
         let (mut engine, events, commands) = AudioEngine::for_test();
         engine.entity_sound_targets.insert(7, 1);
@@ -1266,7 +1464,7 @@ mod tests {
 
     #[test]
     fn untracked_entity_never_reaches_the_worker() {
-        let (engine, _events, commands) = AudioEngine::for_test();
+        let (mut engine, _events, commands) = AudioEngine::for_test();
         engine.update_entity_sound_position(7, Position::new(1.0, 2.0, 3.0));
         assert!(commands.try_recv().is_err());
     }
@@ -1313,6 +1511,48 @@ mod tests {
         end_dispatched_sounds(&events, &commands);
         engine.poll_events();
         assert!(engine.entity_sound_targets.is_empty());
+    }
+
+    #[test]
+    fn drop_does_not_wait_for_a_pending_worker() {
+        let (command_tx, command_rx) = crossbeam_channel::unbounded();
+        let (startup_tx, startup_rx) = crossbeam_channel::bounded(1);
+        drop(startup_tx);
+        let (_event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (started_tx, started_rx) = crossbeam_channel::bounded(1);
+        let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            assert!(matches!(command_rx.recv().unwrap(), AudioCommand::Shutdown));
+            shutdown_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        let engine = AudioEngine::attached(
+            None,
+            Some(command_tx),
+            startup_rx,
+            event_rx,
+            Some(worker),
+            PathBuf::new(),
+            None,
+            SoundsIndex::default(),
+            [1.0; SoundCategory::COUNT],
+        );
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let (dropped_tx, dropped_rx) = crossbeam_channel::bounded(1);
+        let dropper = std::thread::spawn(move || {
+            drop(engine);
+            dropped_tx.send(()).unwrap();
+        });
+        dropped_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        shutdown_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        release_tx.send(()).unwrap();
+        dropper.join().unwrap();
+
+        // The worker was detached while it was still blocked, then released
+        // after observing Shutdown; native resources remain worker-owned.
     }
 
     /// Menu music parks the delay at `i32::MAX` until the worker reports the
