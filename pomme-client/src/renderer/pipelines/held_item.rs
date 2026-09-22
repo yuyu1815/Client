@@ -10,13 +10,14 @@ use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::pipelines::hand;
 use crate::renderer::pipelines::item_display::{DisplayResolver, DisplayTransform};
 use crate::renderer::pipelines::item_entity::{
-    self, ItemEntityPipeline, ItemPipelineShared, push_model_light,
+    self, ItemEntityPipeline, ItemPipelineShared, push_model_light, push_world_lighting,
 };
 
 pub struct HeldItemInfo {
     pub name: String,
     pub light: f32,
     pub has_3d_model: bool,
+    pub nether_lighting: bool,
 }
 
 /// First-person use-animation state (eat/drink), the inputs to vanilla
@@ -43,7 +44,8 @@ impl HeldItemPipeline {
         jar_assets_dir: &Path,
     ) -> Self {
         let shared = ItemPipelineShared::new(device, allocator, atlas, "held_item");
-        let pipeline = item_entity::create_pipeline(device, render_pass, shared.pipeline_layout);
+        let pipeline =
+            item_entity::create_held_pipeline(device, render_pass, shared.pipeline_layout);
         Self {
             pipeline,
             shared,
@@ -87,13 +89,25 @@ impl HeldItemPipeline {
         self.shared.bind(cmd, frame, self.pipeline);
         cmd.bind_vertex_buffers(0, &[buffer], &[0]);
         push_model_light(cmd, self.shared.pipeline_layout, &model, item.light);
+        // Held items use the same transformed-normal path as dropped items.
+        // Vanilla renders the hand after selecting Lighting.LEVEL; the
+        // GUI-only precomputed light byte in the shared mesh is ignored here.
+        push_world_lighting(
+            cmd,
+            self.shared.pipeline_layout,
+            &model,
+            item.nether_lighting,
+        );
         cmd.draw(vertex_count, 1, 0, 0);
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
-        self.pipeline =
-            item_entity::create_pipeline(device, render_pass, self.shared.pipeline_layout);
+        self.pipeline = item_entity::create_held_pipeline(
+            device,
+            render_pass,
+            self.shared.pipeline_layout,
+        );
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {

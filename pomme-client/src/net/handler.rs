@@ -1064,6 +1064,14 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::PlayerInfoUpdate(p) => {
             use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry};
+            tracing::info!(
+                target = "renderprobe",
+                packet = "PlayerInfoUpdate",
+                entries = p.entries.len(),
+                addPlayer = p.actions.add_player,
+                updateGameMode = p.actions.update_game_mode,
+                "player info packet reached client tab-list pipeline"
+            );
             let actions = PlayerInfoActions {
                 add_player: p.actions.add_player,
                 initialize_chat: p.actions.initialize_chat,

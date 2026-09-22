@@ -21,18 +21,21 @@ enum VariantEntry {
 }
 
 impl VariantEntry {
-    fn first(&self) -> Option<&ModelRef> {
+    fn refs(&self) -> &[ModelRef] {
         match self {
-            VariantEntry::Single(r) => Some(r),
-            VariantEntry::Array(arr) => arr.first(),
+            VariantEntry::Single(r) => std::slice::from_ref(r),
+            VariantEntry::Array(arr) => arr,
         }
+    }
+
+    fn first(&self) -> Option<&ModelRef> {
+        self.refs().first()
     }
 }
 
 #[derive(Deserialize)]
 struct MultipartCase {
     apply: MultipartApply,
-    #[allow(dead_code)]
     when: Option<serde_json::Value>,
 }
 
@@ -44,11 +47,15 @@ enum MultipartApply {
 }
 
 impl MultipartApply {
-    fn first(&self) -> Option<&ModelRef> {
+    fn refs(&self) -> &[ModelRef] {
         match self {
-            MultipartApply::Single(r) => Some(r),
-            MultipartApply::Array(arr) => arr.first(),
+            MultipartApply::Single(r) => std::slice::from_ref(r),
+            MultipartApply::Array(arr) => arr,
         }
+    }
+
+    fn first(&self) -> Option<&ModelRef> {
+        self.refs().first()
     }
 }
 
@@ -61,6 +68,36 @@ struct ModelRef {
     y: i32,
     #[serde(default)]
     uvlock: bool,
+    #[serde(default = "default_model_weight")]
+    weight: u32,
+}
+
+fn default_model_weight() -> u32 {
+    1
+}
+
+const MAX_MODEL_WEIGHT: u64 = i32::MAX as u64;
+
+fn validate_weight_values(weights: impl IntoIterator<Item = u64>) -> Result<u32, &'static str> {
+    let mut total = 0u64;
+    for weight in weights {
+        if weight == 0 {
+            return Err("weight must be a positive int");
+        }
+        if weight > MAX_MODEL_WEIGHT {
+            return Err("weight exceeds POSITIVE_INT/i32::MAX");
+        }
+        total = total
+            .checked_add(weight)
+            .ok_or("weight sum overflow")?;
+        if total > MAX_MODEL_WEIGHT {
+            return Err("weight sum exceeds i32::MAX");
+        }
+    }
+    if total == 0 {
+        return Err("weighted model list must not be empty");
+    }
+    u32::try_from(total).map_err(|_| "weight sum does not fit Java nextInt bound")
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -305,14 +342,72 @@ impl CardinalLightType {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ItemTint {
+    /// No item JSON tint source, or an un-tinted model face.
+    Untinted,
+    /// Vanilla `Constant` source, decoded from opaque ARGB/RGB input.
+    Constant([u8; 3]),
+    /// Vanilla `GrassColorSource`; the RGB is the source's level-independent result.
+    Grass {
+        temperature: f32,
+        downfall: f32,
+        rgb: [u8; 3],
+    },
+    /// A known JSON source that this client does not yet evaluate.
+    Unknown { kind: String },
+}
+
+impl Default for ItemTint {
+    fn default() -> Self {
+        Self::Untinted
+    }
+}
+
+impl ItemTint {
+    pub fn rgb(&self) -> [u8; 3] {
+        match self {
+            Self::Untinted => [255, 255, 255],
+            Self::Constant(rgb) => *rgb,
+            Self::Grass { rgb, .. } => *rgb,
+            Self::Unknown { .. } => [255, 255, 255],
+        }
+    }
+
+    pub(crate) fn debug_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "source": self.debug_kind(),
+            "rgb": self.rgb(),
+            "definition": self,
+        })
+    }
+
+    fn debug_kind(&self) -> &'static str {
+        match self {
+            Self::Untinted => "untinted",
+            Self::Constant(_) => "constant",
+            Self::Grass { .. } => "grass",
+            Self::Unknown { .. } => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BakedQuad {
     pub positions: [[f32; 3]; 4],
     pub uvs: [[f32; 2]; 4],
     pub texture: String,
     pub cullface: Option<Direction>,
+    /// Original vanilla face tint index; retained for probe parity with Java quads.
+    #[serde(default)]
+    pub tint_index: Option<i32>,
     pub tint: super::registry::Tint,
-    /// The default table's shade, for GUI and held items.
+    /// Item-model tint resolved from that item's JSON `tints` list. This is
+    /// separate from block/terrain Tint so a block tint cannot leak into items.
+    #[serde(default)]
+    pub item_tint: ItemTint,
+    /// GUI's precomputed ITEMS_3D shade. Held/drop world shaders compute
+    /// their context light from the packed normal instead.
     pub shade_light: f32,
     /// The face terrain shades this quad as, `None` for `shade: false`.
     pub shade_face: Option<Direction>,
@@ -328,9 +423,103 @@ pub struct BakedModel {
 }
 
 #[derive(Clone)]
+pub struct WeightedBakedModel {
+    pub weight: u32,
+    pub model: BakedModel,
+}
+
+#[derive(Clone)]
 pub struct MultipartEntry {
-    pub when: HashMap<String, String>,
-    pub quads: Vec<BakedQuad>,
+    pub(crate) when: WhenCondition,
+    pub(crate) models: Vec<WeightedBakedModel>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum WhenCondition {
+    Always,
+    Never,
+    Property {
+        key: String,
+        values: Vec<(String, bool)>,
+    },
+    All(Vec<WhenCondition>),
+    Any(Vec<WhenCondition>),
+}
+
+impl WhenCondition {
+    pub(crate) fn matches(&self, props: &super::PropMap) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Property { key, values } => props.get(key).is_some_and(|actual| {
+                values.iter().any(|(expected, negated)| {
+                    (*negated && actual != expected) || (!*negated && actual == expected)
+                })
+            }),
+            Self::All(terms) => terms.iter().all(|term| term.matches(props)),
+            Self::Any(terms) => terms.iter().any(|term| term.matches(props)),
+        }
+    }
+}
+
+fn choose_weighted<'a>(models: &'a [WeightedBakedModel], seed: i64) -> Option<&'a BakedModel> {
+    let total = validate_weight_values(models.iter().map(|model| model.weight as u64)).ok()? as u64;
+    let pick = legacy_next_int(seed, total as u32) as u64;
+    let mut cursor = 0;
+    models.iter().find_map(|model| {
+        cursor += model.weight as u64;
+        (pick < cursor).then_some(&model.model)
+    })
+}
+
+/// Vanilla `Mth.getSeed(BlockPos)`, followed by the `LegacyRandomSource`
+/// bounded integer used by `WeightedList`. This keeps model alternatives
+/// position-dependent instead of silently selecting the first JSON entry.
+pub(crate) fn model_seed_for_position(x: i32, y: i32, z: i32) -> i64 {
+    let mut seed = (x as i64).wrapping_mul(3_129_871)
+        ^ (z as i64).wrapping_mul(116_129_781)
+        ^ y as i64;
+    seed = seed
+        .wrapping_mul(seed)
+        .wrapping_mul(42_317_861)
+        .wrapping_add(seed.wrapping_mul(11));
+    seed >> 16
+}
+
+fn legacy_next(seed: &mut u64, bits: u32) -> u32 {
+    *seed = seed
+        .wrapping_mul(25_214_903_917)
+        .wrapping_add(11)
+        & ((1u64 << 48) - 1);
+    (*seed >> (48 - bits)) as u32
+}
+
+fn legacy_next_int(seed: i64, bound: u32) -> u32 {
+    debug_assert!(bound > 0);
+    let mut state = ((seed as u64) ^ 25_214_903_917) & ((1u64 << 48) - 1);
+    if bound.is_power_of_two() {
+        return ((bound as u64 * legacy_next(&mut state, 31) as u64) >> 31) as u32;
+    }
+    loop {
+        let bits = legacy_next(&mut state, 31);
+        let value = bits % bound;
+        if bits.wrapping_sub(value).wrapping_add(bound - 1) < (1 << 31) {
+            return value;
+        }
+    }
+}
+
+pub(crate) fn multipart_seed_for_position(x: i32, y: i32, z: i32) -> i64 {
+    let seed = model_seed_for_position(x, y, z);
+    let mut state = ((seed as u64) ^ 25_214_903_917) & ((1u64 << 48) - 1);
+    (((legacy_next(&mut state, 32) as u64) << 32) | legacy_next(&mut state, 32) as u64) as i64
+}
+
+pub(crate) fn choose_baked_model<'a>(
+    models: &'a [WeightedBakedModel],
+    seed: i64,
+) -> Option<&'a BakedModel> {
+    choose_weighted(models, seed)
 }
 
 const FOLIAGE_TINTED: &[&str] = &[
@@ -387,7 +576,7 @@ pub fn load_all_block_textures(
     results
 }
 
-type BakedModelMap = HashMap<String, HashMap<String, BakedModel>>;
+type BakedModelMap = HashMap<String, HashMap<String, Vec<WeightedBakedModel>>>;
 type MultipartMap = HashMap<String, Vec<MultipartEntry>>;
 
 pub fn bake_all_models(
@@ -395,7 +584,7 @@ pub fn bake_all_models(
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> (BakedModelMap, MultipartMap) {
-    let mut results: HashMap<String, HashMap<String, BakedModel>> = HashMap::new();
+    let mut results: BakedModelMap = HashMap::new();
     let mut multipart_results: HashMap<String, Vec<MultipartEntry>> = HashMap::new();
     let mut model_cache = HashMap::new();
     let mut total = 0u32;
@@ -406,46 +595,84 @@ pub fn bake_all_models(
         packs,
         |block_name, blockstate| {
             total += 1;
-            let block_tint = determine_tint(block_name);
-            let mut variants_map: HashMap<String, BakedModel> = HashMap::new();
+            let mut variants_map: HashMap<String, Vec<WeightedBakedModel>> = HashMap::new();
 
             if let Some(variants) = &blockstate.variants {
                 for (variant_key, variant_entry) in variants {
-                    let model_ref = variant_entry.first()?;
-                    let resolved = resolve_model(
-                        &model_ref.model,
-                        jar_assets_dir,
-                        asset_index,
-                        &mut model_cache,
-                        packs,
-                    );
-                    if let Some(mut baked) =
-                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, block_tint)
-                    {
-                        if is_non_occluding(block_name) {
-                            baked.occludes = false;
+                    if let Err(error) = validate_weight_values(
+                        variant_entry.refs().iter().map(|model_ref| model_ref.weight as u64),
+                    ) {
+                        tracing::warn!(
+                            "Skipping invalid weighted blockstate model {block_name} variant {variant_key}: {error}"
+                        );
+                        continue;
+                    }
+                    let mut models = Vec::new();
+                    for model_ref in variant_entry.refs() {
+                        let resolved = resolve_model(
+                            &model_ref.model,
+                            jar_assets_dir,
+                            asset_index,
+                            &mut model_cache,
+                            packs,
+                        );
+                        if let Some(mut baked) = bake_resolved_model(
+                            &resolved,
+                            model_ref.x,
+                            model_ref.y,
+                            model_ref.uvlock,
+                            |tint_index| determine_tint_for_index(block_name, tint_index),
+                        ) {
+                            if is_non_occluding(block_name) {
+                                baked.occludes = false;
+                            }
+                            models.push(WeightedBakedModel {
+                                weight: model_ref.weight,
+                                model: baked,
+                            });
                         }
-                        variants_map.insert(variant_key.clone(), baked);
+                    }
+                    if !models.is_empty() {
+                        variants_map.insert(variant_key.clone(), models);
                     }
                 }
             } else if let Some(multipart) = &blockstate.multipart {
                 let mut entries = Vec::new();
                 for case in multipart {
-                    let model_ref = case.apply.first()?;
-                    let resolved = resolve_model(
-                        &model_ref.model,
-                        jar_assets_dir,
-                        asset_index,
-                        &mut model_cache,
-                        packs,
-                    );
-                    if let Some(baked) =
-                        bake_resolved_model(&resolved, model_ref.x, model_ref.y, block_tint)
-                    {
-                        let when = parse_when_condition(&case.when);
+                    if let Err(error) = validate_weight_values(
+                        case.apply.refs().iter().map(|model_ref| model_ref.weight as u64),
+                    ) {
+                        tracing::warn!(
+                            "Skipping invalid weighted multipart models for {block_name}: {error}"
+                        );
+                        continue;
+                    }
+                    let mut models = Vec::new();
+                    for model_ref in case.apply.refs() {
+                        let resolved = resolve_model(
+                            &model_ref.model,
+                            jar_assets_dir,
+                            asset_index,
+                            &mut model_cache,
+                            packs,
+                        );
+                        if let Some(baked) = bake_resolved_model(
+                            &resolved,
+                            model_ref.x,
+                            model_ref.y,
+                            model_ref.uvlock,
+                            |tint_index| determine_tint_for_index(block_name, tint_index),
+                        ) {
+                            models.push(WeightedBakedModel {
+                                weight: model_ref.weight,
+                                model: baked,
+                            });
+                        }
+                    }
+                    if !models.is_empty() {
                         entries.push(MultipartEntry {
-                            when,
-                            quads: baked.quads,
+                            when: parse_when_condition(&case.when),
+                            models,
                         });
                     }
                 }
@@ -491,6 +718,7 @@ pub struct BakedItemModels {
     pub models: HashMap<String, BakedModel>,
     pub generated_textures: HashSet<String>,
     pub flat_texture_keys: HashMap<String, String>,
+    pub flat_tints: HashMap<String, ItemTint>,
     pub ground_transforms: HashMap<String, Mat4>,
 }
 
@@ -528,6 +756,7 @@ pub fn bake_item_models(
     let mut item_models: HashMap<String, BakedModel> = HashMap::new();
     let mut flat_item_textures: HashSet<String> = HashSet::new();
     let mut flat_keys: HashMap<String, String> = HashMap::new();
+    let mut flat_tints: HashMap<String, ItemTint> = HashMap::new();
     let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
@@ -548,7 +777,8 @@ pub fn bake_item_models(
             continue;
         }
 
-        let tint = determine_tint(item_name);
+        // Item models do not carry the terrain block state; in particular a
+        // stem block's item is a seed and must not inherit the age tint.
         let mut merged: Option<BakedModel> = None;
         // Vanilla applies each composite part's own GROUND transform. Pomme
         // merges the parts into one mesh, so it can apply only one; no vanilla
@@ -579,10 +809,21 @@ pub fn bake_item_models(
                 {
                     flat_item_textures.insert(key.clone());
                     flat_keys.insert(item_name.to_string(), key);
+                    flat_tints.insert(
+                        item_name.to_string(),
+                        resolve_item_tint(&part.tints, Some(0)),
+                    );
                 }
                 break;
             }
-            let Some(mut baked) = bake_resolved_model(&resolved, 0, 0, tint) else {
+            let Some(mut baked) = bake_resolved_model_with_item_tints(
+                &resolved,
+                0,
+                0,
+                false,
+                |_| Tint::None,
+                |tint_index| resolve_item_tint(&part.tints, tint_index),
+            ) else {
                 continue;
             };
             if let Some(m) = part.transform {
@@ -625,6 +866,7 @@ pub fn bake_item_models(
         models: item_models,
         generated_textures: flat_item_textures,
         flat_texture_keys: flat_keys,
+        flat_tints,
         ground_transforms,
     }
 }
@@ -707,10 +949,13 @@ fn items_3d_lights() -> ([f32; 3], [f32; 3]) {
         [x / len, y / len, z / len]
     };
     let transform = |v: [f32; 3]| {
-        let v = rotate_y(v, -std::f32::consts::PI / 8.0);
+        // Match Lighting's ITEMS_3D matrix: the rightmost pose transform is
+        // applied first, then the Y flip is part of that matrix, not a final
+        // post-rotation. This is the Java source order in Lighting.java.
         let v = rotate_x(v, 2.3561945);
-        let v = rotate_y(v, 1.0821041);
+        let v = rotate_y(v, -std::f32::consts::PI / 8.0);
         let v = rotate_x(v, 3.2375858);
+        let v = rotate_y(v, 1.0821041);
         [v[0], -v[1], v[2]]
     };
     (
@@ -727,7 +972,12 @@ fn lambert_shade(world_normal: [f32; 3], l0: [f32; 3], l1: [f32; 3]) -> f32 {
 
 fn rotate_mesh_normal(n_mesh: [f32; 3], rotation_deg: [f32; 3]) -> [f32; 3] {
     let after_y = rotate_y(n_mesh, rotation_deg[1].to_radians());
-    rotate_x(after_y, rotation_deg[0].to_radians())
+    let rotated = rotate_x(after_y, rotation_deg[0].to_radians());
+    // GuiItemAtlas applies PoseStack.scale(slot, -slot, slot) before the
+    // item transform. VertexConsumer.putBakedQuad transforms normals with
+    // that pose's inverse-transpose, so the GUI Y flip is part of Java's
+    // actual normal submitted to item.vsh (not a projection-only flip).
+    [rotated[0], -rotated[1], rotated[2]]
 }
 
 fn vanilla_gui_face_shades(rotation_deg: [f32; 3]) -> [f32; 6] {
@@ -762,7 +1012,12 @@ fn apply_gui_lambert(quads: &mut [BakedQuad], rotation_deg: [f32; 3]) {
         }
         let n_mesh = [nx / len, ny / len, nz / len];
         let n_world = rotate_mesh_normal(n_mesh, rotation_deg);
-        quad.shade_light *= lambert_shade(n_world, l0, l1);
+        // ItemFeatureRenderer's item.vsh applies minecraft_mix_light once to
+        // every GUI quad normal. Do not retain the terrain cardinal shade here;
+        // that would apply Direction::shade_light a second time in the GUI
+        // item path. Held/drop paths ignore this byte and light the packed
+        // normal in their context-specific vertex shader.
+        quad.shade_light = lambert_shade(n_world, l0, l1);
     }
 }
 
@@ -839,7 +1094,9 @@ fn add_chest_cube(
             uvs,
             texture: texture.to_string(),
             cullface: None,
+            tint_index: None,
             tint: super::registry::Tint::None,
+            item_tint: ItemTint::Untinted,
             shade_light: spec.shade,
             shade_face: None,
         });
@@ -863,6 +1120,7 @@ enum UvPattern {
 struct ModelPart {
     path: String,
     transform: Option<Mat4>,
+    tints: Vec<ItemTint>,
 }
 
 /// Model references to bake for one item. `minecraft:composite` contributes
@@ -881,6 +1139,7 @@ fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
         parts.push(ModelPart {
             path,
             transform: None,
+            tints: find_first_model_tints(json),
         });
     }
     parts
@@ -892,6 +1151,99 @@ pub fn first_item_model_ref(json: &serde_json::Value) -> Option<String> {
     find_first_model_string(json)
         .or_else(|| find_first_string_for_key(json, "base"))
         .map(|path| strip_mc_prefix(&path).to_string())
+}
+
+fn find_first_model_tints(json: &serde_json::Value) -> Vec<ItemTint> {
+    fn find(node: &serde_json::Value) -> Option<Vec<ItemTint>> {
+        if node.get("model").and_then(serde_json::Value::as_str).is_some() {
+            return Some(parse_item_tints(node));
+        }
+        match node {
+            serde_json::Value::Object(map) => map.values().find_map(find),
+            serde_json::Value::Array(values) => values.iter().find_map(find),
+            _ => None,
+        }
+    }
+    find(json).unwrap_or_default()
+}
+
+fn parse_item_tints(node: &serde_json::Value) -> Vec<ItemTint> {
+    node.get("tints")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| values.iter().map(parse_item_tint).collect())
+        .unwrap_or_default()
+}
+
+fn parse_item_tint(value: &serde_json::Value) -> ItemTint {
+    let Some(kind) = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(strip_mc_prefix)
+    else {
+        return ItemTint::Unknown {
+            kind: "missing_type".to_string(),
+        };
+    };
+    match kind {
+        "constant" => value
+            .get("value")
+            .and_then(serde_json::Value::as_i64)
+            .map(|value| ItemTint::Constant([
+                (value as u32 >> 16) as u8,
+                (value as u32 >> 8) as u8,
+                value as u8,
+            ]))
+            .unwrap_or_else(|| ItemTint::Unknown {
+                kind: "constant".to_string(),
+            }),
+        "grass" => {
+            let temperature = value
+                .get("temperature")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.5) as f32;
+            let downfall = value
+                .get("downfall")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(1.0) as f32;
+            // 26.2's built-in item source uses the default grass colormap
+            // for the only vanilla item grass parameters currently shipped.
+            let rgb = if (temperature - 0.5).abs() < f32::EPSILON
+                && (downfall - 1.0).abs() < f32::EPSILON
+            {
+                [124, 189, 107]
+            } else {
+                // Source identity remains visible; unsupported parameterized
+                // grass is not silently treated as a world/biome tint.
+                [255, 255, 255]
+            };
+            ItemTint::Grass {
+                temperature,
+                downfall,
+                rgb,
+            }
+        }
+        other => ItemTint::Unknown {
+            kind: other.to_string(),
+        },
+    }
+}
+
+fn resolve_item_tint(tints: &[ItemTint], index: Option<i32>) -> ItemTint {
+    if tints.is_empty() {
+        return ItemTint::Untinted;
+    }
+    let Some(index) = index else {
+        return ItemTint::Untinted;
+    };
+    if index < 0 {
+        return ItemTint::Untinted;
+    }
+    tints
+        .get(index as usize)
+        .cloned()
+        .unwrap_or_else(|| ItemTint::Unknown {
+            kind: format!("missing_index_{index}"),
+        })
 }
 
 fn collect_parts_from_node(
@@ -930,6 +1282,7 @@ fn collect_parts_from_node(
                 parts.push(ModelPart {
                     path: strip_mc_prefix(path).to_string(),
                     transform,
+                    tints: parse_item_tints(node),
                 });
             }
         }
@@ -1015,18 +1368,71 @@ pub fn find_first_string_for_key(json: &serde_json::Value, key: &str) -> Option<
     }
 }
 
-fn parse_when_condition(when: &Option<serde_json::Value>) -> HashMap<String, String> {
-    let mut result = HashMap::new();
-    if let Some(serde_json::Value::Object(map)) = when {
-        for (key, value) in map {
-            if let serde_json::Value::String(s) = value {
-                result.insert(key.clone(), s.clone());
-            } else if let serde_json::Value::Bool(b) = value {
-                result.insert(key.clone(), b.to_string());
-            }
+fn parse_when_condition(when: &Option<serde_json::Value>) -> WhenCondition {
+    let Some(value) = when else {
+        return WhenCondition::Always;
+    };
+    match parse_condition(value) {
+        Ok(condition) => condition,
+        Err(error) => {
+            tracing::warn!("Ignoring malformed blockstate when condition: {error}");
+            WhenCondition::Never
         }
     }
-    result
+}
+
+fn parse_condition(value: &serde_json::Value) -> Result<WhenCondition, String> {
+    let serde_json::Value::Object(map) = value else {
+        return Err("condition must be an object".into());
+    };
+    if map.contains_key("NOT") || map.contains_key("!") || map.contains_key("XOR") {
+        return Err("unsupported condition operator; only AND/OR are vanilla-compatible".into());
+    }
+    if map.len() != 1 && (map.contains_key("OR") || map.contains_key("AND")) {
+        return Err("combined condition must contain exactly one operator".into());
+    }
+    if let Some(terms) = map.get("OR") {
+        return Ok(WhenCondition::Any(parse_condition_list(terms)?));
+    }
+    if let Some(terms) = map.get("AND") {
+        return Ok(WhenCondition::All(parse_condition_list(terms)?));
+    }
+    let mut properties = Vec::with_capacity(map.len());
+    for (key, value) in map {
+        let raw = match value {
+            serde_json::Value::String(value) => value.clone(),
+            serde_json::Value::Bool(value) => value.to_string(),
+            serde_json::Value::Number(value) => value.to_string(),
+            _ => return Err(format!("property {key} has a non-scalar value")),
+        };
+        let mut values = Vec::new();
+        for item in raw.split('|') {
+            if item.is_empty() {
+                return Err(format!("property {key} has an empty alternative"));
+            }
+            let (negated, expected) = item.strip_prefix('!').map_or((false, item), |v| (true, v));
+            if expected.is_empty() {
+                return Err(format!("property {key} has an empty negation"));
+            }
+            values.push((expected.to_string(), negated));
+        }
+        properties.push(WhenCondition::Property {
+            key: key.clone(),
+            values,
+        });
+    }
+    Ok(match properties.len() {
+        0 => WhenCondition::Always,
+        1 => properties.pop().unwrap(),
+        _ => WhenCondition::All(properties),
+    })
+}
+
+fn parse_condition_list(value: &serde_json::Value) -> Result<Vec<WhenCondition>, String> {
+    let serde_json::Value::Array(terms) = value else {
+        return Err("combined condition must contain an array".into());
+    };
+    terms.iter().map(parse_condition).collect()
 }
 
 fn for_each_blockstate(
@@ -1060,8 +1466,16 @@ fn for_each_blockstate(
         let Ok(contents) = std::fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(blockstate) = serde_json::from_str::<BlockstateFile>(&contents) else {
-            continue;
+        let blockstate = match serde_json::from_str::<BlockstateFile>(&contents) {
+            Ok(blockstate) => blockstate,
+            Err(error) => {
+                tracing::warn!(
+                    "Skipping malformed blockstate {} ({}): {error}",
+                    name,
+                    path.display()
+                );
+                continue;
+            }
         };
 
         callback(name, &blockstate);
@@ -1115,6 +1529,7 @@ fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
             x: r.x,
             y: r.y,
             uvlock: r.uvlock,
+            weight: r.weight,
         })
     } else if let Some(multipart) = &blockstate.multipart {
         let r = multipart.first()?.apply.first()?;
@@ -1123,6 +1538,7 @@ fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
             x: r.x,
             y: r.y,
             uvlock: r.uvlock,
+            weight: r.weight,
         })
     } else {
         None
@@ -1277,7 +1693,26 @@ fn bake_resolved_model(
     resolved: &ResolvedModel,
     rot_x: i32,
     rot_y: i32,
-    tint: super::registry::Tint,
+    uvlock: bool,
+    tint_for_index: impl Fn(Option<i32>) -> super::registry::Tint,
+) -> Option<BakedModel> {
+    bake_resolved_model_with_item_tints(
+        resolved,
+        rot_x,
+        rot_y,
+        uvlock,
+        tint_for_index,
+        |_| ItemTint::Untinted,
+    )
+}
+
+fn bake_resolved_model_with_item_tints(
+    resolved: &ResolvedModel,
+    rot_x: i32,
+    rot_y: i32,
+    uvlock: bool,
+    tint_for_index: impl Fn(Option<i32>) -> super::registry::Tint,
+    item_tint_for_index: impl Fn(Option<i32>) -> ItemTint,
 ) -> Option<BakedModel> {
     if resolved.elements.is_empty() {
         return None;
@@ -1311,20 +1746,31 @@ fn bake_resolved_model(
             };
 
             let positions = face_positions(dir, from, to);
-            let uvs = face_uvs(dir, from, to, face_def.uv.as_ref(), face_def.rotation);
+            let mut uvs = face_uvs(
+                dir,
+                from,
+                to,
+                face_def.uv.as_ref(),
+                face_def.rotation,
+                uvlock,
+                rot_x,
+                rot_y,
+            );
 
             let mut positions = apply_element_rotation(positions, &element.rotation);
 
             let mut cullface = face_def.cullface.as_deref().and_then(Direction::from_str);
-            let quad_tint = if face_def.tint_index.is_some() {
-                tint
-            } else {
-                super::registry::Tint::None
-            };
+            let quad_tint = tint_for_index(face_def.tint_index);
+            let item_tint = item_tint_for_index(face_def.tint_index);
 
             if rot_x != 0 || rot_y != 0 {
                 positions = rotate_positions(positions, rot_x, rot_y);
                 cullface = cullface.map(|d| d.rotate_x(rot_x).rotate_y(rot_y));
+            }
+            // FaceBakery recalculates the canonical FaceInfo winding after a
+            // model rotation (and swaps UVs with the matching vertices).
+            if element.rotation.is_none() {
+                (positions, uvs) = recalculate_winding(positions, uvs);
             }
 
             // Vanilla `FaceBakery.bakeQuad`: the shade direction is the
@@ -1338,7 +1784,9 @@ fn bake_resolved_model(
                 uvs,
                 texture: texture_name,
                 cullface,
+                tint_index: face_def.tint_index,
                 tint: quad_tint,
+                item_tint,
                 shade_light: shade_face.map_or(1.0, |face| face.shade_light()),
                 shade_face,
             });
@@ -1398,6 +1846,9 @@ pub(crate) fn face_uvs(
     to: [f32; 3],
     explicit_uv: Option<&[f32; 4]>,
     rotation: Option<i32>,
+    uvlock: bool,
+    rot_x: i32,
+    rot_y: i32,
 ) -> [[f32; 2]; 4] {
     // Vanilla `FaceBakery.defaultFaceUV`, normalized to 0..1: some faces
     // sample a window reflected about the texture center.
@@ -1427,7 +1878,58 @@ pub(crate) fn face_uvs(
         }
         r.rem_euclid(360) / 90
     }) as usize;
-    std::array::from_fn(|i| cycle[(i + shift) % 4])
+    let raw = std::array::from_fn(|i| cycle[(i + shift) % 4]);
+    if !uvlock || (rot_x == 0 && rot_y == 0) {
+        return raw;
+    }
+    raw.map(|[u, v]| uvlock_uv(dir, [u, v], rot_x, rot_y))
+}
+
+/// Mirrors vanilla `BlockMath.getFaceTransformation` +
+/// `FaceBakery.inverseFaceTransformation`: UV coordinates are transformed in
+/// the face's local basis, not by adding the model rotation angle to V.
+fn uvlock_uv(dir: Direction, uv: [f32; 2], rot_x: i32, rot_y: i32) -> [f32; 2] {
+    // FaceBakery's inverseFaceTransformation works in the actual FaceInfo
+    // tangent basis. In particular, V is -Y on every vertical face; using a
+    // generic X/Y/Z basis mirrors the rotated wall/pane faces.
+    let (u_axis, v_axis) = face_uv_basis(dir);
+    let normal = Vec3::from_array(dir.offset().map(|value| value as f32));
+    let target = nearest_cardinal_direction(rotate_vector(normal, rot_x, rot_y))
+        .unwrap_or(Direction::Up);
+    let (target_u, target_v) = face_uv_basis(target);
+    let local = u_axis * (uv[0] - 0.5) + v_axis * (uv[1] - 0.5);
+    let rotated = rotate_vector(local, rot_x, rot_y);
+    [rotated.dot(target_u) + 0.5, rotated.dot(target_v) + 0.5]
+}
+
+fn face_uv_basis(dir: Direction) -> (Vec3, Vec3) {
+    match dir {
+        Direction::Down => (Vec3::X, Vec3::NEG_Z),
+        Direction::Up => (Vec3::X, Vec3::Z),
+        Direction::North => (Vec3::NEG_X, Vec3::NEG_Y),
+        Direction::South => (Vec3::X, Vec3::NEG_Y),
+        Direction::West => (Vec3::Z, Vec3::NEG_Y),
+        Direction::East => (Vec3::NEG_Z, Vec3::NEG_Y),
+    }
+}
+
+fn rotate_vector(v: Vec3, rot_x: i32, rot_y: i32) -> Vec3 {
+    // Vanilla Quadrant R90 is BLOCK_ROT_*_90, i.e. the negative JOML
+    // quarter-turn used by the existing position baker.
+    let v = rotate_x_vec(v, -rot_x);
+    rotate_y_vec(v, -rot_y)
+}
+
+fn rotate_x_vec(v: Vec3, degrees: i32) -> Vec3 {
+    let angle = (degrees as f32).to_radians();
+    let (sin, cos) = angle.sin_cos();
+    Vec3::new(v.x, cos * v.y - sin * v.z, sin * v.y + cos * v.z)
+}
+
+fn rotate_y_vec(v: Vec3, degrees: i32) -> Vec3 {
+    let angle = (degrees as f32).to_radians();
+    let (sin, cos) = angle.sin_cos();
+    Vec3::new(cos * v.x + sin * v.z, v.y, -sin * v.x + cos * v.z)
 }
 
 fn apply_element_rotation(
@@ -1509,6 +2011,37 @@ pub(crate) fn direction_from_positions(positions: &[[f32; 3]; 4]) -> Option<Dire
     nearest_cardinal_direction(quad_normal(positions)?)
 }
 
+fn recalculate_winding(
+    mut positions: [[f32; 3]; 4],
+    mut uvs: [[f32; 2]; 4],
+) -> ([[f32; 3]; 4], [[f32; 2]; 4]) {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for position in positions {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(position[axis]);
+            max[axis] = max[axis].max(position[axis]);
+        }
+    }
+    let Some(direction) = direction_from_positions(&positions) else {
+        return (positions, uvs);
+    };
+    let canonical = face_positions(direction, min, max);
+    for vertex in 0..4 {
+        let Some(source) = (vertex..4).find(|&candidate| {
+            positions[candidate]
+                .iter()
+                .zip(canonical[vertex])
+                .all(|(&actual, expected)| (actual - expected).abs() < 1.0e-5)
+        }) else {
+            return (positions, uvs);
+        };
+        positions.swap(vertex, source);
+        uvs.swap(vertex, source);
+    }
+    (positions, uvs)
+}
+
 fn rotate_positions(mut positions: [[f32; 3]; 4], rot_x: i32, rot_y: i32) -> [[f32; 3]; 4] {
     let center = 0.5f32;
 
@@ -1563,7 +2096,7 @@ fn face_textures_base(
         get("west"),
     );
 
-    let tint = determine_tint(block_name);
+    let tint = determine_block_tint(block_name);
 
     if let (Some(up), Some(down), Some(north), Some(south), Some(east), Some(west)) =
         (up, down, north, south, east, west)
@@ -1645,27 +2178,75 @@ fn is_non_occluding(block_name: &str) -> bool {
         || matches!(block_name, "glass" | "tinted_glass" | "ice" | "frosted_ice")
 }
 
-fn determine_tint(block_name: &str) -> Tint {
-    if block_name == "redstone_wire" {
-        Tint::Redstone
-    } else if block_name == "spruce_leaves" {
-        Tint::Fixed([0x61, 0x99, 0x61])
-    } else if block_name == "birch_leaves" {
-        Tint::Fixed([0x80, 0xA7, 0x55])
-    } else if GRASS_TINTED.contains(&block_name) {
-        Tint::Grass
-    } else if DRY_FOLIAGE_TINTED.contains(&block_name) {
-        Tint::DryFoliage
-    } else if FOLIAGE_TINTED.contains(&block_name) {
-        Tint::Foliage
-    } else {
-        Tint::None
+fn determine_block_tint(block_name: &str) -> Tint {
+    match block_name {
+        "redstone_wire" => Tint::Redstone,
+        // BlockColors.createDefault(): constant(-2046180) = 0xFFE0C71C.
+        "attached_melon_stem" | "attached_pumpkin_stem" => Tint::Fixed([0xE0, 0xC7, 0x1C]),
+        "melon_stem" | "pumpkin_stem" => Tint::Stem,
+        "spruce_leaves" => Tint::Fixed([0x61, 0x99, 0x61]),
+        "birch_leaves" => Tint::Fixed([0x80, 0xA7, 0x55]),
+        "potted_fern" | "bush" | "sugar_cane" => Tint::Grass,
+        // BlockColors.constant(colorInHand, colorInWorld): terrain uses world.
+        "lily_pad" => Tint::Fixed([0x20, 0x80, 0x30]),
+        "pink_petals" | "wildflowers" => Tint::Grass,
+        name if GRASS_TINTED.contains(&name) => Tint::Grass,
+        name if DRY_FOLIAGE_TINTED.contains(&name) => Tint::DryFoliage,
+        name if FOLIAGE_TINTED.contains(&name) => Tint::Foliage,
+        _ => Tint::None,
     }
 }
+
+/// Resolve only a registered layer. Unknown layers stay white, matching
+/// BlockModelRenderer's -1 fallback instead of inventing a biome tint.
+fn determine_tint_for_index(block_name: &str, tint_index: Option<i32>) -> Tint {
+    let Some(index) = tint_index else {
+        return Tint::None;
+    };
+    if matches!(block_name, "pink_petals" | "wildflowers") {
+        return if index == 1 { Tint::Grass } else { Tint::None };
+    }
+    if index == 0 { determine_block_tint(block_name) } else { Tint::None }
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gui_item_lighting_uses_vanilla_items_3d_pose_order() {
+        let (light0, light1) = items_3d_lights();
+        for (actual, expected) in [
+            (light0, [
+                -0.9334393_f32,
+                -0.26269472_f32,
+                -0.24430018_f32,
+            ]),
+            (light1, [-0.10357136_f32, -0.97660685_f32, 0.18844643_f32]),
+        ] {
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!((actual - expected).abs() < 1.0e-5, "{actual} != {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn gui_item_lighting_replaces_terrain_cardinal_shade() {
+        let mut quad = BakedQuad {
+            positions: [[0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0]],
+            uvs: [[0.0, 0.0]; 4],
+            texture: "stone".to_string(),
+            cullface: Some(Direction::Up),
+            tint_index: None,
+            tint: Tint::None,
+            item_tint: ItemTint::Untinted,
+            shade_light: Direction::Up.shade_light(),
+            shade_face: Some(Direction::Up),
+        };
+        apply_gui_lambert(std::slice::from_mut(&mut quad), BLOCK_GUI_ROTATION_DEG);
+        assert!((quad.shade_light - 0.4).abs() < 1.0e-6);
+    }
 
     const DIRS: [Direction; 6] = [
         Direction::Down,
@@ -1706,10 +2287,38 @@ mod tests {
             ("azalea_leaves", Tint::None),
             ("flowering_azalea_leaves", Tint::None),
             ("pale_oak_leaves", Tint::None),
+            ("attached_pumpkin_stem", Tint::Fixed([0xE0, 0xC7, 0x1C])),
+            ("attached_melon_stem", Tint::Fixed([0xE0, 0xC7, 0x1C])),
+            ("pumpkin_stem", Tint::Stem),
+            ("melon_stem", Tint::Stem),
+            ("potted_fern", Tint::Grass),
+            ("bush", Tint::Grass),
+            ("sugar_cane", Tint::Grass),
+            ("lily_pad", Tint::Fixed([0x20, 0x80, 0x30])),
+            ("pink_petals", Tint::Grass),
+            ("wildflowers", Tint::Grass),
         ];
         for (name, expected) in cases {
-            assert_eq!(determine_tint(name), expected, "{name}");
+            assert_eq!(determine_block_tint(name), expected, "{name}");
         }
+        assert_eq!(determine_tint_for_index("pink_petals", Some(0)), Tint::None);
+        assert_eq!(determine_tint_for_index("pink_petals", Some(1)), Tint::Grass);
+        assert_eq!(determine_tint_for_index("pink_petals", Some(2)), Tint::None);
+        assert_eq!(determine_tint_for_index("lily_pad", Some(0)), determine_block_tint("lily_pad"));
+        assert_eq!(determine_tint_for_index("lily_pad", Some(1)), Tint::None);
+        assert_eq!(parse_item_tint(&serde_json::json!({
+            "type": "minecraft:grass", "temperature": 0.5, "downfall": 1.0
+        })).rgb(), [124, 189, 107]);
+        assert_eq!(parse_item_tint(&serde_json::json!({
+            "type": "minecraft:constant", "value": -9321636
+        })).rgb(), [113, 195, 92]);
+        assert_eq!(parse_item_tints(&serde_json::json!({"type": "minecraft:model"})), Vec::<ItemTint>::new());
+        assert!(matches!(parse_item_tint(&serde_json::json!({"type": "minecraft:dye"})), ItemTint::Unknown { .. }));
+        assert_eq!(resolve_item_tint(&[ItemTint::Constant([1, 2, 3])], Some(0)).rgb(), [1, 2, 3]);
+        assert!(matches!(resolve_item_tint(&[ItemTint::Constant([1, 2, 3])], Some(1)), ItemTint::Unknown { .. }));
+        assert_eq!(resolve_item_tint(&[ItemTint::Grass { temperature: 0.5, downfall: 1.0, rgb: [1, 2, 3] }], Some(-1)), ItemTint::Untinted);
+        assert_eq!(resolve_item_tint(&[], None), ItemTint::Untinted);
+        assert_eq!(resolve_item_tint(&[], Some(0)), ItemTint::Untinted);
     }
 
     #[test]
@@ -1747,8 +2356,14 @@ mod tests {
             ground_transform: Mat4::IDENTITY,
         };
 
-        let baked = bake_resolved_model(&resolved, 0, 270, Tint::None).unwrap();
+        let baked = bake_resolved_model(&resolved, 0, 270, false, |_| Tint::None).unwrap();
         assert_eq!(baked.quads.len(), 1);
+        assert_eq!(
+            direction_from_positions(&baked.quads[0].positions),
+            Some(Direction::South)
+        );
+        // Model rotation changes geometry, but uvlock=false leaves explicit UVs alone.
+        assert_eq!(baked.quads[0].uvs, [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
         assert!((baked.quads[0].shade_light - Direction::South.shade_light()).abs() < 1.0e-6);
     }
 
@@ -1771,7 +2386,16 @@ mod tests {
                 (Some(180), 2),
                 (Some(270), 3),
             ] {
-                let uvs = face_uvs(dir, [0.0; 3], [1.0; 3], Some(&[0.0, 0.0, 16.0, 16.0]), rot);
+                let uvs = face_uvs(
+                    dir,
+                    [0.0; 3],
+                    [1.0; 3],
+                    Some(&[0.0, 0.0, 16.0, 16.0]),
+                    rot,
+                    false,
+                    0,
+                    0,
+                );
                 let mid = |axis: Vec3| {
                     let coords = positions.map(|p| p.dot(axis));
                     (coords.iter().copied().fold(f32::INFINITY, f32::min)
@@ -1808,7 +2432,7 @@ mod tests {
             (Direction::East, (0.375, 0.4375, 0.75, 0.8125)),
         ];
         for (dir, (u1, v1, u2, v2)) in expected {
-            let uvs = face_uvs(dir, from, to, None, None);
+            let uvs = face_uvs(dir, from, to, None, None, false, 0, 0);
             // The cycle assigns vertex 0 the (u1, v1) corner and vertex 2 the
             // (u2, v2) corner.
             assert_eq!(uvs[0], [u1, v1], "{dir:?} window origin");
@@ -1973,7 +2597,7 @@ mod tests {
 
         let mut cache = HashMap::new();
         let resolved = resolve_model("block/test_core", &root, &None, &mut cache, None);
-        let baked = bake_resolved_model(&resolved, 0, 0, Tint::None).unwrap();
+        let baked = bake_resolved_model(&resolved, 0, 0, false, |_| Tint::None).unwrap();
         assert_eq!(baked.quads.len(), 6);
         assert!(baked.quads.iter().all(|quad| quad.texture == "test_core"));
 
@@ -2008,5 +2632,131 @@ mod tests {
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].path, "block/oak_stairs");
         assert!(parts[0].transform.is_none());
+    }
+
+    #[test]
+    fn multipart_conditions_follow_vanilla_truth_table() {
+        let props = crate::world::block::PropMap::from_pairs(vec![
+            ("north", "true"),
+            ("east", "false"),
+            ("shape", "inner_left"),
+        ]);
+        let or = parse_condition(&serde_json::json!({
+            "OR": [{"north": "false"}, {"east": "false"}]
+        }))
+        .unwrap();
+        let and = parse_condition(&serde_json::json!({
+            "AND": [{"north": "true"}, {"shape": "inner_left|outer_left"}]
+        }))
+        .unwrap();
+        let pipe = parse_condition(&serde_json::json!({"shape": "inner_right|inner_left"})).unwrap();
+        let negated = parse_condition(&serde_json::json!({"north": "!false"})).unwrap();
+        assert!(or.matches(&props));
+        assert!(and.matches(&props));
+        assert!(pipe.matches(&props));
+        assert!(negated.matches(&props));
+        assert!(!parse_condition(&serde_json::json!({"missing": "true"}))
+            .unwrap()
+            .matches(&props));
+        assert_eq!(parse_when_condition(&None), WhenCondition::Always);
+        assert_eq!(parse_condition(&serde_json::json!({})).unwrap(), WhenCondition::Always);
+        assert!(parse_condition(&serde_json::json!({"AND": []})).unwrap().matches(&props));
+        assert!(!parse_condition(&serde_json::json!({"OR": []})).unwrap().matches(&props));
+        assert!(parse_condition(&serde_json::json!({"NOT": {"north": "false"}})).is_err());
+        assert!(parse_condition(&serde_json::json!({"XOR": []})).is_err());
+        assert_eq!(parse_when_condition(&Some(serde_json::json!({"OR": true}))), WhenCondition::Never);
+    }
+
+    #[test]
+    fn uvlock_uses_inverse_face_basis_and_plain_uv_is_unchanged() {
+        let plain = face_uvs(
+            Direction::Up,
+            [0.0; 3],
+            [1.0; 3],
+            Some(&[0.0, 0.0, 16.0, 16.0]),
+            None,
+            false,
+            0,
+            90,
+        );
+        let locked = face_uvs(
+            Direction::Up,
+            [0.0; 3],
+            [1.0; 3],
+            Some(&[0.0, 0.0, 16.0, 16.0]),
+            None,
+            true,
+            0,
+            90,
+        );
+        // uvlock=false keeps explicit UVs unchanged even when geometry rotates.
+        assert_eq!(plain, [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+        // Java 26.2 BlockMath.getFaceTransformation(BLOCK_ROT_Y_90, UP)
+        // inverted through FaceBakery gives this cycle.
+        let expected = [[1.0, 0.0], [0.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        for (actual, expected) in locked.into_iter().zip(expected) {
+            assert!((actual[0] - expected[0]).abs() < 1.0e-6);
+            assert!((actual[1] - expected[1]).abs() < 1.0e-6);
+        }
+        assert_eq!(
+            face_uvs(Direction::South, [0.0; 3], [1.0; 3], None, None, false, 0, 90),
+            face_uvs(Direction::South, [0.0; 3], [1.0; 3], None, None, false, 0, 0)
+        );
+    }
+
+    #[test]
+    fn invalid_weights_are_rejected_without_panicking() {
+        assert_eq!(validate_weight_values([0]), Err("weight must be a positive int"));
+        assert_eq!(validate_weight_values([u64::MAX]), Err("weight exceeds POSITIVE_INT/i32::MAX"));
+        assert_eq!(validate_weight_values([1u64 << 32]), Err("weight exceeds POSITIVE_INT/i32::MAX"));
+        assert_eq!(validate_weight_values([i32::MAX as u64, 1]), Err("weight sum exceeds i32::MAX"));
+        assert_eq!(validate_weight_values([1, 2]), Ok(3));
+        assert!(serde_json::from_str::<ModelRef>(
+            r#"{"model":"minecraft:block/test","weight":-1}"#
+        )
+        .is_err());
+        assert!(choose_baked_model(&[], 0).is_none());
+    }
+
+    #[test]
+    fn weighted_selection_matches_legacy_random_anchor_seeds() {
+        let a = BakedModel { quads: Vec::new(), is_full_cube: false, occludes: false };
+        let b = a.clone();
+        let choices = vec![
+            WeightedBakedModel { weight: 1, model: a },
+            WeightedBakedModel { weight: 1, model: b },
+        ];
+        let first = &choices[0].model as *const _;
+        let second = &choices[1].model as *const _;
+        // Java 26.2 LegacyRandomSource.nextInt(2): 0 -> 1, 1 -> 1, -1 -> 0.
+        assert_eq!(choose_baked_model(&choices, 0).unwrap() as *const _, second);
+        assert_eq!(choose_baked_model(&choices, 1).unwrap() as *const _, second);
+        assert_eq!(choose_baked_model(&choices, -1).unwrap() as *const _, first);
+    }
+
+    #[test]
+    fn vanilla_position_seed_and_weighted_lookup_are_deterministic() {
+        assert_eq!(model_seed_for_position(3, 70, 1), -108_665_848_602_893);
+        assert_eq!(
+            multipart_seed_for_position(3, 70, 1),
+            -1_913_033_443_730_608_672
+        );
+        let a = BakedModel { quads: Vec::new(), is_full_cube: false, occludes: false };
+        let b = a.clone();
+        let choices = vec![
+            WeightedBakedModel { weight: 1, model: a },
+            WeightedBakedModel { weight: 1, model: b },
+        ];
+        let first = &choices[0].model as *const _;
+        let second = &choices[1].model as *const _;
+        let mut saw_first = false;
+        let mut saw_second = false;
+        for x in -64..64 {
+            let seed = model_seed_for_position(x, 70, x * 3);
+            let selected = choose_baked_model(&choices, seed).unwrap() as *const _;
+            saw_first |= selected == first;
+            saw_second |= selected == second;
+        }
+        assert!(saw_first && saw_second);
     }
 }

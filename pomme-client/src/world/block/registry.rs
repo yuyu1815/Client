@@ -4,12 +4,12 @@ use std::path::Path;
 use azalea_block::BlockState;
 use serde::{Deserialize, Serialize};
 
-// v5 invalidates v4 caches: Tint::Fixed changes the serialized/rendered
-// meaning.
-pub const BLOCK_CACHE_FILE: &str = "block_cache_v5.json";
+// v10 invalidates v9 after item tint semantics became part of baked-model
+// provenance; the cache still stores face textures only and old files remain.
+pub const BLOCK_CACHE_FILE: &str = "block_cache_v10.json";
 
 use super::model;
-use super::model::BakedModel;
+use super::model::{BakedModel, MultipartEntry, WeightedBakedModel};
 use crate::assets::AssetIndex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +22,8 @@ pub enum Tint {
     Fixed([u8; 3]),
     /// Power-level color, resolved at mesh time from the state's `power`.
     Redstone,
+    /// Growth-age color, resolved at mesh time from the state's `age`.
+    Stem,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -73,11 +75,12 @@ impl FaceTextures {
 #[derive(Clone)]
 pub struct BlockRegistry {
     textures: HashMap<String, FaceTextures>,
-    baked: HashMap<String, HashMap<String, BakedModel>>,
-    multipart: HashMap<String, Vec<model::MultipartEntry>>,
+    baked: HashMap<String, HashMap<String, Vec<WeightedBakedModel>>>,
+    multipart: HashMap<String, Vec<MultipartEntry>>,
     item_models: HashMap<String, BakedModel>,
     flat_item_textures: std::collections::HashSet<String>,
     flat_item_texture_keys: HashMap<String, String>,
+    flat_item_tints: HashMap<String, model::ItemTint>,
     item_ground_transforms: HashMap<String, glam::Mat4>,
     /// Block name -> its single `BlockState`, for one-state blocks (see
     /// `placeable_block_for_item`).
@@ -127,6 +130,7 @@ impl BlockRegistry {
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
         let flat_item_texture_keys = baked_items.flat_texture_keys;
+        let flat_item_tints = baked_items.flat_tints;
         let item_ground_transforms = baked_items.ground_transforms;
 
         Self {
@@ -136,6 +140,7 @@ impl BlockRegistry {
             item_models,
             flat_item_textures,
             flat_item_texture_keys,
+            flat_item_tints,
             item_ground_transforms,
             placeable_blocks: build_placeable_blocks(),
         }
@@ -168,8 +173,40 @@ impl BlockRegistry {
         self.flat_item_texture_keys.get(name).map(String::as_str)
     }
 
+    pub fn get_flat_item_tint(&self, name: &str) -> model::ItemTint {
+        self.flat_item_tints
+            .get(name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn get_item_ground_transform(&self, name: &str) -> Option<glam::Mat4> {
         self.item_ground_transforms.get(name).copied()
+    }
+
+    pub(crate) fn debug_item_snapshot(&self, name: &str) -> serde_json::Value {
+        if let Some(model) = self.item_models.get(name) {
+            return serde_json::json!({
+                "item": name,
+                "path": "3d_baked",
+                "quads": model.quads.iter().map(|quad| serde_json::json!({
+                    "texture": quad.texture,
+                    "tintIndex": quad.tint_index,
+                    "itemTint": quad.item_tint.debug_json(),
+                })).collect::<Vec<_>>(),
+                "provenance": "Rust item model bake; no block color source",
+            });
+        }
+        let texture = self.flat_item_texture_keys.get(name);
+        let tint = self.flat_item_tints.get(name).cloned().unwrap_or_default();
+        serde_json::json!({
+            "item": name,
+            "path": "flat_generated",
+            "texture": texture,
+            "tintIndex": 0,
+            "itemTint": tint.debug_json(),
+            "provenance": "Rust generated item mesh input; no block color source",
+        })
     }
 
     pub fn get_textures(&self, state: BlockState) -> Option<&FaceTextures> {
@@ -177,8 +214,22 @@ impl BlockRegistry {
     }
 
     /// Probe-only summary of the already-baked data used by the renderer.
-    pub(crate) fn debug_model_snapshot(&self, state: BlockState) -> serde_json::Value {
-        let baked = self.get_baked_model(state).map(|model| {
+    pub(crate) fn debug_model_snapshot(
+        &self,
+        state: BlockState,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> serde_json::Value {
+        let seed = model::model_seed_for_position(x, y, z);
+        let baked_selection = self.get_baked_alternatives(state).and_then(|choices| {
+            let selected = model::choose_baked_model(choices, seed)?;
+            let index = choices
+                .iter()
+                .position(|choice| std::ptr::eq(&choice.model, selected))?;
+            Some((index, selected.clone()))
+        });
+        let baked = baked_selection.as_ref().map(|(_, model)| {
             serde_json::json!({
                 "quadCount": model.quads.len(),
                 "tintedQuadCount": model.quads.iter().filter(|quad| quad.tint != Tint::None).count(),
@@ -187,22 +238,53 @@ impl BlockRegistry {
                 "occludes": model.occludes,
             })
         });
-        let multipart_quad_count = self
-            .get_multipart_quads(state)
-            .map(|quads| quads.len())
+        let multipart = self.get_multipart_quads_at(state, x, y, z).map(|quads| {
+            serde_json::json!({
+                "quadCount": quads.len(),
+                "quads": quads,
+            })
+        });
+        let multipart_quad_count = multipart
+            .as_ref()
+            .and_then(|value| value.get("quadCount"))
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
         serde_json::json!({
             "block": super::block_id(state),
             "properties": super::block_properties(state).entries().collect::<HashMap<_, _>>(),
+            "selection": {
+                "seed": seed,
+                "targetPos": [x, y, z],
+                "selectedModelKey": baked_selection.as_ref().map(|(index, _)| format!("{}#{}", super::block_id(state), index)),
+                "provenance": "position-seeded baked-model extraction; not actual GPU draw"
+            },
             "faceTextures": self.get_textures(state).and_then(|textures| serde_json::to_value(textures).ok()),
             "baked": baked,
+            "multipart": multipart,
             "multipartQuadCount": multipart_quad_count,
         })
     }
 
     pub fn get_baked_model(&self, state: BlockState) -> Option<&BakedModel> {
-        let variants = self.baked.get(super::block_id(state))?;
+        self.get_baked_alternatives(state)?.first().map(|choice| &choice.model)
+    }
 
+    /// Selects a variant with the same position-seeded weighted lookup as
+    /// vanilla `ModelBlockRenderer.tesselateBlock`.
+    pub fn get_baked_model_at(
+        &self,
+        state: BlockState,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<BakedModel> {
+        let choices = self.get_baked_alternatives(state)?;
+        let seed = model::model_seed_for_position(x, y, z);
+        model::choose_baked_model(choices, seed).cloned()
+    }
+
+    fn get_baked_alternatives(&self, state: BlockState) -> Option<&Vec<WeightedBakedModel>> {
+        let variants = self.baked.get(super::block_id(state))?;
         if variants.len() == 1 {
             return variants.values().next();
         }
@@ -216,22 +298,45 @@ impl BlockRegistry {
             .find(|(key, _)| {
                 constraints_match(props, key.split(',').filter_map(|p| p.split_once('=')))
             })
-            .map(|(_, model)| model)
+            .map(|(_, models)| models)
             .or_else(|| variants.values().next())
     }
 
     pub fn get_multipart_quads(&self, state: BlockState) -> Option<Vec<&model::BakedQuad>> {
         let entries = self.multipart.get(super::block_id(state))?;
         let props = super::block_properties(state);
+        let quads: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.when.matches(props))
+            .flat_map(|entry| {
+                entry
+                    .models
+                    .first()
+                    .into_iter()
+                    .flat_map(|choice| choice.model.quads.iter())
+            })
+            .collect();
+        if quads.is_empty() { None } else { Some(quads) }
+    }
 
+    pub fn get_multipart_quads_at(
+        &self,
+        state: BlockState,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<Vec<model::BakedQuad>> {
+        let entries = self.multipart.get(super::block_id(state))?;
+        let props = super::block_properties(state);
+        let seed = model::multipart_seed_for_position(x, y, z);
         let mut quads = Vec::new();
         for entry in entries {
-            let when = entry.when.iter().map(|(k, v)| (k.as_str(), v.as_str()));
-            if constraints_match(props, when) {
-                quads.extend(entry.quads.iter());
+            if entry.when.matches(props)
+                && let Some(selected) = model::choose_baked_model(&entry.models, seed)
+            {
+                quads.extend(selected.quads.iter().cloned());
             }
         }
-
         if quads.is_empty() { None } else { Some(quads) }
     }
 
@@ -264,15 +369,20 @@ impl BlockRegistry {
         });
 
         let baked_textures = self.baked.values().flat_map(|variants| {
-            variants
-                .values()
-                .flat_map(|model| model.quads.iter().map(|q| q.texture.as_str()))
+            variants.values().flat_map(|choices| {
+                choices.iter().flat_map(|choice| {
+                    choice.model.quads.iter().map(|q| q.texture.as_str())
+                })
+            })
         });
 
         let multipart_textures = self.multipart.values().flat_map(|entries| {
-            entries
-                .iter()
-                .flat_map(|e| e.quads.iter().map(|q| q.texture.as_str()))
+            entries.iter().flat_map(|entry| {
+                entry
+                    .models
+                    .iter()
+                    .flat_map(|choice| choice.model.quads.iter().map(|q| q.texture.as_str()))
+            })
         });
 
         let item_model_textures = self

@@ -1,0 +1,33 @@
+{
+  "schema": 3,
+  "purpose": "single paired actual Java HUD item renderer versus Rust GuiItemPipeline overlay",
+  "cases": [
+    {
+      "caseId": "item-overlay-x00-z00",
+      "dimension": "minecraft:overworld",
+      "x": 8.5,
+      "y": 83.38,
+      "z": 8.5,
+      "yaw": 0.0,
+      "pitch": 90.0,
+      "waitSeconds": 5,
+      "region": {"minX": 1, "minY": 69, "minZ": 1, "maxX": 15, "maxY": 71, "maxZ": 15},
+      "itemOverlay": {
+        "mode": "gui",
+        "guiScale": 3,
+        "panelLogicalRect": [8, 8, 132, 24],
+        "panelPhysicalRect": [24, 24, 396, 72],
+        "backgroundRGB": [32, 32, 32],
+        "metricLimit": "all pixels in each fixed physical 48x48 item rectangle, including neutral panel background and texture-alpha-zero pixels; no alpha/depth mask, crop, alignment, or color correction",
+        "items": [
+          {"id": "fern", "logicalRect": [16, 12, 16, 16], "physicalRect": [48, 36, 48, 48]},
+          {"id": "bush", "logicalRect": [36, 12, 16, 16], "physicalRect": [108, 36, 48, 48]},
+          {"id": "lily_pad", "logicalRect": [56, 12, 16, 16], "physicalRect": [168, 36, 48, 48]},
+          {"id": "sugar_cane", "logicalRect": [76, 12, 16, 16], "physicalRect": [228, 36, 48, 48]},
+          {"id": "pink_petals", "logicalRect": [96, 12, 16, 16], "physicalRect": [288, 36, 48, 48]},
+          {"id": "wildflowers", "logicalRect": [116, 12, 16, 16], "physicalRect": [348, 36, 48, 48]}
+        ]
+      }
+    }
+  ]
+}

@@ -15,19 +15,20 @@ use super::block_entity::StoredBlockEntity;
 const OVERWORLD_HEIGHT: u32 = 384;
 const OVERWORLD_MIN_Y: i32 = -64;
 
-/// `pos` and its four axis-neighbor chunks. This is both the neighborhood a
-/// chunk's mesh samples (see `MeshDispatcher::enqueue`) and, by symmetry, the
-/// set that must re-mesh when `pos` changes. Add the diagonals here when the
-/// corner-sample TODO(chunk-light) lands, so the mesh snapshot and the re-mesh
-/// set stay in sync (vanilla's `enableChunkLight` dirties the full 3x3 via
-/// `setSectionRangeDirty`).
-pub(crate) fn mesh_neighborhood(pos: ChunkPos) -> [ChunkPos; 5] {
+/// `pos` and its 3x3 neighborhood. Biome tint resolution uses vanilla's
+/// 5x5 horizontal blend, so a mesh snapshot must retain diagonal columns too.
+/// The same set is re-meshed when any neighbor changes.
+pub(crate) fn mesh_neighborhood(pos: ChunkPos) -> [ChunkPos; 9] {
     [
-        pos,
-        ChunkPos::new(pos.x - 1, pos.z),
-        ChunkPos::new(pos.x + 1, pos.z),
+        ChunkPos::new(pos.x - 1, pos.z - 1),
         ChunkPos::new(pos.x, pos.z - 1),
+        ChunkPos::new(pos.x + 1, pos.z - 1),
+        ChunkPos::new(pos.x - 1, pos.z),
+        pos,
+        ChunkPos::new(pos.x + 1, pos.z),
+        ChunkPos::new(pos.x - 1, pos.z + 1),
         ChunkPos::new(pos.x, pos.z + 1),
+        ChunkPos::new(pos.x + 1, pos.z + 1),
     ]
 }
 
@@ -306,14 +307,8 @@ impl ChunkStore {
             .unwrap_or(self.min_y())
     }
 
-    /// Registry id of the biome at a block position (matches the mesher's biome
-    /// lookup). Returns 0 when the chunk is missing.
-    pub fn biome_id(&self, x: i32, y: i32, z: i32) -> u32 {
-        self.biome_id_checked(x, y, z).unwrap_or(0)
-    }
-
-    /// Probe callers must distinguish absent biome data from registry entry
-    /// zero.
+    /// Probe and render callers must distinguish absent biome data from
+    /// registry entry zero; missing samples are not fabricated as biome 0.
     pub fn biome_id_checked(&self, x: i32, y: i32, z: i32) -> Option<u32> {
         let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
         let chunk_lock = self.get_chunk(&chunk_pos)?;

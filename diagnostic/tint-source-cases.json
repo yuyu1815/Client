@@ -1,0 +1,40 @@
+[
+  {
+    "caseId": "tint-potted-fern-diagonal",
+    "dimension": "minecraft:overworld",
+    "x": 113.5,
+    "y": 76.0,
+    "z": 35.5,
+    "yaw": -27.0,
+    "pitch": 14.0,
+    "waitSeconds": 20,
+    "expectedTime": 6000,
+    "region": {
+      "minX": 114,
+      "minY": 69,
+      "minZ": 35,
+      "maxX": 124,
+      "maxY": 71,
+      "maxZ": 47
+    }
+  },
+  {
+    "caseId": "tint-bush-diagonal",
+    "dimension": "minecraft:overworld",
+    "x": 19.5,
+    "y": 76.0,
+    "z": 177.5,
+    "yaw": -27.0,
+    "pitch": 14.0,
+    "waitSeconds": 20,
+    "expectedTime": 6000,
+    "region": {
+      "minX": 20,
+      "minY": 69,
+      "minZ": 177,
+      "maxX": 30,
+      "maxY": 71,
+      "maxZ": 189
+    }
+  }
+]

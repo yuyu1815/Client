@@ -365,6 +365,7 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
+                tracing::debug!(target: "renderprobe", termination = if matches!(event, WindowEvent::CloseRequested) { "CloseRequested" } else { "Destroyed" }, "window termination event");
                 // A world saves on the way out, so the window stays up for it
                 // rather than vanishing while the process finishes writing.
                 self.phase.transition(|app| match app {
@@ -728,6 +729,7 @@ impl ApplicationHandler for App {
                     .as_ref()
                     .is_some_and(probe::Probe::exit_requested)
                 {
+                    tracing::debug!(target: "renderprobe", termination = "CloseRequested", "probe exit request accepted");
                     tracing::info!("Probe exit request; shutting down normally");
                     event_loop.exit();
                     return;

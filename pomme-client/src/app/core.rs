@@ -164,6 +164,10 @@ fn apply_server_block(
         pos.z,
         state,
     );
+    game.bump_loaded_mesh_neighborhoods([azalea_core::position::ChunkPos::new(
+        pos.x.div_euclid(16),
+        pos.z.div_euclid(16),
+    )]);
     dirty_sections_for_block(
         priority_remesh,
         pos.x,
@@ -1170,10 +1174,15 @@ impl AppCore {
                     // The meshes went with the old level, so their bookkeeping
                     // has to go too, or the new level's camera section reads as
                     // already meshed.
+                    game.content_gen.clear();
+                    game.section_gen.clear();
                     game.section_vis.clear();
                     game.section_vis_epoch.clear();
                     game.meshed.clear();
+                    game.vis_mask.clear();
+                    game.vis_tiers.clear();
                     game.compiled.clear();
+                    game.pending_load_rescan = false;
                     game.mesh_dispatcher = renderer.create_mesh_dispatcher(
                         Arc::clone(&game.biome_climate),
                         None,
@@ -1195,15 +1204,19 @@ impl AppCore {
                     }
                     game.light_engine
                         .on_chunk_loaded(&mut game.chunk_store, (pos.x, pos.z));
-                    // The column meshes once its queued light applies (vanilla
-                    // schedules the rebuild from enableChunkLight, not here).
+                    // Biome/AO snapshots retain the whole 3x3 dependency set;
+                    // the later light task may bump it again, but never less.
+                    game.bump_loaded_mesh_neighborhoods([pos]);
                     queue_light_apply(game, pos, &light, true);
                 }
                 NetworkEvent::LightUpdate { pos, light } => {
                     queue_light_apply(game, pos, &light, false);
                 }
                 NetworkEvent::ChunkUnloaded { pos } => {
+                    // Enumerate after removing the center: the remaining eight
+                    // loaded neighbors still need a fresh tint/AO snapshot.
                     game.chunk_store.unload_chunk(&pos);
+                    game.bump_loaded_mesh_neighborhoods([pos]);
                     game.light_engine.on_chunk_unloaded((pos.x, pos.z));
                     game.light_engine
                         .queue_task(crate::world::light::LightTask::Remove {
@@ -1917,6 +1930,10 @@ impl AppCore {
                     for b in ack_dirty {
                         game.light_engine
                             .on_block_dirty(&game.chunk_store, b.x, b.y, b.z);
+                        game.bump_loaded_mesh_neighborhoods([azalea_core::position::ChunkPos::new(
+                            b.x.div_euclid(16),
+                            b.z.div_euclid(16),
+                        )]);
                         dirty_sections_for_block(&mut priority_remesh, b.x, b.y, b.z, min_y, n);
                     }
                 }
@@ -1994,6 +2011,16 @@ impl AppCore {
                 } => {
                     game.entity_positions.insert(id, position);
                     game.silent_entities.remove(&id);
+                    if entity_type == azalea_registry::builtin::EntityKind::Player {
+                        tracing::info!(
+                            target = "renderprobe",
+                            packet = "ServerEntity/AddEntity",
+                            entity_id = id,
+                            uuid = %uuid,
+                            position = ?position,
+                            "player entity reached entity store"
+                        );
+                    }
                     if crate::entity::is_living_mob(&entity_type) {
                         let player_uuid = (entity_type
                             == azalea_registry::builtin::EntityKind::Player)

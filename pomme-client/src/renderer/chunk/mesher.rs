@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use azalea_block::BlockState;
+use serde_json::{Value, json};
 use azalea_core::position::ChunkPos;
 use pyronyx::vk;
 
@@ -192,6 +193,8 @@ pub struct SectionMesh {
     /// Translucent (water) indices into the same `vertices`, drawn in a
     /// separate blended pass after opaque geometry.
     pub water_indices: Vec<u32>,
+    /// Probe-only target records; empty unless a trace is armed.
+    pub trace: Vec<Value>,
 }
 
 /// Per-section meshing accumulator: one shared vertex pool plus separate
@@ -204,6 +207,7 @@ struct MeshSink {
     solid: Vec<u32>,
     cutout: Vec<u32>,
     water: Vec<u32>,
+    trace: Vec<Value>,
 }
 
 impl MeshSink {
@@ -215,6 +219,73 @@ impl MeshSink {
         } else {
             &mut self.cutout
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TraceTarget {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub block: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct MeshTraceConfig {
+    pub trace_id: String,
+    pub world_token: String,
+    pub targets: Vec<TraceTarget>,
+}
+
+struct TraceCapture {
+    config: Option<MeshTraceConfig>,
+    records: Vec<Value>,
+}
+
+#[derive(Clone)]
+pub struct MeshTraceState(Arc<Mutex<TraceCapture>>);
+
+impl MeshTraceState {
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(TraceCapture { config: None, records: Vec::new() })))
+    }
+
+    pub fn arm(&self, config: MeshTraceConfig) {
+        let mut capture = self.0.lock().unwrap();
+        capture.records.clear();
+        capture.config = Some(config);
+    }
+
+    fn config(&self) -> Option<MeshTraceConfig> {
+        self.0.lock().unwrap().config.clone()
+    }
+
+    pub fn snapshot(&self) -> Value {
+        let mut capture = self.0.lock().unwrap();
+        let result = json!({
+            "enabled": capture.config.is_some(),
+            "provenance": "mesher emitted SectionMesh -> ChunkBufferStore upload_batch; no GPU readback or fragment value",
+            "config": capture.config.as_ref().map(|c| json!({
+                "traceId": c.trace_id,
+                "worldToken": c.world_token,
+                "targetCount": c.targets.len(),
+                "targets": c.targets.iter().map(|t| json!({"x":t.x,"y":t.y,"z":t.z,"block":t.block})).collect::<Vec<_>>()
+            })),
+            "records": capture.records,
+        });
+        // One-shot arm: ordinary play must not keep matching targets or logging
+        // after the paired capture has consumed its evidence.
+        capture.config = None;
+        capture.records.clear();
+        result
+    }
+
+    pub(crate) fn record(&self, record: Value) {
+        let mut capture = self.0.lock().unwrap();
+        if capture.config.is_none() || capture.records.len() >= 64 {
+            return;
+        }
+        capture.records.push(record);
     }
 }
 
@@ -296,6 +367,7 @@ const NO_REDSTONE: fn() -> [f32; 3] = || [1.0; 3];
 
 fn tint_color(
     tint: Tint,
+    state: BlockState,
     grass: [f32; 3],
     foliage: [f32; 3],
     dry_foliage: [f32; 3],
@@ -312,6 +384,7 @@ fn tint_color(
             rgb[2] as f32 / 255.0,
         ]),
         Tint::Redstone => pack_tint_shifted(redstone()),
+        Tint::Stem => pack_tint_shifted(crate::world::block::stem_rgb(state)),
     }
 }
 
@@ -659,6 +732,7 @@ pub struct MeshDispatcher {
     foliage_colormap: Arc<Colormap>,
     dry_foliage_colormap: Arc<Colormap>,
     biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+    trace_state: MeshTraceState,
     /// The dimension's face-shade table; a dimension change builds a new
     /// dispatcher.
     cardinal_lighting: CardinalLighting,
@@ -675,6 +749,7 @@ impl MeshDispatcher {
         dry_foliage_colormap: Colormap,
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
         cardinal_lighting: CardinalLighting,
+        trace_state: MeshTraceState,
     ) -> Self {
         // Bulk results are bounded for back-pressure; edit results use the
         // unbounded priority channel so they never queue behind the load backlog.
@@ -716,6 +791,7 @@ impl MeshDispatcher {
             foliage_colormap: Arc::new(foliage_colormap),
             dry_foliage_colormap: Arc::new(dry_foliage_colormap),
             biome_climate,
+            trace_state,
             cardinal_lighting,
             pool: Arc::new(BufferPool::new(1024)),
         }
@@ -834,6 +910,7 @@ impl MeshDispatcher {
             min_y: chunk_store.min_y(),
             height: chunk_store.height(),
             debug_world: chunk_store.debug_world,
+            trace: self.trace_state.config(),
         }
     }
 
@@ -1145,6 +1222,7 @@ struct ChunkStoreSnapshot {
     min_y: i32,
     height: u32,
     debug_world: Option<crate::world::block::DebugWorld>,
+    trace: Option<MeshTraceConfig>,
 }
 
 impl ChunkStoreSnapshot {
@@ -1180,31 +1258,51 @@ impl ChunkStoreSnapshot {
         self.height
     }
 
-    fn get_biome(&self, x: i32, y: i32, z: i32) -> azalea_registry::data::Biome {
+    fn get_biome(&self, x: i32, y: i32, z: i32) -> Option<azalea_registry::data::Biome> {
         let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
         let chunk_lock = self
             .chunks
             .iter()
             .find(|(p, _)| *p == chunk_pos)
             .and_then(|(_, c)| c.as_ref());
-        let Some(chunk_lock) = chunk_lock else {
-            return azalea_registry::data::Biome::default();
-        };
+        let chunk_lock = chunk_lock?;
         let c = chunk_lock.read();
         let biome_pos = azalea_core::position::ChunkBiomePos {
             x: (x.rem_euclid(16) / 4) as u8,
             y,
             z: (z.rem_euclid(16) / 4) as u8,
         };
-        c.get_biome(biome_pos, self.min_y).unwrap_or_default()
+        c.get_biome(biome_pos, self.min_y)
     }
 
+    /// Resolve a known climate without turning a missing/unknown biome into
+    /// registry id 0. The nearest loaded known sample is only a temporary
+    /// normal-render fallback; load/unload dirtying remeshes it with the real
+    /// 5x5 inputs once they arrive.
     fn climate_at(&self, x: i32, y: i32, z: i32) -> BiomeClimate {
-        let biome = self.get_biome(x, y, z);
-        self.biome_climate
-            .get(&u32::from(biome))
-            .copied()
-            .unwrap_or_default()
+        if let Some(biome) = self.get_biome(x, y, z)
+            && let Some(climate) = self.biome_climate.get(&u32::from(biome))
+        {
+            return *climate;
+        }
+        for radius in 1i32..=4 {
+            for dz in -radius..=radius {
+                for dx in -radius..=radius {
+                    if dx.abs() != radius && dz.abs() != radius {
+                        continue;
+                    }
+                    let Some(biome) = self.get_biome(x + dx * 4, y, z + dz * 4) else {
+                        continue;
+                    };
+                    if let Some(climate) = self.biome_climate.get(&u32::from(biome)) {
+                        return *climate;
+                    }
+                }
+            }
+        }
+        // ponytail: bounded nearest-sample scan; replace with a dedicated
+        // missing-biome state only if normal-render fallback becomes visible.
+        BiomeClimate::default()
     }
 
     fn grass_color_at(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
@@ -1221,6 +1319,28 @@ impl ChunkStoreSnapshot {
 
     fn grass_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
         blend_color(x, z, |bx, bz| self.grass_color_at(bx, y, bz))
+    }
+
+    fn grass_debug(&self, x: i32, y: i32, z: i32) -> Value {
+        let mut samples = Vec::new();
+        for dz in -2..=2 {
+            for dx in -2..=2 {
+                let bx = x + dx;
+                let bz = z + dz;
+                samples.push(json!({
+                    "x": bx,
+                    "z": bz,
+                    "biomeId": self.get_biome(bx, y, bz).map(u32::from),
+                    "biomeSampleStatus": if self.get_biome(bx, y, bz).is_some() {
+                        "present"
+                    } else {
+                        "missing"
+                    },
+                    "color": self.grass_color_at(bx, y, bz),
+                }));
+            }
+        }
+        json!({"target": [x, y, z], "blended": self.grass_tint(x, y, z), "samples": samples})
     }
 
     fn foliage_tint(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
@@ -1412,10 +1532,13 @@ fn greedy_mesh_section(
 
             let [x0, _, z0] = verts_uvs[0].0;
             let block_x = x0 as i32 + world_x;
+            let block_y = verts_uvs[0].0[1] as i32 + section_y;
             let block_z = z0 as i32 + world_z;
+            let state = snapshot.get_block_state(block_x, block_y, block_z);
             let tint = tint_color(
                 info.textures.tint,
-                snapshot.grass_tint(block_x, section_y, block_z),
+                state,
+                snapshot.grass_tint(block_x, block_y, block_z),
                 snapshot.foliage_tint(block_x, section_y, block_z),
                 snapshot.dry_foliage_tint(block_x, section_y, block_z),
                 NO_REDSTONE,
@@ -1595,17 +1718,39 @@ fn mesh_chunk_snapshot(
                     emit_fluid(
                         sink, kind, block_pos, state, snapshot, registry, uv_map, bx, by, bz,
                     );
-                } else if let Some(baked) = registry.get_baked_model(state) {
+                } else if let Some(baked) = registry.get_baked_model_at(state, bx, by, bz) {
+                    let trace_target = snapshot.trace.as_ref().and_then(|config| {
+                        config.targets.iter().find(|target| {
+                            target.x == bx
+                                && target.y == by
+                                && target.z == bz
+                                && target.block == crate::world::block::block_id(state)
+                        })
+                    });
+                    let mut emitted_trace = Vec::new();
                     emit_baked_model(
-                        sink, block_pos, state, baked, snapshot, registry, uv_map, bx, by, bz,
+                        sink, block_pos, state, &baked, snapshot, registry, uv_map, bx, by, bz,
+                        trace_target, &mut emitted_trace,
                     );
-                } else if let Some(quads) = registry.get_multipart_quads(state) {
+                    sink.trace.extend(emitted_trace);
+                } else if let Some(quads) = registry.get_multipart_quads_at(state, bx, by, bz) {
+                    let trace_target = snapshot.trace.as_ref().and_then(|config| {
+                        config.targets.iter().find(|target| {
+                            target.x == bx
+                                && target.y == by
+                                && target.z == bz
+                                && target.block == crate::world::block::block_id(state)
+                        })
+                    });
+                    let mut emitted_trace = Vec::new();
                     emit_multipart(
                         sink, block_pos, state, &quads, snapshot, registry, uv_map, bx, by, bz,
+                        trace_target, &mut emitted_trace,
                     );
+                    sink.trace.extend(emitted_trace);
                 } else if let Some(textures) = registry.get_textures(state) {
                     emit_cube_faces(
-                        sink, block_pos, textures, snapshot, registry, uv_map, bx, by, bz,
+                        sink, block_pos, state, textures, snapshot, registry, uv_map, bx, by, bz,
                     );
                 } else {
                     let id = crate::world::block::block_id(state);
@@ -1660,6 +1805,32 @@ fn mesh_chunk_snapshot(
         let aabb = section_aabb(&sink.vertices);
         let mut packed = pool.take_vertices();
         packed.extend(sink.vertices.iter().map(pack_vertex));
+        let mut trace = sink.trace;
+        for record in &mut trace {
+            let start = record["vertexStart"].as_u64().unwrap_or(0) as usize;
+            let count = record["vertexCount"].as_u64().unwrap_or(0) as usize;
+            let decoded = packed
+                .get(start..start.saturating_add(count))
+                .unwrap_or(&[])
+                .iter()
+                .map(|v| json!({
+                    "pos": v.pos,
+                    "uv": v.uv,
+                    "sprite": v.sprite,
+                    "lightTintBytes": v.light_tint,
+                }))
+                .collect::<Vec<_>>();
+            record["finalPackBytesDecoded"] = json!(decoded);
+            record["vertexStride"] = json!(size_of::<PackedVertex>());
+            record["sectionIndex"] = json!(i);
+            record["indexStartFinal"] = json!(
+                if record["indexList"].as_str() == Some("cutout") {
+                    solid_index_count as u64 + record["indexStart"].as_u64().unwrap_or(0)
+                } else {
+                    record["indexStart"].as_u64().unwrap_or(0)
+                }
+            );
+        }
         pool.recycle_scratch(sink.vertices);
         sections.push(SectionMesh {
             section_index: i as i32,
@@ -1668,6 +1839,7 @@ fn mesh_chunk_snapshot(
             indices: sink.solid,
             solid_index_count,
             water_indices: sink.water,
+            trace,
         });
     }
 
@@ -1697,6 +1869,8 @@ fn emit_baked_model(
     bx: i32,
     by: i32,
     bz: i32,
+    trace_target: Option<&TraceTarget>,
+    trace_output: &mut Vec<Value>,
 ) {
     for quad in &model.quads {
         if let Some(cullface) = quad.cullface {
@@ -1710,11 +1884,15 @@ fn emit_baked_model(
         let region = uv_map.get_region(&quad.texture);
         let tint = tint_color(
             quad.tint,
+            state,
             snapshot.grass_tint(bx, by, bz),
             snapshot.foliage_tint(bx, by, bz),
             snapshot.dry_foliage_tint(bx, by, bz),
             || crate::world::block::redstone_wire_rgb(state),
         );
+        let vertex_start = sink.vertices.len();
+        let solid_start = sink.solid.len();
+        let cutout_start = sink.cutout.len();
         let lights = if let Some(dir) = quad.cullface {
             compute_face_ao(snapshot, registry, bx, by, bz, dir, quad.shade_face)
         } else {
@@ -1729,6 +1907,34 @@ fn emit_baked_model(
             region,
             tint,
         );
+        if trace_target.is_some() {
+            let (index_list, index_start, index_count) = if sink.solid.len() > solid_start {
+                ("solid", solid_start, sink.solid.len() - solid_start)
+            } else {
+                ("cutout", cutout_start, sink.cutout.len() - cutout_start)
+            };
+            trace_output.push(json!({
+                "target": {"x": bx, "y": by, "z": bz, "block": crate::world::block::block_id(state)},
+                "branch": "emit_baked_model",
+                "quadIndex": trace_output.len(),
+                "face": quad.cullface.map(|d| format!("{d:?}")),
+                "texture": quad.texture,
+                "sprite": region.sprite,
+                "tintIndex": quad.tint_index,
+                "tint": format!("{:?}", quad.tint),
+                "grassTint": snapshot.grass_tint(bx, by, bz),
+                "grassDebug": snapshot.grass_debug(bx, by, bz),
+                "vertexStart": vertex_start,
+                "vertexCount": sink.vertices.len() - vertex_start,
+                "indexList": index_list,
+                "indexStart": index_start,
+                "indexCount": index_count,
+                "positions": quad.positions.map(|p| [p[0] + block_pos[0], p[1] + block_pos[1], p[2] + block_pos[2]]),
+                "uvs": quad.uvs,
+                "lights": lights,
+                "atlasRect": {"sprite": region.sprite, "pixelRect": region.pixel_rect, "uv": [region.u_min, region.v_min, region.u_max, region.v_max]},
+            }));
+        }
     }
 }
 
@@ -1736,6 +1942,7 @@ fn emit_baked_model(
 fn emit_cube_faces(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
+    state: azalea_block::BlockState,
     textures: &crate::world::block::registry::FaceTextures,
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
@@ -1746,6 +1953,7 @@ fn emit_cube_faces(
 ) {
     let tint = tint_color(
         textures.tint,
+        state,
         snapshot.grass_tint(bx, by, bz),
         snapshot.foliage_tint(bx, by, bz),
         snapshot.dry_foliage_tint(bx, by, bz),
@@ -2039,6 +2247,7 @@ fn block_face_tex_tint(
             if let Some(textures) = registry.get_textures(state) {
                 let tint = tint_color(
                     textures.tint,
+                    state,
                     snapshot.grass_tint(bx, by, bz),
                     snapshot.foliage_tint(bx, by, bz),
                     snapshot.dry_foliage_tint(bx, by, bz),
@@ -2311,13 +2520,15 @@ fn emit_multipart(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
     state: azalea_block::BlockState,
-    quads: &[&crate::world::block::model::BakedQuad],
+    quads: &[crate::world::block::model::BakedQuad],
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
     uv_map: &AtlasUVMap,
     bx: i32,
     by: i32,
     bz: i32,
+    trace_target: Option<&TraceTarget>,
+    trace_output: &mut Vec<Value>,
 ) {
     for quad in quads {
         if let Some(cullface) = quad.cullface {
@@ -2331,11 +2542,15 @@ fn emit_multipart(
         let region = uv_map.get_region(&quad.texture);
         let tint = tint_color(
             quad.tint,
+            state,
             snapshot.grass_tint(bx, by, bz),
             snapshot.foliage_tint(bx, by, bz),
             snapshot.dry_foliage_tint(bx, by, bz),
             || crate::world::block::redstone_wire_rgb(state),
         );
+        let vertex_start = sink.vertices.len();
+        let solid_start = sink.solid.len();
+        let cutout_start = sink.cutout.len();
         emit_face(
             sink,
             block_pos,
@@ -2345,6 +2560,33 @@ fn emit_multipart(
             region,
             tint,
         );
+        if trace_target.is_some() {
+            let (index_list, index_start, index_count) = if sink.solid.len() > solid_start {
+                ("solid", solid_start, sink.solid.len() - solid_start)
+            } else {
+                ("cutout", cutout_start, sink.cutout.len() - cutout_start)
+            };
+            trace_output.push(json!({
+                "target": {"x": bx, "y": by, "z": bz, "block": crate::world::block::block_id(state)},
+                "branch": "emit_multipart",
+                "quadIndex": trace_output.len(),
+                "face": quad.cullface.map(|d| format!("{d:?}")),
+                "texture": quad.texture,
+                "sprite": region.sprite,
+                "tintIndex": quad.tint_index,
+                "tint": format!("{:?}", quad.tint),
+                "grassTint": snapshot.grass_tint(bx, by, bz),
+                "grassDebug": snapshot.grass_debug(bx, by, bz),
+                "vertexStart": vertex_start,
+                "vertexCount": sink.vertices.len() - vertex_start,
+                "indexList": index_list,
+                "indexStart": index_start,
+                "indexCount": index_count,
+                "positions": quad.positions.map(|p| [p[0] + block_pos[0], p[1] + block_pos[1], p[2] + block_pos[2]]),
+                "uvs": quad.uvs,
+                "atlasRect": {"sprite": region.sprite, "pixelRect": region.pixel_rect, "uv": [region.u_min, region.v_min, region.u_max, region.v_max]},
+            }));
+        }
     }
 }
 
@@ -2631,7 +2873,7 @@ pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4
     let (from, to) = ([0.0; 3], [1.0; 3]);
     (
         face_positions(dir, from, to),
-        face_uvs(dir, from, to, None, None),
+        face_uvs(dir, from, to, None, None, false, 0, 0),
     )
 }
 
@@ -2639,8 +2881,9 @@ pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4
 mod terrain_uv_tests {
     use super::{
         add_weighted_fluid_height, fluid_height_with_above, fluid_top_uv_values, pack_sprite_uv,
-        unpack_sprite_uv,
+        unpack_sprite_uv, MeshTraceConfig, MeshTraceState, TraceTarget,
     };
+    use serde_json::json;
 
     fn wrapped(x: f32) -> f32 {
         x - x.floor()
@@ -2704,5 +2947,23 @@ mod terrain_uv_tests {
         assert_eq!(fluid_height_with_above(water, water), 1.0);
         assert_eq!(fluid_height_with_above(thin, water), 1.0);
         assert_eq!(fluid_height_with_above(thin, empty), 3.0 / 9.0);
+    }
+
+    #[test]
+    fn mesh_trace_is_opt_in_and_bounded() {
+        let state = MeshTraceState::new();
+        assert_eq!(state.snapshot()["enabled"], false);
+        state.arm(MeshTraceConfig {
+            trace_id: "test".into(),
+            world_token: "token".into(),
+            targets: vec![TraceTarget { x: 1, y: 2, z: 3, block: "stone".into() }],
+        });
+        for i in 0..80 {
+            state.record(json!({"i": i}));
+        }
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot["enabled"], true);
+        assert_eq!(snapshot["records"].as_array().unwrap().len(), 64);
+        assert_eq!(snapshot["config"]["traceId"], "test");
     }
 }

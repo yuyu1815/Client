@@ -640,6 +640,21 @@ pub fn redstone_wire_rgb(state: BlockState) -> [f32; 3] {
     COLORS[power.min(15)]
 }
 
+/// Vanilla `BlockTintSources.stem`: ARGB.color(age * 32, 255 - age * 8, age * 4).
+/// The state table carries the canonical `age` property as a decimal string.
+pub fn stem_rgb(state: BlockState) -> [f32; 3] {
+    let age = block_properties(state)
+        .get("age")
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(0)
+        .min(7);
+    [
+        age as f32 * 32.0 / 255.0,
+        (255.0 - age as f32 * 8.0) / 255.0,
+        age as f32 * 4.0 / 255.0,
+    ]
+}
+
 /// Vanilla `isAir`: includes cave and void air.
 pub fn is_air(state: BlockState) -> bool {
     block_data(state).is_air
@@ -762,6 +777,22 @@ mod tests {
         let full = redstone_wire_rgb(find_state("redstone_wire", &[("power", "15")]));
         for (got, want) in full.iter().zip([1.0, 0.2, 0.0]) {
             assert!((got - want).abs() < 1e-6, "{full:?}");
+        }
+    }
+
+    #[test]
+    fn stem_colors_follow_vanilla_age_formula() {
+        setup();
+        for age in 0..=7 {
+            let state = find_state("pumpkin_stem", &[("age", &age.to_string())]);
+            let expected = [
+                age as f32 * 32.0 / 255.0,
+                (255.0 - age as f32 * 8.0) / 255.0,
+                age as f32 * 4.0 / 255.0,
+            ];
+            for (got, want) in stem_rgb(state).into_iter().zip(expected) {
+                assert!((got - want).abs() < 1e-6, "age={age}: {got} != {want}");
+            }
         }
     }
 

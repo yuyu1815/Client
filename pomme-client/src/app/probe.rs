@@ -6,8 +6,9 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use azalea_core::position::ChunkPos;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use super::core::AppCore;
 use super::phases::in_game::GameState;
@@ -105,7 +106,7 @@ fn save_json(path: &Path, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn save_raw_capture(root: &Path, id: &str, mut raw: RawCapture) -> Result<(), String> {
+fn save_raw_capture(root: &Path, id: &str, mut raw: RawCapture) -> std::result::Result<(), String> {
     let world_path = root.join("results").join(format!("{id}.world-input.jsonl"));
     let debug_path = root.join("results").join(format!("{id}.render-debug.json"));
     let metadata_path = root.join("results").join(format!("{id}.json"));
@@ -124,7 +125,7 @@ fn save_raw_capture(root: &Path, id: &str, mut raw: RawCapture) -> Result<(), St
     write_atomic(&world_path, &text).map_err(|e| e.to_string())?;
     write_atomic(
         &debug_path,
-        br#"{"schema":1,"capture":"deferred-after-frame-readback"}"#,
+        &serde_json::to_vec_pretty(&raw.debug).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
     raw.metadata["worldInput"] = json!(world_path);
@@ -154,6 +155,132 @@ struct RawCell {
 struct RawCapture {
     metadata: Value,
     cells: Vec<RawCell>,
+    debug: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PeerFilter {
+    pub mode: String,
+    pub peer_name: String,
+    #[serde(default)]
+    pub peer_uuid: Option<uuid::Uuid>,
+    pub provenance: String,
+}
+
+pub(crate) fn should_exclude_peer(
+    filter: Option<&PeerFilter>,
+    entity_id: i32,
+    local_entity_id: i32,
+    entity_uuid: Option<uuid::Uuid>,
+    entity_name: Option<&str>,
+) -> bool {
+    let Some(filter) = filter else { return false };
+    filter.mode == "paired"
+        && entity_id != local_entity_id
+        && entity_name == Some(filter.peer_name.as_str())
+        && filter
+            .peer_uuid
+            .is_none_or(|expected| entity_uuid == Some(expected))
+}
+
+#[derive(Clone)]
+struct ItemOverlayLayout {
+    metadata: Value,
+    panel: [f32; 4],
+    background: [f32; 4],
+    items: Vec<(String, [f32; 4])>,
+}
+
+fn fixed_rect(value: &Value, name: &str) -> Result<[f32; 4]> {
+    let values = value
+        .get(name)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("itemOverlay missing {name}"))?;
+    if values.len() != 4 {
+        return Err(format!("itemOverlay {name} must have four values").into());
+    }
+    let mut rect = [0.0; 4];
+    for (out, value) in rect.iter_mut().zip(values) {
+        let n = value.as_f64().ok_or("itemOverlay rect must be numeric")?;
+        if !n.is_finite() || n.fract() != 0.0 || n < 0.0 || n > 4096.0 {
+            return Err("itemOverlay rect must contain bounded integers".into());
+        }
+        *out = n as f32;
+    }
+    if rect[2] <= 0.0 || rect[3] <= 0.0 {
+        return Err(format!("itemOverlay {name} must be non-empty").into());
+    }
+    Ok(rect)
+}
+
+fn parse_item_overlay(request: &Value) -> Result<Option<ItemOverlayLayout>> {
+    let Some(value) = request.get("itemOverlay") else {
+        return Ok(None);
+    };
+    let object = value.as_object().ok_or("itemOverlay must be an object")?;
+    if object.get("mode").and_then(Value::as_str) != Some("gui") {
+        return Err("itemOverlay mode must be gui".into());
+    }
+    let gui_scale = object
+        .get("guiScale")
+        .and_then(Value::as_u64)
+        .filter(|scale| (1..=8).contains(scale))
+        .ok_or("itemOverlay guiScale must be 1..8")?;
+    let panel = fixed_rect(value, "panelPhysicalRect")?;
+    let background_rgb = value
+        .get("backgroundRGB")
+        .and_then(Value::as_array)
+        .ok_or("itemOverlay missing backgroundRGB")?;
+    if background_rgb.len() != 3 {
+        return Err("itemOverlay backgroundRGB must have three values".into());
+    }
+    let mut background = [0.0; 4];
+    for (out, value) in background[..3].iter_mut().zip(background_rgb) {
+        let n = value.as_u64().filter(|n| *n <= 255).ok_or("invalid backgroundRGB")?;
+        let encoded = n as f32 / 255.0;
+        // MenuOverlayPipeline writes to the SRGB swapchain; feed it the exact
+        // linear value for the requested neutral byte so Java/Rust panel pixels
+        // are compared before item texture differences.
+        *out = if encoded <= 0.04045 {
+            encoded / 12.92
+        } else {
+            ((encoded + 0.055) / 1.055).powf(2.4)
+        };
+    }
+    background[3] = 1.0;
+    let items = value
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or("itemOverlay missing items")?;
+    if !(1..=12).contains(&items.len()) {
+        return Err("itemOverlay requires 1..=12 items".into());
+    }
+    let allowed = [
+        "fern", "bush", "lily_pad", "sugar_cane", "pink_petals", "wildflowers",
+        "ice", "honey_block", "stone",
+    ];
+    let mut parsed = Vec::with_capacity(items.len());
+    for item in items {
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("itemOverlay item missing id")?;
+        if !allowed.contains(&id) || parsed.iter().any(|(seen, _)| seen == id) {
+            return Err(format!("unsupported or duplicate itemOverlay id {id}").into());
+        }
+        let rect = fixed_rect(item, "physicalRect")?;
+        if rect[2] != 16.0 * gui_scale as f32 || rect[3] != 16.0 * gui_scale as f32 {
+            return Err(format!("itemOverlay {id} physical rect is not 16x16 at guiScale {gui_scale}").into());
+        }
+        parsed.push((id.to_owned(), rect));
+    }
+    Ok(Some(ItemOverlayLayout {
+        metadata: value.clone(),
+        panel,
+        background,
+        items: parsed,
+    }))
 }
 
 enum PendingCapture {
@@ -176,12 +303,22 @@ pub struct Probe {
     states: Vec<Value>,
     pending: Option<PendingCapture>,
     paired_prepared: Option<(String, Value)>,
+    paired_prepared_debug: Option<Value>,
+    paired_prepared_halo_token: Option<String>,
     paired_target: Option<(String, Instant)>,
     paired_seen: HashSet<String>,
+    peer_filter: Option<PeerFilter>,
+    item_overlay: Option<ItemOverlayLayout>,
 }
 
 impl Probe {
     pub fn new(root: PathBuf, server: Option<String>) -> Self {
+        let peer_filter = std::fs::read(root.join("peer-filter.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PeerFilter>(&bytes).ok());
+        if peer_filter.is_none() && root.join("peer-filter.json").is_file() {
+            tracing::warn!(target = "renderprobe", "Ignoring invalid peer-filter.json");
+        }
         Self {
             root,
             server,
@@ -190,13 +327,61 @@ impl Probe {
             states: Vec::new(),
             pending: None,
             paired_prepared: None,
+            paired_prepared_debug: None,
+            paired_prepared_halo_token: None,
             paired_target: None,
             paired_seen: HashSet::new(),
+            peer_filter,
+            item_overlay: None,
         }
+    }
+
+    pub(crate) fn peer_filter(&self) -> Option<&PeerFilter> {
+        self.peer_filter.as_ref()
+    }
+
+    pub(crate) fn peer_filter_metadata(&self) -> Value {
+        self.peer_filter
+            .as_ref()
+            .map_or(Value::Null, |filter| json!(filter))
     }
 
     pub fn exit_requested(&self) -> bool {
         self.root.join("exit-request.json").is_file()
+    }
+
+    pub(crate) fn item_overlay_elements(&self) -> Vec<crate::renderer::pipelines::menu_overlay::MenuElement> {
+        let Some(layout) = &self.item_overlay else { return Vec::new() };
+        let mut elements = Vec::with_capacity(layout.items.len() + 1);
+        elements.push(crate::renderer::pipelines::menu_overlay::MenuElement::Rect {
+            x: layout.panel[0],
+            y: layout.panel[1],
+            w: layout.panel[2],
+            h: layout.panel[3],
+            corner_radius: 0.0,
+            color: layout.background,
+        });
+        for (item_name, rect) in &layout.items {
+            elements.push(crate::renderer::pipelines::menu_overlay::MenuElement::ItemIcon {
+                x: rect[0],
+                y: rect[1],
+                w: rect[2],
+                h: rect[3],
+                item_name: item_name.clone(),
+                tint: [1.0, 1.0, 1.0, 1.0],
+            });
+        }
+        elements
+    }
+
+    pub(crate) fn item_overlay_metadata(&self) -> Value {
+        self.item_overlay
+            .as_ref()
+            .map_or(Value::Null, |layout| layout.metadata.clone())
+    }
+
+    pub(crate) fn item_overlay_active(&self) -> bool {
+        self.item_overlay.is_some()
     }
 
     fn path(&self, id: &str, suffix: &str) -> PathBuf {
@@ -228,7 +413,7 @@ impl Probe {
         &mut self,
         core: &AppCore,
         renderer: &mut Renderer,
-        game: &GameState,
+        game: &mut GameState,
         sky: &SkyState,
     ) {
         let request_path = self.root.join("capture-request.json");
@@ -322,12 +507,137 @@ impl Probe {
         }
     }
 
+    fn paired_debug_samples(
+        region: &Region,
+        chunks: &crate::world::chunk::ChunkStore,
+    ) -> Vec<(i32, i32, i32, azalea_block::BlockState)> {
+        let names = [
+            "stone",
+            "oak_stairs",
+            "glass_pane",
+            "cobblestone_wall",
+            "stripped_oak_log",
+            "stripped_acacia_log",
+            "stripped_cherry_log",
+            "stripped_dark_oak_log",
+            "stripped_mangrove_log",
+            "stripped_pale_oak_log",
+            "pumpkin_stem",
+            "melon_stem",
+            "attached_pumpkin_stem",
+            "attached_melon_stem",
+            "potted_fern",
+            "bush",
+            "sugar_cane",
+            "lily_pad",
+            "pink_petals",
+            "wildflowers",
+            "cherry_leaves",
+            "mangrove_propagule",
+            "azalea_leaves",
+            "flowering_azalea_leaves",
+            "spruce_leaves",
+            "birch_leaves",
+            "water",
+            "lava",
+            "bubble_column",
+        ];
+        let mut seen = HashSet::new();
+        let mut samples = Vec::new();
+        for x in region.min_x..=region.max_x {
+            for y in region.min_y..=region.max_y {
+                for z in region.min_z..=region.max_z {
+                    let state = chunks.get_block_state(x, y, z);
+                    let key = state_record(state)["stateKey"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    if names.contains(&block::block_id(state))
+                        && seen.insert(key)
+                        && samples.len() < 16
+                    {
+                        samples.push((x, y, z, state));
+                    }
+                }
+            }
+        }
+        samples
+    }
+
+    fn world_halo_token(
+        chunks: &crate::world::chunk::ChunkStore,
+        region: &Region,
+    ) -> Result<String> {
+        const PROVENANCE: &[u8] = b"world-halo-token-v2/state-u32le/raw-sky-u8/raw-block-u8/biome-u32le/order=x-asc,y-asc,z-asc/halo=xz+-2/no-fallback";
+        let min_x = region
+            .min_x
+            .checked_sub(2)
+            .ok_or("World halo coordinate overflow")?;
+        let max_x = region
+            .max_x
+            .checked_add(2)
+            .ok_or("World halo coordinate overflow")?;
+        let min_z = region
+            .min_z
+            .checked_sub(2)
+            .ok_or("World halo coordinate overflow")?;
+        let max_z = region
+            .max_z
+            .checked_add(2)
+            .ok_or("World halo coordinate overflow")?;
+        let mut digest = Sha256::new();
+        digest.update(PROVENANCE);
+        for value in [
+            region.min_x,
+            region.min_y,
+            region.min_z,
+            region.max_x,
+            region.max_y,
+            region.max_z,
+        ] {
+            digest.update(value.to_le_bytes());
+        }
+        for x in min_x..=max_x {
+            for z in min_z..=max_z {
+                let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
+                if chunks.get_chunk(&chunk_pos).is_none()
+                    || !chunks.light_data.contains_key(&(chunk_pos.x, chunk_pos.z))
+                {
+                    return Err(format!(
+                        "World halo input is unloaded at chunk {},{}",
+                        chunk_pos.x, chunk_pos.z
+                    )
+                    .into());
+                }
+            }
+        }
+        for x in min_x..=max_x {
+            for y in region.min_y..=region.max_y {
+                for z in min_z..=max_z {
+                    let state = chunks.get_block_state(x, y, z);
+                    let biome = chunks
+                        .biome_id_checked(x, y, z)
+                        .ok_or_else(|| format!("World halo biome is unloaded at {x},{y},{z}"))?;
+                    digest.update(u32::from(state).to_le_bytes());
+                    digest.update([chunks.get_sky_light(x, y, z)]);
+                    digest.update([chunks.get_block_light(x, y, z)]);
+                    digest.update(biome.to_le_bytes());
+                }
+            }
+        }
+        Ok(digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect())
+    }
+
     fn poll_paired(
         &mut self,
         request: &Value,
         core: &AppCore,
         renderer: &mut Renderer,
-        game: &GameState,
+        game: &mut GameState,
         sky: &SkyState,
     ) {
         let result_id = request["resultId"].as_str().unwrap_or("request").to_owned();
@@ -341,14 +651,6 @@ impl Probe {
                 );
                 return;
             }
-        }
-        if request["resultId"] != request["caseId"] {
-            self.fail_paired(
-                request,
-                &result_id,
-                "Paired resultId must identify this case",
-            );
-            return;
         }
         if !safe_case(&result_id) || !safe_case(request["caseId"].as_str().unwrap_or("")) {
             self.fail_paired(request, &result_id, "Unsafe paired case/result ID");
@@ -368,12 +670,46 @@ impl Probe {
             {
                 return;
             }
+            let requested_item_overlay = match parse_item_overlay(request) {
+                Ok(layout) => layout,
+                Err(e) => {
+                    self.fail_paired(request, &result_id, e);
+                    return;
+                }
+            };
             match self.validate_capture(request, renderer, game) {
-                Ok(_) => {
+                Ok(region) => {
+                    if let Some(layout) = requested_item_overlay {
+                        game.hide_gui = false;
+                        renderer.arm_gui_item_draw_trace(layout.metadata.clone());
+                        self.item_overlay = Some(layout);
+                    }
                     if let Err(e) = self.prepare_state_inventory() {
                         self.fail_paired(request, &result_id, e);
                         return;
                     }
+                    let samples = Self::paired_debug_samples(&region, &game.chunk_store);
+                    let mut prepared_debug =
+                        render_debug::prepare(renderer, &game.chunk_store, &samples);
+                    let halo_token = match Self::world_halo_token(&game.chunk_store, &region) {
+                        Ok(token) => token,
+                        Err(e) => {
+                            self.fail_paired(request, &result_id, e);
+                            return;
+                        }
+                    };
+                    if let Some(sampling) = prepared_debug
+                        .get_mut("diagnosticSampling")
+                        .and_then(Value::as_object_mut)
+                    {
+                        sampling.insert("worldHaloTokenProvenance".into(), json!("world-halo-token-v2: target region plus x/z +/-2 for vanilla 5x5 biome tint blend; fixed x/y/z order; raw state ID, raw sky light, raw block light, biome ID; unloaded input rejects token"));
+                        sampling.insert("fluidNeighborWorldHaloToken".into(), json!(halo_token));
+                        sampling.insert("preparedWorldHaloToken".into(), json!(halo_token));
+                        sampling.insert("actualDrawDiagnostics".into(), json!("armed: mesher/upload payload, no GPU readback"));
+                    }
+                    let trace_samples = Self::paired_debug_samples(&region, &game.chunk_store);
+                    renderer.arm_actual_draw_trace(&result_id, &halo_token, &trace_samples);
+                    game.remesh_probe_targets(renderer, &trace_samples);
                     let ready = json!({
                         "schema": 1,
                         "runId": request["runId"],
@@ -387,6 +723,8 @@ impl Probe {
                         self.fail_paired(request, &result_id, e);
                     } else {
                         self.paired_prepared = Some((result_id, request.clone()));
+                        self.paired_prepared_debug = Some(prepared_debug);
+                        self.paired_prepared_halo_token = Some(halo_token);
                     }
                 }
                 Err(e) => tracing::debug!("Paired prepare waiting: {e}"),
@@ -438,6 +776,8 @@ impl Probe {
             self.fail_paired(request, &result_id, e);
         }
         self.paired_prepared = None;
+        self.paired_prepared_debug = None;
+        self.paired_prepared_halo_token = None;
         self.paired_target = None;
     }
 
@@ -460,8 +800,9 @@ impl Probe {
             return Err(format!("Close client screen before capture: paused={}, gui={}, chat={}, dead={}, options={}, dialog={}",
                 game.paused, game.gui_open(), game.chat.is_open(), game.dead, game.options_from_game, game.dialog_open()).into());
         }
-        if !renderer.is_first_person() || !game.hide_gui {
-            return Err("Probe requires first person and hidden HUD".into());
+        let item_overlay = parse_item_overlay(request)?;
+        if !renderer.is_first_person() || (!game.hide_gui && item_overlay.is_none()) {
+            return Err("Probe requires first person and hidden HUD unless paired itemOverlay mode is active".into());
         }
         let p = game.player.position;
         let (yaw, pitch) = renderer.camera_effective_look_deg();
@@ -558,11 +899,23 @@ impl Probe {
         request: &Value,
         core: &AppCore,
         renderer: &mut Renderer,
-        game: &GameState,
+        game: &mut GameState,
         sky: &SkyState,
     ) -> Result<()> {
         let region = self.validate_capture(request, renderer, game)?;
         self.prepare_state_inventory()?;
+        let prepared_debug = self
+            .paired_prepared_debug
+            .clone()
+            .ok_or("Paired GO has no prepared diagnostics")?;
+        let prepared_halo_token = self
+            .paired_prepared_halo_token
+            .as_deref()
+            .ok_or("Paired GO has no prepared world halo token")?;
+        let actual_halo_token = Self::world_halo_token(&game.chunk_store, &region)?;
+        if actual_halo_token != prepared_halo_token {
+            return Err("Prepared target-region state/light/biome halo changed before GO".into());
+        }
         let actual_snapshot_at = chrono::Utc::now().to_rfc3339();
         let chunks = &game.chunk_store;
         let clock_token = (
@@ -610,31 +963,99 @@ impl Probe {
         if clock_token != after_token {
             return Err("Clock/region snapshot changed during paired capture; reprepare".into());
         }
+        let actual_halo_token = Self::world_halo_token(chunks, &region)?;
+        if actual_halo_token != prepared_halo_token {
+            return Err(
+                "Target-region state/light/biome halo changed during raw capture; reprepare".into(),
+            );
+        }
+        let mut debug = render_debug::snapshot_with_prepared(
+            renderer,
+            sky,
+            &game.dimension,
+            if game.server_render_distance > 0 {
+                core.menu.render_distance.min(game.server_render_distance)
+            } else {
+                core.menu.render_distance
+            },
+            game.probe_lightmap_brightness(),
+            &prepared_debug,
+        );
+        if let Some(sampling) = debug
+            .get_mut("diagnosticSampling")
+            .and_then(Value::as_object_mut)
+        {
+            sampling.insert("actualWorldRawSampledAt".into(), json!(actual_snapshot_at));
+            sampling.insert("actualWorldHaloToken".into(), json!(actual_halo_token));
+            sampling.insert("preparedWorldHaloToken".into(), json!(prepared_halo_token));
+            sampling.insert(
+                "worldInputChanged".into(),
+                json!(actual_halo_token != prepared_halo_token),
+            );
+            sampling.insert("actualDrawDiagnostics".into(), json!("captured emitted/upload payload; GPU fragment/readback not captured"));
+        }
         let p = game.player.position;
         let c = renderer.camera_render_position();
         let (yaw, pitch) = renderer.camera_effective_look_deg();
         let (vendor, driver) = renderer.probe_gpu_info();
+        let excluded_actor_count = game
+            .entity_store
+            .living
+            .iter()
+            .filter(|entry| {
+                let entity_id = *entry.0;
+                let entity = entry.1;
+                let name = entity.player_uuid.and_then(|uuid| {
+                    game.tab_list.players.get(&uuid).map(|player| player.name.as_str())
+                });
+                should_exclude_peer(
+                    self.peer_filter.as_ref(),
+                    entity_id,
+                    game.player.entity_id,
+                    entity.player_uuid,
+                    name,
+                )
+            })
+            .count();
+        let mut excluded_peer = self.peer_filter_metadata();
+        if let Some(peer) = excluded_peer.as_object_mut() {
+            let resolved_uuid = game.entity_store.living.values().find_map(|entity| {
+                let uuid = entity.player_uuid?;
+                let name = game.tab_list.players.get(&uuid)?.name.as_str();
+                (name == peer.get("peerName").and_then(Value::as_str).unwrap_or_default()).then_some(uuid)
+            });
+            peer.insert("resolvedPeerUuid".into(), json!(resolved_uuid));
+        }
         let metadata = json!({
             "schema": 3, "gameVersion": core.version, "launchVersion": "Pomme", "server": self.server,
             "runId": request["runId"], "caseId": request["caseId"], "attemptId": request["attemptId"], "resultId": id,
-            "requestedAt": request["requestedAt"], "targetCaptureAt": request["targetCaptureAt"], "actualSnapshotAt": actual_snapshot_at,
+            "requestedAt": request["requestedAt"], "targetCaptureAt": request["targetCaptureAt"], "expectedTime": request["expectedTime"], "actualSnapshotAt": actual_snapshot_at,
             "dimension": game.dimension, "playerX": p.x, "playerY": p.y, "playerZ": p.z,
             "playerYaw": game.player.look_dir.y_rot_deg(), "playerPitch": game.player.look_dir.x_rot_deg(),
             "cameraX": c.x, "cameraY": c.y, "cameraZ": c.z, "cameraYaw": yaw, "cameraPitch": pitch,
             "fov": renderer.camera_fov_degrees(), "width": renderer.screen_width(), "height": renderer.screen_height(),
             "gpuName": renderer.gpu_name(), "gpuVendor": format!("PCI 0x{vendor:04x}"), "backend": "Vulkan", "driver": format!("Vulkan driverVersion {driver}"), "vulkanApi": renderer.vulkan_version(),
-            "capturedAt": actual_snapshot_at, "cameraMode": "FIRST_PERSON", "hudHidden": game.hide_gui, "viewBobbing": core.menu.view_bobbing,
+            "capturedAt": actual_snapshot_at, "cameraMode": "FIRST_PERSON", "hudHidden": game.hide_gui, "showHand": !game.hide_gui, "captureSource": "Vulkan swapchain PresentSrcKHR -> TransferSrcOptimal -> host readback PNG", "viewBobbing": core.menu.view_bobbing,
             "clock": {"id": game.sky_state.clock_id, "totalTicks": game.sky_state.day_time, "partialTick": game.sky_state.clock_partial_tick, "rate": game.sky_state.clock_rate},
             "clockPhase": game.sky_state.day_tick().rem_euclid(24000.0), "serverTickRate": core.server_tick_rate, "serverFrozen": core.server_tick_frozen,
             "serverFrozenTicksToRun": core.server_tick_steps, "clientGameTime": game.sky_state.game_time, "clientTime": game.sky_state.day_time as f64 + f64::from(game.sky_state.clock_partial_tick),
             "clientDaytime": game.sky_state.day_tick(), "rendererSkyTime": sky.day_time as f64 + f64::from(sky.clock_partial_tick + sky.partial_tick * sky.clock_rate),
             "region": region, "recordCount": cells.len(), "stateInventory": self.root.join("results/states.jsonl"), "stateCount": self.states.len(),
-            "snapshotTiming": "actualSnapshotAt is the target CPU raw snapshot; actualFrameCapturedAt is Vulkan copy recording; frameReadbackCompletedAt is readback completion"
+            "excludedProbePeer": excluded_peer,
+            "actualDrawEntityList": {"actorCount": game.entity_store.living.len(), "excludedProbePeerActorCount": excluded_actor_count, "drawEligibleActorCount": game.entity_store.living.len().saturating_sub(excluded_actor_count), "provenance": "GameState EntityStore at paired capture; filter is exact PlayerInfo name plus optional UUID; no all-entity suppression"},
+            "snapshotTiming": "actualSnapshotAt is the target CPU raw snapshot; actualFrameCapturedAt is Vulkan copy recording; frameReadbackCompletedAt is readback completion",
+            "diagnosticMode": if self.item_overlay.is_some() { "itemOverlay" } else { "normal" },
+            "itemOverlay": self.item_overlay_metadata(),
+            "itemOverlayColorSpace": "Rust UI color floats -> B8G8R8A8_SRGB framebuffer; no post-capture correction"
         });
         self.pending = Some(PendingCapture::Screenshot {
             id: id.to_owned(),
             rx,
-            raw: Some(RawCapture { metadata, cells }),
+            raw: Some(RawCapture {
+                metadata,
+                cells,
+                debug,
+            }),
         });
         Ok(())
     }
@@ -658,6 +1079,24 @@ impl Probe {
         let debug_names = [
             "stone",
             "oak_stairs",
+            "glass_pane",
+            "cobblestone_wall",
+            "stripped_oak_log",
+            "stripped_acacia_log",
+            "stripped_cherry_log",
+            "stripped_dark_oak_log",
+            "stripped_mangrove_log",
+            "stripped_pale_oak_log",
+            "pumpkin_stem",
+            "melon_stem",
+            "attached_pumpkin_stem",
+            "attached_melon_stem",
+            "potted_fern",
+            "bush",
+            "sugar_cane",
+            "lily_pad",
+            "pink_petals",
+            "wildflowers",
             "cherry_leaves",
             "mangrove_propagule",
             "azalea_leaves",
@@ -720,7 +1159,7 @@ impl Probe {
             "fov": renderer.camera_fov_degrees(), "width": renderer.screen_width(), "height": renderer.screen_height(),
             "gpuName": renderer.gpu_name(), "gpuVendor": format!("PCI 0x{vendor:04x}"), "backend": "Vulkan",
             "driver": format!("Vulkan driverVersion {driver}"), "vulkanApi": renderer.vulkan_version(),
-            "capturedAt": chrono::Utc::now().to_rfc3339(), "cameraMode": "FIRST_PERSON", "hudHidden": game.hide_gui,
+            "capturedAt": chrono::Utc::now().to_rfc3339(), "cameraMode": "FIRST_PERSON", "hudHidden": game.hide_gui, "showHand": !game.hide_gui, "captureSource": "Vulkan swapchain PresentSrcKHR -> TransferSrcOptimal -> host readback PNG",
             "viewBobbing": core.menu.view_bobbing, "biomeSampling": "renderer quart cell (no vanilla fuzzy zoom)",
             "receivedClock": received_clock,
             "clock": {"id": game.sky_state.clock_id, "totalTicks": game.sky_state.day_time, "partialTick": game.sky_state.clock_partial_tick, "rate": game.sky_state.clock_rate},
@@ -781,6 +1220,35 @@ impl Probe {
 mod tests {
     use super::*;
     #[test]
+    fn item_overlay_validation_accepts_bounded_variable_16px_slots() {
+        let ids = ["fern", "bush", "lily_pad", "sugar_cane", "pink_petals", "wildflowers"];
+        let items: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                json!({
+                    "id": id,
+                    "logicalRect": [16 + i * 20, 12, 16, 16],
+                    "physicalRect": [48 + i * 60, 36, 48, 48]
+                })
+            })
+            .collect();
+        let value = json!({
+            "mode": "gui",
+            "guiScale": 3,
+            "panelLogicalRect": [8, 8, 132, 24],
+            "panelPhysicalRect": [24, 24, 396, 72],
+            "backgroundRGB": [32, 32, 32],
+            "items": items
+        });
+        let request = json!({"itemOverlay": value});
+        assert!(parse_item_overlay(&request).unwrap().is_some());
+        let mut bad = request;
+        bad["itemOverlay"]["items"] = json!([]);
+        assert!(parse_item_overlay(&bad).is_err());
+    }
+
+    #[test]
     fn probe_boundaries_and_canonical_states() {
         block::init("26.2");
         assert_eq!(canonical_id("stone"), "minecraft:stone");
@@ -821,5 +1289,73 @@ mod tests {
         let a = crate::entity::components::LookDirection::new(-180.0, 32.0).as_vec();
         let b = crate::entity::components::LookDirection::new(180.0, 32.0).as_vec();
         assert!((a - b).length() < 1e-6);
+    }
+
+    #[test]
+    fn peer_filter_matches_uuid_and_name_only_without_touching_normal_mode() {
+        let uuid = uuid::Uuid::from_u128(1);
+        let paired = PeerFilter {
+            mode: "paired".into(),
+            peer_name: "PeerJava".into(),
+            peer_uuid: Some(uuid),
+            provenance: "test".into(),
+        };
+        assert!(should_exclude_peer(
+            Some(&paired),
+            2,
+            1,
+            Some(uuid),
+            Some("PeerJava")
+        ));
+        assert!(!should_exclude_peer(
+            Some(&paired),
+            2,
+            1,
+            Some(uuid),
+            Some("Other")
+        ));
+        assert!(!should_exclude_peer(
+            Some(&paired),
+            2,
+            1,
+            Some(uuid::Uuid::from_u128(2)),
+            Some("PeerJava")
+        ));
+        let name_only = PeerFilter {
+            peer_uuid: None,
+            ..paired.clone()
+        };
+        assert!(should_exclude_peer(
+            Some(&name_only),
+            2,
+            1,
+            Some(uuid::Uuid::from_u128(2)),
+            Some("PeerJava")
+        ));
+        let normal = PeerFilter {
+            mode: "normal".into(),
+            ..name_only
+        };
+        assert!(!should_exclude_peer(
+            Some(&normal),
+            2,
+            1,
+            Some(uuid),
+            Some("PeerJava")
+        ));
+        assert!(!should_exclude_peer(
+            None,
+            2,
+            1,
+            Some(uuid),
+            Some("PeerJava")
+        ));
+        assert!(!should_exclude_peer(
+            Some(&paired),
+            1,
+            1,
+            Some(uuid),
+            Some("PeerJava")
+        ));
     }
 }

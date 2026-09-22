@@ -342,12 +342,12 @@ fn build_overlay_vertices(
         .to_array();
     let mut verts = Vec::new();
 
-    if let Some(model) = registry.get_baked_model(state) {
+    if let Some(model) = registry.get_baked_model_at(state, pos.x, pos.y, pos.z) {
         for quad in &model.quads {
             push_quad(&mut verts, origin, quad);
         }
-    } else if let Some(quads) = registry.get_multipart_quads(state) {
-        for quad in quads {
+    } else if let Some(quads) = registry.get_multipart_quads_at(state, pos.x, pos.y, pos.z) {
+        for quad in &quads {
             push_quad(&mut verts, origin, quad);
         }
     } else if registry.get_textures(state).is_some() {

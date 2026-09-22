@@ -142,8 +142,8 @@ fn opaque_light_debug(
     })
 }
 
-fn model_debug(renderer: &Renderer, state: BlockState) -> Value {
-    let mut model = renderer.probe_model_debug(state);
+fn model_debug(renderer: &Renderer, state: BlockState, x: i32, y: i32, z: i32) -> Value {
+    let mut model = renderer.probe_model_debug(state, x, y, z);
     atlas_debug(renderer, &mut model);
     model
 }
@@ -211,6 +211,91 @@ fn fluid_debug(world: &ChunkStore, x: i32, y: i32, z: i32, state: BlockState) ->
     })
 }
 
+fn item_rows(renderer: &Renderer) -> Vec<Value> {
+    [
+        "fern", "bush", "lily_pad", "sugar_cane", "pink_petals", "wildflowers", "ice",
+        "honey_block", "stone",
+    ]
+        .into_iter()
+        .map(|name| {
+            let mut row = renderer.probe_item_debug(name);
+            let mut texture_names = Vec::new();
+            if let Some(texture) = row.get("texture").and_then(Value::as_str) {
+                texture_names.push(texture.to_owned());
+            }
+            if let Some(quads) = row.get("quads").and_then(Value::as_array) {
+                for texture in quads.iter().filter_map(|quad| quad.get("texture").and_then(Value::as_str)) {
+                    if !texture_names.iter().any(|seen| seen == texture) {
+                        texture_names.push(texture.to_owned());
+                    }
+                }
+            }
+            let mut atlas_regions = serde_json::Map::new();
+            for texture in &texture_names {
+                let region = renderer.atlas_uv_map().get_region(texture);
+                atlas_regions.insert(texture.clone(), json!({
+                    "sprite": region.sprite,
+                    "pixelRect": region.pixel_rect,
+                    "uv": [region.u_min, region.v_min, region.u_max, region.v_max],
+                    "opaque": region.opaque,
+                    "translucent": region.translucent,
+                    "alphaCounts": region.alpha_counts,
+                    "atlasFormat": "R8G8B8A8_SRGB",
+                }));
+            }
+            if let Some(texture) = texture_names.first() {
+                row["selectedSprite"] = atlas_regions[texture].clone();
+                row["selectedSprite"]["key"] = json!(texture);
+            }
+            row["atlasRegions"] = Value::Object(atlas_regions);
+            row
+        })
+        .collect()
+}
+
+fn sample_rows(
+    renderer: &Renderer,
+    world: &ChunkStore,
+    samples: &[(i32, i32, i32, BlockState)],
+) -> Vec<Value> {
+    samples
+        .iter()
+        .map(|(x, y, z, state)| {
+            json!({
+                "x": x,
+                "y": y,
+                "z": z,
+                "model": model_debug(renderer, *state, *x, *y, *z),
+                "opaqueLight": opaque_light_debug(world, *x, *y, *z, *state),
+                "fluid": fluid_debug(world, *x, *y, *z, *state),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn prepare(
+    renderer: &Renderer,
+    world: &ChunkStore,
+    samples: &[(i32, i32, i32, BlockState)],
+) -> Value {
+    json!({
+        "schema": 4,
+        "samples": sample_rows(renderer, world, samples),
+        "itemTintDiagnostics": {
+            "candidates": item_rows(renderer),
+            "scope": "item JSON tints -> modelpart tintIndex -> Rust flat/3D mesh input",
+            "blockTintSource": "not used",
+        },
+        "diagnosticSampling": {
+            "phase": "prepare",
+            "sampledAtPrepare": chrono::Utc::now().to_rfc3339(),
+            "modelSpriteAssetStaticDiagnostics": true,
+            "fluidNeighborScope": "target region plus one-block x/z halo",
+            "actualDrawDiagnostics": false,
+        },
+    })
+}
+
 pub(crate) fn snapshot(
     renderer: &Renderer,
     sky: &SkyState,
@@ -219,6 +304,25 @@ pub(crate) fn snapshot(
     lightmap_brightness: f32,
     world: &ChunkStore,
     samples: &[(i32, i32, i32, BlockState)],
+) -> Value {
+    let prepared = prepare(renderer, world, samples);
+    snapshot_with_prepared(
+        renderer,
+        sky,
+        dimension,
+        render_distance,
+        lightmap_brightness,
+        &prepared,
+    )
+}
+
+pub(crate) fn snapshot_with_prepared(
+    renderer: &Renderer,
+    sky: &SkyState,
+    dimension: &str,
+    render_distance: u32,
+    lightmap_brightness: f32,
+    prepared: &Value,
 ) -> Value {
     json!({
         "schema": 2,
@@ -237,19 +341,17 @@ pub(crate) fn snapshot(
             "clearColor": sky.clear_color_linear(dimension, render_distance),
             "colorEncoding": "linear floats -> B8G8R8A8_SRGB framebuffer encode",
             "renderContract": renderer.probe_render_debug(sky.clear_color_linear(dimension, render_distance)),
-            "samplerState": {"atlasFormat": "R8G8B8A8_SRGB", "magFilter": "NEAREST", "minFilter": "NEAREST", "mipmapMode": "LINEAR", "maxLod": 4, "anisotropy": 1.0, "addressMode": "CLAMP_TO_EDGE"},
+            "actualDrawTrace": renderer.probe_actual_draw_trace(),
+            "samplerState": {"atlasFormat": "R8G8B8A8_SRGB", "magFilter": "NEAREST", "minFilter": "NEAREST", "mipmapMode": "LINEAR", "maxLod": 4, "anisotropy": 1.0, "addressMode": "CLAMP_TO_EDGE", "rgss": "not used by terrain shader"},
+            "samplingProvenance": "terrain atlas uses the existing nearest mag/min sampler with textureGrad; linear+texel-center experiment was reverted after the same-case stone MAE worsened",
             "lightmap": {"eyeBrightness": lightmap_brightness, "rawSkyBlockEmission": "world-input.jsonl"},
         },
-        "samples": samples.iter().map(|(x, y, z, state)| {
-            let fluid_json = fluid_debug(world, *x, *y, *z, *state);
-            json!({
-                "x": x,
-                "y": y,
-                "z": z,
-                "model": model_debug(renderer, *state),
-                "opaqueLight": opaque_light_debug(world, *x, *y, *z, *state),
-                "fluid": fluid_json,
-            })
-        }).collect::<Vec<_>>(),
+        "samples": prepared["samples"].clone(),
+        "itemTintDiagnostics": prepared
+            .get("itemTintDiagnostics")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "guiItemOverlay": renderer.probe_gui_item_draw_trace(),
+        "diagnosticSampling": prepared["diagnosticSampling"].clone(),
     })
 }

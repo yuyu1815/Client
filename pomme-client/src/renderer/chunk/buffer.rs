@@ -1,12 +1,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use serde_json::json;
 use azalea_core::position::ChunkPos;
 use glam::DVec3;
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
-use super::mesher::{ChunkAABB, ChunkMeshData, PackedVertex, SectionMesh};
+use super::mesher::{ChunkAABB, ChunkMeshData, MeshTraceState, PackedVertex, SectionMesh};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
@@ -389,6 +390,7 @@ pub struct ChunkBufferStore {
     /// which it's safe to reclaim (`MAX_FRAMES_IN_FLIGHT` out, so no in-flight
     /// frame still draws it). Drained in `begin_frame`.
     pending_free: VecDeque<(u64, (u32, u32, u32, u32))>,
+    trace_state: MeshTraceState,
 }
 
 impl ChunkBufferStore {
@@ -397,6 +399,7 @@ impl ChunkBufferStore {
         physical_device: vk::PhysicalDevice,
         graphics_family: u32,
         allocator: &Arc<Mutex<Allocator>>,
+        trace_state: MeshTraceState,
     ) -> Self {
         let total_buckets = compute_bucket_count(physical_device);
         let vertex_size = total_buckets as u64 * BUCKET_VERTICES as u64 * VERTEX_SIZE;
@@ -762,6 +765,7 @@ impl ChunkBufferStore {
             last_draw_count: 0,
             frame_seq: 0,
             pending_free: VecDeque::new(),
+            trace_state,
         }
     }
 
@@ -1067,6 +1071,78 @@ impl ChunkBufferStore {
                         ibuf[off + opaque.len()..off + opaque.len() + water.len()]
                             .copy_from_slice(water);
                     }
+                }
+            }
+
+            for sec in &upload_secs {
+                let Some(plan) = plans.iter().find(|p| p.section_index == sec.section_index) else {
+                    continue;
+                };
+                for record in &sec.trace {
+                let vertex_start = record["vertexStart"].as_u64().unwrap_or(0) as usize;
+                let vertex_count = record["vertexCount"].as_u64().unwrap_or(0) as usize;
+                let byte_start = vertex_start.saturating_mul(VERTEX_SIZE as usize);
+                let byte_end = byte_start.saturating_add(vertex_count.saturating_mul(VERTEX_SIZE as usize));
+                let bytes: &[u8] = bytemuck::cast_slice(plan.verts);
+                let payload = bytes.get(byte_start..byte_end).unwrap_or(&[]);
+                use sha2::{Digest, Sha256};
+                let hash = Sha256::digest(payload);
+                let index_base = record["indexStartFinal"].as_u64().unwrap_or(0) as usize;
+                let index_count = record["indexCount"].as_u64().unwrap_or(0) as usize;
+                let full_indices = if record["indexList"].as_str() == Some("cutout") {
+                    let mut values = Vec::with_capacity(plan.indices.len() + plan.water_indices.len());
+                    values.extend_from_slice(plan.indices);
+                    values
+                } else {
+                    plan.indices.to_vec()
+                };
+                let index_bytes: &[u8] = bytemuck::cast_slice(
+                    full_indices.get(index_base..index_base.saturating_add(index_count)).unwrap_or(&[]),
+                );
+                let index_hash = Sha256::digest(index_bytes);
+                let mut upload = record.clone();
+                upload["meshPos"] = json!([mesh.pos.x, mesh.pos.z]);
+                upload["sectionGeneration"] = json!(mesh.content_gen);
+                upload["uploadEpoch"] = json!(mesh.upload_epoch);
+                upload["sectionVtxByteOffset"] = json!(plan.vtx_off as u64 * VERTEX_SIZE);
+                upload["actualVtxByteOffset"] = json!(
+                    plan.vtx_off as u64 * VERTEX_SIZE + vertex_start as u64 * VERTEX_SIZE
+                );
+                upload["actualIndexByteOffset"] = json!(
+                    (plan.idx_off as u64 + index_base as u64) * INDEX_SIZE
+                );
+                let draw_first_index = if record["indexList"].as_str() == Some("cutout") {
+                    plan.idx_off + plan.solid_index_count
+                } else {
+                    plan.idx_off
+                };
+                let draw_index_count = if record["indexList"].as_str() == Some("cutout") {
+                    plan.indices.len() as u32 - plan.solid_index_count
+                } else {
+                    plan.solid_index_count
+                };
+                upload["drawIndirectSection"] = json!({
+                    "firstIndex": draw_first_index,
+                    "indexCount": draw_index_count,
+                    "vertexOffset": plan.vtx_off as i32,
+                    "instanceCount": 1,
+                    "firstInstance": "section meta index assigned during cached draw-list rebuild",
+                });
+                upload["stride"] = json!(VERTEX_SIZE);
+                upload["attributeFormatOffsets"] = json!({
+                    "pos": {"format": "R16G16Unorm+R16Unorm", "offset": 0},
+                    "uv": {"format": "R16G16Uint", "offset": 6},
+                    "sprite": {"format": "R16Uint", "offset": 10},
+                    "lightTint": {"format": "R8G8B8A8Unorm", "offset": 12},
+                });
+                upload["uploadPayloadSha256"] = json!(hash.iter().map(|b| format!("{b:02x}")).collect::<String>());
+                upload["uploadIndexPayloadSha256"] = json!(index_hash.iter().map(|b| format!("{b:02x}")).collect::<String>());
+                upload["uploadPath"] = json!(if self.use_staging {
+                    "ChunkMeshData -> staging buffer -> vkCmdCopyBuffer -> device-local vertex/index pool"
+                } else {
+                    "ChunkMeshData -> mapped host-visible vertex/index pool"
+                });
+                    self.trace_state.record(upload);
                 }
             }
 

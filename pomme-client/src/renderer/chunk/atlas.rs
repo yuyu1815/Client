@@ -32,6 +32,8 @@ pub struct AtlasRegion {
     /// `NativeImage.computeTransparency` routes such sprites to the
     /// translucent item sheet rather than the cutout one.
     pub translucent: bool,
+    /// Level-0 alpha distribution: `[zero, partial, opaque]` texel counts.
+    pub alpha_counts: [u32; 3],
 }
 
 #[derive(Clone)]
@@ -111,6 +113,7 @@ struct Source {
     /// Over every frame, as vanilla's `SpriteContents.transparency` is.
     opaque: bool,
     translucent: bool,
+    alpha_counts: [u32; 3],
     alpha_mask: Option<SpriteAlphaMask>,
     mip_source: Option<MipSource>,
 }
@@ -125,6 +128,7 @@ impl Source {
             h: 0,
             opaque: false,
             translucent: false,
+            alpha_counts: [0; 3],
             alpha_mask: None,
             mip_source: None,
         }
@@ -429,6 +433,7 @@ fn load_source(
             };
             let alpha_mask =
                 retain_alpha_mask.then(|| sprite_alpha_mask_from_rgba(&data, width, &animation));
+            let alpha_counts = sprite_alpha_counts(&data);
             let (opaque, translucent) = sprite_transparency(&data);
             let display =
                 extract_frame_rgba(&data, width, &animation, animation.initial_display_frame);
@@ -448,6 +453,7 @@ fn load_source(
                 h: animation.frame_height,
                 opaque,
                 translucent,
+                alpha_counts,
                 alpha_mask,
                 mip_source,
             }
@@ -536,6 +542,7 @@ impl TextureAtlas {
                         .expect("an 8192² atlas holds fewer than 65536 sprites");
                     region.opaque = src.opaque;
                     region.translucent = src.translucent;
+                    region.alpha_counts = src.alpha_counts;
                     rects.push(region.pixel_rect.map(u32::from));
                     for py in 0..src.h {
                         for px in 0..src.w {
@@ -1091,6 +1098,7 @@ fn pixel_region(x: u32, y: u32, w: u32, h: u32, atlas_size: u32) -> AtlasRegion 
         sprite: 0,
         opaque: true,
         translucent: false,
+        alpha_counts: [0, 0, w * h],
     }
 }
 
@@ -1098,16 +1106,22 @@ fn pixel_region(x: u32, y: u32, w: u32, h: u32, atlas_size: u32) -> AtlasRegion 
 /// alphas are 255, translucent when any alpha lies strictly between 0 and 255.
 /// Conservative for the solid pass: any transparency routes the sprite to the
 /// cutout pass, so a hole never renders solid.
+fn sprite_alpha_counts(data: &[u8]) -> [u32; 3] {
+    let mut counts = [0; 3];
+    for pixel in data.as_chunks::<4>().0 {
+        let bucket = match pixel[3] {
+            0 => 0,
+            255 => 2,
+            _ => 1,
+        };
+        counts[bucket] += 1;
+    }
+    counts
+}
+
 fn sprite_transparency(data: &[u8]) -> (bool, bool) {
-    data.as_chunks::<4>()
-        .0
-        .iter()
-        .fold((true, false), |(opaque, translucent), px| {
-            (
-                opaque && px[3] == 255,
-                translucent || (px[3] != 0 && px[3] != 255),
-            )
-        })
+    let counts = sprite_alpha_counts(data);
+    (counts[0] == 0 && counts[1] == 0, counts[1] != 0)
 }
 
 type PackResult = (HashMap<String, Option<(u32, u32)>>, AtlasRegion);
@@ -1173,6 +1187,7 @@ mod tests {
             h: height,
             opaque,
             translucent,
+            alpha_counts: sprite_alpha_counts(&data),
             alpha_mask: None,
             mip_source: Some(MipSource {
                 full_data: data,

@@ -1,0 +1,40 @@
+[
+  {
+    "caseId": "stem-oblique-west",
+    "dimension": "minecraft:overworld",
+    "x": 82.5,
+    "y": 76.0,
+    "z": 105.5,
+    "yaw": -27.0,
+    "pitch": 14.0,
+    "waitSeconds": 20,
+    "expectedTime": 6000,
+    "region": {
+      "minX": 88,
+      "minY": 69,
+      "minZ": 108,
+      "maxX": 98,
+      "maxY": 71,
+      "maxZ": 144
+    }
+  },
+  {
+    "caseId": "stem-oblique-east",
+    "dimension": "minecraft:overworld",
+    "x": 104.5,
+    "y": 76.0,
+    "z": 105.5,
+    "yaw": 27.0,
+    "pitch": 14.0,
+    "waitSeconds": 20,
+    "expectedTime": 6000,
+    "region": {
+      "minX": 88,
+      "minY": 69,
+      "minZ": 108,
+      "maxX": 98,
+      "maxY": 71,
+      "maxZ": 144
+    }
+  }
+]

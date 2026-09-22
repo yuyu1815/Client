@@ -23,7 +23,7 @@ pub use camera::CloudMode;
 use camera::{Camera, CameraUniform};
 use chunk::atlas::TextureAtlas;
 use chunk::buffer::ChunkBufferStore;
-use chunk::mesher::{ChunkMeshData, MeshDispatcher};
+use chunk::mesher::{ChunkMeshData, MeshDispatcher, MeshTraceConfig, MeshTraceState, TraceTarget};
 use context::VulkanContext;
 use glam::dvec3;
 use pipelines::block_entity::BlockEntityPipeline;
@@ -170,11 +170,13 @@ pub struct Renderer {
     cloud_pipeline: CloudPipeline,
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
+    gui_item_draw_trace: Option<serde_json::Value>,
 
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
     block_entity_pipeline: BlockEntityPipeline,
     chunk_buffers: ChunkBufferStore,
+    mesh_trace: MeshTraceState,
     render_finished_per_image: Vec<vk::Semaphore>,
     screenshot: screenshot::ScreenshotCapture,
     swapchain_dirty: bool,
@@ -428,11 +430,13 @@ impl Renderer {
             &ctx.allocator,
         );
 
+        let mesh_trace = MeshTraceState::new();
         let chunk_buffers = ChunkBufferStore::new(
             &ctx.device,
             ctx.physical_device,
             ctx.graphics_family,
             &ctx.allocator,
+            mesh_trace.clone(),
         );
 
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
@@ -513,7 +517,9 @@ impl Renderer {
             cloud_pipeline,
             gui_item_pipeline,
             gui_item_atlas,
+            gui_item_draw_trace: None,
             chunk_buffers,
+            mesh_trace,
             render_finished_per_image,
             screenshot: screenshot::ScreenshotCapture::new(game_dir.to_path_buf()),
             swapchain_dirty: false,
@@ -1014,8 +1020,79 @@ impl Renderer {
     }
 
     /// Probe-only access to the model data already selected by the renderer.
-    pub(crate) fn probe_model_debug(&self, state: BlockState) -> serde_json::Value {
-        self.registry.debug_model_snapshot(state)
+    pub(crate) fn probe_model_debug(
+        &self,
+        state: BlockState,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> serde_json::Value {
+        self.registry.debug_model_snapshot(state, x, y, z)
+    }
+
+    pub(crate) fn probe_item_debug(&self, name: &str) -> serde_json::Value {
+        let mut item = self.registry.debug_item_snapshot(name);
+        item["meshUpload"] = self
+            .item_entity_pipeline
+            .debug_mesh(name)
+            .unwrap_or(serde_json::Value::Null);
+        item
+    }
+
+    pub(crate) fn arm_actual_draw_trace(
+        &self,
+        trace_id: &str,
+        world_token: &str,
+        samples: &[(i32, i32, i32, BlockState)],
+    ) {
+        let tint_targets = samples.iter().filter(|(_, _, _, state)| {
+            matches!(
+                crate::world::block::block_id(*state),
+                "potted_fern" | "bush" | "sugar_cane" | "lily_pad"
+                    | "pink_petals" | "wildflowers"
+                    | "pumpkin_stem" | "melon_stem"
+            )
+        });
+        let mut seen = HashSet::new();
+        let targets = tint_targets
+            .chain(samples.iter())
+            .filter_map(|(x, y, z, state)| {
+                seen.insert((*x, *y, *z)).then_some(TraceTarget {
+                    x: *x,
+                    y: *y,
+                    z: *z,
+                    block: crate::world::block::block_id(*state).to_owned(),
+                })
+            })
+            .take(3)
+            .collect();
+        self.mesh_trace.arm(MeshTraceConfig {
+            trace_id: trace_id.to_owned(),
+            world_token: world_token.to_owned(),
+            targets,
+        });
+    }
+
+    pub(crate) fn probe_actual_draw_trace(&self) -> serde_json::Value {
+        self.mesh_trace.snapshot()
+    }
+
+    pub(crate) fn arm_gui_item_draw_trace(&mut self, layout: serde_json::Value) {
+        self.gui_item_draw_trace = Some(serde_json::json!({
+            "mode": "gui",
+            "layout": layout,
+            "guiItemDrawConfirmed": false,
+            "status": "armed-awaiting-menu-draw",
+            "pipeline": "GuiItemPipeline::bake_to_slot -> MenuOverlayPipeline::draw_from -> MenuElement::ItemIcon",
+            "frameSubmission": null,
+        }));
+    }
+
+    pub(crate) fn probe_gui_item_draw_trace(&self) -> serde_json::Value {
+        self.gui_item_draw_trace.clone().unwrap_or_else(|| serde_json::json!({
+            "status": "not-armed",
+            "guiItemDrawConfirmed": false,
+        }))
     }
 
     /// Probe-only capture of the actual swapchain color contract and the clear
@@ -1111,6 +1188,7 @@ impl Renderer {
             dry_foliage_colormap,
             biome_climate,
             cardinal_light.table(),
+            self.mesh_trace.clone(),
         )
     }
 
@@ -1156,6 +1234,7 @@ impl Renderer {
                 name,
                 light,
                 has_3d_model,
+                nether_lighting: dimension == "minecraft:the_nether",
             }
         });
         // Clear to the sky color: the strip between the sky disc's edge and the
@@ -1445,6 +1524,7 @@ impl Renderer {
                 &self.ctx.allocator,
                 name,
                 &texture_key,
+                self.registry.get_flat_item_tint(name),
                 &self.atlas.uv_map,
             );
             false
@@ -1883,6 +1963,40 @@ impl Renderer {
 
                 self.menu_pipeline
                     .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
+                if let Some(trace) = self.gui_item_draw_trace.as_mut() {
+                    let mut drawn = Vec::new();
+                    for element in overlay {
+                        if let MenuElement::ItemIcon { item_name, .. } = element
+                            && item_atlas_uvs.contains_key(item_name)
+                        {
+                            drawn.push(item_name.clone());
+                        }
+                    }
+                    let expected_count = trace["layout"]["items"]
+                        .as_array()
+                        .map_or(0, Vec::len);
+                    trace["drawnItems"] = serde_json::json!(drawn);
+                    trace["atlasReadySlotCount"] = serde_json::json!(item_atlas_uvs.len());
+                    trace["expectedItemCount"] = serde_json::json!(expected_count);
+                    trace["meshContracts"] = serde_json::json!(drawn.iter().filter_map(|name| {
+                        self.item_entity_pipeline
+                            .debug_mesh(name)
+                            .map(|mesh| serde_json::json!({"item": name, "mesh": mesh}))
+                    }).collect::<Vec<_>>());
+                    trace["guiItemDrawConfirmed"] = serde_json::json!(drawn.len() == expected_count);
+                    trace["status"] = serde_json::json!(if drawn.len() == expected_count {
+                        "draw-confirmed"
+                    } else {
+                        "draw-incomplete"
+                    });
+                    trace["frameSubmission"] = serde_json::json!({
+                        "frameIndex": frame,
+                        "commandBuffer": format!("{:?}", cmd.handle()),
+                        "renderPass": "swapchain-world",
+                        "atlasBound": true,
+                        "source": "actual MenuOverlayPipeline draw call in submitted Vulkan command buffer",
+                    });
+                }
 
                 // Each preview box gets its depth cleared and its own scissor
                 // while the 3D content draws.
@@ -2090,7 +2204,14 @@ fn warm_item_meshes(
                 .get_flat_item_texture_key(name)
                 .map(String::from)
                 .unwrap_or_else(|| format!("item/{name}"));
-            item_entity_pipeline.ensure_flat_mesh(device, allocator, name, &texture_key, uv_map);
+            item_entity_pipeline.ensure_flat_mesh(
+                device,
+                allocator,
+                name,
+                &texture_key,
+                registry.get_flat_item_tint(name),
+                uv_map,
+            );
         }
     }
 }

@@ -183,6 +183,7 @@ pub struct GameState {
     pub subtitles: crate::ui::subtitles::SubtitleOverlayState,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
+    probe_actor_diag_tick: u64,
     /// Vanilla `Hud.autosaveIndicatorValue` / `lastAutosaveIndicatorValue`;
     /// driven by in-flight screenshot writes (pomme saves no worlds).
     pub saving_indicator_value: f32,
@@ -308,6 +309,25 @@ pub struct GameState {
     pub chunk_occlusion_enabled: bool,
 }
 
+fn bump_loaded_content_generations(
+    content_gen: &mut HashMap<ChunkPos, u64>,
+    centers: impl IntoIterator<Item = ChunkPos>,
+    loaded: &HashSet<ChunkPos>,
+) -> HashSet<ChunkPos> {
+    let mut affected = HashSet::new();
+    for center in centers {
+        for pos in crate::world::chunk::mesh_neighborhood(center) {
+            if loaded.contains(&pos) {
+                affected.insert(pos);
+            }
+        }
+    }
+    for pos in &affected {
+        *content_gen.entry(*pos).or_insert(0) += 1;
+    }
+    affected
+}
+
 /// What a column was last meshed as: LOD, content generation, and the set of
 /// section indices (bitmask) that have been meshed so far.
 #[derive(Clone, Copy)]
@@ -420,6 +440,7 @@ impl GameState {
             toasts: crate::ui::toast::ToastState::default(),
             subtitles: crate::ui::subtitles::SubtitleOverlayState::default(),
             tick_count: 0,
+            probe_actor_diag_tick: u64::MAX,
             saving_indicator_value: 0.0,
             last_saving_indicator_value: 0.0,
             xp_display_start_tick: i64::MIN,
@@ -882,14 +903,19 @@ impl GameState {
             ));
     }
 
-    /// Mark a column dirty by advancing its content generation, returning the
-    /// new value. Any in-flight mesh built from an older generation is
-    /// dropped on arrival, so a deferred column always remeshes with the
-    /// latest blocks.
-    pub fn bump_content_gen(&mut self, pos: ChunkPos) -> u64 {
-        let g = self.content_gen.entry(pos).or_insert(0);
-        *g += 1;
-        *g
+    /// Mark every loaded column whose 5x5 biome/tint snapshot can observe a
+    /// change at `centers`. The snapshot is intentionally 3x3 columns, so a
+    /// load, edit, light update, or unload invalidates the same dependency set.
+    pub fn bump_loaded_mesh_neighborhoods(
+        &mut self,
+        centers: impl IntoIterator<Item = ChunkPos>,
+    ) -> HashSet<ChunkPos> {
+        let loaded: HashSet<_> = self.chunk_store.loaded_positions().collect();
+        let affected = bump_loaded_content_generations(&mut self.content_gen, centers, &loaded);
+        if !affected.is_empty() {
+            self.pending_load_rescan = true;
+        }
+        affected
     }
 
     /// The chunk column the player stands in.
@@ -913,20 +939,13 @@ impl GameState {
         if dirty.columns.is_empty() && dirty.sections.is_empty() {
             return;
         }
-        let mut bumped: Vec<ChunkPos> = Vec::new();
-        for &(x, z) in &dirty.columns {
-            for p in crate::world::chunk::mesh_neighborhood(ChunkPos::new(x, z)) {
-                if self.chunk_store.get_chunk(&p).is_some() && !bumped.contains(&p) {
-                    bumped.push(p);
-                }
-            }
-        }
-        for &pos in &bumped {
-            self.bump_content_gen(pos);
-        }
-        if !bumped.is_empty() {
-            self.pending_load_rescan = true;
-        }
+        let bumped = self.bump_loaded_mesh_neighborhoods(
+            dirty
+                .columns
+                .iter()
+                .copied()
+                .map(|(x, z)| ChunkPos::new(x, z)),
+        );
         let player_chunk = self.player_chunk();
         let min_section_y = self.chunk_store.min_y() >> 4;
         let section_count = self.chunk_store.section_count();
@@ -1121,6 +1140,31 @@ impl GameState {
 
     /// Upload a finished mesh and apply its bookkeeping. The sync edit path;
     /// the frame drain batches uploads instead.
+    pub fn remesh_probe_targets(
+        &mut self,
+        renderer: &mut Renderer,
+        samples: &[(i32, i32, i32, azalea_block::BlockState)],
+    ) {
+        let mut sections = HashSet::new();
+        for &(x, y, z, _) in samples.iter().take(3) {
+            let col = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
+            let si = (y - self.chunk_store.min_y()).div_euclid(16);
+            if self.chunk_store.get_chunk(&col).is_some() {
+                sections.insert((col, si));
+            }
+        }
+        for ((col, si), _) in sections.into_iter().map(|key| (key, ())) {
+            let g = self.bump_section_gen(col, si..si + 1);
+            let mesh = self.mesh_dispatcher.mesh_sections_now(
+                &self.chunk_store,
+                col,
+                si..si + 1,
+                g,
+            );
+            self.apply_mesh_upload(renderer, mesh);
+        }
+    }
+
     fn apply_mesh_upload(&mut self, renderer: &mut Renderer, mut mesh: ChunkMeshData) {
         self.apply_mesh_bookkeeping(&mut mesh);
         let dropped = renderer.upload_chunk_meshes(std::slice::from_ref(&mesh));
@@ -1910,7 +1954,11 @@ pub fn update_game(
     connection: &ConnectionHandle,
     game: &mut GameState,
 ) -> GameUpdateResult {
-    if core.probe.is_some() {
+    if core
+        .probe
+        .as_ref()
+        .is_some_and(|probe| !probe.item_overlay_active())
+    {
         game.hide_gui = true;
     }
     // Snapshot last frame's phase timings before this frame overwrites them: they
@@ -3191,18 +3239,38 @@ pub fn update_game(
         (pos, stage, state)
     });
 
+    let probe_peer_filter = core
+        .probe
+        .as_ref()
+        .and_then(|probe| probe.peer_filter())
+        .cloned();
     let mut entity_renders: Vec<EntityRenderInfo> = if benchmark_running {
         Vec::new()
     } else {
         game.entity_store
             .living
             .iter()
-            .map(|(&entity_id, e)| {
+            .filter_map(|(&entity_id, e)| {
+                let entity_name = e.player_uuid.and_then(|uuid| {
+                    game.tab_list
+                        .players
+                        .get(&uuid)
+                        .map(|player| player.name.as_str())
+                });
+                if crate::app::probe::should_exclude_peer(
+                    probe_peer_filter.as_ref(),
+                    entity_id,
+                    game.player.entity_id,
+                    e.player_uuid,
+                    entity_name,
+                ) {
+                    return None;
+                }
                 let interp_pos = e.prev_position.lerp(e.position, partial_tick as f64);
                 let extras =
                     entity_extras(entity_id, e, partial_tick, game.sky_state.game_time as i64);
 
-                EntityRenderInfo {
+                Some(EntityRenderInfo {
                     position: interp_pos + extras.render_offset,
                     head_y_rot_deg: lerp_angle(
                         e.prev_head_y_rot_deg,
@@ -3266,10 +3334,67 @@ pub fn update_game(
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                     attack_time: e.swing_progress(partial_tick),
                     skip_cull: false,
-                }
+                })
             })
             .collect()
     };
+
+    if core.probe.is_some()
+        && game.tick_count % 20 == 0
+        && game.probe_actor_diag_tick != game.tick_count
+    {
+        game.probe_actor_diag_tick = game.tick_count;
+        let camera = gfx.renderer.camera_render_position();
+        let actors: Vec<String> = game
+            .entity_store
+            .living
+            .iter()
+            .map(|(&entity_id, entity)| {
+                let player = entity.player_uuid.and_then(|uuid| game.tab_list.players.get(&uuid));
+                let name = player.map(|p| p.name.as_str()).unwrap_or("<non-player>");
+                let game_mode = player.map(|p| p.game_mode.to_string()).unwrap_or_else(|| "na".into());
+                let spectator = player.is_some_and(|p| p.game_mode == 3);
+                let skin_sprite = player.is_some_and(|p| p.textures.is_some());
+                let distance = entity.position.distance(camera);
+                let draw_eligible = !crate::app::probe::should_exclude_peer(
+                    probe_peer_filter.as_ref(),
+                    entity_id,
+                    game.player.entity_id,
+                    entity.player_uuid,
+                    player.map(|p| p.name.as_str()),
+                );
+                format!(
+                    "id={entity_id} name={name} kind={:?} uuid={:?} gameMode={game_mode} spectator={spectator} pos=({:.3},{:.3},{:.3}) distance={distance:.3} bodyBounds=({:.3},{:.3},{:.3})..({:.3},{:.3},{:.3}) headBounds=({:.3},{:.3},{:.3})..({:.3},{:.3},{:.3}) skinSprite={skin_sprite} drawEligible={draw_eligible}",
+                    entity.entity_type,
+                    entity.player_uuid,
+                    entity.position.x,
+                    entity.position.y,
+                    entity.position.z,
+                    entity.position.x - 0.3,
+                    entity.position.y,
+                    entity.position.z - 0.3,
+                    entity.position.x + 0.3,
+                    entity.position.y + 1.5,
+                    entity.position.z + 0.3,
+                    entity.position.x - 0.3,
+                    entity.position.y + 1.5,
+                    entity.position.z - 0.3,
+                    entity.position.x + 0.3,
+                    entity.position.y + 1.8,
+                    entity.position.z + 0.3,
+                )
+            })
+            .collect();
+        tracing::info!(
+            target = "renderprobe",
+            camera = ?camera,
+            localEntityId = game.player.entity_id,
+            excludedPeer = ?probe_peer_filter,
+            actorCount = actors.len(),
+            actors = ?actors,
+            "actual render actor diagnostic"
+        );
+    }
 
     if !benchmark_running
         && !gfx.renderer.is_first_person()
@@ -3445,6 +3570,7 @@ pub fn update_game(
 
     if let Some(mut probe) = core.probe.take() {
         probe.poll(core, &mut gfx.renderer, game, &sky);
+        elements.extend(probe.item_overlay_elements());
         core.probe = Some(probe);
     }
 
@@ -3660,10 +3786,14 @@ fn build_weather_columns(
             if y1 - y0 == 0 {
                 continue;
             }
-            let climate = biome_climate
-                .get(&chunk_store.biome_id(wx, cam_y, wz))
-                .copied()
-                .unwrap_or_default();
+            let Some(biome_id) = chunk_store.biome_id_checked(wx, cam_y, wz) else {
+                // Weather is diagnostic/visual only; do not invent biome 0 at
+                // the view-distance edge while the chunk is still absent.
+                continue;
+            };
+            let Some(climate) = biome_climate.get(&biome_id).copied() else {
+                continue;
+            };
             let precip = precipitation_for(&climate, cam_y);
             if precip == Precip::None {
                 continue;
@@ -4375,7 +4505,8 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_server_time, has_red_overlay, section_bit, section_bits, server_tick_runs,
+        advance_server_time, bump_loaded_content_generations, has_red_overlay, section_bit,
+        section_bits, server_tick_runs,
     };
     use crate::renderer::SkyState;
 
@@ -4429,6 +4560,32 @@ mod tests {
         assert_eq!(section_bit(-1), 0);
         assert_eq!(section_bit(32), 0);
         assert_eq!(section_bits(-3..-2), 0);
+    }
+
+    #[test]
+    fn unload_and_reload_dirty_the_remaining_3x3_dependency_set() {
+        use std::collections::{HashMap, HashSet};
+        use azalea_core::position::ChunkPos;
+
+        let center = ChunkPos::new(0, 0);
+        let loaded: HashSet<_> = crate::world::chunk::mesh_neighborhood(center)
+            .into_iter()
+            .collect();
+        let mut generations = HashMap::new();
+        assert_eq!(bump_loaded_content_generations(&mut generations, [center], &loaded).len(), 9);
+        assert!(generations.values().all(|&generation| generation == 1));
+
+        let mut after_unload = loaded.clone();
+        after_unload.remove(&center);
+        let dirty = bump_loaded_content_generations(&mut generations, [center], &after_unload);
+        assert_eq!(dirty.len(), 8);
+        assert!(!dirty.contains(&center));
+        assert!(dirty.iter().all(|pos| generations[pos] == 2));
+
+        let dirty = bump_loaded_content_generations(&mut generations, [center], &loaded);
+        assert_eq!(dirty.len(), 9);
+        assert_eq!(generations[&center], 2);
+        assert!(dirty.iter().all(|pos| generations[pos] == 3 || *pos == center));
     }
 
     #[test]

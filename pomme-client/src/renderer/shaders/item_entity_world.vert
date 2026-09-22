@@ -22,6 +22,9 @@ layout(location = 3) out float v_fog;
 layout(location = 4) out vec3 v_fog_color;
 
 float vanilla_level_diffuse(vec3 normal) {
+    // Held and dropped items are submitted during the world/hand passes while
+    // Lighting.LEVEL is selected. GUI items use item_entity.vert instead,
+    // where their ITEMS_3D/ITEMS_FLAT light is already baked into light_tint.r.
     vec3 light0 = normalize(vec3(0.2, 1.0, -0.7));
     vec3 light1 = normalize(
         nether_lighting > 0.5

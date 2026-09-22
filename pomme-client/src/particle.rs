@@ -340,10 +340,10 @@ impl ParticleStore {
             && faces.tint != Tint::None
             && block_id != "grass_block"
         {
-            let tint = if faces.tint == Tint::Redstone {
-                crate::world::block::redstone_wire_rgb(state)
-            } else {
-                self.blend_tint(faces.tint, pos, chunks, biome_climate)
+            let tint = match faces.tint {
+                Tint::Redstone => crate::world::block::redstone_wire_rgb(state),
+                Tint::Stem => crate::world::block::stem_rgb(state),
+                _ => self.blend_tint(faces.tint, pos, chunks, biome_climate),
             };
             for (c, t) in color.iter_mut().zip(tint) {
                 *c *= t;
@@ -501,10 +501,14 @@ impl ParticleStore {
         biome_climate: &HashMap<u32, BiomeClimate>,
     ) -> [f32; 3] {
         blend_color(pos.x, pos.z, |x, z| {
-            let climate = biome_climate
-                .get(&chunks.biome_id(x, pos.y, z))
-                .copied()
-                .unwrap_or_default();
+            let climate = match chunks.biome_id_checked(x, pos.y, z) {
+                Some(biome_id) => biome_climate.get(&biome_id).copied().unwrap_or_default(),
+                None => {
+                    // Particle tint has no safe world sample here; use the
+                    // neutral default without fabricating biome id 0.
+                    BiomeClimate::default()
+                }
+            };
             match tint {
                 Tint::Grass => grass_color(&climate, &self.grass_colormap, x, z),
                 Tint::Foliage => foliage_color(&climate, &self.foliage_colormap),
@@ -515,7 +519,7 @@ impl ParticleStore {
                     rgb[2] as f32 / 255.0,
                 ],
                 // Redstone is state-derived, resolved by the caller.
-                Tint::None | Tint::Redstone => [1.0; 3],
+                Tint::None | Tint::Redstone | Tint::Stem => [1.0; 3],
             }
         })
     }
