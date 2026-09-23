@@ -732,6 +732,7 @@ impl LivingEntity {
 }
 
 pub struct ItemEntity {
+    pub uuid: uuid::Uuid,
     pub position: Position,
     pub prev_position: Position,
     pub item_name: String,
@@ -742,6 +743,7 @@ pub struct ItemEntity {
     pub count: i32,
     pub age: u32,
     pub bob_offset: f32,
+    pub invisible: bool,
     velocity: DVec3,
     on_ground: bool,
     /// Server-authoritative position, tracked from move/teleport packets.
@@ -785,12 +787,13 @@ impl ItemEntityStore {
         }
     }
 
-    pub fn spawn_item(&mut self, id: i32, position: Position, velocity: DVec3) {
+    pub fn spawn_item(&mut self, id: i32, uuid: uuid::Uuid, position: Position, velocity: DVec3) {
         let bob_offset =
             ((id as u32).wrapping_mul(2654435761)) as f32 / u32::MAX as f32 * std::f32::consts::TAU;
         self.items.insert(
             id,
             ItemEntity {
+                uuid,
                 position,
                 prev_position: position,
                 item_name: String::new(),
@@ -799,11 +802,19 @@ impl ItemEntityStore {
                 count: 1,
                 age: 0,
                 bob_offset,
+                invisible: false,
                 velocity,
                 on_ground: false,
                 server_pos: position,
             },
         );
+    }
+
+    /// Vanilla `Entity` shared flags byte: bit 0x20 marks an invisible entity.
+    pub fn set_shared_flags(&mut self, id: i32, flags: u8) {
+        if let Some(entity) = self.items.get_mut(&id) {
+            entity.invisible = flags & 0x20 != 0;
+        }
     }
 
     pub fn set_item_data(
@@ -900,11 +911,16 @@ impl ItemEntityStore {
         }
     }
 
+    pub fn advance_age(&mut self, simulation_ticks: u32) {
+        for entity in self.items.values_mut() {
+            entity.age = entity.age.wrapping_add(simulation_ticks);
+        }
+    }
+
     pub fn tick(&mut self, chunk_store: &ChunkStore) {
         for (&id, entity) in self.items.iter_mut() {
             entity.prev_position = entity.position;
             tick_item_physics(id, entity, chunk_store);
-            entity.age += 1;
         }
         for pickup in &mut self.pickups {
             pickup.life += 1;
@@ -1486,6 +1502,23 @@ fn probes_water(kind: &EntityKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_uuid_stone_shared_invisibility_flag_gates_its_shadow_input() {
+        let uuid = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+        let mut store = ItemEntityStore::new();
+        store.spawn_item(1, uuid, Position::new(0.5, 64.0, 3.5), DVec3::ZERO);
+        store.set_item_data(1, "minecraft:stone".into(), 1, 0, 1);
+
+        store.set_shared_flags(1, 0x20);
+        let item = store.visible_items(DVec3::new(0.5, 65.0, 1.5), 64.0)[0];
+        assert_eq!(item.uuid, uuid);
+        assert_eq!(item.item_name, "minecraft:stone");
+        assert!(item.invisible, "metadata bit 0x20 must suppress its shadow");
+
+        store.set_shared_flags(1, 0);
+        assert!(!store.visible_items(DVec3::new(0.5, 65.0, 1.5), 64.0)[0].invisible);
+    }
 
     #[test]
     fn tick_living_advances_remote_interpolation_state() {

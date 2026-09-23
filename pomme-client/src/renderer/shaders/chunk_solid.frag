@@ -20,7 +20,7 @@ layout(location = 6) flat in uint v_sprite;
 layout(location = 0) out vec4 out_color;
 
 void main() {
-    vec4 color = sample_atlas_sprite(atlas_texture, v_sprite_uv, v_sprite);
+    vec4 color = sample_atlas_sprite_rgss(atlas_texture, v_sprite_uv, v_sprite);
     vec3 shaded =
         shade_chunk_surface(color.rgb, v_tint, v_light, v_visibility, v_fog_color, v_fog);
     out_color = vec4(shaded, 1.0);

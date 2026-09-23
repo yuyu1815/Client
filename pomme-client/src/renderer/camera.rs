@@ -521,6 +521,14 @@ const ENV_FOG_START: f32 = 0.0;
 const ENV_FOG_END: f32 = 1024.0;
 
 impl CameraUniform {
+    pub fn view_projection(&self) -> [[f32; 4]; 4] {
+        self.view_proj
+    }
+
+    pub fn camera_position(&self) -> [f32; 3] {
+        [self.camera_pos[0], self.camera_pos[1], self.camera_pos[2]]
+    }
+
     pub fn new(
         camera: &Camera,
         sky_color: [f32; 3],

@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "purpose": "same-process native dropped-stone age/freeze/step regression; one owned UUID, no age override, opt-in shared bob only",
+  "cases": [
+    {"caseId":"drop-age-frozen-a","dimension":"minecraft:overworld","x":0.5,"y":64.0,"z":1.5,"yaw":0.0,"pitch":20.0,"waitSeconds":2,"expectedTime":6000,"heldItem":false,"dropItem":true,"clearMainHand":true,"expectedGameMode":"creative","region":{"minX":-3,"minY":63,"minZ":-3,"maxX":3,"maxY":65,"maxZ":3}},
+    {"caseId":"drop-age-frozen-b","dimension":"minecraft:overworld","x":0.5,"y":64.0,"z":1.5,"yaw":0.0,"pitch":20.0,"waitSeconds":2,"expectedTime":6000,"heldItem":false,"dropItem":true,"clearMainHand":true,"expectedGameMode":"creative","region":{"minX":-3,"minY":63,"minZ":-3,"maxX":3,"maxY":65,"maxZ":3}},
+    {"caseId":"drop-age-step-3","dimension":"minecraft:overworld","x":0.5,"y":64.0,"z":1.5,"yaw":0.0,"pitch":20.0,"waitSeconds":2,"setTimeBeforeCapture":6003,"stepTicksBeforeCapture":3,"expectedTime":6003,"heldItem":false,"dropItem":true,"clearMainHand":true,"expectedGameMode":"creative","region":{"minX":-3,"minY":63,"minZ":-3,"maxX":3,"maxY":65,"maxZ":3}},
+    {"caseId":"drop-age-time-reset","dimension":"minecraft:overworld","x":0.5,"y":64.0,"z":1.5,"yaw":0.0,"pitch":20.0,"waitSeconds":1,"setTimeBeforeCapture":6000,"expectedTime":6000,"heldItem":false,"dropItem":true,"clearMainHand":true,"expectedGameMode":"creative","region":{"minX":-3,"minY":63,"minZ":-3,"maxX":3,"maxY":65,"maxZ":3}}
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "purpose": "paired same-client-process first-person held-stone diagnostic; only the first-person draw gate differs, with HUD/hotbar and world kept visible and unchanged",
+  "cases": [
+    {
+      "caseId": "held-stone-on",
+      "dimension": "minecraft:overworld",
+      "x": 0.5,
+      "y": 64.0,
+      "z": 1.5,
+      "yaw": 0.0,
+      "pitch": 0.0,
+      "waitSeconds": 1,
+      "prepareWaitSeconds": 1,
+      "expectedTime": 6000,
+      "heldItem": true,
+      "firstPersonDrawEnabled": true,
+      "expectedHeldItem": "stone",
+      "expectedGameMode": "creative",
+      "region": {"minX": -3, "minY": 63, "minZ": -3, "maxX": 3, "maxY": 65, "maxZ": 3}
+    },
+    {
+      "caseId": "held-stone-off",
+      "dimension": "minecraft:overworld",
+      "x": 0.5,
+      "y": 64.0,
+      "z": 1.5,
+      "yaw": 0.0,
+      "pitch": 0.0,
+      "waitSeconds": 1,
+      "prepareWaitSeconds": 1,
+      "expectedTime": 6000,
+      "heldItem": true,
+      "firstPersonDrawEnabled": false,
+      "expectedHeldItem": "stone",
+      "expectedGameMode": "creative",
+      "region": {"minX": -3, "minY": 63, "minZ": -3, "maxX": 3, "maxY": 65, "maxZ": 3}
+    }
+  ]
+}

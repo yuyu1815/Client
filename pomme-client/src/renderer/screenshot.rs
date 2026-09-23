@@ -3,6 +3,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
+use serde_json::Value;
 use pyronyx::vk;
 
 use super::util;
@@ -14,6 +15,7 @@ pub struct ProbeScreenshotReply {
     pub frame: usize,
     pub actual_frame_captured_at: String,
     pub frame_readback_completed_at: String,
+    pub vignette_draw_trace: Option<Value>,
 }
 
 struct PendingCapture {
@@ -25,6 +27,7 @@ struct PendingCapture {
     height: u32,
     bgra: bool,
     target: Option<(PathBuf, Sender<Result<ProbeScreenshotReply, String>>)>,
+    vignette_draw_trace: Option<Value>,
 }
 
 /// Vanilla F2 (`Screenshot.grab`): copies the presented swapchain image into a
@@ -98,6 +101,7 @@ impl ScreenshotCapture {
         image: vk::Image,
         extent: vk::Extent2D,
         format: vk::Format,
+        vignette_draw_trace: Option<Value>,
     ) {
         if !self.armed {
             return;
@@ -192,6 +196,7 @@ impl ScreenshotCapture {
             height: extent.height,
             bgra: is_bgra(format),
             target: self.target.take(),
+            vignette_draw_trace,
         });
     }
 
@@ -253,6 +258,7 @@ impl ScreenshotCapture {
                     frame: cap.frame,
                     actual_frame_captured_at: cap.recorded_at,
                     frame_readback_completed_at: completed,
+                    vignette_draw_trace: cap.vignette_draw_trace,
                 });
                 let _ = reply.send(reply_result);
                 let _ = tx.send(None);

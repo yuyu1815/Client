@@ -84,6 +84,8 @@ fn main() {
         ("item_entity.vert", shaderc::ShaderKind::Vertex),
         ("item_entity_world.vert", shaderc::ShaderKind::Vertex),
         ("item_entity.frag", shaderc::ShaderKind::Fragment),
+        ("world_shadow.vert", shaderc::ShaderKind::Vertex),
+        ("world_shadow.frag", shaderc::ShaderKind::Fragment),
         ("weather.vert", shaderc::ShaderKind::Vertex),
         ("weather.frag", shaderc::ShaderKind::Fragment),
         ("particle.vert", shaderc::ShaderKind::Vertex),

@@ -1,0 +1,206 @@
+{
+  "schema": 3,
+  "purpose": "single paired held-stone and nine-item GUI control at the owned fixture ground position on identical binaries",
+  "cases": [
+    {
+      "caseId": "held-stone-firstperson",
+      "dimension": "minecraft:overworld",
+      "x": 0.5,
+      "y": 64,
+      "z": 1.5,
+      "yaw": 0,
+      "pitch": 0,
+      "waitSeconds": 5,
+      "expectedTime": 6000,
+      "heldItem": true,
+      "expectedHeldItem": "stone",
+      "expectedGameMode": "creative",
+      "region": {
+        "minX": -3,
+        "minY": 63,
+        "minZ": -3,
+        "maxX": 3,
+        "maxY": 65,
+        "maxZ": 3
+      }
+    },
+    {
+      "caseId": "item-overlay-translucent-x00-z00",
+      "dimension": "minecraft:overworld",
+      "x": 0.5,
+      "y": 64,
+      "z": 1.5,
+      "yaw": 0,
+      "pitch": 0,
+      "waitSeconds": 5,
+      "region": {
+        "minX": -3,
+        "minY": 63,
+        "minZ": -3,
+        "maxX": 3,
+        "maxY": 65,
+        "maxZ": 3
+      },
+      "itemOverlay": {
+        "mode": "gui",
+        "guiScale": 3,
+        "panelLogicalRect": [
+          8,
+          8,
+          204,
+          24
+        ],
+        "panelPhysicalRect": [
+          24,
+          24,
+          612,
+          72
+        ],
+        "backgroundRGB": [
+          32,
+          32,
+          32
+        ],
+        "metricLimit": "all pixels in each fixed physical 48x48 item rectangle, including neutral panel background and texture-alpha-zero pixels; no alpha/depth mask, crop, alignment, or color correction",
+        "items": [
+          {
+            "id": "fern",
+            "logicalRect": [
+              16,
+              12,
+              16,
+              16
+            ],
+            "physicalRect": [
+              48,
+              36,
+              48,
+              48
+            ]
+          },
+          {
+            "id": "bush",
+            "logicalRect": [
+              36,
+              12,
+              16,
+              16
+            ],
+            "physicalRect": [
+              108,
+              36,
+              48,
+              48
+            ]
+          },
+          {
+            "id": "lily_pad",
+            "logicalRect": [
+              56,
+              12,
+              16,
+              16
+            ],
+            "physicalRect": [
+              168,
+              36,
+              48,
+              48
+            ]
+          },
+          {
+            "id": "sugar_cane",
+            "logicalRect": [
+              76,
+              12,
+              16,
+              16
+            ],
+            "physicalRect": [
+              228,
+              36,
+              48,
+              48
+            ]
+          },
+          {
+            "id": "pink_petals",
+            "logicalRect": [
+              96,
+              12,
+              16,
+              16
+            ],
+            "physicalRect": [
+              288,
+              36,
+              48,
+              48
+            ]
+          },
+          {
+            "id": "wildflowers",
+            "logicalRect": [
+              116,
+              12,
+              16,
+              16
+            ],
+            "physicalRect": [
+              348,
+              36,
+              48,
+              48
+            ]
+          },
+          {
+            "id": "ice",
+            "logicalRect": [
+              136,
+              12,
+              16,
+              16
+            ],
+            "physicalRect": [
+              408,
+              36,
+              48,
+              48
+            ]
+          },
+          {
+            "id": "honey_block",
+            "logicalRect": [
+              156,
+              12,
+              16,
+              16
+            ],
+            "physicalRect": [
+              468,
+              36,
+              48,
+              48
+            ]
+          },
+          {
+            "id": "stone",
+            "logicalRect": [
+              176,
+              12,
+              16,
+              16
+            ],
+            "physicalRect": [
+              528,
+              36,
+              48,
+              48
+            ]
+          }
+        ]
+      },
+      "clearMainHand": true
+    }
+  ]
+}

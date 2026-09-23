@@ -6,6 +6,7 @@ layout(set = 1, binding = 0) uniform sampler2D atlas_texture;
 
 layout(push_constant) uniform PushConstants {
     layout(offset = 64) float world_light;
+    layout(offset = 68) float unorm_atlas_target;
 };
 
 layout(location = 0) in vec2 v_tex_coords;
@@ -49,5 +50,5 @@ void main() {
         srgb_to_linear_exact(encoded.g),
         srgb_to_linear_exact(encoded.b)
     );
-    out_color = vec4(linear, color.a);
+    out_color = vec4(unorm_atlas_target > 0.5 ? encoded : linear, color.a);
 }

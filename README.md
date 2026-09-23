@@ -141,6 +141,10 @@ Run `just` with no arguments to list every recipe. The common ones:
 - `just client-pre-pr` / `just launcher-pre-pr`: the fmt, clippy, and test checks CI enforces
 - `just protogen` / `just registrygen` / `just knownpackgen` / `just blockgen` / `just stategen`: regenerate a version's packet-id, registry, known-pack, block-state, and per-state property tables from `reference/<version>/`; `stategen` runs vanilla's own code and needs JDK 25 (`just jdk=<bin dir> stategen`, Windows only)
 
+### Render diagnostics
+
+Paired-probe JSON, render traces, and `POMME_HELD_DRAW_PAYLOAD_TRACE=1` / `POMME_ITEM_ENTITY_TRACE=1` are opt-in diagnostics; normal gameplay does not read or require these files or hooks. `POMME_DROP_BOB_OFFSET` is a target-UUID-gated render-only comparison input; native age/partial and spin remain untouched. Legacy drop phase controls additionally require the single target UUID and are render-state-only diagnostic inputs, never production RNG changes. When removing this investigation, delete the paired-probe hooks in `app/probe.rs`, the probe-only `app/render_debug.rs` module and its `app/mod.rs` declaration, renderer trace arms/accessors (`probe_actual_draw_trace`, `probe_held_item_pipeline_trace`, `probe_item_entity_pipeline_trace`, `debug_held_draw_payload` and their `arm_*` callers), plus the Java drop/held mixins and `HeldItemTrace`, paired-run scripts, and `Client/diagnostic/drop-stone-*` tools together. Keep production render paths independent of diagnostic JSON.
+
 ## Contributing
 
 Contributions are welcome.

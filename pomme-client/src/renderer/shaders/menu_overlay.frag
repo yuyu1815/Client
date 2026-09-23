@@ -23,6 +23,18 @@ layout(location = 4) in float v_corner_radius;
 
 layout(location = 0) out vec4 out_color;
 
+float srgb_to_linear_exact(float value) {
+    return value <= 0.04045
+        ? value / 12.92
+        : pow((value + 0.055) / 1.055, 2.4);
+}
+
+float linear_to_srgb_exact(float value) {
+    return value <= 0.0031308
+        ? value * 12.92
+        : 1.055 * pow(value, 1.0 / 2.4) - 0.055;
+}
+
 float sdf_rounded_rect(vec2 p, vec2 half_size, float radius) {
     vec2 q = abs(p) - half_size + vec2(radius);
     return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - radius;
@@ -50,7 +62,10 @@ void main() {
         // converting the gamma-space factor to linear keeps the darkening
         // identical on the sRGB target. (dst alpha is scaled too, unlike
         // vanilla; the swapchain composite ignores alpha.)
-        float tex_gamma = pow(texture(overlay_tex, v_uv).r, 1.0 / 2.2);
+        // R8G8B8A8_SRGB sampling hardware-decodes the native encoded PNG.
+        // Vanilla multiplies the encoded sample by the encoded vertex tint, so
+        // recover that value with the exact inverse transfer before multiplying.
+        float tex_gamma = linear_to_srgb_exact(texture(overlay_tex, v_uv).r);
         float src = tex_gamma * v_color.r;
         out_color = vec4(0.0, 0.0, 0.0, 1.0 - pow(1.0 - src, 2.2));
         return;
@@ -108,7 +123,12 @@ void main() {
 
     if (v_mode > 2.5) {
         vec4 tex = texture(item_tex, v_uv);
-        out_color = vec4(tex.rgb * v_color.rgb * v_color.a, tex.a * v_color.a);
+        vec3 linear = vec3(
+            srgb_to_linear_exact(tex.r),
+            srgb_to_linear_exact(tex.g),
+            srgb_to_linear_exact(tex.b)
+        );
+        out_color = vec4(linear * v_color.rgb * v_color.a, tex.a * v_color.a);
         return;
     }
 

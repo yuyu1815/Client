@@ -5,6 +5,7 @@ mod context;
 pub mod entity_model;
 pub(crate) mod packing;
 pub mod pipelines;
+pub(crate) mod world_shadow;
 mod screenshot;
 pub use screenshot::ProbeScreenshotReply;
 pub(crate) mod shader;
@@ -112,6 +113,7 @@ enum RenderMode<'a> {
         held_item: Option<pipelines::held_item::HeldItemInfo>,
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
+        dimension: &'a str,
         sky: SkyState,
         fog_color: [f32; 3],
         entities: &'a [EntityRenderInfo],
@@ -121,6 +123,7 @@ enum RenderMode<'a> {
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
+        chunks: &'a crate::world::chunk::ChunkStore,
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
@@ -171,6 +174,8 @@ pub struct Renderer {
     gui_item_pipeline: pipelines::gui_item::GuiItemPipeline,
     gui_item_atlas: pipelines::gui_item_atlas::GuiItemAtlas,
     gui_item_draw_trace: Option<serde_json::Value>,
+    held_item_gate_trace: Option<serde_json::Value>,
+    last_vignette_draw_trace: Option<serde_json::Value>,
 
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
@@ -199,6 +204,7 @@ impl Renderer {
         let FontSources {
             jar_assets_dir,
             asset_index,
+            packs,
             ..
         } = font_sources;
         let size = window.inner_size();
@@ -439,11 +445,19 @@ impl Renderer {
             mesh_trace.clone(),
         );
 
+        let shadow_path = crate::assets::resolve_asset_path_with_packs(
+            jar_assets_dir, asset_index, "minecraft/textures/misc/shadow.png", Some(packs),
+        );
+        let shadow_texture = crate::assets::load_image(&shadow_path).ok().map(|image| {
+            let rgba = image.into_rgba8();
+            (rgba.width(), rgba.height(), rgba.into_raw())
+        });
+        if shadow_texture.is_none() {
+            tracing::warn!("Vanilla entity shadow texture unavailable at {:?}; world shadows disabled", shadow_path);
+        }
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
-            &ctx.device,
-            swapchain_state.render_pass,
-            &ctx.allocator,
-            &atlas,
+            &ctx.device, swapchain_state.render_pass, &ctx.allocator, &atlas,
+            ctx.graphics_queue, ctx.command_pool, shadow_texture,
         );
 
         let held_item_pipeline = pipelines::held_item::HeldItemPipeline::new(
@@ -518,6 +532,8 @@ impl Renderer {
             gui_item_pipeline,
             gui_item_atlas,
             gui_item_draw_trace: None,
+            held_item_gate_trace: None,
+            last_vignette_draw_trace: None,
             chunk_buffers,
             mesh_trace,
             render_finished_per_image,
@@ -1095,6 +1111,20 @@ impl Renderer {
         }))
     }
 
+    pub(crate) fn probe_item_entity_pipeline_trace(&self) -> serde_json::Value {
+        let mut trace = self.item_entity_pipeline.probe_draw_trace();
+        trace["shadow"] = self.item_entity_pipeline.probe_shadow_trace();
+        trace
+    }
+
+    pub(crate) fn probe_held_item_pipeline_trace(&self) -> serde_json::Value {
+        serde_json::json!({
+            "gate": self.held_item_gate_trace,
+            "draw": self.held_item_pipeline.probe_draw_trace(),
+            "provenance": "actual Rust first-person render gate and HeldItemPipeline submitted CPU payload"
+        })
+    }
+
     /// Probe-only capture of the actual swapchain color contract and the clear
     /// value passed to the world render path. This does not alter rendering.
     pub(crate) fn probe_render_debug(&self, clear_color: [f32; 3]) -> serde_json::Value {
@@ -1222,11 +1252,25 @@ impl Renderer {
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
+        chunks: &crate::world::chunk::ChunkStore,
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
+        self.held_item_gate_trace = Some(serde_json::json!({
+            "showHand": show_hand,
+            "firstPerson": self.camera.mode == camera::CameraMode::FirstPerson,
+            "topDown": self.camera.top_down().is_some(),
+            "hasHeldItem": held_item.is_some(),
+            "actualDrawCount": if show_hand && self.camera.mode == camera::CameraMode::FirstPerson && self.camera.top_down().is_none() && held_item.is_some() { 1 } else { 0 },
+            "actualRenderFrameIndex": self.ctx.frame_index,
+            "actualDrawAt": chrono::Utc::now().to_rfc3339(),
+            "skipReason": if !show_hand { Some("show_hand_false") } else if self.camera.mode != camera::CameraMode::FirstPerson { Some("camera_not_first_person") } else if self.camera.top_down().is_some() { Some("top_down_camera") } else if held_item.is_none() { Some("empty_selected_slot") } else { None::<&str> },
+            "provenance": "actual Renderer::render_world inputs and camera state before submission"
+        }));
+        // Clear prior trace so it cannot be mistaken for this frame's draw.
+        self.held_item_pipeline.clear_probe_trace();
         self.camera.set_render_distance(render_distance);
         let held_item = held_item.map(|(name, light)| {
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
@@ -1258,6 +1302,7 @@ impl Renderer {
                 held_item,
                 destroy_info,
                 show_chunk_borders,
+                dimension,
                 sky,
                 fog_color: clear_col,
                 entities,
@@ -1267,6 +1312,7 @@ impl Renderer {
                 weather,
                 cloud_mode,
                 render_distance,
+                chunks,
                 player_preview,
                 book_preview,
                 eyes_in_water,
@@ -1804,6 +1850,7 @@ impl Renderer {
                 held_item,
                 destroy_info,
                 show_chunk_borders,
+                dimension,
                 sky,
                 fog_color: _,
                 entities,
@@ -1813,6 +1860,7 @@ impl Renderer {
                 weather,
                 cloud_mode,
                 render_distance,
+                chunks,
                 player_preview,
                 book_preview,
                 eyes_in_water,
@@ -1841,6 +1889,9 @@ impl Renderer {
 
                 let anchor = self.camera.anchor();
                 let eye = self.camera_render_position();
+                self.item_entity_pipeline.draw_shadows(
+                    cmd, frame, chunks, item_entities, eye.to_array(), anchor, dimension,
+                );
 
                 if let Some((block_pos, stage, state)) = destroy_info {
                     self.block_overlay_pipeline.draw(
@@ -1963,6 +2014,25 @@ impl Renderer {
 
                 self.menu_pipeline
                     .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
+                let vignette_brightness: Vec<f32> = overlay
+                    .iter()
+                    .filter_map(|element| match element {
+                        MenuElement::Vignette { brightness, .. } => Some(*brightness),
+                        _ => None,
+                    })
+                    .collect();
+                self.last_vignette_draw_trace = (!vignette_brightness.is_empty()).then(|| {
+                    serde_json::json!({
+                        "frameIndex": frame,
+                        "elementCount": vignette_brightness.len(),
+                        "vertexBrightness": vignette_brightness,
+                        "renderPass": "swapchain-world",
+                        "draw": "MenuOverlayPipeline::draw -> draw_from -> cmd.draw",
+                        "sourceFormat": "R8G8B8A8_SRGB camera_overlay; linear sampler",
+                        "blend": "ONE / ONE_MINUS_SRC_ALPHA on B8G8R8A8_SRGB attachment",
+                        "provenance": "actual MenuElement::Vignette present in the submitted world overlay command buffer; this records element input/draw path, not GPU fragment color"
+                    })
+                });
                 if let Some(trace) = self.gui_item_draw_trace.as_mut() {
                     let mut drawn = Vec::new();
                     for element in overlay {
@@ -2124,6 +2194,7 @@ impl Renderer {
             self.swapchain.images[image_index as usize],
             self.swapchain.extent,
             self.swapchain.format.format,
+            self.last_vignette_draw_trace.clone(),
         );
 
         self.gui_item_atlas.end_frame();

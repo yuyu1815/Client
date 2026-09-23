@@ -25,9 +25,23 @@ vec3 apply_fog(vec3 color, float fog, vec3 fog_color) {
     return mix(color, fog_color, clamp(fog, 0.0, 1.0));
 }
 
-// Shared chunk surface shading (opaque terrain and translucent water): linear
-// tint and light, fade to fog while a section is still appearing, then distance
-// fog. Callers supply their own alpha (cutout vs blend).
+vec3 terrain_srgb_to_linear(vec3 c) {
+    bvec3 low = lessThanEqual(c, vec3(0.04045));
+    vec3 a = c / 12.92;
+    vec3 b = pow((c + 0.055) / 1.055, vec3(2.4));
+    return mix(b, a, low);
+}
+
+vec3 terrain_linear_to_srgb(vec3 c) {
+    c = max(c, vec3(0.0));
+    bvec3 low = lessThanEqual(c, vec3(0.0031308));
+    vec3 a = c * 12.92;
+    vec3 b = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    return mix(b, a, low);
+}
+
+// Java 26.2 terrain.fsh multiplies encoded UNORM samples/color/light and fog.
+// Vulkan's SRGB atlas/target require a bridge around that encoded-space math.
 vec3 shade_chunk_surface(
     vec3 tex_rgb,
     vec3 tint,
@@ -36,11 +50,10 @@ vec3 shade_chunk_surface(
     vec3 fog_color,
     float fog
 ) {
-    vec3 linear_tint = pow(tint, vec3(2.2));
-    float linear_light = pow(light, 2.2);
-    vec3 tinted = tex_rgb * linear_tint * linear_light;
+    vec3 encoded = terrain_linear_to_srgb(tex_rgb) * tint * light;
     if (visibility < 1.0) {
-        tinted = mix(fog_color, tinted, visibility);
+        encoded = mix(fog_color, encoded, visibility);
     }
-    return apply_fog(tinted, fog, fog_color);
+    encoded = apply_fog(encoded, fog, fog_color);
+    return terrain_srgb_to_linear(encoded);
 }

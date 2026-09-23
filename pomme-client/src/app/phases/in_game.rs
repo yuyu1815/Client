@@ -1399,9 +1399,9 @@ pub(crate) fn advance_server_time(
             if frozen {
                 *steps -= 1;
             }
+            ticks += 1;
         }
         *accumulator = (*accumulator - period).max(0.0);
-        ticks += 1;
     }
     ticks
 }
@@ -1957,7 +1957,7 @@ pub fn update_game(
     if core
         .probe
         .as_ref()
-        .is_some_and(|probe| !probe.item_overlay_active())
+        .is_some_and(|probe| !probe.probe_hud_visible())
     {
         game.hide_gui = true;
     }
@@ -2017,7 +2017,7 @@ pub fn update_game(
     // Predict the server world clock between SetTime packets. A zero rate is
     // authoritative pause; fractional rates accumulate in clock_partial_tick.
     // This cadence is separate from the 20 Hz player/input loop below.
-    advance_server_time(
+    let simulation_ticks = advance_server_time(
         &mut core.time_tick_accumulator,
         dt,
         core.server_tick_rate,
@@ -2025,6 +2025,7 @@ pub fn update_game(
         &mut core.server_tick_steps,
         &mut game.sky_state,
     );
+    game.item_entity_store.advance_age(simulation_ticks);
 
     if game.input_live() && game.chunk_load_bench.is_none() {
         gfx.renderer
@@ -3454,6 +3455,11 @@ pub fn update_game(
         );
     }
 
+    let item_age_partial_tick = if core.server_tick_frozen {
+        1.0
+    } else {
+        sky_partial_tick
+    };
     let item_renders = if benchmark_running {
         Vec::new()
     } else {
@@ -3465,6 +3471,7 @@ pub fn update_game(
             *gfx.renderer.camera_pivot_position(),
             gfx.renderer.camera_anchor(),
             partial_tick,
+            item_age_partial_tick,
         )
     };
 
@@ -3577,10 +3584,12 @@ pub fn update_game(
     // Recompute after this frame's state changes (a finished benchmark releases
     // the cursor mid-frame), so the renderer doesn't re-hide it from a stale value.
     let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
+    let show_hand = !game.hide_gui
+        && core.probe.as_ref().is_none_or(|probe| probe.held_item_draw_enabled());
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
         hide_cursor,
-        !game.hide_gui,
+        show_hand,
         elements,
         swing_progress,
         use_anim,
@@ -3600,6 +3609,7 @@ pub fn update_game(
             core.menu.cloud_mode
         },
         effective_rd,
+        &game.chunk_store,
         player_preview,
         book_preview,
         game.player.eyes_in_water,
@@ -3906,11 +3916,20 @@ fn emit_item_copies(
     anchor_rel_pos: glam::Vec3,
     age_f: f32,
     bob_offset: f32,
+    actual_bob_offset: f32,
+    controlled_phase: bool,
+    bob_controlled: bool,
     ground_transform: glam::Mat4,
     min_y: f32,
     z_size: f32,
     light: f32,
     nether_lighting: bool,
+    entity_uuid: Option<uuid::Uuid>,
+    invisible: bool,
+    actual_age: Option<u32>,
+    actual_render_age: f32,
+    world_position: glam::DVec3,
+    stack_count: i32,
 ) {
     use crate::renderer::pipelines::item_entity::ItemRenderInfo;
     use crate::util::JavaRandom;
@@ -3929,6 +3948,19 @@ fn emit_item_copies(
             model_matrix: base * copy_offset * ground_transform,
             light,
             nether_lighting,
+            entity_uuid,
+            invisible,
+            actual_age,
+            actual_render_age,
+            age_f,
+            actual_spin: actual_render_age / 20.0 + actual_bob_offset,
+            spin,
+            bob_offset,
+            actual_bob_offset,
+            controlled_phase,
+            bob_controlled,
+            position: world_position.to_array(),
+            stack_count,
         });
     };
 
@@ -3964,11 +3996,22 @@ fn build_item_render_infos(
     camera_pos: glam::DVec3,
     anchor: glam::DVec3,
     partial_tick: f32,
+    age_partial_tick: f32,
 ) -> Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo> {
     let mut infos = Vec::new();
     let nether_lighting = cardinal_light == CardinalLightType::Nether;
     for item in entity_store.visible_items(camera_pos, 64.0) {
-        let age_f = item.age as f32 + partial_tick;
+        let actual_age_f = item.age as f32 + age_partial_tick;
+        let actual_bob_offset = item.bob_offset;
+        let target_trace = std::env::var_os("POMME_ITEM_ENTITY_TRACE").is_some()
+            && std::env::var("POMME_DROP_TARGET_UUID").is_ok_and(|target| target == item.uuid.to_string());
+        let phase_age = std::env::var("POMME_DROP_PHASE_AGE").ok().and_then(|v| v.parse::<f32>().ok());
+        let phase_bob = std::env::var("POMME_DROP_PHASE_BOB_OFFSET").ok().and_then(|v| v.parse::<f32>().ok());
+        let bob_input = std::env::var("POMME_DROP_BOB_OFFSET").ok().and_then(|v| v.parse::<f32>().ok());
+        let controlled_phase = target_trace && phase_age.is_some() && phase_bob.is_some();
+        let bob_controlled = target_trace && bob_input.is_some();
+        let age_f = if controlled_phase { phase_age.unwrap_or(actual_age_f) } else { actual_age_f };
+        let bob_offset = if bob_controlled { bob_input.unwrap_or(actual_bob_offset) } else if controlled_phase { phase_bob.unwrap_or(actual_bob_offset) } else { actual_bob_offset };
         let lerped = item.prev_position.lerp(item.position, partial_tick as f64);
         let light = get_entity_light(chunk_store, lerped);
         let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &item.item_name);
@@ -3980,12 +4023,21 @@ fn build_item_render_infos(
             item.count,
             (*lerped - anchor).as_vec3(),
             age_f,
-            item.bob_offset,
+            bob_offset,
+            actual_bob_offset,
+            controlled_phase,
+            bob_controlled,
             ground_transform,
             min_y,
             z_size,
             light,
             nether_lighting,
+            Some(item.uuid),
+            item.invisible,
+            Some(item.age),
+            actual_age_f,
+            *lerped,
+            item.count,
         );
     }
 
@@ -4004,11 +4056,20 @@ fn build_item_render_infos(
             (*pickup.position - anchor).as_vec3(),
             age_f,
             pickup.bob_offset,
+            pickup.bob_offset,
+            false,
+            false,
             ground_transform,
             min_y,
             z_size,
             light,
             nether_lighting,
+            None,
+            false,
+            None,
+            age_f,
+            *pickup.position,
+            pickup.count,
         );
     }
 
@@ -4547,6 +4608,36 @@ mod tests {
             2
         );
         assert_eq!(sky.day_time, 2);
+        assert_eq!(steps, 0);
+    }
+
+    #[test]
+    fn item_age_follows_simulation_ticks_not_client_ticks_or_daytime() {
+        use crate::entity::ItemEntityStore;
+        use crate::entity::components::Position;
+        use glam::DVec3;
+        use uuid::Uuid;
+
+        let mut sky = SkyState::default_day();
+        let mut items = ItemEntityStore::new();
+        items.spawn_item(1, Uuid::nil(), Position::new(0.0, 64.0, 0.0), DVec3::ZERO);
+        items.set_item_data(1, "minecraft:stone".into(), 1, 0, 1);
+        let age = |items: &ItemEntityStore| items.visible_items(DVec3::ZERO, 100.0)[0].age;
+        assert_eq!(age(&items), 0);
+
+        let mut accumulator = 0.0;
+        let mut steps = 0;
+        let ticks = advance_server_time(&mut accumulator, 1.0, 20.0, true, &mut steps, &mut sky);
+        items.advance_age(ticks);
+        assert_eq!(age(&items), 0);
+        sky.day_time = 6000;
+        assert_eq!(age(&items), 0);
+
+        steps = 3;
+        let ticks = advance_server_time(&mut accumulator, 0.15, 20.0, true, &mut steps, &mut sky);
+        items.advance_age(ticks);
+        assert_eq!(ticks, 3);
+        assert_eq!(age(&items), 3);
         assert_eq!(steps, 0);
     }
 

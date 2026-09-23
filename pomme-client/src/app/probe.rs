@@ -309,6 +309,9 @@ pub struct Probe {
     paired_seen: HashSet<String>,
     peer_filter: Option<PeerFilter>,
     item_overlay: Option<ItemOverlayLayout>,
+    held_item_mode: bool,
+    drop_item_mode: bool,
+    held_item_draw_enabled: bool,
 }
 
 impl Probe {
@@ -333,6 +336,9 @@ impl Probe {
             paired_seen: HashSet::new(),
             peer_filter,
             item_overlay: None,
+            held_item_mode: false,
+            drop_item_mode: false,
+            held_item_draw_enabled: true,
         }
     }
 
@@ -380,8 +386,12 @@ impl Probe {
             .map_or(Value::Null, |layout| layout.metadata.clone())
     }
 
-    pub(crate) fn item_overlay_active(&self) -> bool {
-        self.item_overlay.is_some()
+    pub(crate) fn probe_hud_visible(&self) -> bool {
+        self.item_overlay.is_some() || self.held_item_mode || self.drop_item_mode
+    }
+
+    pub(crate) fn held_item_draw_enabled(&self) -> bool {
+        self.held_item_draw_enabled
     }
 
     fn path(&self, id: &str, suffix: &str) -> PathBuf {
@@ -440,6 +450,15 @@ impl Probe {
                         if let Some(mut raw) = raw {
                             raw.metadata["actualFrameCapturedAt"] =
                                 json!(reply.actual_frame_captured_at);
+                            let submitted = reply
+                                .vignette_draw_trace
+                                .unwrap_or(serde_json::Value::Null);
+                            raw.metadata["vignetteTrace"]["actualSubmittedDraw"] = json!({
+                                "captureFrame": reply.frame,
+                                "renderTrace": submitted,
+                                "sameFrame": submitted["frameIndex"] == json!(reply.frame),
+                                "provenance": "actual submitted Renderer menu overlay trace snapshotted with this screenshot command buffer; frame identity checked"
+                            });
                             raw.metadata["frameReadbackCompletedAt"] =
                                 json!(reply.frame_readback_completed_at);
                             raw.metadata["captureFrame"] = json!(reply.frame);
@@ -677,12 +696,19 @@ impl Probe {
                     return;
                 }
             };
+            self.held_item_draw_enabled = request.get("firstPersonDrawEnabled").and_then(Value::as_bool).unwrap_or(true);
             match self.validate_capture(request, renderer, game) {
                 Ok(region) => {
+                    self.held_item_mode = request.get("heldItem").and_then(Value::as_bool) == Some(true);
+                    self.drop_item_mode = request.get("dropItem").and_then(Value::as_bool) == Some(true);
+                    if self.drop_item_mode { game.hide_gui = false; }
                     if let Some(layout) = requested_item_overlay {
                         game.hide_gui = false;
                         renderer.arm_gui_item_draw_trace(layout.metadata.clone());
                         self.item_overlay = Some(layout);
+                    } else {
+                        self.item_overlay = None;
+                        if self.held_item_mode { game.hide_gui = false; }
                     }
                     if let Err(e) = self.prepare_state_inventory() {
                         self.fail_paired(request, &result_id, e);
@@ -717,6 +743,18 @@ impl Probe {
                         "attemptId": request["attemptId"],
                         "resultId": result_id,
                         "client": "rust",
+                        "heldItemActual": {
+                            "selectedSlot": core.input.selected_slot(),
+                            "gameMode": game.player.game_mode,
+                            "mainHandItem": match game.player.inventory.hotbar_slots()[core.input.selected_slot() as usize] {
+                                azalea_inventory::ItemStack::Present(ref data) => crate::player::inventory::item_resource_name(data.kind),
+                                _ => "minecraft:air".to_owned(),
+                            },
+                            "showHand": !game.hide_gui,
+                            "firstPersonDrawEnabled": self.held_item_draw_enabled,
+                            "cameraMode": if renderer.is_first_person() { "FIRST_PERSON" } else { "OTHER" },
+                            "provenance": "actual Rust GameState inventory/hotbar selection and Renderer camera/HUD state before GO; not request echo"
+                        },
                         "readyAt": chrono::Utc::now().to_rfc3339(),
                     });
                     if let Err(e) = save_json(&self.path(&result_id, ".ready.json"), &ready) {
@@ -801,8 +839,13 @@ impl Probe {
                 game.paused, game.gui_open(), game.chat.is_open(), game.dead, game.options_from_game, game.dialog_open()).into());
         }
         let item_overlay = parse_item_overlay(request)?;
-        if !renderer.is_first_person() || (!game.hide_gui && item_overlay.is_none()) {
-            return Err("Probe requires first person and hidden HUD unless paired itemOverlay mode is active".into());
+        let held_item_mode = request.get("heldItem").and_then(Value::as_bool) == Some(true);
+        let drop_item_mode = request.get("dropItem").and_then(Value::as_bool) == Some(true);
+        if held_item_mode && item_overlay.is_some() {
+            return Err("heldItem mode cannot include itemOverlay".into());
+        }
+        if !renderer.is_first_person() || (!game.hide_gui && item_overlay.is_none() && !held_item_mode && !drop_item_mode) {
+            return Err("Probe requires first person; visible HUD requires itemOverlay, heldItem, or dropItem mode".into());
         }
         let p = game.player.position;
         let (yaw, pitch) = renderer.camera_effective_look_deg();
@@ -1036,6 +1079,31 @@ impl Probe {
             "fov": renderer.camera_fov_degrees(), "width": renderer.screen_width(), "height": renderer.screen_height(),
             "gpuName": renderer.gpu_name(), "gpuVendor": format!("PCI 0x{vendor:04x}"), "backend": "Vulkan", "driver": format!("Vulkan driverVersion {driver}"), "vulkanApi": renderer.vulkan_version(),
             "capturedAt": actual_snapshot_at, "cameraMode": "FIRST_PERSON", "hudHidden": game.hide_gui, "showHand": !game.hide_gui, "captureSource": "Vulkan swapchain PresentSrcKHR -> TransferSrcOptimal -> host readback PNG", "viewBobbing": core.menu.view_bobbing,
+            "vignetteTrace": {
+                "brightness": game.vignette_brightness,
+                "clampedBrightness": game.vignette_brightness.clamp(0.0, 1.0),
+                "tickCount": game.tick_count,
+                "paused": game.paused,
+                "eyeBlock": {
+                    "x": game.player.eye_pos().x.floor() as i32,
+                    "y": game.player.eye_pos().y.floor() as i32,
+                    "z": game.player.eye_pos().z.floor() as i32
+                },
+                "eyeSkyLight": game.chunk_store.get_sky_light(game.player.eye_pos().x.floor() as i32, game.player.eye_pos().y.floor() as i32, game.player.eye_pos().z.floor() as i32),
+                "eyeBlockLight": game.chunk_store.get_block_light(game.player.eye_pos().x.floor() as i32, game.player.eye_pos().y.floor() as i32, game.player.eye_pos().z.floor() as i32),
+                "eyeLightmapBrightness": game.probe_lightmap_brightness(),
+                "updateTarget": (1.0 - game.probe_lightmap_brightness()).clamp(0.0, 1.0),
+                "enabled": core.menu.vignette,
+                "hudHidden": game.hide_gui,
+                "benchmarkRunning": game.chunk_load_bench.is_some(),
+                "elementSubmittedByHudPath": core.menu.vignette && !game.hide_gui && game.chunk_load_bench.is_none(),
+                "clientTickCount": game.tick_count,
+                "textureFormat": "R8G8B8A8_SRGB camera_overlay image; overlay sampler linear min/mag, hardware sRGB-decodes sample",
+                "shaderSampleUse": "menu_overlay.frag vignette branch converts sampled linear RGB back to encoded sRGB before multiplying encoded vertex brightness",
+                "blendAndTarget": "ONE / ONE_MINUS_SRC_ALPHA premultiplied UI pipeline on B8G8R8A8_SRGB swapchain attachment",
+                "drawOrder": "held/hand before MenuOverlayPipeline::draw_from; GUI vignette in that menu overlay draw",
+                "provenance": "actual Rust GameState/menu option at paired capture; element predicate mirrors in_game.rs and ui/hud.rs; GPU fragment value not captured"
+            },
             "clock": {"id": game.sky_state.clock_id, "totalTicks": game.sky_state.day_time, "partialTick": game.sky_state.clock_partial_tick, "rate": game.sky_state.clock_rate},
             "clockPhase": game.sky_state.day_tick().rem_euclid(24000.0), "serverTickRate": core.server_tick_rate, "serverFrozen": core.server_tick_frozen,
             "serverFrozenTicksToRun": core.server_tick_steps, "clientGameTime": game.sky_state.game_time, "clientTime": game.sky_state.day_time as f64 + f64::from(game.sky_state.clock_partial_tick),
@@ -1044,7 +1112,22 @@ impl Probe {
             "excludedProbePeer": excluded_peer,
             "actualDrawEntityList": {"actorCount": game.entity_store.living.len(), "excludedProbePeerActorCount": excluded_actor_count, "drawEligibleActorCount": game.entity_store.living.len().saturating_sub(excluded_actor_count), "provenance": "GameState EntityStore at paired capture; filter is exact PlayerInfo name plus optional UUID; no all-entity suppression"},
             "snapshotTiming": "actualSnapshotAt is the target CPU raw snapshot; actualFrameCapturedAt is Vulkan copy recording; frameReadbackCompletedAt is readback completion",
-            "diagnosticMode": if self.item_overlay.is_some() { "itemOverlay" } else { "normal" },
+            "diagnosticMode": if self.item_overlay.is_some() { "itemOverlay" } else if request.get("dropItem").and_then(Value::as_bool) == Some(true) { "dropItem" } else if request.get("heldItem").and_then(Value::as_bool) == Some(true) { "heldItem" } else { "normal" },
+            "gameMode": if self.drop_item_mode { match game.player.game_mode { 0 => "survival", 1 => "creative", 2 => "adventure", 3 => "spectator", _ => "unknown" } } else { "not-captured" },
+            "heldItemMode": request.get("heldItem").and_then(Value::as_bool) == Some(true),
+            "firstPersonDrawEnabled": self.held_item_draw_enabled,
+            "heldItemActual": {
+                "selectedSlot": core.input.selected_slot(),
+                "gameMode": game.player.game_mode,
+                "mainHandItem": match game.player.inventory.hotbar_slots()[core.input.selected_slot() as usize] {
+                    azalea_inventory::ItemStack::Present(ref data) => crate::player::inventory::item_resource_name(data.kind),
+                    _ => "minecraft:air".to_owned(),
+                },
+                "showHand": !game.hide_gui,
+                "firstPersonDrawEnabled": self.held_item_draw_enabled,
+                "cameraMode": if renderer.is_first_person() { "FIRST_PERSON" } else { "OTHER" },
+                "provenance": "actual Rust GameState inventory/hotbar selection and Renderer camera/HUD values at paired capture; not request echo"
+            },
             "itemOverlay": self.item_overlay_metadata(),
             "itemOverlayColorSpace": "Rust UI color floats -> B8G8R8A8_SRGB framebuffer; no post-capture correction"
         });
@@ -1219,6 +1302,16 @@ impl Probe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_draw_gate_does_not_hide_hud() {
+        let mut probe = Probe::new(PathBuf::new(), None);
+        probe.held_item_mode = true;
+        probe.held_item_draw_enabled = false;
+        assert!(probe.probe_hud_visible());
+        assert!(!probe.held_item_draw_enabled());
+    }
+
     #[test]
     fn item_overlay_validation_accepts_bounded_variable_16px_slots() {
         let ids = ["fern", "bush", "lily_pad", "sugar_cane", "pink_petals", "wildflowers"];

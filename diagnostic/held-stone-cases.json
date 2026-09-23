@@ -1,0 +1,22 @@
+{
+  "schema": 3,
+  "purpose": "single paired first-person held-stone frame in the existing owned fixture; HUD remains visible for the native hotbar, with no diagnostic GUI overlay",
+  "cases": [
+    {
+      "caseId": "held-stone-firstperson",
+      "dimension": "minecraft:overworld",
+      "x": 0.5,
+      "y": 64.0,
+      "z": 1.5,
+      "yaw": 0.0,
+      "pitch": 0.0,
+      "waitSeconds": 1,
+      "prepareWaitSeconds": 1,
+      "expectedTime": 6000,
+      "heldItem": true,
+      "expectedHeldItem": "stone",
+      "expectedGameMode": "creative",
+      "region": {"minX": -3, "minY": 63, "minZ": -3, "maxX": 3, "maxY": 65, "maxZ": 3}
+    }
+  ]
+}

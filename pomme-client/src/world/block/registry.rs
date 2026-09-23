@@ -192,6 +192,8 @@ impl BlockRegistry {
                 "quads": model.quads.iter().map(|quad| serde_json::json!({
                     "texture": quad.texture,
                     "tintIndex": quad.tint_index,
+                    "direction": quad.shade_face,
+                    "positions": quad.positions,
                     "itemTint": quad.item_tint.debug_json(),
                 })).collect::<Vec<_>>(),
                 "provenance": "Rust item model bake; no block color source",

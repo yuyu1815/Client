@@ -33,6 +33,7 @@ pub struct HeldItemPipeline {
     pipeline: vk::Pipeline,
     shared: ItemPipelineShared,
     display: DisplayResolver,
+    last_draw_trace: Option<serde_json::Value>,
 }
 
 impl HeldItemPipeline {
@@ -50,6 +51,7 @@ impl HeldItemPipeline {
             pipeline,
             shared,
             display: DisplayResolver::new(jar_assets_dir, "firstperson_righthand"),
+            last_draw_trace: None,
         }
     }
 
@@ -71,10 +73,16 @@ impl HeldItemPipeline {
         bob: Mat4,
     ) {
         let Some((buffer, vertex_count)) = meshes.mesh_handle(&item.name) else {
+            self.last_draw_trace = Some(serde_json::json!({
+                "status": "skipped", "reason": "no_item_mesh", "item": item.name,
+                "frameIndex": frame, "vertexCount": 0,
+                "provenance": "actual HeldItemPipeline::update_and_draw caller"
+            }));
             return;
         };
 
-        let uniform = CameraUniform::with_view_proj(hand::projection(aspect, hud_fov) * bob);
+        let view_projection = hand::projection(aspect, hud_fov) * bob;
+        let uniform = CameraUniform::with_view_proj(view_projection);
         self.shared.update_camera(frame, &uniform);
 
         let display = self
@@ -84,6 +92,8 @@ impl HeldItemPipeline {
             Some(anim) => eat_item_matrix(anim),
             None => first_person_item_matrix(swing_progress),
         };
+        // build_item_mesh stores vertices centered at the origin; ItemTransform's
+        // final -0.5 translation applies to vanilla's uncentered [0, 1] vertices.
         let model = arm * display.to_matrix();
 
         self.shared.bind(cmd, frame, self.pipeline);
@@ -99,6 +109,33 @@ impl HeldItemPipeline {
             item.nether_lighting,
         );
         cmd.draw(vertex_count, 1, 0, 0);
+        self.last_draw_trace = Some(serde_json::json!({
+            "status": "submitted",
+            "source": "actual Vulkan HeldItemPipeline::update_and_draw cmd.draw",
+            "vertexPayload": std::env::var_os("POMME_HELD_DRAW_PAYLOAD_TRACE")
+                .is_some()
+                .then(|| meshes.debug_held_draw_payload(&item.name))
+                .flatten(),
+            "frameIndex": frame,
+            "actualDrawCount": 1,
+            "actualDrawAt": chrono::Utc::now().to_rfc3339(),
+            "item": item.name,
+            "vertexCount": vertex_count,
+            "light": item.light,
+            "lightMode": if item.nether_lighting { "NETHER" } else { "LEVEL" },
+            "modelMatrixColumnMajor": model.to_cols_array(),
+            "normalMatrixColumnMajor": glam::Mat3::from_mat4(model).inverse().transpose().to_cols_array(),
+            "viewProjectionMatrixColumnMajor": view_projection.to_cols_array(),
+            "provenance": "CPU actual submitted matrices/pipeline draw; not GPU vertex readback"
+        }));
+    }
+
+    pub fn probe_draw_trace(&self) -> Option<serde_json::Value> {
+        self.last_draw_trace.clone()
+    }
+
+    pub fn clear_probe_trace(&mut self) {
+        self.last_draw_trace = None;
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
@@ -170,5 +207,19 @@ fn default_first_person(has_3d_model: bool) -> DisplayTransform {
             translation: Vec3::new(1.13, 3.2, 1.13) / 16.0,
             scale: Vec3::splat(0.68),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn held_display_transform_pivots_around_model_center() {
+        let arm = first_person_item_matrix(0.0);
+        let model = arm * default_first_person(true).to_matrix();
+        let center = model.transform_point3(Vec3::ZERO);
+        let arm_origin = arm.transform_point3(Vec3::ZERO);
+        assert!(center.abs_diff_eq(arm_origin, 1e-6));
     }
 }

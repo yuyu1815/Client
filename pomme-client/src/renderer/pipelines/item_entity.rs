@@ -8,7 +8,7 @@ use pyronyx::vk;
 
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, SpriteAlphaMask, TextureAtlas};
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util, world_shadow};
 use crate::world::block::model::{BakedModel, Direction, ItemTint, direction_from_positions};
 
 /// Item-only vertex format. Vanilla's ENTITY item format keeps UV0 as floats
@@ -80,6 +80,19 @@ pub struct ItemRenderInfo {
     pub model_matrix: Mat4,
     pub light: f32,
     pub nether_lighting: bool,
+    pub entity_uuid: Option<uuid::Uuid>,
+    pub invisible: bool,
+    pub actual_age: Option<u32>,
+    pub actual_render_age: f32,
+    pub age_f: f32,
+    pub actual_spin: f32,
+    pub spin: f32,
+    pub bob_offset: f32,
+    pub actual_bob_offset: f32,
+    pub controlled_phase: bool,
+    pub bob_controlled: bool,
+    pub position: [f64; 3],
+    pub stack_count: i32,
 }
 
 /// What the item-entity renderer needs to place a mesh: whether it baked from a
@@ -96,6 +109,7 @@ pub struct ItemMeshInfo {
 struct MeshEntry {
     buffer: vk::Buffer,
     allocation: Allocation,
+    gui_buffer: Option<(vk::Buffer, Allocation)>,
     vertex_count: u32,
     is_3d_model: bool,
     /// Vanilla `BakedQuad.MaterialInfo`: a sprite with partial alpha draws on
@@ -118,17 +132,19 @@ pub(super) struct ItemPipelineShared {
     atlas_sampler: vk::Sampler,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Option<Allocation>>,
+    last_view_projection: [[f32; 4]; 4],
+    last_camera_position: [f32; 3],
 }
 
-fn write_atlas_descriptor(
+fn write_texture_descriptor(
     device: &vk::Device,
     set: vk::DescriptorSet,
-    atlas: &TextureAtlas,
+    view: vk::ImageView,
     sampler: vk::Sampler,
 ) {
     let image_info = vk::DescriptorImageInfo {
         sampler,
-        image_view: atlas.view,
+        image_view: view,
         image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
     };
     let write = vk::WriteDescriptorSet {
@@ -186,11 +202,11 @@ impl ItemPipelineShared {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
+                descriptor_count: 2,
             },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: MAX_FRAMES_IN_FLIGHT as u32 + 1,
+            max_sets: MAX_FRAMES_IN_FLIGHT as u32 + 2,
             pool_size_count: pool_sizes.len() as u32,
             pool_sizes: pool_sizes.as_ptr(),
             ..Default::default()
@@ -265,16 +281,39 @@ impl ItemPipelineShared {
             atlas_sampler,
             camera_buffers,
             camera_allocations,
+            last_view_projection: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            last_camera_position: [0.0; 3],
         };
         this.rebind_atlas(device, atlas);
         this
     }
 
     pub(super) fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
-        write_atlas_descriptor(device, self.atlas_set, atlas, self.atlas_sampler);
+        write_texture_descriptor(device, self.atlas_set, atlas.view, self.atlas_sampler);
+    }
+
+    pub(super) fn allocate_texture_set(
+        &self,
+        device: &vk::Device,
+        view: vk::ImageView,
+        sampler: vk::Sampler,
+    ) -> vk::DescriptorSet {
+        let info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool: self.descriptor_pool,
+            descriptor_set_count: 1,
+            set_layouts: &self.atlas_layout,
+            ..Default::default()
+        };
+        let mut set = vk::DescriptorSet::null();
+        device.allocate_descriptor_sets(&info, slice::from_mut(&mut set))
+            .expect("failed to allocate shadow texture descriptor");
+        write_texture_descriptor(device, set, view, sampler);
+        set
     }
 
     pub(super) fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
+        self.last_view_projection = uniform.view_projection();
+        self.last_camera_position = uniform.camera_position();
         let bytes = bytemuck::bytes_of(uniform);
         if let Some(alloc) = self.camera_allocations[frame].as_mut() {
             alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
@@ -282,12 +321,22 @@ impl ItemPipelineShared {
     }
 
     pub(super) fn bind(&self, cmd: vk::CommandBuffer, frame: usize, pipeline: vk::Pipeline) {
+        self.bind_texture(cmd, frame, pipeline, self.atlas_set);
+    }
+
+    pub(super) fn bind_texture(
+        &self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        pipeline: vk::Pipeline,
+        texture_set: vk::DescriptorSet,
+    ) {
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
         cmd.bind_descriptor_sets(
             vk::PipelineBindPoint::Graphics,
             self.pipeline_layout,
             0,
-            &[self.camera_sets[frame], self.atlas_set],
+            &[self.camera_sets[frame], texture_set],
             &[],
         );
     }
@@ -357,13 +406,188 @@ pub(super) fn push_world_lighting(
     );
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ShadowVertex {
+    position: [f32; 3],
+    uv: [f32; 2],
+    color: [u8; 4],
+}
+
+struct ShadowPipeline {
+    pipeline: vk::Pipeline,
+    image: vk::Image,
+    view: vk::ImageView,
+    allocation: Option<Allocation>,
+    sampler: vk::Sampler,
+    texture_set: vk::DescriptorSet,
+    buffers: Vec<(vk::Buffer, Allocation)>,
+    last_trace: Option<serde_json::Value>,
+}
+
+impl ShadowPipeline {
+    // ponytail: fixed 16-quad per-frame ceiling; grow when non-item entities use this pass.
+    const MAX_QUADS: usize = 16;
+    const VERTICES_PER_QUAD: usize = 6;
+
+    fn new(
+        device: &vk::Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        render_pass: vk::RenderPass,
+        allocator: &Arc<Mutex<Allocator>>,
+        shared: &ItemPipelineShared,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Self {
+        let (image, view, allocation) = util::create_gpu_image_with_format(
+            device, allocator, width, height, vk::Format::R8G8B8A8Unorm, "entity_shadow",
+        );
+        let (staging, staging_alloc) = util::create_staging_buffer(device, allocator, rgba, "entity_shadow_staging");
+        util::upload_image(device, queue, command_pool, staging, image, width, height);
+        device.destroy_buffer(staging, None);
+        allocator.lock().unwrap().free(staging_alloc).ok();
+        let sampler = unsafe { util::create_linear_sampler(device) };
+        let texture_set = shared.allocate_texture_set(device, view, sampler);
+        let pipeline = create_shadow_pipeline(device, render_pass, shared.pipeline_layout);
+        let zeroes = vec![0; Self::MAX_QUADS * Self::VERTICES_PER_QUAD * size_of::<ShadowVertex>()];
+        let buffers = (0..MAX_FRAMES_IN_FLIGHT).map(|_| {
+            util::create_mapped_buffer(device, allocator, &zeroes, vk::BufferUsageFlags::VertexBuffer, "entity_shadow_vertices")
+        }).collect();
+        Self { pipeline, image, view, allocation: Some(allocation), sampler, texture_set, buffers, last_trace: None }
+    }
+
+    fn draw(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        shared: &ItemPipelineShared,
+        chunks: &crate::world::chunk::ChunkStore,
+        items: &[ItemRenderInfo],
+        camera: [f64; 3],
+        anchor: glam::DVec3,
+        dimension: &str,
+    ) {
+        self.last_trace = None;
+        let ambient = if dimension == "minecraft:the_nether" { 0.1 } else { 0.0 };
+        let mut vertices = Vec::new();
+        let mut target_trace = None;
+        for item in items {
+            // The drop pipeline receives only currently renderable items; Rust option/invisibility metadata are not tracked yet.
+            let trace_target = std::env::var_os("POMME_ITEM_ENTITY_TRACE").is_some()
+                && item.entity_uuid.is_some_and(|uuid| std::env::var("POMME_DROP_TARGET_UUID").is_ok_and(|s| s == uuid.to_string()));
+            let diagnostic_disabled = trace_target
+                && std::env::var("POMME_DROP_SHADOWS_DISABLED").is_ok_and(|v| v == "1");
+            let pieces = if diagnostic_disabled { Vec::new() } else {
+                world_shadow::item_shadow_pieces(
+                    chunks, item.position, camera, 0.15, 0.75, ambient, true, !item.invisible,
+                )
+            };
+            for piece in &pieces {
+                append_shadow_quad(&mut vertices, *piece, item.position, anchor);
+            }
+            if trace_target {
+                target_trace = Some(serde_json::json!({
+                    "targetEntityUUID": item.entity_uuid,
+                    "radius": 0.15, "strength": 0.75, "shadowsOption": true,
+                    "visible": !item.invisible, "distanceCamera": camera, "position": item.position,
+                    "textureAsset": "minecraft:textures/misc/shadow.png",
+                    "textureFormat": "R8G8B8A8_UNORM; dedicated descriptor, not an atlas entry",
+                    "sampler": "LINEAR, CLAMP_TO_EDGE; source PNG mcmeta clamp=true",
+                    "depthState": "LESS_OR_EQUAL, depth writes off; Java uses GREATER_OR_EQUAL under reversed-Z",
+                    "projectionOffset": "perspective ModelView scale 1-1/4096 per VIEW_OFFSET_Z_LAYERING",
+                    "scope": "item entities only; default shadows-on behavior, shared invisibility metadata gates this entity",
+                    "diagnosticDisabled": diagnostic_disabled,
+                    "pieces": pieces.iter().map(|p| serde_json::json!({
+                        "relative": p.relative, "bounds": p.bounds, "alpha": p.alpha,
+                        "brightness": p.brightness, "powerAtDepth": p.power_at_depth, "uv": p.uv,
+                    })).collect::<Vec<_>>(),
+                    "emittedVertexCount": vertices.len(),
+                    "emittedVertices": vertices.iter().map(|v| serde_json::json!({
+                        "position": v.position, "uv": v.uv, "rgba": v.color,
+                    })).collect::<Vec<_>>(),
+                    "provenance": "actual Rust world-shadow payload immediately before mapped VBO upload and cmd.draw"
+                }));
+            }
+        }
+        if vertices.is_empty() {
+            self.last_trace = target_trace;
+            return;
+        }
+        let count = vertices.len().min(Self::MAX_QUADS * Self::VERTICES_PER_QUAD);
+        let (_, allocation) = &mut self.buffers[frame];
+        let mapped = allocation.mapped_slice_mut().expect("shadow vertex buffer is mapped");
+        let bytes = bytemuck::cast_slice(&vertices[..count]);
+        mapped[..bytes.len()].copy_from_slice(bytes);
+        shared.bind_texture(cmd, frame, self.pipeline, self.texture_set);
+        cmd.push_constants(
+            shared.pipeline_layout,
+            vk::ShaderStageFlags::Vertex,
+            0,
+            bytemuck::bytes_of(&glam::Mat4::IDENTITY.to_cols_array()),
+        );
+        cmd.bind_vertex_buffers(0, &[self.buffers[frame].0], &[0]);
+        cmd.draw(count as u32, 1, 0, 0);
+        if let Some(trace) = target_trace.as_mut() { trace["draw"] = serde_json::json!("submitted"); }
+        self.last_trace = target_trace;
+    }
+
+    fn recreate(&mut self, device: &vk::Device, render_pass: vk::RenderPass, layout: vk::PipelineLayout) {
+        device.destroy_pipeline(self.pipeline, None);
+        self.pipeline = create_shadow_pipeline(device, render_pass, layout);
+    }
+
+    fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        device.destroy_pipeline(self.pipeline, None);
+        device.destroy_image_view(self.view, None);
+        device.destroy_image(self.image, None);
+        if let Some(allocation) = self.allocation.take() {
+            allocator.lock().unwrap().free(allocation).ok();
+        }
+        device.destroy_sampler(self.sampler, None);
+        for (buffer, allocation) in self.buffers.drain(..) {
+            device.destroy_buffer(buffer, None);
+            allocator.lock().unwrap().free(allocation).ok();
+        }
+    }
+}
+
+fn append_shadow_quad(
+    out: &mut Vec<ShadowVertex>,
+    piece: world_shadow::ShadowPiece,
+    entity: [f64; 3],
+    anchor: glam::DVec3,
+) {
+    let [min_x, min_y, min_z, max_x, _, max_z] = piece.bounds;
+    let [u0, v0, u1, v1] = piece.uv;
+    let y = entity[1] as f32 + piece.relative[1] + min_y as f32 - anchor.y as f32;
+    let x0 = entity[0] as f32 + piece.relative[0] + min_x as f32 - anchor.x as f32;
+    let x1 = entity[0] as f32 + piece.relative[0] + max_x as f32 - anchor.x as f32;
+    let z0 = entity[2] as f32 + piece.relative[2] + min_z as f32 - anchor.z as f32;
+    let z1 = entity[2] as f32 + piece.relative[2] + max_z as f32 - anchor.z as f32;
+    let alpha = (piece.alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+    let color = [255, 255, 255, alpha];
+    let corners = [
+        ([x0, y, z0], [u0, v0]),
+        ([x0, y, z1], [u0, v1]),
+        ([x1, y, z1], [u1, v1]),
+        ([x1, y, z0], [u1, v0]),
+    ];
+    for i in [0, 1, 2, 0, 2, 3] {
+        out.push(ShadowVertex { position: corners[i].0, uv: corners[i].1, color });
+    }
+}
+
 pub struct ItemEntityPipeline {
+    shadow: Option<ShadowPipeline>,
     /// Vanilla `ITEM_CUTOUT`: alpha-tested, no blending.
     cutout: vk::Pipeline,
     /// Vanilla `ITEM_TRANSLUCENT`: alpha-tested and blended.
     translucent: vk::Pipeline,
     shared: ItemPipelineShared,
     meshes: HashMap<String, MeshEntry>,
+    last_draw_trace: Option<serde_json::Value>,
 }
 
 impl ItemEntityPipeline {
@@ -372,21 +596,43 @@ impl ItemEntityPipeline {
         render_pass: vk::RenderPass,
         allocator: &Arc<Mutex<Allocator>>,
         atlas: &TextureAtlas,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        shadow_texture: Option<(u32, u32, Vec<u8>)>,
     ) -> Self {
         let shared = ItemPipelineShared::new(device, allocator, atlas, "item_entity");
+        let shadow = shadow_texture.map(|(width, height, rgba)| ShadowPipeline::new(
+            device, queue, command_pool, render_pass, allocator, &shared, width, height, &rgba,
+        ));
         let (cutout, translucent) =
             create_world_pipelines(device, render_pass, shared.pipeline_layout);
 
         Self {
+            shadow,
             cutout,
             translucent,
             shared,
             meshes: HashMap::new(),
+            last_draw_trace: None,
         }
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
         self.shared.update_camera(frame, uniform);
+    }
+
+    pub fn draw_shadows(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        chunks: &crate::world::chunk::ChunkStore,
+        items: &[ItemRenderInfo],
+        camera: [f64; 3],
+        anchor: glam::DVec3,
+        dimension: &str,
+    ) {
+        let Some(shadow) = self.shadow.as_mut() else { return; };
+        shadow.draw(cmd, frame, &self.shared, chunks, items, camera, anchor, dimension);
     }
 
     fn insert_mesh(
@@ -395,6 +641,7 @@ impl ItemEntityPipeline {
         allocator: &Arc<Mutex<Allocator>>,
         name: &str,
         vertices: &[ItemVertex],
+        gui_vertices: Option<&[ItemVertex]>,
         is_3d_model: bool,
         translucent: bool,
     ) {
@@ -406,6 +653,16 @@ impl ItemEntityPipeline {
             vk::BufferUsageFlags::VertexBuffer,
             &format!("item_{name}"),
         );
+        let gui_buffer = gui_vertices.map(|gui_vertices| {
+            let (buffer, allocation) = util::create_mapped_buffer(
+                device,
+                allocator,
+                bytemuck::cast_slice(gui_vertices),
+                vk::BufferUsageFlags::VertexBuffer,
+                &format!("item_{name}_gui_order"),
+            );
+            (buffer, allocation)
+        });
         let (bounds_min, bounds_max) = mesh_bounds(vertices);
         let mut tint_rgbs = Vec::new();
         for vertex in vertices {
@@ -423,6 +680,7 @@ impl ItemEntityPipeline {
             MeshEntry {
                 buffer,
                 allocation,
+                gui_buffer,
                 vertex_count: vertices.len() as u32,
                 is_3d_model,
                 translucent,
@@ -446,6 +704,38 @@ impl ItemEntityPipeline {
         self.meshes.get(name).map(|m| (m.buffer, m.vertex_count))
     }
 
+    pub fn debug_held_draw_payload(&self, name: &str) -> Option<serde_json::Value> {
+        let mesh = self.meshes.get(name)?;
+        let bytes = mesh.allocation.mapped_slice()?;
+        let vertices: &[ItemVertex] = bytemuck::try_cast_slice(bytes).ok()?;
+        Some(serde_json::json!({
+            "buffer": format!("{:?}", mesh.buffer),
+            "boundByteOffset": 0,
+            "vertexCount": mesh.vertex_count,
+            "strideBytes": ItemVertex::STRIDE,
+            "mappedAllocationOffset": mesh.allocation.offset(),
+            "mappedAllocationBytes": bytes.len(),
+            "vertices": vertices.iter().take(mesh.vertex_count as usize).map(|v| serde_json::json!({
+                "position": v.position,
+                "uv": v.tex_coords,
+                "lightTintBytes": v.light_tint.to_le_bytes(),
+                "normalBytes": v.normal,
+            })).collect::<Vec<_>>(),
+            "provenance": "CPU readback of host-mapped allocation bound by the actual held vkCmdBindVertexBuffers; not GPU readback",
+        }))
+    }
+
+    pub fn gui_mesh_handle(&self, name: &str) -> Option<(vk::Buffer, u32)> {
+        self.meshes.get(name).map(|mesh| {
+            let buffer = mesh.gui_buffer.as_ref().map_or(mesh.buffer, |(buffer, _)| *buffer);
+            (buffer, mesh.vertex_count)
+        })
+    }
+
+    pub fn mesh_is_translucent(&self, name: &str) -> bool {
+        self.meshes.get(name).is_some_and(|mesh| mesh.translucent)
+    }
+
     pub(crate) fn debug_mesh(&self, name: &str) -> Option<serde_json::Value> {
         self.meshes.get(name).map(|mesh| {
             serde_json::json!({
@@ -454,7 +744,9 @@ impl ItemEntityPipeline {
                 "translucent": mesh.translucent,
                 "renderPath": if mesh.translucent { "ItemEntityPipeline::translucent" } else { "ItemEntityPipeline::cutout" },
                 "blend": if mesh.translucent { "src-alpha,one-minus-src-alpha" } else { "disabled" },
-                "guiBakePath": "GuiItemPipeline::bake_to_slot -> item_entity.vert; light_tint.r is precomputed Lighting.ITEMS_3D GUI light; color attachment R8G8B8A8Unorm; blend src-alpha,one-minus-src-alpha",
+                "guiDepthWrite": !mesh.translucent,
+                "guiAlphaBlend": if mesh.translucent { "one,one-minus-src-alpha" } else { "one,zero" },
+                "guiBakePath": "GuiItemPipeline::bake_to_slot -> item_entity.vert; light_tint.r is precomputed Lighting.ITEMS_3D GUI light; color attachment R8G8B8A8Unorm; translucent mesh depth-write=false, cutout depth-write=true",
                 "heldPath": "HeldItemPipeline -> item_entity_world.vert; model inverse-transpose normal + Lighting.LEVEL/NETHER vectors; light_tint.r ignored",
                 "worldDropPath": "ItemEntityPipeline -> item_entity_world.vert; model inverse-transpose normal + Lighting.LEVEL vectors; light_tint.r ignored; color attachment B8G8R8A8_SRGB",
                 "vertexTintFormat": "R8G8B8A8Unorm",
@@ -477,13 +769,22 @@ impl ItemEntityPipeline {
         if self.meshes.contains_key(name) {
             return;
         }
-        let vertices = build_item_mesh(model, uv_map);
+        let translucent = model
+            .quads
+            .iter()
+            .any(|quad| uv_map.get_region(&quad.texture).translucent);
+        let vertices = build_item_mesh(model, uv_map, false);
         if !vertices.is_empty() {
-            let translucent = model
-                .quads
-                .iter()
-                .any(|quad| uv_map.get_region(&quad.texture).translucent);
-            self.insert_mesh(device, allocator, name, &vertices, true, translucent);
+            let gui_vertices = translucent.then(|| build_item_mesh(model, uv_map, true));
+            self.insert_mesh(
+                device,
+                allocator,
+                name,
+                &vertices,
+                gui_vertices.as_deref(),
+                true,
+                translucent,
+            );
         }
     }
 
@@ -513,6 +814,7 @@ impl ItemEntityPipeline {
                 allocator,
                 name,
                 &vertices,
+                None,
                 false,
                 region.translucent,
             );
@@ -521,7 +823,8 @@ impl ItemEntityPipeline {
 
     /// Cutout meshes first, then translucent ones, as vanilla's item sheets
     /// are ordered.
-    pub fn draw(&self, cmd: vk::CommandBuffer, frame: usize, items: &[ItemRenderInfo]) {
+    pub fn draw(&mut self, cmd: vk::CommandBuffer, frame: usize, items: &[ItemRenderInfo]) {
+        self.last_draw_trace = None;
         if items.is_empty() {
             return;
         }
@@ -553,14 +856,54 @@ impl ItemEntityPipeline {
                     item.nether_lighting,
                 );
                 cmd.draw(mesh.vertex_count, 1, 0, 0);
+                if std::env::var_os("POMME_ITEM_ENTITY_TRACE").is_some()
+                    && let Some(uuid) = item.entity_uuid
+                    && std::env::var("POMME_DROP_TARGET_UUID").is_ok_and(|target| target == uuid.to_string())
+                {
+                    self.last_draw_trace = Some(serde_json::json!({
+                        "status": "submitted",
+                        "targetEntityUUID": uuid,
+                        "itemId": item.item_name,
+                        "stackCount": item.stack_count,
+                        "position": item.position,
+                        "actualAge": item.actual_age,
+                        "actualRenderAge": item.actual_render_age,
+                        "renderAge": item.age_f,
+                        "actualBobOffset": item.actual_bob_offset,
+                        "actualSpin": item.actual_spin,
+                        "bobOffset": item.bob_offset,
+                        "spin": item.spin,
+                        "controlledPhase": item.controlled_phase,
+                        "bobControlled": item.bob_controlled,
+                        "controlledBobInput": item.bob_controlled.then_some(item.bob_offset),
+                        "controlledPhaseInputs": item.controlled_phase.then_some(serde_json::json!({"age": item.age_f, "bobOffset": item.bob_offset, "spin": item.spin})),
+                        "displayContext": "GROUND",
+                        "light": item.light,
+                        "lightMode": if item.nether_lighting { "NETHER" } else { "LEVEL" },
+                        "modelMatrixColumnMajor": item.model_matrix.to_cols_array(),
+                        "viewProjectionMatrixColumnMajor": self.shared.last_view_projection.into_iter().flatten().collect::<Vec<_>>(),
+                        "cameraPositionRelativeToAnchor": self.shared.last_camera_position,
+                        "normalMatrixColumnMajor": glam::Mat3::from_mat4(item.model_matrix).inverse().transpose().to_cols_array(),
+                        "vertexCount": mesh.vertex_count,
+                        "vertexPayload": self.debug_held_draw_payload(&item.item_name),
+                        "source": "actual Rust ItemEntityPipeline::draw bound mesh and submitted cmd.draw; payload is mapped VBO CPU bytes"
+                    }));
+                }
             }
         }
+    }
+
+    pub fn probe_draw_trace(&self) -> serde_json::Value {
+        self.last_draw_trace.clone().unwrap_or_else(|| serde_json::json!({"status": "no-target-submission"}))
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         self.destroy_pipelines(device);
         (self.cutout, self.translucent) =
             create_world_pipelines(device, render_pass, self.shared.pipeline_layout);
+        if let Some(shadow) = self.shadow.as_mut() {
+            shadow.recreate(device, render_pass, self.shared.pipeline_layout);
+        }
     }
 
     fn destroy_pipelines(&self, device: &vk::Device) {
@@ -576,12 +919,22 @@ impl ItemEntityPipeline {
         for (_, entry) in self.meshes.drain() {
             device.destroy_buffer(entry.buffer, None);
             allocator.lock().unwrap().free(entry.allocation).ok();
+            if let Some((buffer, allocation)) = entry.gui_buffer {
+                device.destroy_buffer(buffer, None);
+                allocator.lock().unwrap().free(allocation).ok();
+            }
         }
+    }
+
+    pub fn probe_shadow_trace(&self) -> serde_json::Value {
+        self.shadow.as_ref().and_then(|shadow| shadow.last_trace.clone())
+            .unwrap_or_else(|| serde_json::json!({"status": "no-target-shadow-submission"}))
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         self.clear_meshes(device, allocator);
         self.destroy_pipelines(device);
+        if let Some(shadow) = self.shadow.as_mut() { shadow.destroy(device, allocator); }
         self.shared.destroy(device, allocator);
     }
 }
@@ -610,9 +963,43 @@ fn cardinal_normal(positions: &[[f32; 3]; 4]) -> glam::Vec3 {
     glam::Vec3::from_array(direction.offset().map(|v| v as f32))
 }
 
-fn build_item_mesh(model: &BakedModel, uv_map: &AtlasUVMap) -> Vec<ItemVertex> {
+// Java item submits general quads first, then cullface buckets in its baked order.
+fn gui_item_quad_order_key(quad: &crate::world::block::model::BakedQuad) -> (u8, u8) {
+    use Direction::{Down, East, North, South, Up, West};
+    let direction = quad.cullface.or(quad.shade_face).unwrap_or(Up);
+    let rank = if quad.cullface.is_some() {
+        match direction {
+            North => 0,
+            South => 1,
+            East => 2,
+            West => 3,
+            Up => 4,
+            Down => 5,
+        }
+    } else {
+        match direction {
+            Down => 0,
+            Up => 1,
+            North => 2,
+            South => 3,
+            West => 4,
+            East => 5,
+        }
+    };
+    (u8::from(quad.cullface.is_some()), rank)
+}
+
+fn build_item_mesh(
+    model: &BakedModel,
+    uv_map: &AtlasUVMap,
+    vanilla_gui_order: bool,
+) -> Vec<ItemVertex> {
+    let mut quads: Vec<_> = model.quads.iter().collect();
+    if vanilla_gui_order {
+        quads.sort_by_key(|quad| gui_item_quad_order_key(quad));
+    }
     let mut vertices = Vec::new();
-    for quad in &model.quads {
+    for quad in quads {
         let region = uv_map.get_region(&quad.texture);
         let u_span = region.u_max - region.u_min;
         let v_span = region.v_max - region.v_min;
@@ -895,6 +1282,8 @@ pub(super) fn create_held_pipeline(
         vk::FrontFace::CounterClockwise,
         true,
         true,
+        true,
+        false,
     )
 }
 
@@ -912,6 +1301,8 @@ fn create_world_pipelines(
             vk::FrontFace::CounterClockwise,
             true,
             blend,
+            true,
+            false,
         )
     };
     (world(false), world(true))
@@ -923,7 +1314,58 @@ pub(super) fn create_pipeline_with_front_face(
     layout: vk::PipelineLayout,
     front_face: vk::FrontFace,
 ) -> vk::Pipeline {
-    create_pipeline_impl(device, render_pass, layout, front_face, false, true)
+    create_pipeline_impl(device, render_pass, layout, front_face, false, true, true, false)
+}
+
+pub(super) fn create_gui_translucent_pipeline(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+    front_face: vk::FrontFace,
+) -> vk::Pipeline {
+    create_pipeline_impl(device, render_pass, layout, front_face, false, true, false, true)
+}
+
+fn create_shadow_pipeline(device: &vk::Device, render_pass: vk::RenderPass, layout: vk::PipelineLayout) -> vk::Pipeline {
+    let vert = shader::create_shader_module(device, &shader::include_spirv!("world_shadow.vert.spv")[..]);
+    let frag = shader::create_shader_module(device, &shader::include_spirv!("world_shadow.frag.spv")[..]);
+    let stages = [
+        vk::PipelineShaderStageCreateInfo { stage: vk::ShaderStageFlags::Vertex, module: vert, name: c"main".as_ptr(), ..Default::default() },
+        vk::PipelineShaderStageCreateInfo { stage: vk::ShaderStageFlags::Fragment, module: frag, name: c"main".as_ptr(), ..Default::default() },
+    ];
+    let binding = vk::VertexInputBindingDescription { binding: 0, stride: size_of::<ShadowVertex>() as u32, input_rate: vk::VertexInputRate::Vertex };
+    let attrs = [
+        vk::VertexInputAttributeDescription { location: 0, binding: 0, format: vk::Format::R32G32B32Sfloat, offset: 0 },
+        vk::VertexInputAttributeDescription { location: 1, binding: 0, format: vk::Format::R32G32Sfloat, offset: 12 },
+        vk::VertexInputAttributeDescription { location: 2, binding: 0, format: vk::Format::R8G8B8A8Unorm, offset: 20 },
+    ];
+    let vertex = vk::PipelineVertexInputStateCreateInfo { vertex_binding_description_count: 1, vertex_binding_descriptions: &binding, vertex_attribute_description_count: 3, vertex_attribute_descriptions: attrs.as_ptr(), ..Default::default() };
+    let assembly = vk::PipelineInputAssemblyStateCreateInfo { topology: vk::PrimitiveTopology::TriangleList, ..Default::default() };
+    let viewport = vk::PipelineViewportStateCreateInfo { viewport_count: 1, scissor_count: 1, ..Default::default() };
+    let raster = vk::PipelineRasterizationStateCreateInfo { polygon_mode: vk::PolygonMode::Fill, cull_mode: vk::CullModeFlags::None, front_face: vk::FrontFace::CounterClockwise, line_width: 1.0, ..Default::default() };
+    let multisample = vk::PipelineMultisampleStateCreateInfo { rasterization_samples: vk::SampleCountFlags::Type1, ..Default::default() };
+    let depth = vk::PipelineDepthStencilStateCreateInfo { depth_test_enable: vk::TRUE, depth_write_enable: vk::FALSE, depth_compare_op: vk::CompareOp::LessOrEqual, ..Default::default() };
+    let blend = vk::PipelineColorBlendAttachmentState {
+        blend_enable: vk::TRUE, src_color_blend_factor: vk::BlendFactor::SrcAlpha,
+        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha, color_blend_op: vk::BlendOp::Add,
+        src_alpha_blend_factor: vk::BlendFactor::One, dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        alpha_blend_op: vk::BlendOp::Add, color_write_mask: vk::ColorComponentFlags::RGBA,
+    };
+    let blending = vk::PipelineColorBlendStateCreateInfo { attachment_count: 1, attachments: &blend, ..Default::default() };
+    let dynamic_states = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
+    let dynamic = vk::PipelineDynamicStateCreateInfo { dynamic_state_count: 2, dynamic_states: dynamic_states.as_ptr(), ..Default::default() };
+    let info = [vk::GraphicsPipelineCreateInfo {
+        stage_count: 2, stages: stages.as_ptr(), vertex_input_state: &vertex, input_assembly_state: &assembly,
+        viewport_state: &viewport, rasterization_state: &raster, multisample_state: &multisample,
+        depth_stencil_state: &depth, color_blend_state: &blending, dynamic_state: &dynamic,
+        layout, render_pass, subpass: 0, ..Default::default()
+    }];
+    let mut pipeline = vk::Pipeline::null();
+    device.create_graphics_pipelines(vk::PipelineCache::null(), &info, None, slice::from_mut(&mut pipeline))
+        .expect("failed to create world shadow pipeline");
+    device.destroy_shader_module(vert, None);
+    device.destroy_shader_module(frag, None);
+    pipeline
 }
 
 fn create_pipeline_impl(
@@ -933,6 +1375,8 @@ fn create_pipeline_impl(
     front_face: vk::FrontFace,
     world_lighting: bool,
     blend: bool,
+    depth_write: bool,
+    accumulate_alpha: bool,
 ) -> vk::Pipeline {
     let vert_spv: &[u8] = if world_lighting {
         &shader::include_spirv!("item_entity_world.vert.spv")[..]
@@ -990,7 +1434,7 @@ fn create_pipeline_impl(
     };
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
-        depth_write_enable: vk::TRUE,
+        depth_write_enable: if depth_write { vk::TRUE } else { vk::FALSE },
         // Vanilla 26.2's DepthStencilState.DEFAULT is inclusive
         // GREATER_THAN_OR_EQUAL under reversed-Z. Pomme uses conventional
         // depth here, so the equivalent comparison is LESS_OR_EQUAL. The
@@ -1005,7 +1449,11 @@ fn create_pipeline_impl(
         dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
         color_blend_op: vk::BlendOp::Add,
         src_alpha_blend_factor: vk::BlendFactor::One,
-        dst_alpha_blend_factor: vk::BlendFactor::Zero,
+        dst_alpha_blend_factor: if accumulate_alpha {
+            vk::BlendFactor::OneMinusSrcAlpha
+        } else {
+            vk::BlendFactor::Zero
+        },
         alpha_blend_op: vk::BlendOp::Add,
         color_write_mask: vk::ColorComponentFlags::RGBA,
     };
@@ -1094,6 +1542,46 @@ mod tests {
             vertex.normal[1] as f32 / 127.0,
             vertex.normal[2] as f32 / 127.0,
         )
+    }
+
+    #[test]
+    fn gui_translucent_quad_order_matches_vanilla_buckets() {
+        let quad = |direction, cullface| crate::world::block::model::BakedQuad {
+            positions: [[0.0; 3]; 4],
+            uvs: [[0.0; 2]; 4],
+            texture: String::new(),
+            cullface,
+            tint_index: None,
+            tint: crate::world::block::registry::Tint::None,
+            item_tint: ItemTint::Untinted,
+            shade_light: 1.0,
+            shade_face: Some(direction),
+        };
+        use Direction::{Down, East, North, South, Up, West};
+        let mut quads = vec![
+            quad(Down, Some(Down)),
+            quad(East, None),
+            quad(South, Some(South)),
+            quad(Up, None),
+            quad(North, Some(North)),
+            quad(West, None),
+        ];
+        quads.sort_by_key(gui_item_quad_order_key);
+        let order: Vec<_> = quads
+            .iter()
+            .map(|quad| (quad.cullface.is_some(), quad.shade_face.unwrap()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (false, Up),
+                (false, West),
+                (false, East),
+                (true, North),
+                (true, South),
+                (true, Down),
+            ]
+        );
     }
 
     #[test]

@@ -2043,7 +2043,7 @@ impl AppCore {
                         }
                     }
                     if entity_type == azalea_registry::builtin::EntityKind::Item {
-                        game.item_entity_store.spawn_item(id, position, velocity);
+                        game.item_entity_store.spawn_item(id, uuid, position, velocity);
                     }
                 }
                 NetworkEvent::EntityMoved {
@@ -2213,6 +2213,11 @@ impl AppCore {
                         } else {
                             game.silent_entities.remove(&id);
                         }
+                    }
+                    if index == 0
+                        && let crate::entity::MetaValue::Byte(flags) = value
+                    {
+                        game.item_entity_store.set_shared_flags(id, flags);
                     }
                     game.entity_store.apply_entity_data(id, index, value);
                 }

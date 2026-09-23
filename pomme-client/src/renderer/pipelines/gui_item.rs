@@ -15,6 +15,7 @@ use crate::renderer::util;
 
 pub struct GuiItemPipeline {
     pipeline: vk::Pipeline,
+    translucent_pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     camera_layout: vk::DescriptorSetLayout,
     atlas_layout: vk::DescriptorSetLayout,
@@ -51,7 +52,7 @@ impl GuiItemPipeline {
         let push_range = vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::Vertex | vk::ShaderStageFlags::Fragment,
             offset: 0,
-            size: 68,
+            size: 72,
         };
         let layouts = [camera_layout, atlas_layout];
         let layout_info = vk::PipelineLayoutCreateInfo {
@@ -66,6 +67,12 @@ impl GuiItemPipeline {
             .expect("failed to create gui_item pipeline layout");
 
         let pipeline = item_entity::create_pipeline_with_front_face(
+            device,
+            atlas_render_pass,
+            pipeline_layout,
+            vk::FrontFace::Clockwise,
+        );
+        let translucent_pipeline = item_entity::create_gui_translucent_pipeline(
             device,
             atlas_render_pass,
             pipeline_layout,
@@ -166,6 +173,7 @@ impl GuiItemPipeline {
 
         let mut this = Self {
             pipeline,
+            translucent_pipeline,
             pipeline_layout,
             camera_layout,
             atlas_layout,
@@ -189,7 +197,14 @@ impl GuiItemPipeline {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, atlas_render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.translucent_pipeline, None);
         self.pipeline = item_entity::create_pipeline_with_front_face(
+            device,
+            atlas_render_pass,
+            self.pipeline_layout,
+            vk::FrontFace::Clockwise,
+        );
+        self.translucent_pipeline = item_entity::create_gui_translucent_pipeline(
             device,
             atlas_render_pass,
             self.pipeline_layout,
@@ -257,7 +272,7 @@ impl GuiItemPipeline {
         item_name: &str,
         is_block: bool,
     ) {
-        let Some((buffer, vertex_count)) = item_entity.mesh_handle(item_name) else {
+        let Some((buffer, vertex_count)) = item_entity.gui_mesh_handle(item_name) else {
             return;
         };
 
@@ -270,13 +285,27 @@ impl GuiItemPipeline {
             display,
         );
 
+        let pipeline = if item_entity.mesh_is_translucent(item_name) {
+            self.translucent_pipeline
+        } else {
+            self.pipeline
+        };
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
         cmd.bind_vertex_buffers(0, &[buffer], &[0]);
         push_model_light(cmd, self.pipeline_layout, &model, 1.0);
+        let unorm_atlas_target = 1.0_f32;
+        cmd.push_constants(
+            self.pipeline_layout,
+            vk::ShaderStageFlags::Fragment,
+            68,
+            bytemuck::bytes_of(&unorm_atlas_target),
+        );
         cmd.draw(vertex_count, 1, 0, 0);
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.translucent_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);

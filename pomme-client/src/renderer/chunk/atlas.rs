@@ -603,7 +603,7 @@ impl TextureAtlas {
             mip_levels,
         );
 
-        let sampler = unsafe { util::create_nearest_sampler_mipmapped(device, mip_levels) };
+        let sampler = unsafe { util::create_linear_sampler_mipmapped(device, mip_levels) };
 
         tracing::info!(
             "Atlas built: {atlas_size}x{atlas_size}, mip level {mip_level}, {} regions",

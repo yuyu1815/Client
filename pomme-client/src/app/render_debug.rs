@@ -352,6 +352,8 @@ pub(crate) fn snapshot_with_prepared(
             .cloned()
             .unwrap_or(Value::Null),
         "guiItemOverlay": renderer.probe_gui_item_draw_trace(),
+        "itemEntityPipeline": renderer.probe_item_entity_pipeline_trace(),
+        "heldItemPipeline": renderer.probe_held_item_pipeline_trace(),
         "diagnosticSampling": prepared["diagnosticSampling"].clone(),
     })
 }

@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "purpose": "one owned-fixture dropped stone, native GROUND renderer, stack count one, fixed camera, no HUD/image alignment",
+  "cases": [
+    {
+      "caseId": "drop-stone-ground",
+      "dimension": "minecraft:overworld",
+      "x": 0.5,
+      "y": 64.0,
+      "z": 1.5,
+      "yaw": 0.0,
+      "pitch": 20.0,
+      "waitSeconds": 1,
+      "prepareWaitSeconds": 1,
+      "expectedTime": 6000,
+      "heldItem": false,
+      "dropItem": true,
+      "clearMainHand": true,
+      "expectedGameMode": "creative",
+      "region": {"minX": -3, "minY": 63, "minZ": -3, "maxX": 3, "maxY": 65, "maxZ": 3}
+    }
+  ]
+}

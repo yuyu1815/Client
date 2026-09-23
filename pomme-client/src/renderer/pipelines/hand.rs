@@ -10,7 +10,8 @@ use pyronyx::vk;
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, SkinData, shader, util};
 const NEAR: f32 = 0.05;
-const FAR: f32 = 10.0;
+// Minecraft 26.2 GameRenderer.setupPerspective uses a 100-block hand far plane.
+const FAR: f32 = 100.0;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -668,4 +669,16 @@ fn create_pipeline(
     device.destroy_shader_module(frag_module, None);
 
     pipeline
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hand_projection_matches_vanilla_near_and_far_planes() {
+        let projection = projection(16.0 / 9.0, 70.0_f32.to_radians());
+        assert!((projection.z_axis.z + 1.0005003).abs() < 1e-6);
+        assert!((projection.w_axis.z + 0.050025012).abs() < 1e-6);
+    }
 }
