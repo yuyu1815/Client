@@ -30,9 +30,7 @@ pub(crate) fn item_shadow_pieces(
         return Vec::new();
     }
     let radius = radius.min(32.0);
-    let distance_sq = (0..3)
-        .map(|i| (camera[i] - entity[i]).powi(2))
-        .sum::<f64>();
+    let distance_sq = (0..3).map(|i| (camera[i] - entity[i]).powi(2)).sum::<f64>();
     let Some(power) = shadow_power(distance_sq, strength) else {
         return Vec::new();
     };
@@ -84,7 +82,8 @@ pub(crate) fn item_shadow_pieces(
 }
 
 fn loaded_full_surface(chunks: &ChunkStore, x: i32, y: i32, z: i32) -> Option<LocalBox> {
-    // Block data does not encode RenderShape; reject empty/partial surfaces, but an invisible full-collision block remains unclassifiable.
+    // Block data does not encode RenderShape; reject empty/partial surfaces, but an
+    // invisible full-collision block remains unclassifiable.
     let chunk_pos = azalea_core::position::ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
     chunks.get_chunk(&chunk_pos)?;
     let state = chunks.get_block_state(x, y, z);
@@ -106,10 +105,15 @@ fn full_surface_shape(state: azalea_block::BlockState) -> Option<LocalBox> {
 }
 
 fn loaded_max_brightness(chunks: &ChunkStore, x: i32, y: i32, z: i32) -> Option<u8> {
-    // skyDarken is not tracked; the accepted daytime fixture's sky level is 15, so Java's subtraction is zero here.
+    // skyDarken is not tracked; the accepted daytime fixture's sky level is 15, so
+    // Java's subtraction is zero here.
     let chunk_pos = azalea_core::position::ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
     chunks.light_data.get(&(chunk_pos.x, chunk_pos.z))?;
-    Some(chunks.get_sky_light(x, y, z).max(chunks.get_block_light(x, y, z)))
+    Some(
+        chunks
+            .get_sky_light(x, y, z)
+            .max(chunks.get_block_light(x, y, z)),
+    )
 }
 
 fn shadow_power(distance_sq: f64, strength: f32) -> Option<f32> {
@@ -143,21 +147,87 @@ mod tests {
         let distance_sq = (65.62_f64 - 64.0).powi(2) + 2.0_f64.powi(2);
         let cases = [
             ("unloaded", None, None, true, true, distance_sq, None),
-            ("empty surface", Some(air), Some(15), true, true, distance_sq, None),
-            ("invisible RenderShape", Some(barrier), Some(15), true, true, distance_sq, None),
-            ("partial shape", Some(slab), Some(15), true, true, distance_sq, None),
-            ("light threshold", Some(stone), Some(3), true, true, distance_sq, None),
-            ("distance fade", Some(stone), Some(15), true, true, 256.0, None),
-            ("option disabled", Some(stone), Some(15), false, true, distance_sq, None),
-            ("invisible", Some(stone), Some(15), true, false, distance_sq, None),
-            ("stone at full light", Some(stone), Some(15), true, true, distance_sq, Some(0.36529627)),
+            (
+                "empty surface",
+                Some(air),
+                Some(15),
+                true,
+                true,
+                distance_sq,
+                None,
+            ),
+            (
+                "invisible RenderShape",
+                Some(barrier),
+                Some(15),
+                true,
+                true,
+                distance_sq,
+                None,
+            ),
+            (
+                "partial shape",
+                Some(slab),
+                Some(15),
+                true,
+                true,
+                distance_sq,
+                None,
+            ),
+            (
+                "light threshold",
+                Some(stone),
+                Some(3),
+                true,
+                true,
+                distance_sq,
+                None,
+            ),
+            (
+                "distance fade",
+                Some(stone),
+                Some(15),
+                true,
+                true,
+                256.0,
+                None,
+            ),
+            (
+                "option disabled",
+                Some(stone),
+                Some(15),
+                false,
+                true,
+                distance_sq,
+                None,
+            ),
+            (
+                "invisible",
+                Some(stone),
+                Some(15),
+                true,
+                false,
+                distance_sq,
+                None,
+            ),
+            (
+                "stone at full light",
+                Some(stone),
+                Some(15),
+                true,
+                true,
+                distance_sq,
+                Some(0.36529627),
+            ),
         ];
         for (name, state, light, enabled, visible, distance, expected) in cases {
             let actual = state
                 .and_then(full_surface_shape)
                 .zip(light)
                 .filter(|_| enabled && visible)
-                .and_then(|(_, level)| shadow_power(distance, 0.75).and_then(|power| shadow_alpha(power, level, 0.0)));
+                .and_then(|(_, level)| {
+                    shadow_power(distance, 0.75).and_then(|power| shadow_alpha(power, level, 0.0))
+                });
             assert_eq!(actual.is_some(), expected.is_some(), "{name}");
             if let (Some(actual), Some(expected)) = (actual, expected) {
                 assert!((actual - expected).abs() < 1e-6, "{name}: {actual}");

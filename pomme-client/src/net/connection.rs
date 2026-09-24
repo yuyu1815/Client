@@ -81,6 +81,7 @@ pub struct ConnectArgs {
     pub access_token: Option<String>,
     pub view_distance: u8,
     pub chat_options: crate::ui::chat::ChatOptions,
+    pub server_cookies: std::collections::HashMap<azalea_registry::identifier::Identifier, Vec<u8>>,
 }
 
 pub struct ConnectionHandle {
@@ -131,6 +132,7 @@ pub async fn connect_to_server(
         access_token,
         view_distance,
         chat_options,
+        mut server_cookies,
     } = args;
 
     let mut conn = match transport {
@@ -176,7 +178,8 @@ pub async fn connect_to_server(
         );
     }
 
-    let profile_id = login_sequence(&mut conn, &uuid, access_token.as_deref()).await?;
+    let (profile_id, profile_name) =
+        login_sequence(&mut conn, &uuid, access_token.as_deref()).await?;
 
     // 1.20.1 and older have no configuration phase: the server enters play as
     // soon as it has sent the profile, and the registries ride in the game
@@ -198,6 +201,7 @@ pub async fn connect_to_server(
                 chat_options,
                 &event_tx,
                 &mut game_packet_rx,
+                &mut server_cookies,
                 None,
             )
             .await?,
@@ -211,7 +215,7 @@ pub async fn connect_to_server(
     let _ = event_tx.try_send(NetworkEvent::BiomeColors {
         colors: biome_colors,
     });
-    let _ = event_tx.try_send(NetworkEvent::Connected);
+    let _ = event_tx.try_send(NetworkEvent::Connected { profile_name });
 
     game_loop(
         conn,
@@ -224,6 +228,7 @@ pub async fn connect_to_server(
             chat_options,
             chat: ChatSender::new(profile_id, uuid, access_token, key_pair_tx),
             key_pair_rx,
+            server_cookies,
         },
     )
     .await
@@ -357,12 +362,12 @@ fn resolve_wire(probed: Option<i32>, selected: i32) -> Result<i32, i32> {
     }
 }
 
-/// Returns the game profile id the server logged us in as.
+/// Returns the accepted game profile id and exact scoreboard name.
 async fn login_sequence(
     conn: &mut Conn,
     uuid: &uuid::Uuid,
     access_token: Option<&str>,
-) -> Result<uuid::Uuid, ConnectionError> {
+) -> Result<(uuid::Uuid, String), ConnectionError> {
     loop {
         // Read the raw frame ourselves so older-version layouts can be
         // rewritten before the typed decode (26.1's login_finished lacks the
@@ -391,7 +396,7 @@ async fn login_sequence(
                     p.game_profile.name,
                     p.game_profile.uuid
                 );
-                return Ok(p.game_profile.uuid);
+                return Ok((p.game_profile.uuid, p.game_profile.name));
             }
             ClientboundLoginPacket::LoginDisconnect(p) => {
                 return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
@@ -461,6 +466,10 @@ async fn config_sequence(
     chat_options: crate::ui::chat::ChatOptions,
     event_tx: &Sender<NetworkEvent>,
     outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
+    server_cookies: &mut std::collections::HashMap<
+        azalea_registry::identifier::Identifier,
+        Vec<u8>,
+    >,
     // `Some` on a mid-session reconfiguration: the previous registries,
     // kept when the server re-sends nothing (vanilla's RegistryDataCollector
     // returns the original registries unchanged in that case).
@@ -473,6 +482,9 @@ async fn config_sequence(
     let mut received_registry_data = false;
     let mut selected_known_packs = false;
     let mut received_dialog_tags = None;
+    let mut code_of_conduct_seen = false;
+    let mut code_of_conduct_accepted = false;
+    let mut finish_configuration_pending = false;
 
     // Vanilla sends brand and client information once, from the login
     // listener; a reconfiguration sends neither.
@@ -544,6 +556,39 @@ async fn config_sequence(
                         {
                             write_config_frame(conn, frame).await?;
                         }
+                    } else if let Outbound::CodeOfConductDecision(accepted) = outbound {
+                        if !code_of_conduct_seen || code_of_conduct_accepted {
+                            return Err(ConnectionError::Disconnected(
+                                "Code-of-conduct decision arrived without a pending notice".into(),
+                            ));
+                        }
+                        if !accepted {
+                            return Err(ConnectionError::Disconnected(
+                                "Code of conduct declined by user".into(),
+                            ));
+                        }
+                        write_config_packet(conn, ServerboundConfigPacket::AcceptCodeOfConduct(
+                            azalea_protocol::packets::config::s_accept_code_of_conduct::ServerboundAcceptCodeOfConduct {},
+                        )).await?;
+                        code_of_conduct_accepted = true;
+                        if finish_configuration_pending {
+                            write_config_packet(conn, ServerboundConfigPacket::FinishConfiguration(
+                                s_finish_configuration::ServerboundFinishConfiguration {},
+                            )).await?;
+                            return Ok(match previous {
+                                Some(previous) if !received_registry_data => Configured {
+                                    registries: previous.registries.clone(),
+                                    dialogs: match received_dialog_tags {
+                                        Some(tags) => std::sync::Arc::new(previous.dialogs.with_tags(tags)),
+                                        None => previous.dialogs.clone(),
+                                    },
+                                },
+                                _ => Configured {
+                                    dialogs: std::sync::Arc::new(dialog_registry(&registry_holder, received_dialog_tags.unwrap_or_default())),
+                                    registries: std::sync::Arc::new(registry_holder),
+                                },
+                            });
+                        }
                     } else if let Outbound::Packet(packet) = outbound
                         && let ServerboundGamePacket::ResourcePack(p) = *packet
                     {
@@ -611,6 +656,10 @@ async fn config_sequence(
                 .await?;
             }
             ClientboundConfigPacket::FinishConfiguration(_) => {
+                if code_of_conduct_seen && !code_of_conduct_accepted {
+                    finish_configuration_pending = true;
+                    continue;
+                }
                 write_config_packet(
                     conn,
                     ServerboundConfigPacket::FinishConfiguration(
@@ -639,16 +688,62 @@ async fn config_sequence(
                 return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
             }
             ClientboundConfigPacket::CookieRequest(p) => {
+                let payload = server_cookies.get(&p.key).cloned();
                 write_config_packet(
                     conn,
                     ServerboundConfigPacket::CookieResponse(
                         s_cookie_response::ServerboundCookieResponse {
                             key: p.key,
-                            payload: None,
+                            payload,
                         },
                     ),
                 )
                 .await?;
+            }
+            ClientboundConfigPacket::StoreCookie(p) => {
+                server_cookies.insert(p.key, p.payload);
+            }
+            ClientboundConfigPacket::Ping(p) => {
+                write_config_packet(
+                    conn,
+                    ServerboundConfigPacket::Pong(s_pong::ServerboundPong { id: p.id }),
+                )
+                .await?;
+            }
+            ClientboundConfigPacket::CodeOfConduct(p) => {
+                if code_of_conduct_seen {
+                    return Err(ConnectionError::Disconnected(
+                        "Server sent duplicate code-of-conduct notice".into(),
+                    ));
+                }
+                code_of_conduct_seen = true;
+                event_tx
+                    .try_send(NetworkEvent::CodeOfConduct {
+                        text: p.code_of_conduct,
+                    })
+                    .map_err(|e| {
+                        ConnectionError::Disconnected(format!(
+                            "Could not deliver code of conduct to UI: {e}"
+                        ))
+                    })?;
+                // Return to the outer select so inbound configuration packets
+                // remain live while the user considers the notice.
+            }
+            ClientboundConfigPacket::Transfer(p) => {
+                event_tx
+                    .try_send(NetworkEvent::ServerTransfer(super::ServerTransfer {
+                        host: p.host,
+                        port: p.port,
+                        cookies: server_cookies.clone(),
+                    }))
+                    .map_err(|e| {
+                        ConnectionError::Disconnected(format!(
+                            "Could not deliver server transfer to app: {e}"
+                        ))
+                    })?;
+                return Err(ConnectionError::Disconnected(
+                    "Server requested transfer; waiting for application reconnect".into(),
+                ));
             }
             ClientboundConfigPacket::ResourcePackPush(p) => {
                 tracing::info!(
@@ -834,6 +929,7 @@ struct GameLoopArgs {
     chat_options: crate::ui::chat::ChatOptions,
     chat: ChatSender,
     key_pair_rx: mpsc::UnboundedReceiver<Option<std::sync::Arc<ProfileKeyPair>>>,
+    server_cookies: std::collections::HashMap<azalea_registry::identifier::Identifier, Vec<u8>>,
 }
 
 async fn game_loop(
@@ -849,6 +945,7 @@ async fn game_loop(
         chat_options,
         mut chat,
         mut key_pair_rx,
+        mut server_cookies,
     } = args;
     let Joined {
         mut configured,
@@ -921,11 +1018,38 @@ async fn game_loop(
                 continue;
             }
         };
+        if translation.is_none()
+            && crate::version::session_protocol() == pomme_protocol::version::NATIVE.protocol
+        {
+            match super::native_codecs::decode_native_explosion(&raw) {
+                Ok(Some(explosion)) => {
+                    let _ = event_tx.try_send(NetworkEvent::Explosion(explosion));
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "Skipping malformed native ClientboundExplode packet");
+                    continue;
+                }
+            }
+        }
         let raw = match translation {
             Some(t) => match t.translate_game_frame(raw) {
                 Some(raw) => raw,
                 None => continue,
             },
+            None if crate::version::session_protocol()
+                == pomme_protocol::version::NATIVE.protocol =>
+            {
+                match super::native_codecs::normalize_native_team_color(&raw) {
+                    Ok(Some(normalized)) => normalized.into_boxed_slice(),
+                    Ok(None) => raw,
+                    Err(error) => {
+                        tracing::warn!(%error, "Skipping malformed native set_player_team packet");
+                        continue;
+                    }
+                }
+            }
             None => raw,
         };
         match super::chat::handle_raw_chat_packet(&raw, event_tx, &chat_types, &mut inbound_chat) {
@@ -974,6 +1098,7 @@ async fn game_loop(
                         chat_options,
                         event_tx,
                         &mut outbound_rx,
+                        &mut server_cookies,
                         Some(&configured),
                     )
                     .await?;
@@ -1010,6 +1135,22 @@ async fn game_loop(
                         login.online_mode = conn.is_encrypted();
                     }
                 }
+                if let ClientboundGamePacket::Transfer(p) = &packet {
+                    event_tx
+                        .try_send(NetworkEvent::ServerTransfer(super::ServerTransfer {
+                            host: p.host.clone(),
+                            port: p.port,
+                            cookies: server_cookies.clone(),
+                        }))
+                        .map_err(|e| {
+                            ConnectionError::Disconnected(format!(
+                                "Could not deliver server transfer to app: {e}"
+                            ))
+                        })?;
+                    return Err(ConnectionError::Disconnected(
+                        "Server requested transfer; waiting for application reconnect".into(),
+                    ));
+                }
                 handle_game_packet(
                     &packet,
                     &sender,
@@ -1017,6 +1158,7 @@ async fn game_loop(
                     &configured.registries,
                     &shared_tree,
                     &mut batch_size_calculator,
+                    &mut server_cookies,
                 );
             }
             Err(e) => skip_malformed_packet(e)?,
@@ -1032,12 +1174,23 @@ fn outbound_frame(
     tree: &crate::net::commands::SharedCommandTree,
 ) -> Result<Option<Vec<u8>>, ConnectionError> {
     Ok(match out {
-        Outbound::Packet(mut packet) => {
-            if let Some(t) = translation {
+        Outbound::Packet(mut packet) => match translation {
+            Some(t) => {
                 t.remap_outbound(&mut packet);
+                Some(serialize_frame(&*packet)?)
             }
-            Some(serialize_frame(&*packet)?)
-        }
+            None if crate::version::session_protocol()
+                == pomme_protocol::version::NATIVE.protocol =>
+            {
+                match &*packet {
+                    ServerboundGamePacket::SetCreativeModeSlot(p) => {
+                        Some(super::native_codecs::encode_native_creative_slot(p)?)
+                    }
+                    _ => Some(serialize_frame(&*packet)?),
+                }
+            }
+            None => Some(serialize_frame(&*packet)?),
+        },
         Outbound::Raw(bytes) => Some(bytes),
         Outbound::ChatInput(input) => match chat.encode_input(&input, tree.lock().as_deref()) {
             Ok(frame) => Some(frame),
@@ -1054,6 +1207,7 @@ fn outbound_frame(
         Outbound::CustomClick { id, payload } => {
             custom_click_frame(Phase::Game, &id, payload.as_ref())
         }
+        Outbound::CodeOfConductDecision(_) => None,
     })
 }
 
@@ -1223,9 +1377,446 @@ mod tests {
         }
     }
 
+    async fn recv_event(receiver: &crossbeam_channel::Receiver<NetworkEvent>) -> NetworkEvent {
+        let receiver = receiver.clone();
+        tokio::task::spawn_blocking(move || {
+            receiver.recv_timeout(std::time::Duration::from_secs(2))
+        })
+        .await
+        .expect("event receiver task panicked")
+        .expect("timed out waiting for network event")
+    }
+
+    async fn read_test_packet<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
+        peer: &mut Conn,
+    ) -> P {
+        tokio::time::timeout(std::time::Duration::from_secs(2), peer.read_packet())
+            .await
+            .expect("peer packet read timed out")
+            .unwrap()
+    }
+
+    async fn code_of_conduct_peer() -> (
+        Conn,
+        tokio::task::JoinHandle<Result<(), ConnectionError>>,
+        crossbeam_channel::Receiver<NetworkEvent>,
+        mpsc::UnboundedSender<Outbound>,
+    ) {
+        use azalea_auth::game_profile::GameProfile;
+        use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
+        use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
+        use uuid::Uuid;
+
+        use crate::net::conn::memory_pipes;
+
+        let (client_end, server_end) = memory_pipes();
+        let mut peer = Conn::from_memory(server_end);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(64);
+        let (packet_tx, packet_rx) = mpsc::unbounded_channel();
+        let client = tokio::spawn(connect_to_server(
+            ConnectArgs {
+                transport: Transport::Memory(client_end),
+                username: "Steve".into(),
+                uuid: Uuid::nil(),
+                access_token: None,
+                view_distance: 8,
+                chat_options: crate::ui::chat::ChatOptions::default(),
+                server_cookies: Default::default(),
+            },
+            event_tx,
+            packet_tx.clone(),
+            packet_rx,
+        ));
+        let _: ServerboundHandshakePacket =
+            tokio::time::timeout(std::time::Duration::from_secs(2), peer.read_packet())
+                .await
+                .expect("peer packet read timed out")
+                .unwrap();
+        let _: ServerboundLoginPacket = read_test_packet(&mut peer).await;
+        peer.write_packet(ClientboundLoginFinished {
+            game_profile: GameProfile::new(Uuid::nil(), "Steve".into()),
+            session_id: Uuid::nil(),
+        })
+        .await
+        .unwrap();
+        let _: ServerboundLoginPacket = read_test_packet(&mut peer).await;
+        let _: ServerboundConfigPacket = read_test_packet(&mut peer).await;
+        let _: ServerboundConfigPacket = read_test_packet(&mut peer).await;
+        (peer, client, event_rx, packet_tx)
+    }
+
     /// The whole join over an in-memory pipe, against a peer that sends only
     /// the two frames the client actually requires: login finished, then
     /// finish configuration. No registry data, no compression, no encryption.
+    #[tokio::test]
+    async fn code_of_conduct_waits_for_explicit_accept_before_finish_configuration() {
+        use azalea_auth::game_profile::GameProfile;
+        use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
+        use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
+        use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
+        use azalea_protocol::packets::login::c_login_finished::ClientboundLoginFinished;
+        use uuid::Uuid;
+
+        use crate::net::conn::memory_pipes;
+
+        async fn sent<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
+            peer: &mut Conn,
+        ) -> P {
+            read_test_packet(peer).await
+        }
+
+        let (client_end, server_end) = memory_pipes();
+        let mut peer = Conn::from_memory(server_end);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(64);
+        let (packet_tx, packet_rx) = mpsc::unbounded_channel();
+        let client = tokio::spawn(connect_to_server(
+            ConnectArgs {
+                transport: Transport::Memory(client_end),
+                username: "Steve".into(),
+                uuid: Uuid::nil(),
+                access_token: None,
+                view_distance: 8,
+                chat_options: crate::ui::chat::ChatOptions::default(),
+                server_cookies: Default::default(),
+            },
+            event_tx,
+            packet_tx.clone(),
+            packet_rx,
+        ));
+        assert!(matches!(
+            sent::<ServerboundHandshakePacket>(&mut peer).await,
+            ServerboundHandshakePacket::Intention(_)
+        ));
+        let _: ServerboundLoginPacket = sent(&mut peer).await;
+        peer.write_packet(ClientboundLoginFinished {
+            game_profile: GameProfile::new(Uuid::nil(), "Steve".into()),
+            session_id: Uuid::nil(),
+        })
+        .await
+        .unwrap();
+        let _: ServerboundLoginPacket = sent(&mut peer).await;
+        let _: ServerboundConfigPacket = sent(&mut peer).await;
+        let _: ServerboundConfigPacket = sent(&mut peer).await;
+        peer.write_packet(ClientboundCodeOfConduct {
+            code_of_conduct: "Read this".into(),
+        })
+        .await
+        .unwrap();
+        peer.write_packet(ClientboundFinishConfiguration)
+            .await
+            .unwrap();
+        assert!(
+            matches!(recv_event(&event_rx).await, NetworkEvent::CodeOfConduct { text } if text == "Read this")
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(30),
+                peer.read_packet::<ServerboundConfigPacket>()
+            )
+            .await
+            .is_err()
+        );
+
+        packet_tx
+            .send(Outbound::CodeOfConductDecision(true))
+            .unwrap();
+        assert!(matches!(
+            sent::<ServerboundConfigPacket>(&mut peer).await,
+            ServerboundConfigPacket::AcceptCodeOfConduct(_)
+        ));
+        assert!(matches!(
+            sent::<ServerboundConfigPacket>(&mut peer).await,
+            ServerboundConfigPacket::FinishConfiguration(_)
+        ));
+        client.abort();
+    }
+
+    #[tokio::test]
+    async fn code_of_conduct_rejection_never_finishes_configuration() {
+        use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
+        use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
+
+        let (mut peer, client, event_rx, packet_tx) = code_of_conduct_peer().await;
+        peer.write_packet(ClientboundCodeOfConduct {
+            code_of_conduct: "Read this".into(),
+        })
+        .await
+        .unwrap();
+        peer.write_packet(ClientboundFinishConfiguration)
+            .await
+            .unwrap();
+        assert!(matches!(
+            recv_event(&event_rx).await,
+            NetworkEvent::CodeOfConduct { .. }
+        ));
+        packet_tx
+            .send(Outbound::CodeOfConductDecision(false))
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                peer.read_packet::<ServerboundConfigPacket>()
+            )
+            .await,
+            Err(_) | Ok(Err(_))
+        ));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), client)
+            .await
+            .expect("client timed out")
+            .unwrap();
+        assert!(
+            matches!(result, Err(ConnectionError::Disconnected(reason)) if reason.contains("declined"))
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_code_of_conduct_after_accept_never_finishes_configuration() {
+        use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
+        use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
+
+        let (mut peer, client, event_rx, packet_tx) = code_of_conduct_peer().await;
+        let notice = || ClientboundCodeOfConduct {
+            code_of_conduct: "Read this".into(),
+        };
+        peer.write_packet(notice()).await.unwrap();
+        assert!(matches!(
+            recv_event(&event_rx).await,
+            NetworkEvent::CodeOfConduct { .. }
+        ));
+        packet_tx
+            .send(Outbound::CodeOfConductDecision(true))
+            .unwrap();
+        assert!(matches!(
+            read_test_packet::<ServerboundConfigPacket>(&mut peer).await,
+            ServerboundConfigPacket::AcceptCodeOfConduct(_)
+        ));
+        peer.write_packet(notice()).await.unwrap();
+        peer.write_packet(ClientboundFinishConfiguration)
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), client)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(result, Err(ConnectionError::Disconnected(reason)) if reason.contains("duplicate"))
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(30),
+                peer.read_packet::<ServerboundConfigPacket>()
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn code_of_conduct_keeps_ping_live_before_accept() {
+        use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
+        use azalea_protocol::packets::config::c_ping::ClientboundPing;
+
+        let (mut peer, client, event_rx, packet_tx) = code_of_conduct_peer().await;
+        peer.write_packet(ClientboundCodeOfConduct {
+            code_of_conduct: "Read this".into(),
+        })
+        .await
+        .expect("send notice");
+        assert!(
+            matches!(
+                recv_event(&event_rx).await,
+                NetworkEvent::CodeOfConduct { .. }
+            ),
+            "notice event"
+        );
+        peer.write_packet(ClientboundPing { id: 0x1234 })
+            .await
+            .expect("send config ping");
+        assert!(
+            matches!(read_test_packet::<ServerboundConfigPacket>(&mut peer).await, ServerboundConfigPacket::Pong(p) if p.id == 0x1234),
+            "pong before consent"
+        );
+        packet_tx
+            .send(Outbound::CodeOfConductDecision(true))
+            .expect("send consent");
+        assert!(
+            matches!(
+                read_test_packet::<ServerboundConfigPacket>(&mut peer).await,
+                ServerboundConfigPacket::AcceptCodeOfConduct(_)
+            ),
+            "accept after pong"
+        );
+        client.abort();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), client).await;
+    }
+
+    #[tokio::test]
+    async fn code_of_conduct_defers_finish_and_keeps_ping_live() {
+        use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
+        use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
+        use azalea_protocol::packets::config::c_ping::ClientboundPing;
+
+        let (mut peer, client, event_rx, packet_tx) = code_of_conduct_peer().await;
+        peer.write_packet(ClientboundCodeOfConduct {
+            code_of_conduct: "Read this".into(),
+        })
+        .await
+        .expect("send notice");
+        assert!(
+            matches!(
+                recv_event(&event_rx).await,
+                NetworkEvent::CodeOfConduct { .. }
+            ),
+            "notice event"
+        );
+        peer.write_packet(ClientboundFinishConfiguration)
+            .await
+            .expect("send early finish");
+        peer.write_packet(ClientboundPing { id: 0x5678 })
+            .await
+            .expect("send ping while finish pending");
+        assert!(
+            matches!(read_test_packet::<ServerboundConfigPacket>(&mut peer).await, ServerboundConfigPacket::Pong(p) if p.id == 0x5678),
+            "pong while finish pending"
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                peer.read_packet::<ServerboundConfigPacket>()
+            )
+            .await
+            .is_err(),
+            "finish must wait for consent"
+        );
+        packet_tx
+            .send(Outbound::CodeOfConductDecision(true))
+            .expect("send consent");
+        assert!(
+            matches!(
+                read_test_packet::<ServerboundConfigPacket>(&mut peer).await,
+                ServerboundConfigPacket::AcceptCodeOfConduct(_)
+            ),
+            "accept must precede finish"
+        );
+        assert!(
+            matches!(
+                read_test_packet::<ServerboundConfigPacket>(&mut peer).await,
+                ServerboundConfigPacket::FinishConfiguration(_)
+            ),
+            "finish after accept"
+        );
+        client.abort();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), client).await;
+    }
+
+    #[tokio::test]
+    async fn code_of_conduct_keeps_cookie_exchange_live_before_accept() {
+        use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
+        use azalea_protocol::packets::config::c_cookie_request::ClientboundCookieRequest;
+        use azalea_protocol::packets::config::c_store_cookie::ClientboundStoreCookie;
+
+        let (mut peer, client, event_rx, _) = code_of_conduct_peer().await;
+        let key: azalea_registry::identifier::Identifier = "minecraft:session".parse().unwrap();
+        peer.write_packet(ClientboundCodeOfConduct {
+            code_of_conduct: "Read this".into(),
+        })
+        .await
+        .expect("send notice");
+        assert!(
+            matches!(
+                recv_event(&event_rx).await,
+                NetworkEvent::CodeOfConduct { .. }
+            ),
+            "notice event"
+        );
+        peer.write_packet(ClientboundStoreCookie {
+            key: key.clone(),
+            payload: vec![1, 2, 3],
+        })
+        .await
+        .expect("store cookie");
+        peer.write_packet(ClientboundCookieRequest { key })
+            .await
+            .expect("request cookie");
+        assert!(
+            matches!(read_test_packet::<ServerboundConfigPacket>(&mut peer).await, ServerboundConfigPacket::CookieResponse(p) if p.payload.as_deref() == Some(&[1, 2, 3][..])),
+            "cookie response before consent"
+        );
+        client.abort();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), client).await;
+    }
+
+    #[tokio::test]
+    async fn configuration_transfer_carries_server_cookies() {
+        use azalea_protocol::packets::config::c_store_cookie::ClientboundStoreCookie;
+        use azalea_protocol::packets::config::c_transfer::ClientboundTransfer;
+
+        let (mut peer, client, event_rx, _) = code_of_conduct_peer().await;
+        let key: azalea_registry::identifier::Identifier = "minecraft:session".parse().unwrap();
+        peer.write_packet(ClientboundStoreCookie {
+            key: key.clone(),
+            payload: vec![4, 5, 6],
+        })
+        .await
+        .unwrap();
+        peer.write_packet(ClientboundTransfer {
+            host: "next.example".into(),
+            port: 25570,
+        })
+        .await
+        .unwrap();
+        let transfer = recv_event(&event_rx).await;
+        assert!(matches!(transfer, NetworkEvent::ServerTransfer(transfer)
+            if transfer.host == "next.example"
+                && transfer.port == 25570
+                && transfer.cookies.get(&key) == Some(&vec![4, 5, 6])));
+        assert!(
+            matches!(tokio::time::timeout(std::time::Duration::from_secs(2), client).await.expect("client timed out").unwrap(), Err(ConnectionError::Disconnected(reason)) if reason.contains("transfer"))
+        );
+    }
+
+    #[tokio::test]
+    async fn game_transfer_carries_server_cookies() {
+        use azalea_protocol::packets::config::ServerboundConfigPacket;
+        use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
+        use azalea_protocol::packets::config::c_store_cookie::ClientboundStoreCookie;
+        use azalea_protocol::packets::game::c_transfer::ClientboundTransfer;
+
+        let (mut peer, client, event_rx, _) = code_of_conduct_peer().await;
+        let key: azalea_registry::identifier::Identifier = "minecraft:session".parse().unwrap();
+        peer.write_packet(ClientboundStoreCookie {
+            key: key.clone(),
+            payload: vec![7, 8, 9],
+        })
+        .await
+        .unwrap();
+        peer.write_packet(ClientboundFinishConfiguration)
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_test_packet::<ServerboundConfigPacket>(&mut peer).await,
+            ServerboundConfigPacket::FinishConfiguration(_)
+        ));
+        peer.write_packet(ClientboundTransfer {
+            host: "game.example".into(),
+            port: 25571,
+        })
+        .await
+        .unwrap();
+        let transfer = loop {
+            let event = recv_event(&event_rx).await;
+            if let NetworkEvent::ServerTransfer(transfer) = event {
+                break transfer;
+            }
+        };
+        assert_eq!(transfer.host, "game.example");
+        assert_eq!(transfer.port, 25571);
+        assert_eq!(transfer.cookies.get(&key), Some(&vec![7, 8, 9]));
+        assert!(
+            matches!(tokio::time::timeout(std::time::Duration::from_secs(2), client).await.expect("client timed out").unwrap(), Err(ConnectionError::Disconnected(reason)) if reason.contains("transfer"))
+        );
+    }
+
     #[tokio::test]
     async fn joins_an_integrated_server_over_the_pipe() {
         use azalea_auth::game_profile::GameProfile;
@@ -1241,7 +1832,7 @@ mod tests {
         async fn sent<P: azalea_protocol::packets::ProtocolPacket + std::fmt::Debug>(
             peer: &mut Conn,
         ) -> P {
-            peer.read_packet().await.unwrap()
+            read_test_packet(peer).await
         }
 
         let (client_end, server_end) = memory_pipes();
@@ -1253,11 +1844,12 @@ mod tests {
         let client = tokio::spawn(connect_to_server(
             ConnectArgs {
                 transport: Transport::Memory(client_end),
-                username: "Steve".to_owned(),
+                username: "ConfiguredName".to_owned(),
                 uuid: Uuid::nil(),
                 access_token: None,
                 view_distance: 8,
                 chat_options: crate::ui::chat::ChatOptions::default(),
+                server_cookies: Default::default(),
             },
             event_tx,
             packet_tx,
@@ -1270,11 +1862,11 @@ mod tests {
         ));
         assert!(matches!(
             sent(&mut peer).await,
-            ServerboundLoginPacket::Hello(p) if p.name == "Steve"
+            ServerboundLoginPacket::Hello(p) if p.name == "ConfiguredName"
         ));
 
         peer.write_packet(ClientboundLoginFinished {
-            game_profile: GameProfile::new(Uuid::nil(), "Steve".to_owned()),
+            game_profile: GameProfile::new(Uuid::nil(), "AcceptedProfile".to_owned()),
             session_id: Uuid::nil(),
         })
         .await
@@ -1303,11 +1895,11 @@ mod tests {
         ));
 
         // Emitted as soon as configuration ends, before any game packet.
-        let events: Vec<_> = std::iter::from_fn(|| event_rx.recv().ok())
-            .take(2)
-            .collect();
+        let events = vec![recv_event(&event_rx).await, recv_event(&event_rx).await];
         assert!(matches!(events[0], NetworkEvent::BiomeColors { .. }));
-        assert!(matches!(events[1], NetworkEvent::Connected));
+        assert!(
+            matches!(&events[1], NetworkEvent::Connected { profile_name } if profile_name == "AcceptedProfile")
+        );
 
         client.abort();
     }

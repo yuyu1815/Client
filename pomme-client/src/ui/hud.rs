@@ -5,6 +5,7 @@ use azalea_inventory::ItemStack;
 use glam::DVec3;
 
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_count};
+use crate::chat_component::{Component, Style};
 use crate::mob_effect::ActiveMobEffects;
 use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -38,14 +39,31 @@ pub struct FrameTimings {
 
 type ScoreKey = (String, String);
 
-/// Vanilla `NumberFormat`: how a score's value renders in the sidebar.
-/// Styled keeps only the resolved color; a per-score format overrides the
-/// objective's, and no format at all means the styled-red default.
+/// Vanilla `NumberFormat`: how a score's value renders in the sidebar/LIST.
+/// A per-score format overrides the objective's; each consumer supplies its own
+/// default color for an absent format.
 #[derive(Clone)]
 pub enum ScoreNumberFormat {
     Blank,
-    Styled([f32; 4]),
+    Styled(Style),
     Fixed(Vec<TextSpan>),
+}
+
+pub(crate) fn format_score_number(
+    value: i32,
+    number_format: Option<&ScoreNumberFormat>,
+    default_color: [f32; 4],
+) -> Vec<TextSpan> {
+    match number_format {
+        Some(ScoreNumberFormat::Blank) => Vec::new(),
+        Some(ScoreNumberFormat::Styled(style)) => {
+            let mut component = Component::text(value.to_string());
+            component.style = style.clone();
+            crate::ui::text::format_component_spans(&component, WHITE)
+        }
+        Some(ScoreNumberFormat::Fixed(spans)) => spans.clone(),
+        None => vec![TextSpan::new(value.to_string(), default_color)],
+    }
 }
 
 struct ScoreEntry {
@@ -57,11 +75,17 @@ struct ScoreEntry {
 struct Objective {
     display: Vec<TextSpan>,
     number_format: Option<ScoreNumberFormat>,
+    render_type: azalea_core::objectives::ObjectiveCriteria,
+}
+
+pub(crate) struct ListScore {
+    pub value: i32,
+    pub formatted: Vec<TextSpan>,
 }
 
 #[derive(Default)]
 pub struct Scoreboard {
-    sidebar: Option<String>,
+    displays: [Option<String>; 19],
     objectives: HashMap<String, Objective>,
     scores: HashMap<ScoreKey, ScoreEntry>,
     teams: HashMap<String, ScoreboardTeam>,
@@ -75,12 +99,13 @@ pub(crate) struct ScoreboardTeam {
     /// None for RESET / non-color formatting (no icon fill in the spectator
     /// menu), like vanilla's `PlayerTeam.getColor()` Optional.
     pub(crate) fill_color: Option<[f32; 4]>,
+    sidebar_slot: Option<azalea_protocol::packets::game::c_set_display_objective::DisplaySlot>,
     pub(crate) members: HashSet<String>,
 }
 
 impl Scoreboard {
     pub fn clear(&mut self) {
-        self.sidebar = None;
+        self.displays = std::array::from_fn(|_| None);
         self.objectives.clear();
         self.scores.clear();
         self.teams.clear();
@@ -92,27 +117,97 @@ impl Scoreboard {
         display: Option<Vec<TextSpan>>,
         number_format: Option<ScoreNumberFormat>,
     ) {
+        self.set_objective_with_render_type(
+            name,
+            display,
+            number_format,
+            azalea_core::objectives::ObjectiveCriteria::Integer,
+        );
+    }
+
+    pub fn set_objective_with_render_type(
+        &mut self,
+        name: String,
+        display: Option<Vec<TextSpan>>,
+        number_format: Option<ScoreNumberFormat>,
+        render_type: azalea_core::objectives::ObjectiveCriteria,
+    ) {
         if let Some(display) = display {
             self.objectives.insert(
                 name,
                 Objective {
                     display,
                     number_format,
+                    render_type,
                 },
             );
         } else {
             self.objectives.remove(&name);
             self.scores.retain(|(objective, _), _| objective != &name);
-            if self.sidebar.as_deref() == Some(&name) {
-                self.sidebar = None;
+            for display in &mut self.displays {
+                if display.as_deref() == Some(&name) {
+                    *display = None;
+                }
             }
         }
     }
 
-    pub fn set_display(&mut self, name: Option<String>) {
-        // Vanilla resolves the objective at packet time; an unknown name
-        // leaves the slot empty even if the objective arrives later.
-        self.sidebar = name.filter(|name| self.objectives.contains_key(name));
+    pub fn list_objective_render_type(&self) -> Option<azalea_core::objectives::ObjectiveCriteria> {
+        let name = self.displays
+            [azalea_protocol::packets::game::c_set_display_objective::DisplaySlot::List as usize]
+            .as_deref()?;
+        self.objectives
+            .get(name)
+            .map(|objective| objective.render_type)
+    }
+
+    pub fn list_score(&self, owner: &str) -> Option<ListScore> {
+        let objective_name = self.displays
+            [azalea_protocol::packets::game::c_set_display_objective::DisplaySlot::List as usize]
+            .as_deref()?;
+        let objective = self.objectives.get(objective_name)?;
+        let entry = self
+            .scores
+            .get(&(objective_name.to_owned(), owner.to_owned()))?;
+        let number_format = entry
+            .number_format
+            .as_ref()
+            .or(objective.number_format.as_ref());
+        let formatted =
+            format_score_number(entry.score, number_format, super::common::rgb(0xffff55));
+        Some(ListScore {
+            value: entry.score,
+            formatted,
+        })
+    }
+
+    pub fn set_display(
+        &mut self,
+        slot: azalea_protocol::packets::game::c_set_display_objective::DisplaySlot,
+        name: Option<String>,
+    ) {
+        // DisplaySlot is the protocol's contiguous 0..=18 enum. Resolve at
+        // packet time like vanilla; unknown objectives leave only this slot empty.
+        self.displays[slot as usize] = name.filter(|name| self.objectives.contains_key(name));
+    }
+
+    pub fn selected_sidebar(&self, local_scoreboard_name: Option<&str>) -> Option<&str> {
+        if let Some(name) = local_scoreboard_name
+            && let Some(team) = self.teams.values().find(|team| team.members.contains(name))
+            && let Some(objective) = team
+                .sidebar_slot
+                .and_then(|slot| self.displays[slot as usize].as_deref())
+            && self.objectives.contains_key(objective)
+        {
+            return Some(objective);
+        }
+        self.default_sidebar()
+    }
+
+    pub fn default_sidebar(&self) -> Option<&str> {
+        self.displays
+            [azalea_protocol::packets::game::c_set_display_objective::DisplaySlot::Sidebar as usize]
+            .as_deref()
     }
 
     pub fn set_score(
@@ -152,6 +247,7 @@ impl Scoreboard {
         suffix: Vec<TextSpan>,
         color: [f32; 4],
         fill_color: Option<[f32; 4]>,
+        sidebar_slot: Option<azalea_protocol::packets::game::c_set_display_objective::DisplaySlot>,
         members: Option<Vec<String>>,
     ) {
         // Vanilla ignores a parameter change for a team it doesn't know;
@@ -168,6 +264,7 @@ impl Scoreboard {
             suffix: Vec::new(),
             color,
             fill_color: None,
+            sidebar_slot,
             members: HashSet::new(),
         });
         team.display_name = display_name;
@@ -175,6 +272,7 @@ impl Scoreboard {
         team.suffix = suffix;
         team.color = color;
         team.fill_color = fill_color;
+        team.sidebar_slot = sidebar_slot;
         // ADD unions its player list onto an existing team, like vanilla's
         // addPlayerTeam + per-player addPlayerToTeam.
         if let Some(members) = members {
@@ -483,10 +581,13 @@ pub fn build_hud(
     bar: ContextualBarKind<'_>,
     game_mode: u8,
     hotbar: &[ItemStack],
+    item_cooldowns: &crate::player::cooldown::CooldownTracker,
+    partial_tick: f32,
     tool_highlight_timer: u32,
     action_bar: Option<(&[TextSpan], u64)>,
     spans_width_fn: super::common::SpansWidthFn<'_>,
     scoreboard: &Scoreboard,
+    local_scoreboard_name: Option<&str>,
     effects: &ActiveMobEffects,
     boss_bars: &BossBarState,
     first_person: bool,
@@ -554,6 +655,18 @@ pub fn build_hud(
                     item_name: item_resource_name(data.kind),
                     tint: WHITE,
                 });
+                let cooldown = item_cooldowns.fraction(item, partial_tick);
+                if cooldown > 0.0 {
+                    let fill = (cooldown * 16.0).ceil();
+                    elements.push(MenuElement::Rect {
+                        x: ix,
+                        y: iy + 16.0 * gs - fill * gs,
+                        w: 16.0 * gs,
+                        h: fill * gs,
+                        corner_radius: 0.0,
+                        color: [0.0, 0.0, 0.0, 0.5],
+                    });
+                }
                 if data.count > 1 {
                     push_item_count(elements, ix, iy, item_size, gs, data.count);
                 }
@@ -667,6 +780,7 @@ pub fn build_hud(
         screen_h,
         gs,
         scoreboard,
+        local_scoreboard_name,
         text_width_fn,
         spans_width_fn,
     );
@@ -1013,10 +1127,11 @@ fn build_scoreboard(
     screen_h: f32,
     gs: f32,
     scoreboard: &Scoreboard,
+    local_scoreboard_name: Option<&str>,
     text_width_fn: TextWidthFn,
     spans_width_fn: super::common::SpansWidthFn<'_>,
 ) {
-    let Some(objective) = scoreboard.sidebar.as_ref() else {
+    let Some(objective) = scoreboard.selected_sidebar(local_scoreboard_name) else {
         return;
     };
     let Some(obj) = scoreboard.objectives.get(objective) else {
@@ -1041,19 +1156,11 @@ fn build_scoreboard(
         .iter()
         .map(|((_, owner), entry)| {
             let name = scoreboard.line(owner, entry.display.as_deref());
-            let number = match entry
-                .number_format
-                .as_ref()
-                .or(obj.number_format.as_ref())
-                .cloned()
-                .unwrap_or(ScoreNumberFormat::Styled(super::common::rgb(0xff5555)))
-            {
-                ScoreNumberFormat::Blank => Vec::new(),
-                ScoreNumberFormat::Styled(color) => {
-                    vec![TextSpan::new(entry.score.to_string(), color)]
-                }
-                ScoreNumberFormat::Fixed(spans) => spans,
-            };
+            let number = format_score_number(
+                entry.score,
+                entry.number_format.as_ref().or(obj.number_format.as_ref()),
+                super::common::rgb(0xff5555),
+            );
             let number_w = spans_width_fn(&number, fs);
             (name, number, number_w)
         })
@@ -1647,5 +1754,372 @@ fn facing_name(y_rot_deg: f32) -> &'static str {
         135..=224 => "North (-Z)",
         225..=314 => "East (+X)",
         _ => "South (+Z)",
+    }
+}
+
+#[cfg(test)]
+mod scoreboard_display_slot_tests {
+    use azalea_protocol::packets::game::c_set_display_objective::DisplaySlot as Slot;
+
+    use super::Scoreboard;
+
+    fn objective(sb: &mut Scoreboard, name: &str) {
+        sb.set_objective(name.to_owned(), Some(Vec::new()), None);
+    }
+
+    #[test]
+    fn all_19_display_slots_are_independent_and_clear_resets_them() {
+        let slots = [
+            Slot::List,
+            Slot::Sidebar,
+            Slot::BelowName,
+            Slot::TeamBlack,
+            Slot::TeamDarkBlue,
+            Slot::TeamDarkGreen,
+            Slot::TeamDarkAqua,
+            Slot::TeamDarkRed,
+            Slot::TeamDarkPurple,
+            Slot::TeamGold,
+            Slot::TeamGray,
+            Slot::TeamDarkGray,
+            Slot::TeamBlue,
+            Slot::TeamGreen,
+            Slot::TeamAqua,
+            Slot::TeamRed,
+            Slot::TeamLightPurple,
+            Slot::TeamYellow,
+            Slot::TeamWhite,
+        ];
+        let mut sb = Scoreboard::default();
+        for (i, slot) in slots.into_iter().enumerate() {
+            let name = format!("objective-{i}");
+            objective(&mut sb, &name);
+            sb.set_display(slot, Some(name));
+        }
+        assert_eq!(sb.displays.len(), 19);
+        for (i, slot) in slots.into_iter().enumerate() {
+            assert_eq!(
+                sb.displays[slot as usize].as_deref(),
+                Some(format!("objective-{i}").as_str())
+            );
+        }
+        assert_eq!(sb.default_sidebar(), Some("objective-1"));
+        sb.clear();
+        assert!(sb.displays.iter().all(Option::is_none));
+        assert_eq!(sb.default_sidebar(), None);
+    }
+
+    fn team(sb: &mut Scoreboard, team: &str, color: Option<Slot>, members: Vec<&str>) {
+        sb.set_team(
+            team.to_owned(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            [1.0; 4],
+            color.map(|_| [1.0; 4]),
+            color,
+            Some(members.into_iter().map(str::to_owned).collect()),
+        );
+    }
+
+    #[test]
+    fn selected_sidebar_prefers_colored_objective_and_falls_back() {
+        let mut sb = Scoreboard::default();
+        objective(&mut sb, "default");
+        objective(&mut sb, "team");
+        sb.set_display(Slot::Sidebar, Some("default".into()));
+        sb.set_display(Slot::TeamRed, Some("team".into()));
+        team(&mut sb, "red", Some(Slot::TeamRed), vec!["LocalName"]);
+        assert_eq!(sb.selected_sidebar(Some("LocalName")), Some("team"));
+        assert_eq!(sb.selected_sidebar(Some("localname")), Some("default"));
+        assert_eq!(sb.selected_sidebar(None), Some("default"));
+        sb.set_display(Slot::TeamRed, None);
+        assert_eq!(sb.selected_sidebar(Some("LocalName")), Some("default"));
+    }
+
+    #[test]
+    fn reset_and_white_are_distinct_and_membership_updates_reselect() {
+        let mut sb = Scoreboard::default();
+        for name in ["default", "white", "red"] {
+            objective(&mut sb, name);
+        }
+        sb.set_display(Slot::Sidebar, Some("default".into()));
+        sb.set_display(Slot::TeamWhite, Some("white".into()));
+        sb.set_display(Slot::TeamRed, Some("red".into()));
+        team(&mut sb, "reset", None, vec!["LocalName"]);
+        assert_eq!(sb.selected_sidebar(Some("LocalName")), Some("default"));
+        team(
+            &mut sb,
+            "white-team",
+            Some(Slot::TeamWhite),
+            vec!["LocalName"],
+        );
+        assert_eq!(sb.selected_sidebar(Some("LocalName")), Some("white"));
+        team(&mut sb, "red-team", Some(Slot::TeamRed), vec!["Other"]);
+        sb.update_team_members("red-team", vec!["LocalName".into()], true);
+        assert_eq!(sb.selected_sidebar(Some("LocalName")), Some("red"));
+        sb.set_team(
+            "red-team".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            [1.0; 4],
+            Some([1.0; 4]),
+            Some(Slot::TeamWhite),
+            None,
+        );
+        assert_eq!(sb.selected_sidebar(Some("LocalName")), Some("white"));
+        sb.set_team(
+            "red-team".into(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            [1.0; 4],
+            Some([1.0; 4]),
+            Some(Slot::TeamRed),
+            None,
+        );
+        sb.set_objective("red".into(), None, None);
+        assert_eq!(sb.selected_sidebar(Some("LocalName")), Some("default"));
+        objective(&mut sb, "red");
+        sb.set_display(Slot::TeamRed, Some("red".into()));
+        sb.update_team_members("red-team", vec!["LocalName".into()], false);
+        assert_eq!(sb.selected_sidebar(Some("LocalName")), Some("default"));
+        sb.remove_team("reset");
+        sb.remove_team("white-team");
+        sb.remove_team("red-team");
+        assert_eq!(sb.selected_sidebar(Some("LocalName")), Some("default"));
+    }
+
+    #[test]
+    fn representative_slots_unknown_names_and_removal_keep_slot_semantics() {
+        let mut sb = Scoreboard::default();
+        for name in ["list", "side", "below", "red", "other"] {
+            objective(&mut sb, name);
+        }
+        for (slot, name) in [
+            (Slot::List, "list"),
+            (Slot::Sidebar, "side"),
+            (Slot::BelowName, "below"),
+            (Slot::TeamRed, "red"),
+        ] {
+            sb.set_display(slot, Some(name.to_owned()));
+        }
+        assert_eq!(sb.default_sidebar(), Some("side"));
+        sb.set_display(Slot::List, None);
+        assert_eq!(sb.default_sidebar(), Some("side"));
+        sb.set_display(Slot::Sidebar, Some("missing".to_owned()));
+        objective(&mut sb, "missing");
+        assert_eq!(sb.default_sidebar(), None);
+        sb.set_display(Slot::Sidebar, Some("shared".to_owned()));
+        objective(&mut sb, "shared");
+        sb.set_display(Slot::TeamDarkBlue, Some("shared".to_owned()));
+        sb.set_display(Slot::TeamRed, Some("other".to_owned()));
+        sb.set_objective("shared".to_owned(), None, None);
+        assert_eq!(sb.displays[Slot::Sidebar as usize], None);
+        assert_eq!(sb.displays[Slot::TeamDarkBlue as usize], None);
+        assert_eq!(
+            sb.displays[Slot::TeamRed as usize].as_deref(),
+            Some("other")
+        );
+    }
+}
+#[cfg(test)]
+mod scoreboard_list_score_tests {
+    use azalea_core::objectives::ObjectiveCriteria;
+    use azalea_protocol::packets::game::c_set_display_objective::DisplaySlot as Slot;
+
+    use super::Scoreboard;
+    use crate::chat_component::Style;
+    use crate::ui::hud::ScoreNumberFormat;
+    use crate::ui::text::TextSpan;
+
+    fn objective(sb: &mut Scoreboard, name: &str, format: Option<ScoreNumberFormat>) {
+        sb.set_objective_with_render_type(
+            name.to_owned(),
+            Some(vec![TextSpan::new("objective display".into(), [1.0; 4])]),
+            format,
+            ObjectiveCriteria::Integer,
+        );
+    }
+
+    #[test]
+    fn list_accessor_is_only_list_and_requires_existing_raw_owner_score() {
+        let mut sb = Scoreboard::default();
+        objective(&mut sb, "side", None);
+        objective(&mut sb, "list", None);
+        sb.set_display(Slot::Sidebar, Some("side".into()));
+        assert_eq!(sb.list_objective_render_type(), None);
+        sb.set_display(Slot::List, Some("list".into()));
+        assert_eq!(
+            sb.list_objective_render_type(),
+            Some(ObjectiveCriteria::Integer)
+        );
+        sb.set_objective_with_render_type(
+            "list".into(),
+            Some(Vec::new()),
+            None,
+            ObjectiveCriteria::Hearts,
+        );
+        assert_eq!(
+            sb.list_objective_render_type(),
+            Some(ObjectiveCriteria::Hearts)
+        );
+        assert!(sb.list_score("RawProfile").is_none());
+        sb.set_score(
+            "RawProfile".into(),
+            "list".into(),
+            -7,
+            Some(vec![TextSpan::new(
+                "ignored score display".into(),
+                [1.0; 4],
+            )]),
+            None,
+        );
+        let score = sb.list_score("RawProfile").unwrap();
+        assert_eq!(score.value, -7);
+        assert_eq!(score.formatted[0].text, "-7");
+        assert_eq!(
+            score.formatted[0].color,
+            super::super::common::rgb(0xffff55)
+        );
+        assert!(sb.list_score("ignored score display").is_none());
+        sb.reset_score("RawProfile", Some("list"));
+        assert!(sb.list_score("RawProfile").is_none());
+        sb.set_score("RawProfile".into(), "list".into(), 0, None, None);
+        assert_eq!(sb.list_score("RawProfile").unwrap().value, 0);
+        sb.set_display(Slot::List, None);
+        assert_eq!(sb.list_objective_render_type(), None);
+        assert!(sb.list_score("RawProfile").is_none());
+    }
+
+    #[test]
+    fn list_format_resolution_is_score_then_objective_then_yellow_default() {
+        let mut sb = Scoreboard::default();
+        let objective_style = Style {
+            color: Some(0x112233),
+            ..Style::default()
+        };
+        let score_style = Style {
+            color: Some(0x445566),
+            ..Style::default()
+        };
+        objective(
+            &mut sb,
+            "list",
+            Some(ScoreNumberFormat::Styled(objective_style)),
+        );
+        sb.set_display(Slot::List, Some("list".into()));
+        sb.set_score("objective-only".into(), "list".into(), 1, None, None);
+        assert_eq!(
+            sb.list_score("objective-only").unwrap().formatted[0].color,
+            super::super::common::rgb(0x112233)
+        );
+        sb.set_score(
+            "score-level".into(),
+            "list".into(),
+            2,
+            None,
+            Some(ScoreNumberFormat::Styled(score_style)),
+        );
+        assert_eq!(
+            sb.list_score("score-level").unwrap().formatted[0].color,
+            super::super::common::rgb(0x445566)
+        );
+        sb.set_score(
+            "styled-no-color".into(),
+            "list".into(),
+            4,
+            None,
+            Some(ScoreNumberFormat::Styled(Style::default())),
+        );
+        assert_eq!(
+            sb.list_score("styled-no-color").unwrap().formatted[0].color,
+            [1.0; 4]
+        );
+
+        objective(&mut sb, "default", None);
+        sb.set_display(Slot::List, Some("default".into()));
+        sb.set_score("fallback".into(), "default".into(), 3, None, None);
+        assert_eq!(
+            sb.list_score("fallback").unwrap().formatted[0].color,
+            super::super::common::rgb(0xffff55)
+        );
+        let sidebar_default =
+            super::format_score_number(3, None, super::super::common::rgb(0xff5555));
+        assert_eq!(
+            sidebar_default[0].color,
+            super::super::common::rgb(0xff5555)
+        );
+    }
+
+    #[test]
+    fn list_blank_fixed_remove_and_slot_clear_keep_semantics() {
+        let mut sb = Scoreboard::default();
+        objective(
+            &mut sb,
+            "list",
+            Some(ScoreNumberFormat::Styled(Style {
+                color: Some(0x112233),
+                ..Style::default()
+            })),
+        );
+        sb.set_display(Slot::List, Some("list".into()));
+        sb.set_score(
+            "blank".into(),
+            "list".into(),
+            12,
+            None,
+            Some(ScoreNumberFormat::Blank),
+        );
+        assert!(sb.list_score("blank").unwrap().formatted.is_empty());
+        let fixed = vec![TextSpan::new("custom".into(), [0.2, 0.3, 0.4, 1.0])];
+        sb.set_score(
+            "fixed".into(),
+            "list".into(),
+            -4,
+            None,
+            Some(ScoreNumberFormat::Fixed(fixed.clone())),
+        );
+        assert_eq!(sb.list_score("fixed").unwrap().formatted, fixed);
+        let fixed_unstyled = vec![TextSpan::new("unstyled fixed".into(), [1.0; 4])];
+        sb.set_score(
+            "fixed-unstyled".into(),
+            "list".into(),
+            5,
+            None,
+            Some(ScoreNumberFormat::Fixed(fixed_unstyled.clone())),
+        );
+        assert_eq!(
+            sb.list_score("fixed-unstyled").unwrap().formatted,
+            fixed_unstyled
+        );
+        sb.set_objective("list".into(), None, None);
+        assert_eq!(sb.list_objective_render_type(), None);
+        assert!(sb.list_score("fixed").is_none());
+
+        objective(&mut sb, "list", None);
+        sb.set_display(Slot::List, Some("list".into()));
+        assert_eq!(
+            sb.list_objective_render_type(),
+            Some(ObjectiveCriteria::Integer)
+        );
+        objective(&mut sb, "objective-blank", Some(ScoreNumberFormat::Blank));
+        sb.set_display(Slot::List, Some("objective-blank".into()));
+        sb.set_score(
+            "objective-blank-owner".into(),
+            "objective-blank".into(),
+            6,
+            None,
+            None,
+        );
+        assert!(
+            sb.list_score("objective-blank-owner")
+                .unwrap()
+                .formatted
+                .is_empty()
+        );
+        sb.set_display(Slot::List, None);
+        assert_eq!(sb.list_objective_render_type(), None);
     }
 }

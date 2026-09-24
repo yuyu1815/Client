@@ -1,5 +1,5 @@
-//! Shared pieces for container screens (survival inventory, crafting table,
-//! furnace): the click/drag gesture state machine and per-frame slot drawing.
+//! Shared slot drawing and click/drag gesture pieces for inventory, chest,
+//! merchant, mount, and other container screens.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -362,10 +362,54 @@ fn resolve_key_ops(
     ops
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_handed_outside_click_does_not_close_container() {
+        let input = ContainerInput {
+            left_pressed: true,
+            right_pressed: false,
+            middle_pressed: false,
+            left_held: false,
+            right_held: false,
+            shift: false,
+            hotbar_swap: None,
+            swap_offhand: false,
+            throw: false,
+            throw_all: false,
+        };
+        let panel = Panel {
+            scale: 1.0,
+            ox: 10.0,
+            oy: 10.0,
+            w: 176.0,
+            h: 166.0,
+        };
+        let (ops, close) = resolve_gesture(
+            &input,
+            None,
+            &panel,
+            (0.0, 0.0),
+            ContainerKind::Chest { rows: 3 },
+            &[],
+            &ItemStack::Empty,
+            &mut None,
+            &mut None,
+        );
+
+        assert!(!close);
+        assert!(matches!(
+            ops.as_slice(),
+            [ClickOperation::Pickup(PickupClick::Left { slot: None })]
+        ));
+    }
+}
+
 /// Turns this frame's input + hover into container-click operations, driving
 /// the drag state machine. The server applies and resyncs, so no local
-/// prediction. Returns the ops and whether an empty-handed click landed
-/// outside the panel (a close request).
+/// prediction. Returns the ops and whether the menu should close.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_gesture(
     input: &ContainerInput,
@@ -434,12 +478,9 @@ pub fn resolve_gesture(
     };
 
     if outside {
-        // Outside click: drop the cursor stack, else request a close.
-        if carrying {
-            ops.push(pickup(&click_kind, None));
-            return (ops, false);
-        }
-        return (ops, input.left_pressed);
+        // Vanilla sends PICKUP at slot -999; an empty cursor makes it a no-op.
+        ops.push(pickup(&click_kind, None));
+        return (ops, false);
     }
 
     let Some(slot) = hovered else {

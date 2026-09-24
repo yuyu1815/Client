@@ -191,7 +191,8 @@
 //!   before the final byte of `login` and `respawn`
 //! - `container_set_slot` reads a signed-byte container id whose -1/-2
 //!   sentinels became `set_cursor_item`/`set_player_inventory`
-//! - `cooldown` carries an item registry id where 26.2 names a cooldown group
+//! - older `cooldown` packets carry an item registry id; they are normalized to
+//!   the 26.2 cooldown-group Identifier form before raw cooldown handling
 //! - clientbound `set_carried_item` was renamed `set_held_slot` (identical byte
 //!   layout); login `game_profile` -> `login_finished` needs no alias (login
 //!   rewrites dispatch by id) but ends in a `strictErrorHandling` bool 1.21.2
@@ -337,8 +338,8 @@
 //!   `ChatFormatting` ordinal, where 26.2 writes an `Optional<TeamColor>`
 //! - outbound `set_creative_mode_slot` leaves component values undelimited,
 //!   which is 1.21.4's layout rather than 26.2's
-//! - inbound `cooldown` carries an item registry id, where 26.2 names a
-//!   cooldown group
+//! - inbound legacy `cooldown` carries an item registry id and is normalized to
+//!   the 26.2 cooldown-group Identifier payload
 
 use std::io::Cursor;
 use std::sync::Mutex;
@@ -526,6 +527,7 @@ impl Ids767 {
 /// Native-space dispatch ids for the frame rewrites protocol 766 needs.
 struct Ids766 {
     projectile_power_id: u32,
+    mount_screen_open_id: u32,
     /// Serverbound `use_item`: native + wire ids for the rotation strip.
     use_item_id: u32,
     use_item_old_id: u32,
@@ -533,7 +535,11 @@ struct Ids766 {
 
 impl Ids766 {
     fn rewrite(&self, id: u32) -> Option<FrameRewrite> {
-        (id == self.projectile_power_id).then_some(translate_projectile_power_766 as FrameRewrite)
+        Some(match id {
+            i if i == self.projectile_power_id => translate_projectile_power_766,
+            i if i == self.mount_screen_open_id => translate_mount_screen_open_766,
+            _ => return None,
+        })
     }
 }
 
@@ -1640,6 +1646,7 @@ impl GameIds {
             }),
             v766: (protocol <= 766).then(|| Ids766 {
                 projectile_power_id: id(Clientbound, "projectile_power"),
+                mount_screen_open_id: id(Clientbound, "mount_screen_open"),
                 use_item_id: id(Serverbound, "use_item"),
                 use_item_old_id: required_id(table, Phase::Game, Serverbound, "use_item"),
             }),
@@ -2117,18 +2124,28 @@ fn translate_container_set_slot_765(
     Some(out)
 }
 
-/// Rewrites `cooldown`'s item id into the native registry space. Vanilla
-/// 26.2 names a cooldown group instead, but azalea still decodes the item
-/// registry id and these frames feed azalea (like the team-color ordinal).
-/// TODO: write the cooldown group once pomme owns the decoder (see the
-/// azalea-divergence list).
+/// Normalizes the legacy item-id cooldown packet to the 26.2 group-Identifier
+/// layout. An ungrouped UseCooldown's default group is the item's own key.
 fn translate_cooldown_767(remaps: &RegistryRemaps, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     let mut p = 0;
     let item = wire::read_varint(payload, &mut p)?;
-    let mut out = Vec::with_capacity(payload.len() + 2);
+    let duration = wire::read_varint(payload, &mut p)?;
+    if p != payload.len() {
+        return None;
+    }
+    let native_item = remaps.remap(ClientRegistry::Item, item)?;
+    let name = RegistryTable::native().name_of(ClientRegistry::Item, native_item)?;
+    let group = if name.contains(':') {
+        name.to_owned()
+    } else {
+        format!("minecraft:{name}")
+    };
+
+    let mut out = Vec::with_capacity(group.len() + 7);
     wire::write_varint(&mut out, id);
-    wire::write_varint(&mut out, remaps.remap(ClientRegistry::Item, item)?);
-    out.extend_from_slice(&payload[p..]);
+    wire::write_varint(&mut out, group.len() as u32);
+    out.extend_from_slice(group.as_bytes());
+    wire::write_varint(&mut out, duration);
     Some(out)
 }
 
@@ -3107,6 +3124,28 @@ fn translate_projectile_power_766(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[entity]);
     out.extend_from_slice(&magnitude.to_be_bytes());
+    Some(out)
+}
+
+/// Protocol 766's `horse_screen_open` middle value is the mount's legacy
+/// inventory size (`3 * columns + 1`), while native 26.2 expects columns.
+/// This rewrite is deliberately confined to the <=766 version gate.
+fn translate_mount_screen_open_766(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    let mut cur = Cursor::new(payload);
+    let container_id = varint_span(&mut cur)?;
+    let legacy_size = u32::azalea_read_var(&mut cur).ok()?;
+    let entity_id_at = cur.position() as usize;
+    advance(&mut cur, 4)?; // entity id is a fixed-width int
+    if cur.position() as usize != payload.len() {
+        return None;
+    }
+    let columns = legacy_size.saturating_sub(1) / 3;
+
+    let mut out = Vec::with_capacity(payload.len() + 2);
+    wire::write_varint(&mut out, id);
+    out.extend_from_slice(&payload[container_id]);
+    wire::write_varint(&mut out, columns);
+    out.extend_from_slice(&payload[entity_id_at..]);
     Some(out)
 }
 

@@ -4,7 +4,7 @@
 //! reconciles, so a wrong prediction only causes a self-correcting glitch,
 //! never item dup/loss.
 
-use azalea_inventory::components::{EquipmentSlot, Equippable};
+use azalea_inventory::components::{EquipmentSlot, Equippable, MaxStackSize};
 use azalea_inventory::item::MaxStackSizeExt;
 use azalea_inventory::operations::{
     ClickOperation, PickupClick, QuickCraftKind, QuickMoveClick, ThrowClick,
@@ -24,6 +24,8 @@ pub enum ContainerKind {
     ShulkerBox,
     Anvil,
     Enchantment,
+    Merchant,
+    Horse { columns: u8 },
 }
 
 impl ContainerKind {
@@ -34,6 +36,8 @@ impl ContainerKind {
             Self::Chest { rows } => rows as usize * 9 + 36,
             Self::ShulkerBox => 63,
             Self::Enchantment => 38,
+            Self::Merchant => 39,
+            Self::Horse { columns } => 38 + 3 * columns as usize,
         }
     }
 
@@ -46,49 +50,46 @@ impl ContainerKind {
             Self::Chest { rows } => rows as usize * 9,
             Self::ShulkerBox => 27,
             Self::Enchantment => 2,
+            Self::Merchant => 3,
+            Self::Horse { columns } => 2 + 3 * columns as usize,
         }
     }
 
-    /// The result slot whose clicks we can't predict, if this menu has one:
-    /// crafting results need recipe logic, the anvil result costs XP and
-    /// materials. Vanilla excludes the crafting result from double-click
-    /// gathering (`canTakeItemForPickAll`) but not the anvil result; we skip
-    /// that one too since its take costs aren't modeled here. The furnace
-    /// result slot is neither: taking from it is a plain pickup.
+    /// Result slots we leave server-authoritative because taking them has
+    /// recipe/experience effects that this predictor does not model.
     fn crafting_result_slot(self) -> Option<usize> {
         match self {
             Self::Player | Self::CraftingTable => Some(0),
-            Self::Anvil => Some(2),
-            Self::Furnace | Self::Chest { .. } | Self::ShulkerBox | Self::Enchantment => None,
+            Self::Anvil | Self::Merchant => Some(2),
+            Self::Furnace
+            | Self::Chest { .. }
+            | Self::ShulkerBox
+            | Self::Enchantment
+            | Self::Horse { .. } => None,
         }
     }
 
     /// Menu slot holding hotbar index `i` (0-8), the SWAP click target.
     pub fn hotbar_menu_slot(self, i: u8) -> u16 {
         match self {
-            // The player menu's offhand slot sits after the hotbar.
             Self::Player => 36 + i as u16,
             _ => (self.slot_count() - 9) as u16 + i as u16,
         }
     }
 
-    /// The offhand's menu slot, only present in the player menu. Other menus
-    /// reach the offhand through the player inventory directly, which slot
-    /// prediction can't see.
     pub fn offhand_menu_slot(self) -> Option<u16> {
         matches!(self, Self::Player).then_some(45)
     }
 
-    /// Per-slot stack limit where a menu overrides the item's own maximum
-    /// (vanilla `Slot::getMaxStackSize`): the enchanting item slot holds one.
+    /// Per-slot stack limit where a menu overrides the item's maximum.
     fn slot_limit(self, s: usize) -> i32 {
         match (self, s) {
-            (Self::Enchantment, 0) => 1,
+            (Self::Player, 5..=8) | (Self::Enchantment, 0) => 1,
             _ => i32::MAX,
         }
     }
 
-    fn build_menu(self, slots: &[ItemStack]) -> Menu {
+    fn build_menu(self, slots: &[ItemStack]) -> Option<Menu> {
         let mut menu = match self {
             Self::Player => Menu::Player(Player::default()),
             Self::CraftingTable => Menu::Crafting {
@@ -141,24 +142,26 @@ impl ContainerKind {
                 lapis: ItemStack::Empty,
                 player: SlotList::default(),
             },
+            // Azalea has no native merchant or mount menu model. Never predict
+            // these by pretending they are a chest or another menu.
+            Self::Merchant | Self::Horse { .. } => return None,
         };
         for (i, item) in slots.iter().enumerate() {
             if let Some(s) = menu.slot_mut(i) {
                 *s = item.clone();
             }
         }
-        menu
+        Some(menu)
     }
 
-    /// Whether `item` may be placed into slot `s`: result/output slots never,
-    /// player armor slots only their matching equipment, shulker contents no
-    /// shulker boxes, everything else yes. Mirrors vanilla `mayPlace`. The
-    /// furnace fuel slot accepts anything here: fuel values live server-side,
-    /// so the server reconciles bad placements.
+    /// Predict placement restrictions for menu slots whose rule is local and
+    /// deterministic. Furnace fuel remains server-authoritative (tag
+    /// dependent).
     fn may_place(self, s: usize, item: &ItemStackData) -> bool {
         match (self, s) {
-            (Self::Player | Self::CraftingTable, 0) => false,
-            (Self::Furnace | Self::Anvil, 2) => false,
+            (Self::Player | Self::CraftingTable, 0) | (Self::Furnace, 1 | 2) | (Self::Anvil, 2) => {
+                false
+            }
             (Self::Player, 5..=8) => {
                 let want = match s {
                     5 => EquipmentSlot::Head,
@@ -171,6 +174,11 @@ impl ContainerKind {
             (Self::ShulkerBox, 0..=26) => {
                 !crate::player::inventory::item_resource_name(item.kind).ends_with("shulker_box")
             }
+            // Merchant payment slots and horse storage/player slots accept
+            // ordinary stacks. Horse equipment rules depend on the entity.
+            (Self::Merchant, 0..=1) => true,
+            (Self::Merchant, _) | (Self::Horse { .. }, 0..=1) => false,
+            (Self::Horse { .. }, _) => true,
             (Self::Enchantment, 1) => item.kind == ItemKind::LapisLazuli,
             _ => true,
         }
@@ -187,16 +195,16 @@ pub fn apply_click(
     op: &ClickOperation,
     creative: bool,
 ) -> Vec<(u16, ItemStack)> {
-    // Crafting-result clicks need recipe logic; leave them to the server.
+    if matches!(kind, ContainerKind::Merchant | ContainerKind::Horse { .. }) {
+        return Vec::new();
+    }
     if op
         .slot_num()
         .is_some_and(|s| Some(s as usize) == kind.crafting_result_slot())
     {
         return Vec::new();
     }
-    // Vanilla routes a player-slot shift-click by whether the item is
-    // smeltable or fuel; recipes and fuel values live server-side, so leave
-    // those to the server too.
+    // Furnace player-slot quick-move needs server-side recipe/fuel data.
     if kind == ContainerKind::Furnace
         && matches!(op, ClickOperation::QuickMove(_))
         && op
@@ -205,7 +213,9 @@ pub fn apply_click(
     {
         return Vec::new();
     }
-    let mut menu = kind.build_menu(slots);
+    let Some(mut menu) = kind.build_menu(slots) else {
+        return Vec::new();
+    };
     apply_op(kind, &mut menu, cursor, op, creative);
 
     let mut changed = Vec::new();
@@ -218,10 +228,8 @@ pub fn apply_click(
     changed
 }
 
-/// Distribute the carried stack across the dragged slots (left = even split,
-/// right = one each), matching vanilla quick-craft. Returns each covered slot's
-/// resulting stack and the remainder left on the cursor. Read-only: used for
-/// both the live preview and the release commit.
+/// Distribute the carried stack across dragged slots (left = even split,
+/// right = one each), capped by both item components and slot rules.
 pub fn drag_distribution(
     container: ContainerKind,
     slots: &[ItemStack],
@@ -229,6 +237,12 @@ pub fn drag_distribution(
     kind: &QuickCraftKind,
     covered: &[u16],
 ) -> (Vec<(u16, ItemStack)>, ItemStack) {
+    if matches!(
+        container,
+        ContainerKind::Merchant | ContainerKind::Horse { .. }
+    ) {
+        return (Vec::new(), cursor.clone());
+    }
     let ItemStack::Present(carried) = cursor else {
         return (Vec::new(), cursor.clone());
     };
@@ -241,7 +255,7 @@ pub fn drag_distribution(
     if n == 0 {
         return (Vec::new(), cursor.clone());
     }
-    let max = carried.kind.max_stack_size();
+    let max = max_stack_size(carried);
     let place = match kind {
         QuickCraftKind::Left => carried.count / n,
         QuickCraftKind::Right => 1,
@@ -252,7 +266,8 @@ pub fn drag_distribution(
     for &s in &eligible {
         let it = slots.get(s as usize).unwrap_or(&ItemStack::Empty);
         let existing = if same_item(cursor, it) { it.count() } else { 0 };
-        let new_count = (place + existing).min(max.min(container.slot_limit(s as usize)));
+        let new_count =
+            (place + existing).min(effective_stack_limit(max, container.slot_limit(s as usize)));
         remaining -= new_count - existing;
         let mut stack = carried.clone();
         stack.count = new_count;
@@ -261,15 +276,21 @@ pub fn drag_distribution(
     (changed, with_count(carried.clone(), remaining))
 }
 
-/// A drag can cover a slot only if the item may go there (vanilla gates
-/// quick-craft slots on `mayPlace`) and it's empty or holds the same item as
-/// the carried stack.
 pub fn drag_slot_eligible(
     container: ContainerKind,
     slots: &[ItemStack],
     cursor: &ItemStack,
     slot: u16,
 ) -> bool {
+    let slot_index = slot as usize;
+    let drag_allowed = match container {
+        ContainerKind::Merchant => slot_index != 2 && slot_index < container.slot_count(),
+        ContainerKind::Horse { .. } => slot_index >= 2 && slot_index < container.slot_count(),
+        _ => true,
+    };
+    if !drag_allowed {
+        return false;
+    }
     let ItemStack::Present(carried) = cursor else {
         return false;
     };
@@ -296,7 +317,7 @@ fn apply_op(
                 pickup_click(kind, menu, cursor, *s as usize, false)
             }
             PickupClick::Left { slot: None } | PickupClick::LeftOutside => {
-                *cursor = ItemStack::Empty; // drop whole
+                *cursor = ItemStack::Empty
             }
             PickupClick::Right { slot: None } | PickupClick::RightOutside => shrink(cursor, 1),
         },
@@ -313,15 +334,10 @@ fn apply_op(
                 40 => kind.offhand_menu_slot().map(usize::from),
                 _ => None,
             };
-            // Unmappable target (offhand outside the player menu): leave the
-            // swap to the server.
-            let Some(target) = target else {
-                return;
-            };
+            let Some(target) = target else { return };
             swap_click(kind, menu, s.source_slot as usize, target);
         }
         ClickOperation::Throw(t) => {
-            // Vanilla THROW only acts with an empty cursor.
             if cursor.is_present() {
                 return;
             }
@@ -335,38 +351,43 @@ fn apply_op(
             }
         }
         ClickOperation::Clone(c) => {
-            // Vanilla CLONE: creative only, empty cursor, fills to a full stack.
             if creative
                 && cursor.is_empty()
                 && let Some(ItemStack::Present(d)) = menu.slot(c.slot as usize)
             {
                 let mut full = d.clone();
-                full.count = full.kind.max_stack_size();
+                full.count = max_stack_size(&full);
                 *cursor = ItemStack::Present(full);
             }
         }
-        // Drag is handled at the send site.
         ClickOperation::QuickCraft(_) => {}
     }
 }
 
-/// Vanilla `doClick` SWAP: exchange the hovered slot with a hotbar/offhand
-/// slot (`held` in vanilla terms), respecting `mayPlace` and slot limits.
 fn swap_click(kind: ContainerKind, menu: &mut Menu, source: usize, target: usize) {
     let held = take_slot(menu, target);
     let slot_item = take_slot(menu, source);
     let (new_slot, new_held) = match (held, slot_item) {
         (ItemStack::Empty, ItemStack::Empty) => (ItemStack::Empty, ItemStack::Empty),
         (ItemStack::Empty, item) => (ItemStack::Empty, item),
-        (held @ ItemStack::Present(_), slot_item) => {
-            let h = held.as_present().unwrap();
-            let max = h.kind.max_stack_size().min(kind.slot_limit(source));
-            if !kind.may_place(source, h) || h.count > max {
-                // Over-limit swaps re-add overflow to the inventory
-                // server-side; not predicted.
-                (slot_item, held)
+        (ItemStack::Present(held), ItemStack::Empty) => {
+            let max = effective_stack_limit(max_stack_size(&held), kind.slot_limit(source));
+            if kind.may_place(source, &held) {
+                let (placed, remaining) = split_stack_count(held.count, max);
+                (
+                    with_count(held.clone(), placed),
+                    with_count(held, remaining),
+                )
             } else {
-                (held, slot_item)
+                (ItemStack::Empty, ItemStack::Present(held))
+            }
+        }
+        (ItemStack::Present(held), slot_item) => {
+            let max = effective_stack_limit(max_stack_size(&held), kind.slot_limit(source));
+            if kind.may_place(source, &held) && held.count <= max {
+                (ItemStack::Present(held), slot_item)
+            } else {
+                (slot_item, ItemStack::Present(held))
             }
         }
     };
@@ -374,9 +395,6 @@ fn swap_click(kind: ContainerKind, menu: &mut Menu, source: usize, target: usize
     put_slot(menu, target, new_held);
 }
 
-/// Left/right click on a slot, following vanilla `doClick` PICKUP: `primary` is
-/// left (whole stack), otherwise right (one / rounded-up half). Respects
-/// `may_place` so restricted slots (armor) reject the wrong item.
 fn pickup_click(
     kind: ContainerKind,
     menu: &mut Menu,
@@ -387,37 +405,33 @@ fn pickup_click(
     let mut slot_item = take_slot(menu, s);
     let mut carried = std::mem::take(cursor);
     if slot_item.is_empty() {
-        let can_place = carried.as_present().is_some_and(|c| kind.may_place(s, c));
-        if can_place {
+        if carried.as_present().is_some_and(|c| kind.may_place(s, c)) {
             let amount = if primary { carried.count() } else { 1 };
             safe_insert(kind, s, &mut slot_item, &mut carried, amount);
         }
     } else if carried.is_empty() {
-        let total = slot_item.count();
-        let amount = if primary { total } else { (total + 1) / 2 };
+        let amount = if primary {
+            slot_item.count()
+        } else {
+            (slot_item.count() + 1) / 2
+        };
         carried = slot_item.split(amount as u32);
     } else if carried.as_present().is_some_and(|c| kind.may_place(s, c)) {
         if same_item(&carried, &slot_item) {
             let amount = if primary { carried.count() } else { 1 };
             safe_insert(kind, s, &mut slot_item, &mut carried, amount);
-        } else if carried
-            .as_present()
-            .is_some_and(|c| c.count <= c.kind.max_stack_size().min(kind.slot_limit(s)))
-        {
-            // Vanilla swaps only when the carried stack fits the slot's limit.
+        } else if carried.as_present().is_some_and(|c| {
+            c.count <= effective_stack_limit(max_stack_size(c), kind.slot_limit(s))
+        }) {
             std::mem::swap(&mut carried, &mut slot_item);
         }
     } else if same_item(&carried, &slot_item) {
-        // Slot won't accept a placement but holds the same item: pull it into hand.
-        merge_into(&mut carried, &mut slot_item);
+        merge_into(&mut carried, &mut slot_item, kind.slot_limit(s));
     }
     put_slot(menu, s, slot_item);
     *cursor = carried;
 }
 
-/// Move up to `amount` of `carried` into `slot` (empty or same item), capped to
-/// the item's max stack and the slot's own limit, like vanilla
-/// `Slot::safeInsert`.
 fn safe_insert(
     kind: ContainerKind,
     s: usize,
@@ -428,7 +442,7 @@ fn safe_insert(
     let ItemStack::Present(c) = carried.clone() else {
         return;
     };
-    let max = c.kind.max_stack_size().min(kind.slot_limit(s));
+    let max = effective_stack_limit(max_stack_size(&c), kind.slot_limit(s));
     let take = match slot {
         ItemStack::Empty => amount.min(c.count).min(max),
         ItemStack::Present(d) => amount.min(c.count).min((max - d.count).max(0)),
@@ -447,14 +461,6 @@ fn safe_insert(
     shrink(carried, take);
 }
 
-/// Shift-click, repeating until it stops making progress (vanilla loops too).
-/// Chests move between the contents and player regions like `ChestMenu`
-/// (player-bound reversed); the anvil only ever tries the input slots
-/// (`canMoveIntoInputSlots` is true, making `ItemCombinerMenu`'s main/hotbar
-/// branches dead code); the furnace moves its own slots to the player region
-/// like `AbstractFurnaceMenu` (result reversed; player-slot clicks never get
-/// predicted). The player and crafting menus use azalea's `quick_move_stack`,
-/// whose routing matches vanilla closely enough for them.
 fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
     for _ in 0..menu.len() {
         let before = menu.slot(s).map(ItemStack::count).unwrap_or(0);
@@ -477,13 +483,8 @@ fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
                     move_item_stack_to(kind, menu, s, 0..2, false);
                 }
             }
-            ContainerKind::Furnace => {
-                move_item_stack_to(kind, menu, s, 3..menu.len(), s == 2);
-            }
+            ContainerKind::Furnace => move_item_stack_to(kind, menu, s, 3..menu.len(), s == 2),
             ContainerKind::Enchantment => {
-                // Vanilla `EnchantmentMenu.quickMoveStack`: menu slots go to
-                // the player region; lapis fills its slot; anything else moves
-                // a single item into the empty item slot.
                 if s < 2 {
                     move_item_stack_to(kind, menu, s, 2..menu.len(), true);
                 } else if menu
@@ -509,9 +510,6 @@ fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
     }
 }
 
-/// Vanilla `AbstractContainerMenu.moveItemStackTo`: first merge into matching
-/// stacks across `range` (back to front when `reverse`), then place the
-/// remainder into the first empty slot that accepts it.
 fn move_item_stack_to(
     kind: ContainerKind,
     menu: &mut Menu,
@@ -525,11 +523,7 @@ fn move_item_stack_to(
     } else {
         range.collect()
     };
-
-    if moving
-        .as_present()
-        .is_some_and(|d| d.kind.max_stack_size() > 1)
-    {
+    if moving.as_present().is_some_and(|d| max_stack_size(d) > 1) {
         for &i in &indices {
             if moving.is_empty() {
                 break;
@@ -537,36 +531,36 @@ fn move_item_stack_to(
             if let Some(slot) = menu.slot_mut(i)
                 && same_item(slot, &moving)
             {
-                merge_into(slot, &mut moving);
+                merge_into(slot, &mut moving, kind.slot_limit(i));
             }
         }
     }
-
-    if let ItemStack::Present(data) = &moving {
-        for &i in &indices {
-            if !kind.may_place(i, data) {
-                continue;
-            }
-            if let Some(slot) = menu.slot_mut(i)
-                && slot.is_empty()
-            {
-                *slot = std::mem::take(&mut moving);
-                break;
-            }
+    for &i in &indices {
+        let ItemStack::Present(data) = moving.clone() else {
+            break;
+        };
+        if !kind.may_place(i, &data) {
+            continue;
+        }
+        if let Some(slot) = menu.slot_mut(i)
+            && slot.is_empty()
+        {
+            let take = data.count.min(effective_stack_limit(
+                max_stack_size(&data),
+                kind.slot_limit(i),
+            ));
+            *slot = with_count(data, take);
+            shrink(&mut moving, take);
         }
     }
-
     put_slot(menu, src, moving);
 }
 
-/// Double-click: gather matching items from every slot but the crafting-result
-/// slot onto the cursor up to a full stack, partial stacks first (vanilla
-/// `PICKUP_ALL` + `canTakeItemForPickAll`).
 fn pickup_all(kind: ContainerKind, menu: &mut Menu, cursor: &mut ItemStack) {
     let ItemStack::Present(carried) = cursor else {
         return;
     };
-    let max = carried.kind.max_stack_size();
+    let max = max_stack_size(carried);
     for pass in 0..2 {
         for s in 0..menu.len() {
             if Some(s) == kind.crafting_result_slot() {
@@ -580,7 +574,7 @@ fn pickup_all(kind: ContainerKind, menu: &mut Menu, cursor: &mut ItemStack) {
                 continue;
             }
             if pass == 0 && slot_count >= max {
-                continue; // leave full stacks for the second pass
+                continue;
             }
             let take = (max - cursor.count()).min(slot_count);
             shrink_slot(menu, s, take);
@@ -591,9 +585,11 @@ fn pickup_all(kind: ContainerKind, menu: &mut Menu, cursor: &mut ItemStack) {
     }
 }
 
-fn merge_into(dst: &mut ItemStack, src: &mut ItemStack) {
+fn merge_into(dst: &mut ItemStack, src: &mut ItemStack, slot_limit: i32) {
     if let (ItemStack::Present(d), ItemStack::Present(s)) = (&mut *dst, &mut *src) {
-        let moved = (d.kind.max_stack_size() - d.count).max(0).min(s.count);
+        let moved = (effective_stack_limit(max_stack_size(d), slot_limit) - d.count)
+            .max(0)
+            .min(s.count);
         d.count += moved;
         s.count -= moved;
     }
@@ -632,11 +628,65 @@ fn same_item(a: &ItemStack, b: &ItemStack) -> bool {
     }
 }
 
+fn component<T: azalea_inventory::default_components::DefaultableComponent + Clone>(
+    stack: &ItemStackData,
+) -> Option<T> {
+    stack
+        .component_patch
+        .get::<T>()
+        .cloned()
+        .or_else(|| azalea_inventory::default_components::get_default_component::<T>(stack.kind))
+}
+
+pub(crate) fn max_stack_size(stack: &ItemStackData) -> i32 {
+    component::<MaxStackSize>(stack).map_or_else(|| stack.kind.max_stack_size(), |c| c.count)
+}
+
+fn effective_stack_limit(item_limit: i32, slot_limit: i32) -> i32 {
+    item_limit.min(slot_limit)
+}
+
+fn split_stack_count(count: i32, limit: i32) -> (i32, i32) {
+    let placed = count.min(limit.max(0));
+    (placed, count - placed)
+}
+
 fn with_count(mut data: ItemStackData, count: i32) -> ItemStack {
     if count > 0 {
         data.count = count;
         ItemStack::Present(data)
     } else {
         ItemStack::Empty
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{effective_stack_limit, split_stack_count};
+
+    #[test]
+    fn merchant_and_horse_use_native_slot_layouts() {
+        let merchant = super::ContainerKind::Merchant;
+        assert_eq!(merchant.slot_count(), 39);
+        assert_eq!(merchant.inv_start(), 3);
+        assert_eq!(merchant.hotbar_menu_slot(0), 30);
+        assert_eq!(merchant.hotbar_menu_slot(8), 38);
+        assert_eq!(merchant.crafting_result_slot(), Some(2));
+
+        let horse = super::ContainerKind::Horse { columns: 0 };
+        assert_eq!(horse.slot_count(), 38);
+        assert_eq!(horse.inv_start(), 2);
+        let chest_horse = super::ContainerKind::Horse { columns: 5 };
+        assert_eq!(chest_horse.slot_count(), 53);
+        assert_eq!(chest_horse.inv_start(), 17);
+        assert_eq!(chest_horse.hotbar_menu_slot(8), 52);
+    }
+
+    #[test]
+    fn slot_max_never_exceeds_item_or_slot_limits() {
+        assert_eq!(effective_stack_limit(64, 1), 1);
+        assert_eq!(effective_stack_limit(16, 64), 16);
+        assert_eq!(split_stack_count(5, 2), (2, 3));
+        assert_eq!(split_stack_count(5, 0), (0, 5));
     }
 }

@@ -30,16 +30,16 @@ const SPRINT_SPEED_MODIFIER: f64 = 0.3_f32 as f64;
 const SNEAKING_SPEED: f32 = 0.3_f64 as f32;
 const INPUT_DAMPING: f32 = 0.98;
 const AIR_ACCELERATION: f32 = 0.02;
-// TODO: WATER_MOVEMENT_EFFICIENCY attribute - scales drag toward 0.54600006f
-// and accel toward land speed.
+// Vanilla WATER_MOVEMENT_EFFICIENCY blends water drag toward 0.54600006f and
+// acceleration toward land speed.
 const WATER_ACCELERATION: f32 = 0.02;
 const WATER_HORIZONTAL_DRAG: f32 = 0.8;
 const WATER_HORIZONTAL_DRAG_SPRINT: f32 = 0.9;
 const WATER_VERTICAL_DRAG: f32 = 0.8;
-// TODO: vanilla `travelInWater` applies the 0.8 drag first and then
-// `getFluidFallingAdjustedMovement` (gravity / 16 with the -0.003 falling
-// clamp); pomme still subtracts this placeholder before the drag.
-const WATER_GRAVITY: f64 = 0.02;
+// Vanilla `travelInWater` applies fluid drag before gravity / 16 and the
+// -0.003 falling clamp in `getFluidFallingAdjustedMovement`.
+const LAVA_DRAG: f64 = 0.5;
+const LAVA_VERTICAL_DRAG: f64 = 0.8;
 // STEP_HEIGHT is a double attribute, but LivingEntity.maxUpStep casts it to
 // float.
 const STEP_HEIGHT: f32 = 0.6_f64 as f32;
@@ -76,6 +76,7 @@ pub fn tick(
     }
 
     player.update_water_state(chunk_store);
+    reset_fall_distance_for_tick(player);
     update_crouch_state(player, input, chunk_store);
     player.tick_eye_height();
 
@@ -167,6 +168,26 @@ fn travel(
             sin_y_rot,
             cos_y_rot,
         );
+    } else if player.in_lava {
+        tick_lava(
+            player,
+            input,
+            chunk_store,
+            forward,
+            strafe,
+            sin_y_rot,
+            cos_y_rot,
+        );
+    } else if player.fall_flying {
+        tick_fall_flying(
+            player,
+            input,
+            chunk_store,
+            forward,
+            strafe,
+            sin_y_rot,
+            cos_y_rot,
+        );
     } else {
         tick_land(
             player,
@@ -200,6 +221,7 @@ pub fn tick_dead(player: &mut LocalPlayer, chunk_store: &ChunkStore) {
     // remains authoritative until Player.updatePlayerPose runs at tick end.
     let neutral = InputState::released();
     player.update_water_state(chunk_store);
+    reset_fall_distance_for_tick(player);
     player.tick_eye_height();
 
     let (sin_y_rot, cos_y_rot) = vanilla_yaw_sin_cos(player.look_dir.y_rot_deg());
@@ -253,7 +275,8 @@ fn update_fly_state(player: &mut LocalPlayer, input: &InputState, sin_y_rot: f32
 }
 
 fn jump_from_ground(player: &mut LocalPlayer, sin_y_rot: f32, cos_y_rot: f32) {
-    player.velocity.y = f64::from(JUMP_VELOCITY).max(player.velocity.y);
+    let jump = player.attribute_value("minecraft:generic.jump_strength", f64::from(JUMP_VELOCITY));
+    player.velocity.y = jump.max(player.velocity.y);
 
     if player.sprinting {
         player.velocity.x += f64::from(-sin_y_rot) * SPRINT_JUMP_BOOST;
@@ -275,8 +298,9 @@ fn tick_land(
     let on_ground_at_start = player.on_ground;
 
     let saved_vy = player.velocity.y;
-    let speed = movement_speed(player.sprinting);
-    let accel = friction_influenced_speed(speed, player, BLOCK_FRICTION);
+    let speed = movement_speed(player);
+    let friction = block_friction(chunk_store, player.position);
+    let accel = friction_influenced_speed(speed, player, friction);
     let (move_x, move_z) = movement_delta(forward, strafe, accel, sin_y_rot, cos_y_rot);
     player.velocity.x += move_x;
     player.velocity.z += move_z;
@@ -291,11 +315,11 @@ fn tick_land(
         cos_y_rot,
     );
 
-    player.velocity.y -= GRAVITY;
+    player.velocity.y -= effective_gravity(player);
     player.velocity.y *= f64::from(VERTICAL_DRAG);
 
     let h_friction = if on_ground_at_start {
-        GROUND_FRICTION
+        friction * HORIZONTAL_DRAG
     } else {
         HORIZONTAL_DRAG
     };
@@ -318,8 +342,14 @@ fn tick_water(
         player.velocity.y -= f64::from(LIQUID_JUMP_ACCELERATION);
     }
 
-    let (move_x, move_z) =
-        movement_delta(forward, strafe, WATER_ACCELERATION, sin_y_rot, cos_y_rot);
+    let mut water_walker =
+        player.attribute_value("minecraft:generic.water_movement_efficiency", 0.0) as f32;
+    if !player.on_ground {
+        water_walker *= 0.5;
+    }
+    let water_speed =
+        WATER_ACCELERATION + (movement_speed(player) - WATER_ACCELERATION) * water_walker;
+    let (move_x, move_z) = movement_delta(forward, strafe, water_speed, sin_y_rot, cos_y_rot);
     player.velocity.x += move_x;
     player.velocity.z += move_z;
 
@@ -341,23 +371,131 @@ fn tick_water(
         cos_y_rot,
     );
 
-    let h_drag = if player.sprinting {
+    let base_drag = if player.sprinting {
         WATER_HORIZONTAL_DRAG_SPRINT
     } else {
         WATER_HORIZONTAL_DRAG
     };
+    let h_drag = base_drag + (0.546_000_06 - base_drag) * water_walker;
     player.velocity.x *= f64::from(h_drag);
     player.velocity.z *= f64::from(h_drag);
-
-    let gravity = if player.velocity.y <= 0.0 && !player.swimming {
-        GRAVITY * 0.25
-    } else {
-        WATER_GRAVITY
-    };
-    player.velocity.y -= gravity;
     player.velocity.y *= f64::from(WATER_VERTICAL_DRAG);
+    player.velocity.y = fluid_falling_adjusted(
+        player.velocity.y,
+        effective_gravity(player),
+        saved_vy <= 0.0,
+        player.sprinting,
+    );
 
     overwrite_flying_vy(player, saved_vy);
+}
+
+/// 26.2 LivingEntity.updateFallFlyingMovement + client-side Entity.move.
+fn tick_fall_flying(
+    player: &mut LocalPlayer,
+    input: &InputState,
+    chunks: &ChunkStore,
+    forward: f32,
+    strafe: f32,
+    sin_y_rot: f32,
+    cos_y_rot: f32,
+) {
+    let velocity = *player.velocity;
+    let pitch_f = player.look_dir.x_rot_deg() * DEG_TO_RAD;
+    let yaw_f = player.look_dir.y_rot_deg() * DEG_TO_RAD;
+    let look = dvec3(
+        -f64::from(mth_sin(yaw_f) * mth_cos(pitch_f)),
+        -f64::from(mth_sin(pitch_f)),
+        f64::from(mth_cos(yaw_f) * mth_cos(pitch_f)),
+    );
+    let look_h = (look.x * look.x + look.z * look.z).sqrt();
+    let speed_h = (velocity.x * velocity.x + velocity.z * velocity.z).sqrt();
+    let pitch = f64::from(pitch_f);
+    let lift = pitch.cos().powi(2);
+    let mut next = velocity + dvec3(0.0, effective_gravity(player) * (-1.0 + lift * 0.75), 0.0);
+    if next.y < 0.0 && look_h > 0.0 {
+        let convert = next.y * -0.1 * lift;
+        next += dvec3(
+            look.x * convert / look_h,
+            convert,
+            look.z * convert / look_h,
+        );
+    }
+    if pitch < 0.0 && look_h > 0.0 {
+        let convert = speed_h * -f64::from(mth_sin(pitch_f)) * 0.04;
+        next += dvec3(
+            -look.x * convert / look_h,
+            convert * 3.2,
+            -look.z * convert / look_h,
+        );
+    }
+    if look_h > 0.0 {
+        next += dvec3(
+            (look.x / look_h * speed_h - next.x) * 0.1,
+            0.0,
+            (look.z / look_h * speed_h - next.z) * 0.1,
+        );
+    }
+    player.velocity = (next * dvec3(0.99, 0.98, 0.99)).into();
+    apply_collision(player, input, chunks, forward, strafe, sin_y_rot, cos_y_rot);
+}
+
+fn tick_lava(
+    player: &mut LocalPlayer,
+    input: &InputState,
+    chunk_store: &ChunkStore,
+    forward: f32,
+    strafe: f32,
+    sin_y_rot: f32,
+    cos_y_rot: f32,
+) {
+    let (move_x, move_z) =
+        movement_delta(forward, strafe, WATER_ACCELERATION, sin_y_rot, cos_y_rot);
+    player.velocity.x += move_x;
+    player.velocity.z += move_z;
+
+    let saved_vy = player.velocity.y;
+    apply_collision(
+        player,
+        input,
+        chunk_store,
+        forward,
+        strafe,
+        sin_y_rot,
+        cos_y_rot,
+    );
+
+    if player.lava_height <= FLUID_JUMP_THRESHOLD {
+        player.velocity.x *= LAVA_DRAG;
+        player.velocity.y *= LAVA_VERTICAL_DRAG;
+        player.velocity.z *= LAVA_DRAG;
+        player.velocity.y = fluid_falling_adjusted(
+            player.velocity.y,
+            effective_gravity(player),
+            saved_vy <= 0.0,
+            player.sprinting,
+        );
+    } else {
+        player.velocity.x *= LAVA_DRAG;
+        player.velocity.y *= LAVA_DRAG;
+        player.velocity.z *= LAVA_DRAG;
+    }
+    player.velocity.y -= effective_gravity(player) / 4.0;
+    overwrite_flying_vy(player, saved_vy);
+}
+
+fn fluid_falling_adjusted(movement_y: f64, gravity: f64, is_falling: bool, sprinting: bool) -> f64 {
+    if gravity == 0.0 || sprinting {
+        return movement_y;
+    }
+    if is_falling
+        && (movement_y - 0.005).abs() >= 0.003
+        && (movement_y - gravity / 16.0).abs() < 0.003
+    {
+        -0.003
+    } else {
+        movement_y - gravity / 16.0
+    }
 }
 
 // Vanilla Player.travel: while flying the travel step runs normally (gravity
@@ -378,6 +516,13 @@ fn apply_collision(
     sin_y_rot: f32,
     cos_y_rot: f32,
 ) {
+    if player.game_mode == 3 {
+        player.position += *player.velocity;
+        player.on_ground = false;
+        player.horizontal_collision = false;
+        return;
+    }
+
     let aabb = player.bounding_box();
     let delta = back_off_from_edge(
         chunk_store,
@@ -388,7 +533,7 @@ fn apply_collision(
         player.flying,
     );
     let step_height = if player.on_ground {
-        f64::from(STEP_HEIGHT)
+        player.attribute_value("minecraft:generic.step_height", f64::from(STEP_HEIGHT))
     } else {
         0.0
     };
@@ -406,6 +551,12 @@ fn apply_collision(
     player.position += resolved;
     player.on_ground = on_ground;
     player.horizontal_collision = horizontal_collision;
+    update_fall_distance(
+        &mut player.fall_distance,
+        resolved.y,
+        on_ground,
+        player.in_water,
+    );
 
     if collided_x {
         player.velocity.x = 0.0;
@@ -428,6 +579,27 @@ fn apply_collision(
     {
         player.sprinting = false;
     }
+}
+
+fn update_fall_distance(fall_distance: &mut f32, resolved_y: f64, on_ground: bool, in_water: bool) {
+    if on_ground || in_water {
+        *fall_distance = 0.0;
+    } else if resolved_y < 0.0 {
+        *fall_distance -= resolved_y as f32;
+    }
+}
+
+fn reset_fall_distance_for_tick(player: &mut LocalPlayer) {
+    if player.in_water || player.flying || has_fall_distance_reset_effect(player) {
+        player.fall_distance = 0.0;
+    }
+}
+
+fn has_fall_distance_reset_effect(player: &LocalPlayer) -> bool {
+    player.effects.sorted_desc().iter().any(|effect| {
+        crate::mob_effect::info(effect.effect_id)
+            .is_some_and(|info| matches!(info.name, "slow_falling" | "levitation"))
+    })
 }
 
 fn update_sprint_state(
@@ -563,12 +735,39 @@ fn can_fall_at_least(
     )
 }
 
-fn movement_speed(sprinting: bool) -> f32 {
-    let mut speed = MOVEMENT_SPEED_ATTRIBUTE;
-    if sprinting {
+/// Vanilla's `Block.getFriction`; floor fallback mirrors
+/// `Entity.getOnPos(0.500001F)`.
+// ponytail: collision resolver has no mainSupportingBlockPos; use the official
+// floor fallback.
+fn block_friction(chunks: &ChunkStore, position: crate::entity::components::Position) -> f32 {
+    let id = crate::world::block::block_id(chunks.get_block_state(
+        position.x.floor() as i32,
+        (position.y - f64::from(0.500_001_f32)).floor() as i32,
+        position.z.floor() as i32,
+    ));
+    friction_for_block_id(id)
+}
+
+fn friction_for_block_id(id: &str) -> f32 {
+    match id {
+        "ice" | "packed_ice" | "frosted_ice" => 0.98,
+        "blue_ice" => 0.989,
+        "slime_block" => 0.8,
+        _ => BLOCK_FRICTION,
+    }
+}
+
+fn movement_speed(player: &LocalPlayer) -> f32 {
+    let mut speed =
+        player.attribute_value("minecraft:generic.movement_speed", MOVEMENT_SPEED_ATTRIBUTE);
+    if player.sprinting {
         speed *= 1.0 + SPRINT_SPEED_MODIFIER;
     }
     speed as f32
+}
+
+fn effective_gravity(player: &LocalPlayer) -> f64 {
+    player.attribute_value("minecraft:generic.gravity", GRAVITY)
 }
 
 fn movement_delta(
@@ -797,26 +996,45 @@ mod tests {
         assert_eq!(BLOCK_FRICTION.to_bits(), 0x3f19999a);
         assert_eq!(GROUND_FRICTION.to_bits(), 0x3f0bc6a9);
         assert_eq!(GROUND_ACCEL_FACTOR.to_bits(), 0x3e5d2f1c);
-        assert_eq!(WATER_GRAVITY.to_bits(), 0x3f947ae147ae147b);
+        assert_eq!(fluid_falling_adjusted(0.0125, 0.2, true, false), -0.003);
+        assert_eq!(fluid_falling_adjusted(0.0, GRAVITY, false, false), -0.005);
         assert_eq!(MTH_EQUAL_EPSILON.to_bits(), 0x3ee4f8b580000000);
         assert_eq!(MINOR_COLLISION_ANGLE.to_bits(), 0x3fc1df46a0000000);
     }
 
     #[test]
     fn movement_speed_matches_vanilla_attribute_rounding() {
-        assert_eq!(movement_speed(false).to_bits(), 0x3dcccccd);
-        assert_eq!(movement_speed(true).to_bits(), 0x3e051eb9);
+        let mut player = LocalPlayer::new();
+        assert_eq!(movement_speed(&player).to_bits(), 0x3dcccccd);
+        player.sprinting = true;
+        assert_eq!(movement_speed(&player).to_bits(), 0x3e051eb9);
 
         let mut player = LocalPlayer::new();
         player.on_ground = true;
         assert_eq!(
-            friction_influenced_speed(movement_speed(false), &player, BLOCK_FRICTION).to_bits(),
+            friction_influenced_speed(movement_speed(&player), &player, BLOCK_FRICTION).to_bits(),
             0x3dcccccd
         );
+        player.sprinting = true;
         assert_eq!(
-            friction_influenced_speed(movement_speed(true), &player, BLOCK_FRICTION).to_bits(),
+            friction_influenced_speed(movement_speed(&player), &player, BLOCK_FRICTION).to_bits(),
             0x3e051eb9
         );
+    }
+
+    #[test]
+    fn effective_movement_attributes_override_vanilla_defaults() {
+        let mut player = LocalPlayer::new();
+        player.set_attribute_value("minecraft:generic.movement_speed", 0.2);
+        player.set_attribute_value("minecraft:generic.gravity", 0.04);
+        player.set_attribute_value("minecraft:generic.jump_strength", 0.6);
+        assert_eq!(movement_speed(&player), 0.2);
+        player.sprinting = true;
+        assert_eq!(movement_speed(&player), 0.26);
+        assert_eq!(effective_gravity(&player), 0.04);
+        let (sin, cos) = vanilla_yaw_sin_cos(0.0);
+        jump_from_ground(&mut player, sin, cos);
+        assert_eq!(player.velocity.y, 0.6);
     }
 
     #[test]
@@ -874,11 +1092,201 @@ mod tests {
         assert_eq!(cos.to_bits(), 0x3f3504f3);
 
         let forward = f32::from_bits(0x3f3504f2);
-        let (dx, dz) = movement_delta(forward, 0.0, movement_speed(false), sin, cos);
+        let (dx, dz) = movement_delta(forward, 0.0, movement_speed(&LocalPlayer::new()), sin, cos);
         assert_eq!(dx.to_bits(), 0xbfa999996d18578d);
         assert_eq!(dz.to_bits(), 0x3fa999996d18578d);
 
         assert_eq!(vanilla_look_y(30.0).to_bits(), 0xbfdfff8be0000000);
+    }
+
+    #[test]
+    fn lava_travel_uses_deep_fluid_drag_and_gravity() {
+        crate::world::block::init("26.2");
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(0.5, 10.0, 0.5).into();
+        player.velocity = crate::entity::components::Velocity::new(0.2, 0.2, 0.0);
+        player.in_lava = true;
+        player.lava_height = 0.8;
+        let chunks = ChunkStore::new(1);
+
+        tick_lava(
+            &mut player,
+            &InputState::released(),
+            &chunks,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+
+        assert_eq!(player.position.x, 0.7);
+        assert_eq!(player.velocity.x, 0.1);
+        assert_eq!(player.velocity.y, 0.08);
+    }
+
+    #[test]
+    fn friction_reads_vanilla_block_property_values() {
+        for (id, expected) in [
+            ("stone", 0.6),
+            ("ice", 0.98),
+            ("packed_ice", 0.98),
+            ("blue_ice", 0.989),
+            ("slime_block", 0.8),
+        ] {
+            assert_eq!(friction_for_block_id(id), expected);
+        }
+    }
+
+    #[test]
+    fn fall_flying_travel_applies_official_glide_and_drag() {
+        crate::world::block::init("26.2");
+        let mut player = LocalPlayer::new();
+        player.look_dir = crate::entity::components::LookDirection::new(0.0, -30.0);
+        player.velocity = crate::entity::components::Velocity::new(0.0, -0.1, 0.0);
+        let before_y = player.velocity.y;
+        tick_fall_flying(
+            &mut player,
+            &InputState::released(),
+            &ChunkStore::new(1),
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        assert!(
+            player.velocity.y > before_y - GRAVITY,
+            "upward-look lift must offset part of the gravity step"
+        );
+        assert_eq!(player.velocity.x, 0.0);
+    }
+
+    #[test]
+    fn spectator_move_bypasses_block_collision() {
+        let mut player = LocalPlayer::new();
+        player.game_mode = 3;
+        player.fall_distance = 4.0;
+        player.position = dvec3(0.5, 0.0, 0.5).into();
+        player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 1.0);
+        let chunks = ChunkStore::new(1);
+
+        apply_collision(
+            &mut player,
+            &InputState::released(),
+            &chunks,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+
+        assert_eq!(player.position.z, 1.5);
+        assert!(!player.on_ground);
+        assert!(!player.horizontal_collision);
+        assert_eq!(player.fall_distance, 4.0);
+    }
+
+    #[test]
+    fn fall_distance_helper_tracks_only_resolved_downward_movement() {
+        let mut fall_distance = 1.0;
+        update_fall_distance(&mut fall_distance, -0.75, false, false);
+        assert_eq!(fall_distance, 1.75);
+        update_fall_distance(&mut fall_distance, 0.5, false, false);
+        update_fall_distance(&mut fall_distance, 0.0, false, false);
+        assert_eq!(fall_distance, 1.75);
+        update_fall_distance(&mut fall_distance, 0.0, false, true);
+        assert_eq!(fall_distance, 0.0);
+        fall_distance = 2.0;
+        update_fall_distance(&mut fall_distance, 0.0, true, false);
+        assert_eq!(fall_distance, 0.0);
+    }
+
+    #[test]
+    fn apply_collision_clips_fall_at_floor_and_resets_grounded_distance() {
+        crate::world::block::init("26.2");
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(0.5, 61.0, 0.5).into();
+        player.fall_distance = 5.0;
+        player.velocity = crate::entity::components::Velocity::new(0.0, -2.0, 0.0);
+        let mut chunks = ChunkStore::new(1);
+        let _floor_chunk = chunks.chunk_storage.upsert(
+            azalea_core::position::ChunkPos::new(0, 0),
+            azalea_world::chunk::Chunk::default(),
+        );
+        chunks.set_block_state(
+            0,
+            60,
+            0,
+            crate::world::block::first_state_of("stone").unwrap(),
+        );
+
+        apply_collision(
+            &mut player,
+            &InputState::released(),
+            &chunks,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+
+        assert_eq!(player.position.y, 61.0);
+        assert!(player.on_ground);
+        assert_eq!(player.fall_distance, 0.0);
+    }
+
+    #[test]
+    fn tick_and_dead_tick_reset_fall_distance_for_flight_and_effect_membership() {
+        crate::world::block::init("26.2");
+        let chunks = ChunkStore::new(1);
+        let input = InputState::released();
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(0.5, 100.0, 0.5).into();
+        player.flying = true;
+        player.fall_distance = 8.0;
+        tick(&mut player, &input, &chunks, 1.0, false);
+        assert_eq!(player.fall_distance, 0.0);
+        player.position = dvec3(0.5, 100.0, 0.5).into();
+        player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
+        player.on_ground = false;
+        player.fall_distance = 8.0;
+        tick_dead(&mut player, &chunks);
+        assert_eq!(player.fall_distance, 0.0);
+        player.flying = false;
+
+        for (name, duration) in [("slow_falling", 0), ("levitation", -1)] {
+            let effect_id = crate::mob_effect::MOB_EFFECTS
+                .iter()
+                .position(|effect| effect.name == name)
+                .unwrap() as u32;
+            player.effects.update(crate::mob_effect::MobEffectInstance {
+                effect_id,
+                duration,
+                ambient: false,
+                show_icon: true,
+            });
+            player.position = dvec3(0.5, 100.0, 0.5).into();
+            player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
+            player.on_ground = false;
+            player.fall_distance = 8.0;
+            tick(&mut player, &input, &chunks, 1.0, false);
+            assert_eq!(
+                player.fall_distance, 0.0,
+                "normal {name} duration={duration}"
+            );
+            player.position = dvec3(0.5, 100.0, 0.5).into();
+            player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
+            player.on_ground = false;
+            player.fall_distance = 8.0;
+            tick_dead(&mut player, &chunks);
+            assert_eq!(player.fall_distance, 0.0, "dead {name} duration={duration}");
+            player.effects.remove(effect_id);
+            player.position = dvec3(0.5, 100.0, 0.5).into();
+            player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
+            player.on_ground = false;
+            player.fall_distance = 8.0;
+            tick(&mut player, &input, &chunks, 1.0, false);
+            assert_eq!(player.fall_distance, 8.0, "removed {name}");
+        }
     }
 
     #[test]

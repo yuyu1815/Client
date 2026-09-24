@@ -4,9 +4,11 @@ use std::sync::Arc;
 use azalea_block::BlockState;
 use azalea_core::heightmap_kind::HeightmapKind;
 use azalea_core::position::{BlockPos, ChunkPos};
+use azalea_registry::data::Biome;
 use azalea_world::chunk::Chunk;
 use azalea_world::chunk::partial::PartialChunkStorage;
 use azalea_world::chunk::storage::ChunkStorage;
+use azalea_world::palette::PalettedContainer;
 use parking_lot::RwLock;
 use thiserror::Error;
 
@@ -165,6 +167,41 @@ impl ChunkStore {
         self.partial_storage
             .replace_with_packet_data(&pos, &mut cursor, heightmaps, &mut self.chunk_storage)
             .map_err(|e| ChunkError::Parse(e.to_string()))
+    }
+
+    /// Replace the biome palettes of a loaded chunk from a
+    /// `ClientboundChunksBiomesPacket` chunk-data buffer. Returns `false` when
+    /// the chunk is not loaded; malformed/trailing data is rejected atomically.
+    pub fn replace_biomes(&mut self, pos: ChunkPos, data: &[u8]) -> Result<bool, ChunkError> {
+        let Some(chunk) = self.get_chunk(&pos) else {
+            return Ok(false);
+        };
+        let mut cursor = Cursor::new(data);
+        let mut palettes = Vec::with_capacity(self.section_count() as usize);
+        for _ in 0..self.section_count() {
+            palettes.push(
+                PalettedContainer::<Biome>::read(&mut cursor)
+                    .map_err(|e| ChunkError::Parse(e.to_string()))?,
+            );
+        }
+        if cursor.position() != data.len() as u64 {
+            return Err(ChunkError::Parse(format!(
+                "biome data has {} trailing bytes",
+                data.len() as u64 - cursor.position()
+            )));
+        }
+        let mut chunk = chunk.write();
+        if chunk.sections.len() != palettes.len() {
+            return Err(ChunkError::Parse(format!(
+                "biome section count mismatch: chunk has {}, packet has {}",
+                chunk.sections.len(),
+                palettes.len()
+            )));
+        }
+        for (section, biome_palette) in chunk.sections.iter_mut().zip(palettes) {
+            section.biomes = biome_palette;
+        }
+        Ok(true)
     }
 
     pub fn get_sky_light(&self, x: i32, y: i32, z: i32) -> u8 {
@@ -419,6 +456,36 @@ mod tests {
         let mut missing = ChunkStore::new(2);
         missing.debug_world = Some(debug);
         assert_eq!(missing.get_block_state(1, 70, 3), BlockState::AIR);
+    }
+
+    #[test]
+    fn biome_packet_update_replaces_loaded_palettes_and_rejects_malformed_data() {
+        let pos = ChunkPos::new(0, 0);
+        let mut unloaded = ChunkStore::new(2);
+        let mut one_palette = Vec::new();
+        PalettedContainer::<Biome>::new()
+            .write(&mut one_palette)
+            .unwrap();
+        assert!(!unloaded.replace_biomes(pos, &one_palette).unwrap());
+
+        let mut biome = PalettedContainer::<Biome>::new();
+        biome.set(
+            azalea_core::position::ChunkSectionBiomePos { x: 0, y: 0, z: 0 },
+            Biome::from(2),
+        );
+        let mut payload = Vec::new();
+        for _ in 0..ChunkStore::new(2).section_count() {
+            biome.write(&mut payload).unwrap();
+        }
+        let mut chunks = ChunkStore::new(2);
+        chunks
+            .partial_storage
+            .set(&pos, Some(Chunk::default()), &mut chunks.chunk_storage);
+        assert!(chunks.replace_biomes(pos, &payload).unwrap());
+        assert_eq!(chunks.biome_id_checked(0, -64, 0), Some(2));
+        assert!(chunks.replace_biomes(pos, &payload[..1]).is_err());
+        payload.push(0);
+        assert!(chunks.replace_biomes(pos, &payload).is_err());
     }
 
     #[test]

@@ -7,3 +7,6 @@
 /tmp
 
 *.pyc
+*.log
+**/debug
+nul

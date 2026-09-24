@@ -190,6 +190,61 @@ fn hurt_entity(game: &mut GameState, id: i32, dir: Option<f32>) {
     }
 }
 
+fn local_player_motion(player_id: i32, entity_id: i32, velocity: glam::DVec3) -> Option<Velocity> {
+    (entity_id == player_id).then(|| velocity.into())
+}
+
+fn set_first_disconnect_reason(reason: &mut Option<String>, next: String) {
+    if reason.is_none() {
+        *reason = Some(next);
+    }
+}
+
+fn set_player_experience(
+    player: &mut crate::player::LocalPlayer,
+    progress: f32,
+    level: i32,
+    total_experience: u32,
+) {
+    player.experience_progress = progress;
+    player.experience_level = level;
+    player.total_experience = total_experience;
+}
+
+fn set_player_inventory_slot(
+    inventory: &mut crate::player::inventory::Inventory,
+    slot: u32,
+    item: azalea_inventory::ItemStack,
+) -> bool {
+    let slot = match slot {
+        0..=8 => crate::player::inventory::HOTBAR_START + slot as usize,
+        9..=35 => slot as usize,
+        36..=39 => 44 - slot as usize,
+        40 => crate::player::inventory::OFFHAND,
+        // Body and saddle have no corresponding slot in this inventory model.
+        _ => return false,
+    };
+    inventory.set_slot(slot, item);
+    true
+}
+
+fn update_block_entity(
+    block_entities: &mut HashMap<
+        azalea_core::position::BlockPos,
+        crate::world::block_entity::StoredBlockEntity,
+    >,
+    pos: azalea_core::position::BlockPos,
+    kind: azalea_registry::builtin::BlockEntityKind,
+    nbt: Option<simdnbt::owned::NbtCompound>,
+) {
+    let Some(nbt) = nbt else { return };
+    if let Some(existing) = block_entities.get_mut(&pos)
+        && existing.kind == kind
+    {
+        existing.nbt = nbt;
+    }
+}
+
 /// Queues a column's packet light for the per-tick apply. Chunk loads enable
 /// the column, standalone light updates are corrections.
 fn queue_light_apply(
@@ -327,6 +382,180 @@ fn player_input_state(
     }
 }
 
+fn player_command_packet(
+    entity_id: i32,
+    action: azalea_protocol::packets::game::s_player_command::Action,
+    data: u32,
+) -> ServerboundGamePacket {
+    ServerboundGamePacket::PlayerCommand(
+        azalea_protocol::packets::game::s_player_command::ServerboundPlayerCommand {
+            id: azalea_core::entity_id::MinecraftEntityId(entity_id),
+            action,
+            data,
+        },
+    )
+}
+
+fn explosion_sound_pitch(rand_a: f32, rand_b: f32) -> f32 {
+    (1.0 + (rand_a - rand_b) * 0.2) * 0.7
+}
+
+fn add_explosion_knockback(
+    velocity: glam::DVec3,
+    impulse: Option<azalea_core::position::Vec3>,
+) -> glam::DVec3 {
+    impulse.map_or(velocity, |v| velocity + dvec3(v.x, v.y, v.z))
+}
+
+fn player_rotation_packet(look: LookDirection) -> ServerboundGamePacket {
+    ServerboundGamePacket::MovePlayerRot(azalea_protocol::packets::game::ServerboundMovePlayerRot {
+        look_direction: look.into(),
+        flags: azalea_protocol::common::movements::MoveFlags::default(),
+    })
+}
+
+fn resolve_rotation(
+    current_y: f32,
+    current_x: f32,
+    y: f32,
+    x: f32,
+    relative_y: bool,
+    relative_x: bool,
+) -> LookDirection {
+    LookDirection::new(
+        if relative_y { current_y + y } else { y },
+        (if relative_x { current_x + x } else { x }).clamp(-90.0, 90.0),
+    )
+}
+
+fn register_nonliving_spawn(
+    store: &mut crate::entity::EntityStore,
+    id: i32,
+    position: Position,
+    velocity: glam::DVec3,
+    y_rot: f32,
+    x_rot: f32,
+    kind: azalea_registry::builtin::EntityKind,
+) {
+    store.set_vehicle_spawn_transform(id, position, velocity, LookDirection::new(y_rot, x_rot));
+    store.set_vehicle_kind(id, kind);
+}
+
+fn entity_look_direction(store: &crate::entity::EntityStore, id: i32) -> Option<LookDirection> {
+    store
+        .living
+        .get(&id)
+        .map(|e| e.look_dir)
+        .or_else(|| store.vehicles.get(&id).and_then(|v| v.look_dir))
+}
+
+fn apply_vehicle_teleport(
+    store: &mut crate::entity::EntityStore,
+    id: i32,
+    position: Position,
+    velocity: Option<glam::DVec3>,
+    current_velocity: glam::DVec3,
+    look: LookDirection,
+) {
+    if store.vehicles.contains_key(&id) {
+        store.set_vehicle_transform(id, position, velocity.unwrap_or(current_velocity));
+        store.set_vehicle_rotation(id, look);
+    }
+}
+
+fn player_ride_state(
+    store: &crate::entity::EntityStore,
+    player_id: i32,
+) -> (Option<i32>, Option<i32>) {
+    let riding = store.vehicle_of.get(&player_id).copied();
+    let controlled = riding.filter(|id| {
+        store
+            .vehicles
+            .get(id)
+            .is_some_and(|v| v.passengers.first() == Some(&player_id))
+    });
+    (riding, controlled)
+}
+
+fn apply_passengers(
+    store: &mut crate::entity::EntityStore,
+    player_id: i32,
+    vehicle: i32,
+    passengers: &[i32],
+) -> (Option<i32>, Option<i32>) {
+    store.set_passengers(vehicle, passengers);
+    player_ride_state(store, player_id)
+}
+
+fn resolve_entity_teleport(
+    current_position: Position,
+    current_velocity: glam::DVec3,
+    current_look: LookDirection,
+    position: Position,
+    velocity: Option<glam::DVec3>,
+    y_rot: f32,
+    x_rot: f32,
+    relative: Option<&azalea_protocol::common::movements::RelativeMovements>,
+) -> (Position, Option<glam::DVec3>, f32, f32) {
+    let flag = |get: fn(&azalea_protocol::common::movements::RelativeMovements) -> bool| {
+        relative.is_some_and(get)
+    };
+    let position = Position::new(
+        if flag(|r| r.x) {
+            current_position.x + position.x
+        } else {
+            position.x
+        },
+        if flag(|r| r.y) {
+            current_position.y + position.y
+        } else {
+            position.y
+        },
+        if flag(|r| r.z) {
+            current_position.z + position.z
+        } else {
+            position.z
+        },
+    );
+    let y_rot = if flag(|r| r.y_rot) {
+        current_look.y_rot_deg() + y_rot
+    } else {
+        y_rot
+    };
+    let x_rot = if flag(|r| r.x_rot) {
+        current_look.x_rot_deg() + x_rot
+    } else {
+        x_rot
+    };
+    let velocity = velocity.map(|delta| {
+        let mut base: Velocity = current_velocity.into();
+        if flag(|r| r.rotate_delta) {
+            base = base
+                .x_rot((current_look.x_rot_deg() - x_rot).to_radians() as f64)
+                .y_rot((current_look.y_rot_deg() - y_rot).to_radians() as f64);
+        }
+        let base = *base;
+        glam::DVec3::new(
+            if flag(|r| r.delta_x) {
+                base.x + delta.x
+            } else {
+                delta.x
+            },
+            if flag(|r| r.delta_y) {
+                base.y + delta.y
+            } else {
+                delta.y
+            },
+            if flag(|r| r.delta_z) {
+                base.z + delta.z
+            } else {
+                delta.z
+            },
+        )
+    });
+    (position, velocity, y_rot, x_rot)
+}
+
 fn serverbound_player_input(state: &PlayerInputState) -> ServerboundPlayerInput {
     ServerboundPlayerInput {
         forward: state.forward,
@@ -372,7 +601,7 @@ pub struct AppCore {
     requested_player_skins: HashMap<uuid::Uuid, PlayerSkinSource>,
     /// 8x8 RGBA faces of fetched player skins, for the spectator menu's
     /// face atlas (the GPU-side skins keep no CPU pixels).
-    player_faces: HashMap<uuid::Uuid, Vec<u8>>,
+    player_faces: HashMap<uuid::Uuid, (Vec<u8>, Vec<u8>)>,
     player_faces_dirty: bool,
     /// Inline object glyphs (sprites and heads) the text drew recently,
     /// keyed as the text renderer looks them up.
@@ -742,12 +971,20 @@ impl AppCore {
             }
             match skin.result {
                 Ok(data) => {
-                    if let Some(face) = crate::renderer::pipelines::menu_overlay::extract_face_8x8(
+                    let base = crate::renderer::pipelines::menu_overlay::extract_face_8x8_with_hat(
                         &data.pixels,
                         data.width,
                         data.height,
-                    ) {
-                        self.player_faces.insert(skin.uuid, face);
+                        false,
+                    );
+                    let hat = crate::renderer::pipelines::menu_overlay::extract_face_8x8_with_hat(
+                        &data.pixels,
+                        data.width,
+                        data.height,
+                        true,
+                    );
+                    if let (Some(base), Some(hat)) = (base, hat) {
+                        self.player_faces.insert(skin.uuid, (base, hat));
                         self.player_faces_dirty = true;
                     }
                     renderer.update_player_entity_skin(&skin.uuid, &data);
@@ -829,16 +1066,15 @@ impl AppCore {
                 .iter()
                 .any(|(key, entry)| packable(entry) && !self.game_dynamic_atlas_keys.contains(key))
             || spectator_active != self.spectator_faces_packed
-            || (spectator_active && self.player_faces_dirty);
+            || self.player_faces_dirty;
         if rebuild {
             let mut entries = Vec::<(String, Vec<u8>, u32)>::new();
-            if spectator_active {
-                entries.extend(
-                    self.player_faces
-                        .iter()
-                        .map(|(uuid, face)| (uuid.to_string(), face.clone(), 8)),
-                );
-            }
+            entries.extend(self.player_faces.iter().flat_map(|(uuid, (base, hat))| {
+                [
+                    (uuid.to_string(), hat.clone(), 8),
+                    (format!("{uuid}#nohat"), base.clone(), 8),
+                ]
+            }));
             self.game_dynamic_atlas_keys.clear();
             for (key, entry) in &self.inline_objects {
                 match &entry.content {
@@ -879,9 +1115,7 @@ impl AppCore {
             }
             self.inline_atlas_dirty = false;
             self.spectator_faces_packed = spectator_active;
-            if spectator_active {
-                self.player_faces_dirty = false;
-            }
+            self.player_faces_dirty = false;
         }
 
         // An animated sprite keeps every frame in the atlas; the key the text
@@ -1119,9 +1353,10 @@ impl AppCore {
                 break;
             }
             match event {
-                NetworkEvent::Connected => {
+                NetworkEvent::Connected { profile_name } => {
                     if let Some(state) = connect_phase.as_deref_mut() {
                         tracing::info!("Connected to server");
+                        game.local_scoreboard_name = Some(profile_name);
                         *state = ConnectionPhase::Loading;
                     } else {
                         tracing::warn!("Unexpected NetworkEvent::Connected, skipping");
@@ -1146,6 +1381,8 @@ impl AppCore {
                     cardinal_light,
                     clock_id,
                 } => {
+                    game.item_cooldowns = Default::default();
+                    game.world_border = Default::default();
                     tracing::info!(
                         "Dimension: height={height}, min_y={min_y}, skylight={has_skylight}, cardinal_light={cardinal_light:?}, debug={is_debug}, clock_id={clock_id:?}"
                     );
@@ -1191,6 +1428,21 @@ impl AppCore {
                 }
                 NetworkEvent::DimensionName { name } => {
                     game.dimension = name;
+                }
+                NetworkEvent::ChunkBiomes { pos, data } => {
+                    match game.chunk_store.replace_biomes(pos, &data) {
+                        Ok(true) => {
+                            game.bump_loaded_mesh_neighborhoods([pos]);
+                        }
+                        Ok(false) => tracing::debug!(
+                            chunk = ?pos,
+                            "Ignoring biome update for unloaded chunk"
+                        ),
+                        Err(e) => tracing::warn!(
+                            chunk = ?pos,
+                            "Ignoring malformed chunk biome update: {e}"
+                        ),
+                    }
                 }
                 NetworkEvent::ChunkLoaded {
                     pos,
@@ -1332,6 +1584,24 @@ impl AppCore {
                         },
                     ));
                 }
+                NetworkEvent::PlayerRotation {
+                    y_rot,
+                    x_rot,
+                    relative_y,
+                    relative_x,
+                } => {
+                    let look = resolve_rotation(
+                        game.player.look_dir.y_rot_deg(),
+                        game.player.look_dir.x_rot_deg(),
+                        y_rot,
+                        x_rot,
+                        relative_y,
+                        relative_x,
+                    );
+                    game.player.look_dir = look;
+                    game.player.prev_look_dir = look;
+                    connection.packet_tx.send(player_rotation_packet(look));
+                }
                 NetworkEvent::PlayerHealth {
                     health,
                     food,
@@ -1361,29 +1631,23 @@ impl AppCore {
                     vehicle,
                     passengers,
                 } => {
-                    let me = game.player.entity_id;
-                    if passengers.contains(&me) {
-                        game.riding_vehicle_id = Some(vehicle);
-                        // Only the first passenger controls (vanilla
-                        // getControlledVehicle -> null otherwise).
-                        game.controlled_vehicle_id =
-                            (passengers.first() == Some(&me)).then_some(vehicle);
-                    } else {
-                        // Removed from this vehicle.
-                        if game.riding_vehicle_id == Some(vehicle) {
-                            game.riding_vehicle_id = None;
-                        }
-                        if game.controlled_vehicle_id == Some(vehicle) {
-                            game.controlled_vehicle_id = None;
-                        }
-                    }
+                    (game.riding_vehicle_id, game.controlled_vehicle_id) = apply_passengers(
+                        &mut game.entity_store,
+                        game.player.entity_id,
+                        vehicle,
+                        &passengers,
+                    );
                 }
                 NetworkEvent::EntitySaddle { entity_id, saddled } => {
                     if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
                         e.saddled = saddled;
                     }
                 }
-                NetworkEvent::PlayerExperience { progress, level } => {
+                NetworkEvent::PlayerExperience {
+                    progress,
+                    level,
+                    total_experience,
+                } => {
                     if progress != game.player.experience_progress {
                         // Vanilla LocalPlayer.setExperienceValues: the first
                         // change after (re)spawn only arms the sentinel and
@@ -1394,8 +1658,7 @@ impl AppCore {
                             game.tick_count as i64
                         };
                     }
-                    game.player.experience_progress = progress;
-                    game.player.experience_level = level;
+                    set_player_experience(&mut game.player, progress, level, total_experience);
                 }
                 NetworkEvent::Waypoint {
                     operation,
@@ -1433,6 +1696,11 @@ impl AppCore {
                     }
                     if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
                         e.max_health = max_health;
+                    }
+                }
+                NetworkEvent::SetPlayerInventory { slot, item } => {
+                    if set_player_inventory_slot(&mut game.player.inventory, slot, item) {
+                        game.sync_container_from_inventory();
                     }
                 }
                 NetworkEvent::ContainerContent {
@@ -1474,12 +1742,15 @@ impl AppCore {
                     item,
                     state_id,
                 } => {
-                    // Direct inventory updates (-2) carry no menu state id.
-                    if container_id == 0 || container_id == -2 {
+                    // Container 0 uses menu indices; -2 uses Inventory indices.
+                    if container_id == 0 {
                         game.player.inventory.set_slot(index as usize, item);
                         game.sync_container_from_inventory();
-                        if container_id == 0 {
-                            game.inventory_state_id = state_id;
+                        game.inventory_state_id = state_id;
+                    } else if container_id == -2 {
+                        if set_player_inventory_slot(&mut game.player.inventory, index.into(), item)
+                        {
+                            game.sync_container_from_inventory();
                         }
                     } else if game.open_menu_id() == Some(container_id) {
                         game.set_menu_slot(index as usize, item);
@@ -1488,6 +1759,117 @@ impl AppCore {
                 }
                 NetworkEvent::HeldSlot { slot } => {
                     self.input.set_selected_slot(slot);
+                }
+                NetworkEvent::ItemCooldown { group, duration } => {
+                    game.item_cooldowns.apply(group, duration);
+                }
+                NetworkEvent::MerchantOffers {
+                    container_id,
+                    offers,
+                    villager_level,
+                    villager_xp,
+                    show_progress,
+                    can_restock,
+                } => {
+                    if let Some(container) = &mut game.open_container
+                        && container.id == container_id
+                        && let Some(model) = &mut container.merchant
+                    {
+                        model.replace_offers(
+                            container_id,
+                            offers,
+                            villager_level,
+                            villager_xp,
+                            show_progress,
+                            can_restock,
+                        );
+                    }
+                }
+                NetworkEvent::WorldBorderInitialize {
+                    center_x,
+                    center_z,
+                    old_size,
+                    new_size,
+                    lerp_time,
+                    absolute_max_size,
+                    warning_blocks,
+                    warning_time,
+                } => {
+                    game.world_border.initialize(
+                        center_x,
+                        center_z,
+                        old_size,
+                        new_size,
+                        lerp_time,
+                        absolute_max_size,
+                        warning_blocks,
+                        warning_time,
+                    );
+                }
+                NetworkEvent::WorldBorderCenter { x, z } => {
+                    game.world_border.set_center(x, z);
+                }
+                NetworkEvent::WorldBorderSize { size } => {
+                    game.world_border.set_size(size);
+                }
+                NetworkEvent::WorldBorderLerpSize {
+                    old_size,
+                    new_size,
+                    lerp_time,
+                } => {
+                    game.world_border
+                        .lerp_size_between(old_size, new_size, lerp_time);
+                }
+                NetworkEvent::WorldBorderWarningBlocks { warning_blocks } => {
+                    game.world_border.set_warning_blocks(warning_blocks);
+                }
+                NetworkEvent::WorldBorderWarningTime { warning_time } => {
+                    game.world_border.set_warning_time(warning_time);
+                }
+                NetworkEvent::MountScreenOpen {
+                    container_id,
+                    inventory_columns,
+                    entity_id,
+                } => {
+                    use azalea_inventory::ItemStack;
+                    let Ok(columns) = u8::try_from(inventory_columns) else {
+                        tracing::warn!(
+                            inventory_columns,
+                            "Ignoring invalid mount inventory column count"
+                        );
+                        continue;
+                    };
+                    let Some(entity) = game.entity_store.living.get(&entity_id).filter(|entity| {
+                        crate::entity::supports_horse_inventory(&entity.entity_type)
+                    }) else {
+                        tracing::debug!(
+                            entity_id,
+                            "Ignoring mount screen for unknown/non-horse entity"
+                        );
+                        continue;
+                    };
+                    let _entity_kind = entity.entity_type;
+                    let screen =
+                        crate::app::phases::in_game::ContainerScreen::Horse { columns, entity_id };
+                    game.paused = false;
+                    game.inventory_open = false;
+                    game.close_creative_inventory();
+                    game.inv_drag = None;
+                    game.inv_last_click = None;
+                    game.open_container = Some(crate::app::phases::in_game::OpenContainer {
+                        id: container_id,
+                        title: "Horse".to_owned(),
+                        screen,
+                        slots: vec![ItemStack::Empty; screen.click_kind().slot_count()],
+                        data: [0; 10],
+                        anvil: None,
+                        enchant: None,
+                        merchant: None,
+                        state_id: 0,
+                    });
+                    game.sync_container_from_inventory();
+                    game.container_was_open = Some(container_id);
+                    self.apply_cursor_grab(window, Some(game));
                 }
                 NetworkEvent::ContainerData {
                     container_id,
@@ -1512,6 +1894,7 @@ impl AppCore {
                     use crate::app::phases::in_game::ContainerScreen;
                     use crate::ui::furnace::FurnaceVariant;
                     let screen = match menu_type {
+                        MenuKind::Merchant => Some(ContainerScreen::Merchant),
                         MenuKind::Crafting => Some(ContainerScreen::CraftingTable),
                         MenuKind::Furnace => {
                             Some(ContainerScreen::Furnace(FurnaceVariant::Furnace))
@@ -1549,6 +1932,16 @@ impl AppCore {
                                 .then(crate::ui::anvil::AnvilState::new),
                             enchant: (screen == ContainerScreen::Enchantment)
                                 .then(crate::ui::enchantment::EnchantState::new),
+                            merchant: (screen == ContainerScreen::Merchant).then(|| {
+                                crate::ui::merchant::MerchantModel::new(
+                                    container_id,
+                                    Vec::new(),
+                                    0,
+                                    0,
+                                    false,
+                                    false,
+                                )
+                            }),
                             state_id: 0,
                         });
                         game.sync_container_from_inventory();
@@ -1558,10 +1951,8 @@ impl AppCore {
                         game.container_was_open = Some(container_id);
                         self.apply_cursor_grab(window, Some(game));
                     } else {
-                        // TODO: render the remaining menu screens (chest,
-                        // brewing stand, ...). Until then tell the server we
-                        // closed the menu so its container state stays
-                        // consistent.
+                        // Unsupported menu screens must be closed so their
+                        // server-side container state stays consistent.
                         use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
                         connection
                             .packet_tx
@@ -1695,11 +2086,24 @@ impl AppCore {
                     name,
                     display,
                     number_format,
-                } => {
-                    game.scoreboard.set_objective(name, display, number_format);
-                }
-                NetworkEvent::ScoreboardDisplay { name } => {
-                    game.scoreboard.set_display(name);
+                    render_type,
+                } => match (display, render_type) {
+                    (Some(display), Some(render_type)) => {
+                        game.scoreboard.set_objective_with_render_type(
+                            name,
+                            Some(display),
+                            number_format,
+                            render_type,
+                        )
+                    }
+                    (None, None) => game.scoreboard.set_objective(name, None, number_format),
+                    _ => tracing::warn!(
+                        objective = %name,
+                        "dropping malformed scoreboard objective event: display/render type mismatch"
+                    ),
+                },
+                NetworkEvent::ScoreboardDisplay { slot, name } => {
+                    game.scoreboard.set_display(slot, name);
                 }
                 NetworkEvent::ScoreboardScore {
                     owner,
@@ -1721,6 +2125,7 @@ impl AppCore {
                     suffix,
                     color,
                     fill_color,
+                    sidebar_slot,
                     members,
                 } => {
                     game.scoreboard.set_team(
@@ -1730,6 +2135,7 @@ impl AppCore {
                         suffix,
                         color,
                         fill_color,
+                        sidebar_slot,
                         members,
                     );
                 }
@@ -1774,23 +2180,15 @@ impl AppCore {
                         );
                     }
                 }
-                NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => match nbt {
-                    Some(nbt) => {
-                        let chunk_pos = azalea_core::position::ChunkPos::new(
-                            pos.x.div_euclid(16),
-                            pos.z.div_euclid(16),
-                        );
-                        if game.chunk_store.get_chunk(&chunk_pos).is_some() {
-                            game.chunk_store.block_entities.insert(
-                                pos,
-                                crate::world::block_entity::StoredBlockEntity { kind, nbt },
-                            );
-                        }
+                NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => {
+                    let chunk_pos = azalea_core::position::ChunkPos::new(
+                        pos.x.div_euclid(16),
+                        pos.z.div_euclid(16),
+                    );
+                    if game.chunk_store.get_chunk(&chunk_pos).is_some() {
+                        update_block_entity(&mut game.chunk_store.block_entities, pos, kind, nbt);
                     }
-                    None => {
-                        game.chunk_store.block_entities.remove(&pos);
-                    }
-                },
+                }
                 NetworkEvent::BlockEvent {
                     pos,
                     action_id,
@@ -1799,6 +2197,39 @@ impl AppCore {
                     // Action 1 for chest/shulker = open-viewer count.
                     if action_id == 1 {
                         game.block_entity_anim.set_open_count(pos, action_parameter);
+                    }
+                }
+                NetworkEvent::Explosion(explosion) => {
+                    let center =
+                        glam::dvec3(explosion.center.x, explosion.center.y, explosion.center.z);
+                    let pitch = explosion_sound_pitch(fastrand::f32(), fastrand::f32());
+                    self.audio.play_world_sound(
+                        &explosion.explosion_sound,
+                        crate::audio::CATEGORY_BLOCKS,
+                        Position::new(center.x, center.y, center.z),
+                        4.0,
+                        pitch,
+                        fastrand::u64(..),
+                    );
+                    if !game.particle_store.add_explosion_particle(
+                        &explosion.explosion_particle,
+                        center,
+                        dvec3(1.0, 0.0, 0.0),
+                    ) {
+                        tracing::debug!(particle = ?explosion.explosion_particle, "skipping unsupported primary explosion particle option");
+                    }
+                    game.particle_store.track_explosion_effects(
+                        center,
+                        explosion.radius,
+                        explosion.block_count,
+                        explosion.block_particles,
+                    );
+                    if explosion.player_knockback.is_some() {
+                        game.player.velocity = add_explosion_knockback(
+                            *game.player.velocity,
+                            explosion.player_knockback,
+                        )
+                        .into();
                     }
                 }
                 NetworkEvent::PlaySound {
@@ -1930,10 +2361,12 @@ impl AppCore {
                     for b in ack_dirty {
                         game.light_engine
                             .on_block_dirty(&game.chunk_store, b.x, b.y, b.z);
-                        game.bump_loaded_mesh_neighborhoods([azalea_core::position::ChunkPos::new(
-                            b.x.div_euclid(16),
-                            b.z.div_euclid(16),
-                        )]);
+                        game.bump_loaded_mesh_neighborhoods([
+                            azalea_core::position::ChunkPos::new(
+                                b.x.div_euclid(16),
+                                b.z.div_euclid(16),
+                            ),
+                        ]);
                         dirty_sections_for_block(&mut priority_remesh, b.x, b.y, b.z, min_y, n);
                     }
                 }
@@ -1999,6 +2432,28 @@ impl AppCore {
                         _ => {}
                     }
                 }
+                NetworkEvent::GameEvent { event, param } => {
+                    use azalea_protocol::packets::game::c_game_event::EventType;
+                    let starts_credits = matches!(&event, EventType::WinGame)
+                        && !game.respawn_sent
+                        && game.win_credits.is_none();
+                    game.apply_game_event(event, param);
+                    if starts_credits && game.win_credits.is_some() {
+                        // A WinScreen replaces other client screens, stops the
+                        // active drag, and releases the cursor; it is not a death screen.
+                        game.interaction
+                            .stop_destroying_for_screen(&connection.packet_tx);
+                        game.paused = false;
+                        game.options_from_game = false;
+                        self.menu.flush_settings();
+                        game.close_menu();
+                        game.close_creative_inventory();
+                        game.chat
+                            .close(crate::ui::chat::ChatExitReason::Interrupted);
+                        game.game_mode_switcher = None;
+                        self.apply_cursor_grab(window, Some(game));
+                    }
+                }
                 NetworkEvent::EntitySpawned {
                     id,
                     uuid,
@@ -2009,6 +2464,30 @@ impl AppCore {
                     x_rot_deg,
                     head_y_rot_deg,
                 } => {
+                    let previous = GameState::tracking_attachment_for(
+                        &game.player,
+                        &game.entity_store,
+                        &game.item_entity_store,
+                        id,
+                    );
+                    game.particle_store.detach_tracking_emitter(id, previous);
+                    let replaces_real_entity = game.item_entity_store.position(id).is_some()
+                        || game.entity_store.living.contains_key(&id)
+                        || game
+                            .entity_store
+                            .vehicles
+                            .get(&id)
+                            .is_some_and(|v| v.kind.is_some());
+                    if replaces_real_entity {
+                        if let Some(old) = game.entity_store.remove_entity(id)
+                            && let Some(uuid) = old.player_uuid
+                            && !game.entity_store.has_player_uuid(&uuid)
+                        {
+                            self.remove_player_skin(renderer, &uuid);
+                        }
+                        game.item_entity_store.remove(&[id]);
+                        self.audio.stop_entity_sounds(id);
+                    }
                     game.entity_positions.insert(id, position);
                     game.silent_entities.remove(&id);
                     if entity_type == azalea_registry::builtin::EntityKind::Player {
@@ -2042,8 +2521,20 @@ impl AppCore {
                             self.queue_player_skin(uuid, textures);
                         }
                     }
+                    if !crate::entity::is_living_mob(&entity_type) {
+                        register_nonliving_spawn(
+                            &mut game.entity_store,
+                            id,
+                            position,
+                            velocity,
+                            y_rot_deg,
+                            x_rot_deg,
+                            entity_type,
+                        );
+                    }
                     if entity_type == azalea_registry::builtin::EntityKind::Item {
-                        game.item_entity_store.spawn_item(id, uuid, position, velocity);
+                        game.item_entity_store
+                            .spawn_item(id, uuid, position, velocity);
                     }
                 }
                 NetworkEvent::EntityMoved {
@@ -2060,6 +2551,15 @@ impl AppCore {
                         *pos += dvec3(dx, dy, dz);
                         self.audio.update_entity_sound_position(id, *pos);
                     }
+                    if let Some((position, velocity)) = game
+                        .entity_positions
+                        .get(&id)
+                        .copied()
+                        .zip(game.entity_store.vehicles.get(&id).map(|v| v.velocity))
+                    {
+                        game.entity_store
+                            .set_vehicle_transform(id, position, velocity);
+                    }
                 }
                 NetworkEvent::EntityMovedRotated {
                     id,
@@ -2074,10 +2574,21 @@ impl AppCore {
                         .move_living_delta(id, dx, dy, dz, on_ground);
                     game.entity_store
                         .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                    game.entity_store
+                        .set_vehicle_rotation(id, LookDirection::new(y_rot_deg, x_rot_deg));
                     game.item_entity_store.move_delta(id, dx, dy, dz, on_ground);
                     if let Some(pos) = game.entity_positions.get_mut(&id) {
                         *pos += dvec3(dx, dy, dz);
                         self.audio.update_entity_sound_position(id, *pos);
+                    }
+                    if let Some((position, velocity)) = game
+                        .entity_positions
+                        .get(&id)
+                        .copied()
+                        .zip(game.entity_store.vehicles.get(&id).map(|v| v.velocity))
+                    {
+                        game.entity_store
+                            .set_vehicle_transform(id, position, velocity);
                     }
                 }
                 NetworkEvent::EntityRotated {
@@ -2088,29 +2599,119 @@ impl AppCore {
                 } => {
                     game.entity_store
                         .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                    game.entity_store
+                        .set_vehicle_rotation(id, LookDirection::new(y_rot_deg, x_rot_deg));
                 }
                 NetworkEvent::EntityMotion { id, velocity } => {
+                    if let Some(motion) = local_player_motion(game.player.entity_id, id, velocity) {
+                        game.player.velocity = motion;
+                    }
                     game.item_entity_store.set_motion(id, velocity);
                     game.entity_store.set_living_motion(id, velocity);
+                    if let Some(position) = game.entity_store.vehicles.get(&id).map(|v| v.position)
+                    {
+                        game.entity_store
+                            .set_vehicle_transform(id, position, velocity);
+                    }
                 }
                 NetworkEvent::EntityTeleported {
                     id,
                     position,
+                    relative,
                     velocity,
                     y_rot_deg,
                     x_rot_deg,
                     on_ground,
                 } => {
-                    game.entity_store.teleport_living(id, position, on_ground);
-                    game.entity_store
-                        .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
-                    if let Some(velocity) = velocity {
-                        game.entity_store.set_living_motion(id, velocity);
+                    let is_local_player = id == game.player.entity_id;
+                    let current_position = if is_local_player {
+                        Some(game.player.position)
+                    } else {
+                        game.entity_positions
+                            .get(&id)
+                            .copied()
+                            .or_else(|| {
+                                game.entity_store
+                                    .living
+                                    .get(&id)
+                                    .map(|entity| entity.position)
+                            })
+                            .or_else(|| {
+                                game.entity_store
+                                    .vehicles
+                                    .get(&id)
+                                    .filter(|vehicle| vehicle.look_dir.is_some())
+                                    .map(|vehicle| vehicle.position)
+                            })
+                    };
+                    let Some(current_position) = current_position else {
+                        // Vanilla ignores absent entities, except a separately tracked
+                        // removed-player-vehicle id (not represented in this client yet).
+                        continue;
+                    };
+                    let current_look = if is_local_player {
+                        Some(game.player.look_dir)
+                    } else {
+                        entity_look_direction(&game.entity_store, id)
+                    };
+                    let Some(current_look) = current_look else {
+                        // Ignore unknown entities and SetPassengers-only placeholders.
+                        continue;
+                    };
+                    let current_velocity = if is_local_player {
+                        *game.player.velocity
+                    } else {
+                        game.entity_store.living.get(&id).map_or_else(
+                            || {
+                                game.entity_store
+                                    .vehicles
+                                    .get(&id)
+                                    .map_or(glam::DVec3::ZERO, |v| v.velocity)
+                            },
+                            |entity| entity.velocity,
+                        )
+                    };
+                    let (position, velocity, y_rot_deg, x_rot_deg) = resolve_entity_teleport(
+                        current_position,
+                        current_velocity,
+                        current_look,
+                        position,
+                        velocity,
+                        y_rot_deg,
+                        x_rot_deg,
+                        relative.as_ref(),
+                    );
+                    if is_local_player {
+                        game.player.position = position;
+                        game.player.prev_position = position;
+                        let look = LookDirection::new(y_rot_deg, x_rot_deg);
+                        game.player.look_dir = look;
+                        game.player.prev_look_dir = look;
+                        game.player.on_ground = on_ground;
+                        if let Some(velocity) = velocity {
+                            game.player.velocity = velocity.into();
+                        }
+                        game.interaction.on_teleport();
+                    } else {
+                        game.entity_store.teleport_living(id, position, on_ground);
+                        game.entity_store
+                            .rotate_living(id, y_rot_deg, x_rot_deg, on_ground);
+                        if let Some(velocity) = velocity {
+                            game.entity_store.set_living_motion(id, velocity);
+                        }
+                        apply_vehicle_teleport(
+                            &mut game.entity_store,
+                            id,
+                            position,
+                            velocity,
+                            current_velocity,
+                            LookDirection::new(y_rot_deg, x_rot_deg),
+                        );
+                        game.item_entity_store
+                            .teleport(id, position, velocity, on_ground);
+                        self.audio.update_entity_sound_position(id, position);
                     }
-                    game.item_entity_store
-                        .teleport(id, position, velocity, on_ground);
                     game.entity_positions.insert(id, position);
-                    self.audio.update_entity_sound_position(id, position);
                 }
                 NetworkEvent::LevelEvent {
                     event_type,
@@ -2143,6 +2744,7 @@ impl AppCore {
                 NetworkEvent::LevelParticles {
                     kind,
                     override_limiter,
+                    always_show,
                     pos,
                     x_dist,
                     y_dist,
@@ -2153,6 +2755,7 @@ impl AppCore {
                     game.particle_store.add_particles_from_packet(
                         kind,
                         override_limiter,
+                        always_show,
                         pos,
                         glam::dvec3(x_dist as f64, y_dist as f64, z_dist as f64),
                         max_speed as f64,
@@ -2160,9 +2763,98 @@ impl AppCore {
                         renderer.camera_render_position(),
                     );
                 }
+                NetworkEvent::TotemUsed { entity_id } => {
+                    let target = if entity_id == game.player.entity_id {
+                        Some((
+                            azalea_registry::builtin::EntityKind::Player,
+                            game.player.position,
+                            None,
+                        ))
+                    } else if let Some(entity) = game.entity_store.living.get(&entity_id) {
+                        Some((
+                            entity.entity_type,
+                            entity.position,
+                            (entity.entity_type == azalea_registry::builtin::EntityKind::Rabbit)
+                                .then_some(entity.variant),
+                        ))
+                    } else if let Some(position) = game.item_entity_store.position(entity_id) {
+                        Some((azalea_registry::builtin::EntityKind::Item, position, None))
+                    } else if let Some(vehicle) = game.entity_store.vehicles.get(&entity_id) {
+                        vehicle.kind.map(|kind| (kind, vehicle.position, None))
+                    } else {
+                        None
+                    };
+                    if let Some((kind, position, rabbit_variant)) = target {
+                        if let Some(category) =
+                            crate::item_activation::sound_category(kind, rabbit_variant)
+                        {
+                            self.audio.play_world_sound(
+                                &crate::audio::SoundRef::event("item.totem.use"),
+                                category as u8,
+                                position,
+                                1.0,
+                                1.0,
+                                fastrand::u64(..),
+                            );
+                        }
+                        if let Some(attachment) = GameState::tracking_attachment_for(
+                            &game.player,
+                            &game.entity_store,
+                            &game.item_entity_store,
+                            entity_id,
+                        ) {
+                            game.particle_store.add_tracking_emitter(
+                                entity_id,
+                                crate::particle::TrackingParticleKind::Totem,
+                                attachment,
+                                &game.chunk_store,
+                            );
+                        }
+                        game.item_activation = crate::item_activation::activation_for_event(
+                            entity_id,
+                            game.player.entity_id,
+                            true,
+                            &game.player.inventory,
+                            self.input.selected_slot(),
+                            fastrand::f32() * 2.0 - 1.0,
+                            fastrand::f32() * 2.0 - 1.0,
+                        );
+                    }
+                }
+                NetworkEvent::CriticalHit { id, kind } => {
+                    if let Some(attachment) = GameState::tracking_attachment_for(
+                        &game.player,
+                        &game.entity_store,
+                        &game.item_entity_store,
+                        id,
+                    ) {
+                        let kind = match kind {
+                            crate::net::CriticalHitKind::Critical => {
+                                crate::particle::TrackingParticleKind::Crit
+                            }
+                            crate::net::CriticalHitKind::Enchanted => {
+                                crate::particle::TrackingParticleKind::EnchantedHit
+                            }
+                        };
+                        game.particle_store.add_tracking_emitter(
+                            id,
+                            kind,
+                            attachment,
+                            &game.chunk_store,
+                        );
+                    }
+                }
                 NetworkEvent::EntitiesRemoved { ids } => {
                     for id in &ids {
-                        if let Some(entity) = game.entity_store.remove_living(*id)
+                        let final_attachment = GameState::tracking_attachment_for(
+                            &game.player,
+                            &game.entity_store,
+                            &game.item_entity_store,
+                            *id,
+                        );
+                        game.particle_store
+                            .detach_tracking_emitter(*id, final_attachment);
+                        if let Some(entity) = game.entity_store.remove_entity(*id)
                             && let Some(uuid) = entity.player_uuid
                             && !game.entity_store.has_player_uuid(&uuid)
                         {
@@ -2179,6 +2871,8 @@ impl AppCore {
                     if game.riding_vehicle_id.is_some_and(|v| ids.contains(&v)) {
                         game.riding_vehicle_id = None;
                     }
+                    (game.riding_vehicle_id, game.controlled_vehicle_id) =
+                        player_ride_state(&game.entity_store, game.player.entity_id);
                 }
                 NetworkEvent::EntityHeadRotation {
                     id,
@@ -2386,6 +3080,8 @@ impl AppCore {
                     // models the max-health base, so it remains unchanged here.
                     let _ = keep_attribute_modifiers;
                     game.dead = false;
+                    game.win_credits = None;
+                    game.do_limited_crafting = false;
                     // `startWaitingForNewLevel` replaces an open dialog here too.
                     game.server_dialog = None;
                     game.start_level_load();
@@ -2464,8 +3160,19 @@ impl AppCore {
                 }
                 NetworkEvent::Disconnected { reason } => {
                     tracing::warn!("Disconnected: {reason}");
-                    disconnect_reason = Some(reason);
+                    set_first_disconnect_reason(&mut disconnect_reason, reason);
                     self.clear_server_ui(game, renderer);
+                }
+                NetworkEvent::CodeOfConduct { text } => {
+                    if game.code_of_conduct.replace(text).is_some() {
+                        set_first_disconnect_reason(
+                            &mut disconnect_reason,
+                            "Server sent a duplicate code-of-conduct notice".into(),
+                        );
+                    }
+                }
+                NetworkEvent::ServerTransfer(transfer) => {
+                    game.pending_server_transfer = Some(transfer);
                 }
                 NetworkEvent::PlayerInfoUpdate { actions, entries } => {
                     if actions.add_player {
@@ -2814,15 +3521,11 @@ impl AppCore {
                 // Vanilla also calls vehicle.onPlayerJump() for client horse
                 // physics; pomme has no vehicle physics, the server moves us.
                 use azalea_protocol::packets::game::s_player_command as cmd;
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::PlayerCommand(
-                        cmd::ServerboundPlayerCommand {
-                            id: azalea_core::entity_id::MinecraftEntityId(p.entity_id),
-                            action: cmd::Action::StartRidingJump,
-                            data: (p.jump_riding_scale * 100.0).floor() as u32,
-                        },
-                    ));
+                connection.packet_tx.send(player_command_packet(
+                    p.entity_id,
+                    cmd::Action::StartRidingJump,
+                    (p.jump_riding_scale * 100.0).floor() as u32,
+                ));
             } else if !p.was_jump_pressed && jump_held {
                 p.jump_riding_ticks = 0;
                 p.jump_riding_scale = 0.0;
@@ -2876,7 +3579,14 @@ impl AppCore {
             crate::player::is_creative(game.player.game_mode),
         );
 
+        let held_stack_item = game
+            .player
+            .inventory
+            .hotbar_slots()
+            .get(input.selected_slot() as usize);
         let held_stack = game.player.inventory.held_stack(input.selected_slot());
+        let hand_on_cooldown =
+            held_stack_item.is_some_and(|stack| game.item_cooldowns.is_on_cooldown(stack));
         let place_block = held_stack.and_then(|data| {
             let name = crate::player::inventory::item_resource_name(data.kind);
             renderer.registry().placeable_block_for_item(&name)
@@ -2895,6 +3605,9 @@ impl AppCore {
             game.player.look_dir,
             game.player.on_ground,
             crate::player::is_creative(game.player.game_mode),
+            crate::player::is_spectator(game.player.game_mode),
+            azalea_protocol::packets::game::s_interact::InteractionHand::MainHand,
+            hand_on_cooldown,
             game.player.food,
             input.selected_slot(),
             held_stack,
@@ -2978,17 +3691,12 @@ impl AppCore {
     fn send_player_command(
         &self,
         connection: &ConnectionHandle,
+        entity_id: i32,
         action: azalea_protocol::packets::game::s_player_command::Action,
     ) {
         connection
             .packet_tx
-            .send(ServerboundGamePacket::PlayerCommand(
-                azalea_protocol::packets::game::s_player_command::ServerboundPlayerCommand {
-                    id: azalea_core::entity_id::MinecraftEntityId(0),
-                    action,
-                    data: 0,
-                },
-            ));
+            .send(player_command_packet(entity_id, action, 0));
     }
 
     pub fn send_sprint_command(&self, connection: &ConnectionHandle, game: &mut GameState) {
@@ -2999,15 +3707,16 @@ impl AppCore {
             } else {
                 azalea_protocol::packets::game::s_player_command::Action::StopSprinting
             };
-            self.send_player_command(connection, action);
+            self.send_player_command(connection, game.player.entity_id, action);
             game.was_sprinting = sprinting;
         }
     }
 
     /// Vanilla InBedChatScreen: leaving bed sends PlayerCommand STOP_SLEEPING.
-    pub fn send_stop_sleeping(&self, connection: &ConnectionHandle) {
+    pub fn send_stop_sleeping(&self, connection: &ConnectionHandle, entity_id: i32) {
         self.send_player_command(
             connection,
+            entity_id,
             azalea_protocol::packets::game::s_player_command::Action::StopSleeping,
         );
     }
@@ -3167,16 +3876,239 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use azalea_protocol::packets::game::ServerboundGamePacket;
+
     use super::{
-        CursorOp, DeathRoute, HeadProfile, accepted_player_chat_tag, cursor_step, death_route,
-        player_input_state, resolve_head_profile, server_view_distance_update,
-        serverbound_player_input, time_update_clock,
+        CursorOp, DeathRoute, HeadProfile, Velocity, accepted_player_chat_tag,
+        add_explosion_knockback, apply_passengers, apply_vehicle_teleport, cursor_step,
+        death_route, entity_look_direction, explosion_sound_pitch, local_player_motion,
+        player_command_packet, player_input_state, player_ride_state, player_rotation_packet,
+        register_nonliving_spawn, resolve_entity_teleport, resolve_head_profile, resolve_rotation,
+        server_view_distance_update, serverbound_player_input, set_first_disconnect_reason,
+        set_player_experience, set_player_inventory_slot, time_update_clock, update_block_entity,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
     use crate::net::chat_security::SignedChatBody;
     use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry, TabList};
     use crate::player::valid_player_name;
     use crate::ui::chat::ChatMessageTag;
+
+    #[test]
+    fn explosion_sound_pitch_matches_vanilla_formula_and_knockback_is_additive() {
+        assert!((explosion_sound_pitch(0.0, 1.0) - 0.56).abs() < f32::EPSILON);
+        assert!((explosion_sound_pitch(1.0, 0.0) - 0.84).abs() < f32::EPSILON);
+        let velocity = glam::dvec3(1.0, 2.0, 3.0);
+        assert_eq!(
+            add_explosion_knockback(
+                velocity,
+                Some(azalea_core::position::Vec3::new(0.25, -0.5, 0.75)),
+            ),
+            glam::dvec3(1.25, 1.5, 3.75),
+        );
+        assert_eq!(add_explosion_knockback(velocity, None), velocity);
+    }
+
+    #[test]
+    fn player_commands_use_nonzero_local_entity_id_for_all_actions() {
+        use azalea_protocol::packets::game::s_player_command::Action;
+
+        for action in [
+            Action::StartSprinting,
+            Action::StopSprinting,
+            Action::StopSleeping,
+            Action::StartRidingJump,
+        ] {
+            let ServerboundGamePacket::PlayerCommand(packet) = player_command_packet(73, action, 0)
+            else {
+                panic!("expected player command");
+            };
+            assert_eq!(packet.id.0, 73);
+        }
+    }
+
+    #[test]
+    fn player_rotation_resolves_relative_axes_and_clamps_pitch() {
+        let look = resolve_rotation(90.0, 80.0, 15.0, 30.0, true, true);
+        assert_eq!(look.y_rot_deg(), 105.0);
+        assert!(look.x_rot_deg() <= 90.0);
+        assert!(look.x_rot_deg() > 89.0);
+        let absolute = resolve_rotation(90.0, 80.0, -45.0, -120.0, false, false);
+        assert_eq!(absolute.y_rot_deg(), -45.0);
+        assert!(absolute.x_rot_deg() >= -90.0);
+        assert!(absolute.x_rot_deg() < -89.0);
+        let yaw_only = resolve_rotation(20.0, 30.0, 5.0, 15.0, true, false);
+        assert_eq!((yaw_only.y_rot_deg(), yaw_only.x_rot_deg()), (25.0, 15.0));
+        let pitch_only = resolve_rotation(20.0, 30.0, 5.0, 15.0, false, true);
+        assert_eq!(
+            (pitch_only.y_rot_deg(), pitch_only.x_rot_deg()),
+            (5.0, 45.0)
+        );
+        let ServerboundGamePacket::MovePlayerRot(echo) = player_rotation_packet(look) else {
+            panic!("player rotation must echo with MovePlayerRot");
+        };
+        assert_eq!(echo.look_direction.y_rot(), 105.0);
+        assert_eq!(
+            echo.flags,
+            azalea_protocol::common::movements::MoveFlags::default()
+        );
+    }
+
+    #[test]
+    fn nonliving_spawn_and_updates_are_current_base_for_relative_teleport() {
+        use azalea_protocol::common::movements::RelativeMovements;
+
+        use crate::entity::components::{LookDirection, Position};
+        let mut store = crate::entity::EntityStore::new();
+        let id = 42;
+        assert_eq!(entity_look_direction(&store, id), None);
+        store.set_passengers(9, &[id]);
+        assert_eq!(entity_look_direction(&store, id), None);
+        register_nonliving_spawn(
+            &mut store,
+            id,
+            Position::new(1.0, 2.0, 3.0),
+            glam::DVec3::ZERO,
+            30.0,
+            5.0,
+            azalea_registry::builtin::EntityKind::Item,
+        );
+        assert_eq!(
+            store.vehicles[&id].kind,
+            Some(azalea_registry::builtin::EntityKind::Item)
+        );
+        let relative = RelativeMovements {
+            y_rot: true,
+            x_rot: true,
+            ..Default::default()
+        };
+        let (position, _, yaw, pitch) = resolve_entity_teleport(
+            store.vehicles[&id].position,
+            store.vehicles[&id].velocity,
+            entity_look_direction(&store, id).unwrap(),
+            Position::default(),
+            Some(glam::DVec3::ZERO),
+            10.0,
+            4.0,
+            Some(&relative),
+        );
+        assert_eq!((yaw, pitch), (40.0, 9.0));
+        let velocity = store.vehicles[&id].velocity;
+        apply_vehicle_teleport(
+            &mut store,
+            id,
+            position,
+            None,
+            velocity,
+            LookDirection::new(yaw, pitch),
+        );
+        assert_eq!(store.vehicles[&id].velocity, velocity);
+    }
+
+    #[test]
+    fn despawn_reassignment_nested_root_and_local_ride_state_stay_consistent() {
+        use crate::entity::components::Position;
+        let mut store = crate::entity::EntityStore::new();
+        store.set_vehicle_transform(10, Position::default(), glam::DVec3::ZERO);
+        store.set_passengers(10, &[20]);
+        store.set_vehicle_transform(20, Position::default(), glam::DVec3::ZERO);
+        store.set_passengers(20, &[7]);
+        assert_eq!(store.root_vehicle(7), Some(10));
+        assert_eq!(player_ride_state(&store, 7), (Some(20), Some(20)));
+        store.set_vehicle_transform(30, Position::default(), glam::DVec3::ZERO);
+        store.set_passengers(30, &[7]);
+        assert!(store.vehicles[&20].passengers.is_empty());
+        assert_eq!(player_ride_state(&store, 7), (Some(30), Some(30)));
+        store.remove_entity(30);
+        assert_eq!(player_ride_state(&store, 7), (None, None));
+        store.set_passengers(20, &[7]);
+        store.remove_entity(10);
+        assert!(store.vehicles.contains_key(&20));
+        assert_eq!(store.vehicles[&20].passengers, [7]);
+        assert_eq!(store.vehicle_of[&7], 20);
+        assert_eq!(store.root_vehicle(7), Some(20));
+    }
+
+    #[test]
+    fn passenger_updates_preserve_order_reassignment_and_empty_dismount() {
+        let mut store = crate::entity::EntityStore::new();
+        let (riding, controlled) = apply_passengers(&mut store, 7, 10, &[7, 8]);
+        assert_eq!((riding, controlled), (Some(10), Some(10)));
+        assert_eq!(store.vehicles[&10].passengers, [7, 8]);
+        assert_eq!(store.vehicle_of[&7], 10);
+        apply_passengers(&mut store, 7, 20, &[10]);
+        assert_eq!(store.vehicles[&10].passengers, [7, 8]);
+        assert_eq!(store.root_vehicle(7), Some(20));
+        let (riding, controlled) = apply_passengers(&mut store, 7, 30, &[7]);
+        assert_eq!((riding, controlled), (Some(30), Some(30)));
+        assert_eq!(store.vehicles[&10].passengers, [8]);
+        let (riding, controlled) = apply_passengers(&mut store, 7, 30, &[]);
+        assert_eq!((riding, controlled), (None, None));
+        assert!(!store.vehicle_of.contains_key(&7));
+    }
+
+    #[test]
+    fn entity_teleport_resolves_position_rotation_and_velocity_relative_flags() {
+        use azalea_protocol::common::movements::RelativeMovements;
+        let relative = RelativeMovements {
+            x: true,
+            y: false,
+            z: true,
+            y_rot: true,
+            x_rot: false,
+            delta_x: true,
+            delta_y: false,
+            delta_z: true,
+            rotate_delta: false,
+        };
+        let (pos, velocity, yaw, pitch) = resolve_entity_teleport(
+            crate::entity::components::Position::new(10.0, 20.0, 30.0),
+            glam::dvec3(1.0, 2.0, 3.0),
+            crate::entity::components::LookDirection::new(90.0, 20.0),
+            crate::entity::components::Position::new(1.0, 2.0, 3.0),
+            Some(glam::dvec3(0.5, 7.0, -1.0)),
+            10.0,
+            35.0,
+            Some(&relative),
+        );
+        assert_eq!(
+            pos,
+            crate::entity::components::Position::new(11.0, 2.0, 33.0)
+        );
+        assert_eq!(velocity, Some(glam::dvec3(1.5, 7.0, 2.0)));
+        assert_eq!((yaw, pitch), (100.0, 35.0));
+        let rotate_delta = RelativeMovements {
+            y_rot: true,
+            delta_x: true,
+            delta_y: true,
+            delta_z: true,
+            rotate_delta: true,
+            ..RelativeMovements::default()
+        };
+        let (_, rotated_velocity, _, _) = resolve_entity_teleport(
+            glam::DVec3::ZERO.into(),
+            glam::dvec3(1.0, 0.0, 0.0),
+            crate::entity::components::LookDirection::new(0.0, 0.0),
+            glam::DVec3::ZERO.into(),
+            Some(glam::DVec3::ZERO),
+            90.0,
+            0.0,
+            Some(&rotate_delta),
+        );
+        let rotated_velocity = rotated_velocity.unwrap();
+        assert!(rotated_velocity.x.abs() < 1.0e-6, "{rotated_velocity:?}");
+        assert!(rotated_velocity.z > 0.999);
+        let (_, omitted_velocity, _, _) = resolve_entity_teleport(
+            glam::DVec3::ZERO.into(),
+            glam::DVec3::ZERO,
+            crate::entity::components::LookDirection::new(0.0, 0.0),
+            glam::DVec3::ONE.into(),
+            None,
+            0.0,
+            0.0,
+            None,
+        );
+        assert_eq!(omitted_velocity, None);
+    }
 
     fn tab_list_with(uuid: uuid::Uuid, name: &str, textures: Option<&str>) -> TabList {
         let mut tab_list = TabList::new();
@@ -3194,10 +4126,146 @@ mod tests {
                 latency: 0,
                 display_name: None,
                 list_order: 0,
+                show_hat: true,
                 chat_session: None,
             }],
         );
         tab_list
+    }
+
+    #[test]
+    fn player_experience_preserves_total_and_display_values() {
+        let mut player = crate::player::LocalPlayer::new();
+        set_player_experience(&mut player, 0.625, 12, 1234);
+        assert_eq!(player.experience_progress, 0.625);
+        assert_eq!(player.experience_level, 12);
+        assert_eq!(player.total_experience, 1234);
+    }
+
+    #[test]
+    fn set_player_inventory_maps_inventory_indices_and_ignores_unsupported_slots() {
+        let mut inventory = crate::player::inventory::Inventory::new();
+        for index in 0..crate::player::inventory::PLAYER_SLOTS {
+            inventory.set_slot(
+                index,
+                azalea_inventory::ItemStack::new(
+                    azalea_registry::builtin::ItemKind::Dirt,
+                    index as i32 + 1,
+                ),
+            );
+        }
+        let before_hotbar_update = inventory.slots().to_vec();
+        assert!(set_player_inventory_slot(
+            &mut inventory,
+            0,
+            azalea_inventory::ItemStack::new(azalea_registry::builtin::ItemKind::Stone, 1),
+        ));
+        assert!(set_player_inventory_slot(
+            &mut inventory,
+            8,
+            azalea_inventory::ItemStack::new(azalea_registry::builtin::ItemKind::Diamond, 1),
+        ));
+        for slot in 0..=8 {
+            assert_eq!(inventory.slot(slot), &before_hotbar_update[slot]);
+        }
+        for slot in 37..44 {
+            assert_eq!(inventory.slot(slot), &before_hotbar_update[slot]);
+        }
+        assert_eq!(
+            inventory.slot(36).kind(),
+            azalea_registry::builtin::ItemKind::Stone
+        );
+        assert_eq!(
+            inventory.slot(44).kind(),
+            azalea_registry::builtin::ItemKind::Diamond
+        );
+        assert_eq!(inventory.slot(8), &before_hotbar_update[8]);
+
+        let cases = [
+            (0, 36, azalea_registry::builtin::ItemKind::Stone),
+            (8, 44, azalea_registry::builtin::ItemKind::Diamond),
+            (9, 9, azalea_registry::builtin::ItemKind::Emerald),
+            (35, 35, azalea_registry::builtin::ItemKind::Cobblestone),
+            (36, 8, azalea_registry::builtin::ItemKind::OakPlanks),
+            (39, 5, azalea_registry::builtin::ItemKind::IronIngot),
+            (40, 45, azalea_registry::builtin::ItemKind::GoldIngot),
+        ];
+        for (packet_slot, target, kind) in cases {
+            let item = azalea_inventory::ItemStack::new(kind, 1);
+            assert!(set_player_inventory_slot(&mut inventory, packet_slot, item));
+            assert_eq!(
+                inventory.slot(target).kind(),
+                kind,
+                "packet slot {packet_slot}"
+            );
+        }
+        assert_eq!(
+            inventory.slot(44).kind(),
+            azalea_registry::builtin::ItemKind::Diamond
+        );
+        assert_eq!(
+            inventory.slot(8).kind(),
+            azalea_registry::builtin::ItemKind::OakPlanks
+        );
+
+        let before = inventory.slots().to_vec();
+        for unsupported in [41, 42, 43, 45, 46] {
+            assert!(!set_player_inventory_slot(
+                &mut inventory,
+                unsupported,
+                azalea_inventory::ItemStack::new(azalea_registry::builtin::ItemKind::Dirt, 64),
+            ));
+            assert_eq!(inventory.slots(), before, "packet slot {unsupported}");
+        }
+    }
+
+    #[test]
+    fn transfer_reason_survives_the_following_disconnect_event() {
+        let mut reason = None;
+        set_first_disconnect_reason(&mut reason, "transfer to host:25565".into());
+        set_first_disconnect_reason(&mut reason, "connection closed".into());
+        assert_eq!(reason.as_deref(), Some("transfer to host:25565"));
+    }
+
+    #[test]
+    fn entity_motion_updates_only_the_matching_local_player() {
+        let velocity = glam::dvec3(1.0, -2.0, 3.5);
+        assert_eq!(
+            local_player_motion(7, 7, velocity),
+            Some(Velocity::from(velocity))
+        );
+        assert_eq!(local_player_motion(7, 8, velocity), None);
+    }
+
+    #[test]
+    fn block_entity_update_preserves_absent_or_mismatched_entries() {
+        let pos = azalea_core::position::BlockPos::new(1, 2, 3);
+        let mut entries = std::collections::HashMap::from([(
+            pos,
+            crate::world::block_entity::StoredBlockEntity {
+                kind: azalea_registry::builtin::BlockEntityKind::Chest,
+                nbt: simdnbt::owned::NbtCompound::default(),
+            },
+        )]);
+
+        update_block_entity(
+            &mut entries,
+            pos,
+            azalea_registry::builtin::BlockEntityKind::Chest,
+            None,
+        );
+        update_block_entity(
+            &mut entries,
+            pos,
+            azalea_registry::builtin::BlockEntityKind::TrappedChest,
+            Some(simdnbt::owned::NbtCompound::default()),
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[&pos].kind,
+            azalea_registry::builtin::BlockEntityKind::Chest
+        );
     }
 
     #[test]

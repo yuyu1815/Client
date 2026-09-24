@@ -6,6 +6,8 @@ use crate::entity::components::Velocity;
 use crate::world::block::has_collision;
 use crate::world::chunk::ChunkStore;
 
+const COLLISION_EPSILON: f64 = 1.0e-7;
+
 pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb> {
     let mut aabbs = Vec::new();
 
@@ -51,6 +53,10 @@ fn collide_along_axes(
     let original_y = velocity.y;
 
     for block in block_aabbs {
+        if velocity.y.abs() < COLLISION_EPSILON {
+            velocity.y = 0.0;
+            break;
+        }
         velocity.y = block.clip_y_collide(&player_aabb, velocity.y);
     }
     let mut resolved = player_aabb.offset(dvec3(0.0, velocity.y, 0.0));
@@ -59,20 +65,36 @@ fn collide_along_axes(
 
     if x_first {
         for block in block_aabbs {
+            if velocity.x.abs() < COLLISION_EPSILON {
+                velocity.x = 0.0;
+                break;
+            }
             velocity.x = block.clip_x_collide(&resolved, velocity.x);
         }
         resolved = resolved.offset(dvec3(velocity.x, 0.0, 0.0));
 
         for block in block_aabbs {
+            if velocity.z.abs() < COLLISION_EPSILON {
+                velocity.z = 0.0;
+                break;
+            }
             velocity.z = block.clip_z_collide(&resolved, velocity.z);
         }
     } else {
         for block in block_aabbs {
+            if velocity.z.abs() < COLLISION_EPSILON {
+                velocity.z = 0.0;
+                break;
+            }
             velocity.z = block.clip_z_collide(&resolved, velocity.z);
         }
         resolved = resolved.offset(dvec3(0.0, 0.0, velocity.z));
 
         for block in block_aabbs {
+            if velocity.x.abs() < COLLISION_EPSILON {
+                velocity.x = 0.0;
+                break;
+            }
             velocity.x = block.clip_x_collide(&resolved, velocity.x);
         }
     }
@@ -103,6 +125,10 @@ pub fn resolve_collision(
 
         let mut up_vel = step_height;
         for block in &step_aabbs {
+            if up_vel.abs() < COLLISION_EPSILON {
+                up_vel = 0.0;
+                break;
+            }
             up_vel = block.clip_y_collide(&player_aabb, up_vel);
         }
         let raised = player_aabb.offset(dvec3(0.0, up_vel, 0.0));
@@ -116,6 +142,10 @@ pub fn resolve_collision(
         let after_move = raised.offset(dvec3(step_resolved.x, 0.0, step_resolved.z));
         let mut down_vel = -(up_vel - velocity.y);
         for block in &step_aabbs {
+            if down_vel.abs() < COLLISION_EPSILON {
+                down_vel = 0.0;
+                break;
+            }
             down_vel = block.clip_y_collide(&after_move, down_vel);
         }
 
@@ -131,4 +161,17 @@ pub fn resolve_collision(
     }
 
     (resolved, on_ground)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collision_distance_below_vanilla_epsilon_is_zeroed() {
+        let player = Aabb::from_center(dvec3(0.5, 0.0, 0.5), 0.3, 0.9);
+        let block = Aabb::block(1, 0, 0);
+        let (resolved, _) = collide_along_axes(&[block], player, Velocity::new(5.0e-8, 0.0, 0.0));
+        assert_eq!(resolved.x, 0.0);
+    }
 }

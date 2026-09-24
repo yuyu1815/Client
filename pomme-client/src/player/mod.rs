@@ -1,7 +1,10 @@
+pub(crate) mod cooldown;
 pub mod interaction;
 pub mod inventory;
 pub mod menu_click;
 pub mod tab_list;
+
+use std::collections::HashMap;
 
 use glam::{dvec2, dvec3};
 use inventory::Inventory;
@@ -19,6 +22,7 @@ pub const STANDING_HEIGHT: f64 = 1.8_f32 as f64;
 pub const CROUCH_HEIGHT: f64 = 1.5_f32 as f64;
 pub const STANDING_EYE_HEIGHT: f32 = 1.62;
 pub const CROUCH_EYE_HEIGHT: f32 = 1.27;
+pub const SLEEPING_EYE_HEIGHT: f32 = 0.2;
 // Entity.checkInsideBlocks passes the float literal through AABB's double API.
 const INSIDE_BLOCK_MARGIN: f64 = 1.0e-5_f32 as f64;
 const DROWN_DAMAGE_THRESHOLD: i32 = -20;
@@ -50,6 +54,22 @@ pub fn is_spectator(game_mode: u8) -> bool {
 
 fn is_water_block(state: azalea_block::BlockState) -> bool {
     fluid(state).kind == FluidKind::Water
+}
+
+fn should_swim(
+    currently_swimming: bool,
+    sprinting: bool,
+    in_water: bool,
+    under_water: bool,
+    feet_in_water: bool,
+) -> bool {
+    sprinting
+        && in_water
+        && if currently_swimming {
+            true
+        } else {
+            under_water && feet_in_water
+        }
 }
 
 pub struct LocalPlayer {
@@ -100,8 +120,15 @@ pub struct LocalPlayer {
     pub in_water: bool,
     /// Vanilla `getFluidHeight(WATER)`: water surface height above the feet.
     pub fluid_height: f64,
+    pub in_lava: bool,
+    /// Vanilla `getFluidHeight(LAVA)`: lava surface height above the feet.
+    pub lava_height: f64,
     pub eyes_in_water: bool,
     pub swimming: bool,
+    /// Shared LivingEntity flag bit 0x80; packet authority remains external.
+    pub fall_flying: bool,
+    pub fall_flying_ticks: u32,
+    pub fall_distance: f32,
     pub air_supply: i32,
     /// Vanilla LocalPlayer.portalEffectIntensity: drives the full-screen
     /// portal overlay while standing in a nether portal.
@@ -116,7 +143,11 @@ pub struct LocalPlayer {
     pub entity_id: i32,
     pub experience_level: i32,
     pub experience_progress: f32,
+    pub total_experience: u32,
     pub effects: crate::mob_effect::ActiveMobEffects,
+    /// Resolved vanilla attribute values keyed by registry id. Movement speed
+    /// excludes the tick-local sprint multiplier.
+    pub attributes: HashMap<String, f64>,
 }
 
 impl LocalPlayer {
@@ -162,8 +193,13 @@ impl LocalPlayer {
             was_forward_pressed: false,
             in_water: false,
             fluid_height: 0.0,
+            in_lava: false,
+            lava_height: 0.0,
             eyes_in_water: false,
             swimming: false,
+            fall_flying: false,
+            fall_flying_ticks: 0,
+            fall_distance: 0.0,
             air_supply: MAX_AIR_SUPPLY,
             portal_effect_intensity: 0.0,
             prev_portal_effect_intensity: 0.0,
@@ -174,8 +210,18 @@ impl LocalPlayer {
             entity_id: -1,
             experience_level: 0,
             experience_progress: 0.0,
+            total_experience: 0,
             effects: crate::mob_effect::ActiveMobEffects::default(),
+            attributes: HashMap::new(),
         }
+    }
+
+    pub fn set_attribute_value(&mut self, id: impl Into<String>, value: f64) {
+        self.attributes.insert(id.into(), value);
+    }
+
+    pub fn attribute_value(&self, id: &str, default: f64) -> f64 {
+        self.attributes.get(id).copied().unwrap_or(default)
     }
 
     pub fn reset_death_time(&mut self) {
@@ -200,12 +246,14 @@ impl LocalPlayer {
         self.death_time = 0;
         self.reset_hurt_state();
         self.effects = crate::mob_effect::ActiveMobEffects::default();
+        self.attributes.clear();
         self.inventory = Inventory::new();
         self.food = 20;
         self.armor = 0;
         self.saturation = 5.0;
         self.experience_level = 0;
         self.experience_progress = 0.0;
+        self.total_experience = 0;
         self.flying = false;
         self.may_fly = false;
         self.fly_speed = 0.05;
@@ -227,8 +275,13 @@ impl LocalPlayer {
         self.was_forward_pressed = false;
         self.in_water = false;
         self.fluid_height = 0.0;
+        self.in_lava = false;
+        self.lava_height = 0.0;
         self.eyes_in_water = false;
         self.swimming = false;
+        self.fall_flying = false;
+        self.fall_flying_ticks = 0;
+        self.fall_distance = 0.0;
         self.sleep_counter = 0;
         self.on_ground = false;
 
@@ -305,7 +358,9 @@ impl LocalPlayer {
     }
 
     pub fn height(&self) -> f64 {
-        if self.crouching {
+        if self.sleeping_pos.is_some() {
+            0.2
+        } else if self.crouching {
             CROUCH_HEIGHT
         } else {
             STANDING_HEIGHT
@@ -313,11 +368,18 @@ impl LocalPlayer {
     }
 
     pub fn bounding_box(&self) -> Aabb {
-        Aabb::from_center(self.position.into(), PLAYER_HALF_WIDTH, self.height() / 2.0)
+        let half_width = if self.sleeping_pos.is_some() {
+            0.1
+        } else {
+            PLAYER_HALF_WIDTH
+        };
+        Aabb::from_center(self.position.into(), half_width, self.height() / 2.0)
     }
 
     pub fn target_eye_height(&self) -> f32 {
-        if self.crouching {
+        if self.sleeping_pos.is_some() {
+            SLEEPING_EYE_HEIGHT
+        } else if self.crouching {
             CROUCH_EYE_HEIGHT
         } else {
             STANDING_EYE_HEIGHT
@@ -383,14 +445,16 @@ impl LocalPlayer {
         let z1 = (self.position.z + half_w - MARGIN).ceil() as i32 - 1;
 
         let mut fluid_height = 0.0f64;
+        let mut lava_height = 0.0f64;
         for bx in x0..=x1 {
             for by in y0..=y1 {
                 for bz in z0..=z1 {
                     let f = fluid(chunks.get_block_state(bx, by, bz));
-                    if f.kind != FluidKind::Water {
+                    if f.kind == FluidKind::Empty {
                         continue;
                     }
-                    let block_height = if is_water_block(chunks.get_block_state(bx, by + 1, bz)) {
+                    let above = fluid(chunks.get_block_state(bx, by + 1, bz));
+                    let block_height = if above.kind == f.kind {
                         1.0
                     } else {
                         // f32 to match vanilla's float math.
@@ -398,7 +462,12 @@ impl LocalPlayer {
                     };
                     let fluid_top = f64::from(by) + block_height;
                     if fluid_top >= feet_y + MARGIN {
-                        fluid_height = fluid_height.max(fluid_top - feet_y);
+                        let height = fluid_top - feet_y;
+                        match f.kind {
+                            FluidKind::Water => fluid_height = fluid_height.max(height),
+                            FluidKind::Lava => lava_height = lava_height.max(height),
+                            FluidKind::Empty => unreachable!(),
+                        }
                     }
                 }
             }
@@ -409,10 +478,23 @@ impl LocalPlayer {
         let eye_z = self.position.z.floor() as i32;
 
         self.fluid_height = fluid_height;
+        self.lava_height = lava_height;
         // Vanilla `wasTouchingWater` is exactly "fluid height > 0".
         self.in_water = fluid_height > 0.0;
+        self.in_lava = lava_height > 0.0;
         self.eyes_in_water = is_water_block(chunks.get_block_state(eye_x, eye_y, eye_z));
-        self.swimming = self.sprinting && self.in_water && self.eyes_in_water;
+        let feet_in_water = is_water_block(chunks.get_block_state(
+            self.position.x.floor() as i32,
+            feet_y.floor() as i32,
+            self.position.z.floor() as i32,
+        ));
+        self.swimming = should_swim(
+            self.swimming,
+            self.sprinting,
+            self.in_water,
+            self.eyes_in_water,
+            feet_in_water,
+        );
     }
 
     /// Vanilla Entity.checkInsideBlocks: a nether portal counts as entered when
@@ -488,6 +570,25 @@ impl LocalPlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn swimming_uses_vanilla_entry_and_exit_conditions() {
+        assert!(!should_swim(false, true, true, false, true));
+        assert!(should_swim(false, true, true, true, true));
+        assert!(should_swim(true, true, true, false, false));
+        assert!(!should_swim(true, false, true, true, true));
+        assert!(!should_swim(true, true, false, true, true));
+    }
+
+    #[test]
+    fn sleeping_pose_uses_vanilla_dimensions_and_eye_height() {
+        let mut player = LocalPlayer::new();
+        player.sleeping_pos = Some(azalea_core::position::BlockPos::new(0, 64, 0));
+        assert_eq!(player.height(), 0.2);
+        let bounds = player.bounding_box();
+        assert_eq!(bounds.max.x - bounds.min.x, 0.2);
+        assert_eq!(player.target_eye_height(), SLEEPING_EYE_HEIGHT);
+    }
 
     #[test]
     fn bounding_box_tracks_current_crouching_pose() {

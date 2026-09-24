@@ -5,6 +5,7 @@
 //! out of sync, see `handler::handle_raw_game_packet`) — so a failure means
 //! "investigate which side is wrong", with in-game behavior as tiebreaker.
 
+use azalea_buf::{AzBuf, AzBufVar};
 use azalea_core::entity_id::MinecraftEntityId;
 use azalea_core::sound::CustomSound;
 use azalea_protocol::packets::ProtocolPacket;
@@ -26,6 +27,78 @@ fn native_matches_azalea() {
         azalea_protocol::packets::PROTOCOL_VERSION,
         pomme_protocol::version::NATIVE.protocol
     );
+}
+
+#[test]
+fn display_slot_typed_decode_matches_native_id_fallback() {
+    use azalea_protocol::packets::game::c_set_display_objective::DisplaySlot as Slot;
+
+    let packet_id = PacketTable::native()
+        .id(Phase::Game, Direction::Clientbound, "set_display_objective")
+        .unwrap();
+    let valid_slots = [
+        Slot::List,
+        Slot::Sidebar,
+        Slot::BelowName,
+        Slot::TeamBlack,
+        Slot::TeamDarkBlue,
+        Slot::TeamDarkGreen,
+        Slot::TeamDarkAqua,
+        Slot::TeamDarkRed,
+        Slot::TeamDarkPurple,
+        Slot::TeamGold,
+        Slot::TeamGray,
+        Slot::TeamDarkGray,
+        Slot::TeamBlue,
+        Slot::TeamGreen,
+        Slot::TeamAqua,
+        Slot::TeamRed,
+        Slot::TeamLightPurple,
+        Slot::TeamYellow,
+        Slot::TeamWhite,
+    ];
+
+    let mut cases: Vec<(Vec<u8>, Slot)> = valid_slots
+        .iter()
+        .enumerate()
+        .map(|(id, slot)| (vec![id as u8], *slot))
+        .collect();
+    cases.extend(
+        [(-1i32, Slot::List), (19, Slot::List), (300, Slot::List)].map(|(id, slot)| {
+            let mut encoded = Vec::new();
+            wire::write_varint(&mut encoded, id as u32);
+            (encoded, slot)
+        }),
+    );
+    cases.push((vec![0x92, 0x00], Slot::TeamWhite)); // overlong terminating VarInt(18)
+    cases.push((vec![0x93, 0x00], Slot::List)); // overlong terminating out-of-range VarInt(19)
+
+    for (encoded_slot, expected_slot) in cases {
+        let mut frame = Vec::new();
+        wire::write_varint(&mut frame, packet_id);
+        frame.extend(encoded_slot);
+        "objective".to_owned().azalea_write(&mut frame).unwrap();
+        let mut cursor = std::io::Cursor::new(&frame[..]);
+        let ClientboundGamePacket::SetDisplayObjective(packet) =
+            azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(&mut cursor)
+                .unwrap()
+        else {
+            panic!("wrong packet variant");
+        };
+        assert_eq!(packet.slot, expected_slot);
+        assert_eq!(packet.objective_name, "objective");
+        assert_eq!(cursor.position() as usize, frame.len());
+    }
+
+    let mut malformed = Vec::new();
+    wire::write_varint(&mut malformed, packet_id);
+    let varint_start = malformed.len();
+    malformed.extend_from_slice(&[0x80; 5]);
+    let mut cursor = std::io::Cursor::new(&malformed[..]);
+    assert!(
+        azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(&mut cursor).is_err()
+    );
+    assert_eq!(cursor.position() as usize, varint_start + 5);
 }
 
 /// pomme's serverbound chat encoders, read back by azalea's decoders.
@@ -983,7 +1056,7 @@ fn translate_attack_old_versions() {
 fn translate_interact_774() {
     let location = DVec3::new(0.5, 1.25, -0.25);
     let frames = translation_for(774)
-        .translate_outbound_game_frame(wire::encode_interact(42, location, true));
+        .translate_outbound_game_frame(wire::encode_interact(42, wire::InteractionHand::MainHand, location, true));
     assert_eq!(frames.len(), 2);
 
     let interact = old_id(774, Direction::Serverbound, "interact") as u8;
@@ -1076,7 +1149,7 @@ fn translate_horse_screen_open_773() {
         old_id(773, Direction::Clientbound, "horse_screen_open"),
     );
     old.push(1); // container id
-    old.push(3); // inventory columns
+    old.push(3); // native inventory columns
     old.extend_from_slice(&42i32.to_be_bytes());
 
     let ClientboundGamePacket::MountScreenOpen(p) = translate_and_decode(773, old) else {
@@ -1084,6 +1157,27 @@ fn translate_horse_screen_open_773() {
     };
     assert_eq!(p.container_id, 1);
     assert_eq!(p.inventory_columns, 3);
+    assert_eq!(p.entity_id, MinecraftEntityId(42));
+}
+
+/// Protocol 766 carried `3 * columns + 1` in this field. Only that old-wire
+/// gate converts it; native 26.2 and later 1.21 wire values remain columns.
+#[test]
+fn translate_horse_screen_open_766_converts_legacy_inventory_size() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(766, Direction::Clientbound, "horse_screen_open"),
+    );
+    wire::write_varint(&mut old, 7); // container id
+    wire::write_varint(&mut old, 16); // legacy size -> five columns
+    old.extend_from_slice(&42i32.to_be_bytes());
+
+    let ClientboundGamePacket::MountScreenOpen(p) = translate_and_decode(766, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(p.container_id, 7);
+    assert_eq!(p.inventory_columns, 5);
     assert_eq!(p.entity_id, MinecraftEntityId(42));
 }
 
@@ -1877,19 +1971,51 @@ fn translate_container_set_slot_767() {
     assert_eq!(p.slot, 1);
 }
 
-/// 767 `cooldown` item ids remap into the native registry space (azalea
-/// still decodes the item id form).
+/// Legacy item-id cooldowns are normalized to canonical group-Identifier
+/// frames; do not send the 26.2 payload through Azalea's stale item codec.
 #[test]
 fn translate_cooldown_767() {
     let mut old = Vec::new();
     wire::write_varint(&mut old, old_id(767, Direction::Clientbound, "cooldown"));
-    wire::write_varint(&mut old, 5); // item, unshifted below the divergence
-    wire::write_varint(&mut old, 100); // duration
+    let remaps = pomme_protocol::RegistryRemaps::to_native(767).unwrap();
+    let old_item = (0..pomme_protocol::RegistryTable::for_protocol(767)
+        .unwrap()
+        .names(pomme_protocol::ClientRegistry::Item)
+        .len() as u32)
+        .find(|&item| {
+            remaps
+                .remap(pomme_protocol::ClientRegistry::Item, item)
+                .is_some_and(|native| native != item)
+        })
+        .expect("fixture needs a non-identity item remap");
+    wire::write_varint(&mut old, old_item); // legacy item id requiring remap
+    wire::write_varint(&mut old, 100); // signed duration bits
 
-    let ClientboundGamePacket::Cooldown(p) = translate_and_decode(767, old) else {
-        panic!("wrong packet");
+    let translated = translation_for(767)
+        .translate_game_frame(old.into_boxed_slice())
+        .unwrap();
+    let mut cur = std::io::Cursor::new(&translated[..]);
+    assert_eq!(
+        u32::azalea_read_var(&mut cur).unwrap(),
+        table_id(Phase::Game, Direction::Clientbound, "cooldown")
+    );
+    let group = Identifier::azalea_read(&mut cur).unwrap();
+    assert_eq!(i32::azalea_read_var(&mut cur).unwrap(), 100);
+    assert_eq!(cur.position() as usize, translated.len());
+
+    let native_item = remaps
+        .remap(pomme_protocol::ClientRegistry::Item, old_item)
+        .unwrap();
+    assert_ne!(native_item, old_item);
+    let native_name = pomme_protocol::RegistryTable::native()
+        .name_of(pomme_protocol::ClientRegistry::Item, native_item)
+        .unwrap();
+    let expected_group = if native_name.contains(':') {
+        native_name.to_owned()
+    } else {
+        format!("minecraft:{native_name}")
     };
-    assert_eq!(p.duration, 100);
+    assert_eq!(group, Identifier::new(expected_group));
 }
 
 /// The clientbound `set_carried_item` -> `set_held_slot` rename alias.
@@ -2558,6 +2684,25 @@ fn expect_text(json: &str) -> azalea_chat::FormattedText {
         &serde_json::from_str::<serde_json::Value>(json).unwrap(),
     )
     .unwrap()
+}
+
+#[test]
+fn translate_set_score_764_adds_absent_optional_fields() {
+    let mut old = Vec::new();
+    wire::write_varint(&mut old, old_id(764, Direction::Clientbound, "set_score"));
+    write_utf(&mut old, "alice");
+    wire::write_varint(&mut old, 0); // add/update
+    write_utf(&mut old, "objective");
+    wire::write_varint(&mut old, 42);
+
+    let ClientboundGamePacket::SetScore(score) = translate_and_decode(764, old) else {
+        panic!("wrong packet");
+    };
+    assert_eq!(score.owner, "alice");
+    assert_eq!(score.objective_name, "objective");
+    assert_eq!(score.score, 42);
+    assert!(score.display.is_none());
+    assert!(score.number_format.is_none());
 }
 
 /// The 1.20.2 JSON -> NBT component transcode, end to end through

@@ -28,6 +28,10 @@ const LAST_SEEN_CAPACITY: usize = 20;
 const MAX_CHAT_LENGTH: usize = 256;
 const MAX_ARGUMENT_NAME_LENGTH: usize = 16;
 
+fn argument_name_exceeds_limit(name: &str) -> bool {
+    name.encode_utf16().count() > MAX_ARGUMENT_NAME_LENGTH
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -500,7 +504,7 @@ impl ChatSender {
         }
         if arguments
             .iter()
-            .any(|(name, _)| name.chars().count() > MAX_ARGUMENT_NAME_LENGTH)
+            .any(|(name, _)| argument_name_exceeds_limit(name))
         {
             return Err("signed command argument name exceeds 16 characters".into());
         }
@@ -874,6 +878,13 @@ L59jqlQpPBBT3EAbN66KEao=
         assert_eq!(sender.session.as_ref().unwrap().message_index, 0);
         sender.encode_input("hello", None).unwrap();
         assert_eq!(sender.session.as_ref().unwrap().message_index, 1);
+    }
+
+    #[test]
+    fn signed_argument_name_limit_uses_utf16_code_units() {
+        assert!(!argument_name_exceeds_limit(&"x".repeat(16)));
+        assert!(!argument_name_exceeds_limit(&"😀".repeat(8)));
+        assert!(argument_name_exceeds_limit(&"😀".repeat(9)));
     }
 
     #[test]

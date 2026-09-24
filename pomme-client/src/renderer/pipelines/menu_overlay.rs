@@ -2147,6 +2147,11 @@ pub enum SpriteId {
     SpectatorScrollRight,
     SpectatorTeleportToPlayer,
     SpectatorTeleportToTeam,
+    TabHeartContainerBlinking,
+    TabHeartFullBlinking,
+    TabHeartHalfBlinking,
+    TabHeartAbsorbingFullBlinking,
+    TabHeartAbsorbingHalfBlinking,
 }
 
 pub const CREATIVE_TAB_SPRITES: [[[SpriteId; 7]; 2]; 2] = [
@@ -2371,6 +2376,31 @@ fn build_sprite_atlas(
         (
             SpriteId::HeartAbsorbingHalf,
             "minecraft/textures/gui/sprites/hud/heart/absorbing_half.png",
+            0.0,
+        ),
+        (
+            SpriteId::TabHeartContainerBlinking,
+            "minecraft/textures/gui/sprites/hud/heart/container_blinking.png",
+            0.0,
+        ),
+        (
+            SpriteId::TabHeartFullBlinking,
+            "minecraft/textures/gui/sprites/hud/heart/full_blinking.png",
+            0.0,
+        ),
+        (
+            SpriteId::TabHeartHalfBlinking,
+            "minecraft/textures/gui/sprites/hud/heart/half_blinking.png",
+            0.0,
+        ),
+        (
+            SpriteId::TabHeartAbsorbingFullBlinking,
+            "minecraft/textures/gui/sprites/hud/heart/absorbing_full_blinking.png",
+            0.0,
+        ),
+        (
+            SpriteId::TabHeartAbsorbingHalfBlinking,
+            "minecraft/textures/gui/sprites/hud/heart/absorbing_half_blinking.png",
             0.0,
         ),
         (

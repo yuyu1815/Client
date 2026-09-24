@@ -6,9 +6,11 @@ pub mod chunk_batch;
 pub mod commands;
 pub mod conn;
 pub mod connection;
+mod cooldown;
 mod dialog;
 pub mod handler;
 pub mod known_packs;
+mod native_codecs;
 pub mod resolve;
 pub mod sender;
 pub mod stream;
@@ -27,6 +29,23 @@ use simdnbt::owned::NbtCompound;
 use crate::entity::MetaValue;
 use crate::entity::components::Position;
 use crate::entity::villager::{VillagerKind, VillagerProfession};
+
+/// Lossless client-owned Explosion payload; sound is decoded as a native
+/// holder.
+#[derive(Clone)]
+pub struct ExplosionPayload {
+    pub center: azalea_core::position::Vec3,
+    pub radius: f32,
+    pub block_count: i32,
+    pub player_knockback: Option<azalea_core::position::Vec3>,
+    pub explosion_particle: azalea_entity::particle::Particle,
+    pub explosion_sound: crate::audio::SoundRef,
+    pub block_particles: Vec<
+        azalea_protocol::packets::game::c_explode::Weighted<
+            azalea_protocol::packets::game::c_explode::ExplosionParticleInfo,
+        >,
+    >,
+}
 
 /// A packet's per-column light payload (chunk load or standalone update):
 /// present sections listed in `*_updates`, selected by `*_y_mask`, with
@@ -57,8 +76,22 @@ impl From<&azalea_protocol::packets::game::c_light_update::ClientboundLightUpdat
     }
 }
 
+pub struct ServerTransfer {
+    pub host: String,
+    pub port: u32,
+    pub cookies: std::collections::HashMap<azalea_registry::identifier::Identifier, Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CriticalHitKind {
+    Critical,
+    Enchanted,
+}
+
 pub enum NetworkEvent {
-    Connected,
+    Connected {
+        profile_name: String,
+    },
     Registries(Arc<azalea_core::registry_holder::RegistryHolder>),
     /// The `minecraft:dialog` registry with its tags, sent with `Registries`
     /// and again whenever a tag update replaces the dialog tags.
@@ -84,6 +117,10 @@ pub enum NetworkEvent {
         heightmaps: Vec<(HeightmapKind, Box<[u64]>)>,
         light: PacketLightData,
     },
+    ChunkBiomes {
+        pos: ChunkPos,
+        data: Vec<u8>,
+    },
     /// Standalone server light correction (`ClientboundLightUpdate`).
     LightUpdate {
         pos: ChunkPos,
@@ -102,6 +139,14 @@ pub enum NetworkEvent {
         change: azalea_protocol::common::movements::PositionMoveRotation,
         relative: azalea_protocol::common::movements::RelativeMovements,
     },
+    PlayerRotation {
+        y_rot: f32,
+        x_rot: f32,
+        relative_y: bool,
+        relative_x: bool,
+    },
+    /// Lossless native explosion payload; consumed once by the game core.
+    Explosion(ExplosionPayload),
     PlayerHealth {
         health: f32,
         food: u32,
@@ -110,6 +155,11 @@ pub enum NetworkEvent {
     PlayerExperience {
         progress: f32,
         level: i32,
+        total_experience: u32,
+    },
+    SetPlayerInventory {
+        slot: u32,
+        item: ItemStack,
     },
     UpdateMobEffect {
         entity_id: i32,
@@ -155,11 +205,56 @@ pub enum NetworkEvent {
     HeldSlot {
         slot: u8,
     },
+    ItemCooldown {
+        group: azalea_registry::identifier::Identifier,
+        duration: i32,
+    },
     /// A menu data value (furnace lit/cook progress, etc.).
     ContainerData {
         container_id: i32,
         id: u16,
         value: u16,
+    },
+    MerchantOffers {
+        container_id: i32,
+        offers: Vec<azalea_protocol::packets::game::c_merchant_offers::MerchantOffer>,
+        villager_level: u32,
+        villager_xp: u32,
+        show_progress: bool,
+        can_restock: bool,
+    },
+    MountScreenOpen {
+        container_id: i32,
+        inventory_columns: u32,
+        entity_id: i32,
+    },
+    WorldBorderInitialize {
+        center_x: f64,
+        center_z: f64,
+        old_size: f64,
+        new_size: f64,
+        lerp_time: i64,
+        absolute_max_size: i32,
+        warning_blocks: i32,
+        warning_time: i32,
+    },
+    WorldBorderCenter {
+        x: f64,
+        z: f64,
+    },
+    WorldBorderSize {
+        size: f64,
+    },
+    WorldBorderLerpSize {
+        old_size: f64,
+        new_size: f64,
+        lerp_time: i64,
+    },
+    WorldBorderWarningBlocks {
+        warning_blocks: i32,
+    },
+    WorldBorderWarningTime {
+        warning_time: i32,
     },
     OpenScreen {
         container_id: i32,
@@ -221,8 +316,10 @@ pub enum NetworkEvent {
         name: String,
         display: Option<Vec<crate::ui::text::TextSpan>>,
         number_format: Option<crate::ui::hud::ScoreNumberFormat>,
+        render_type: Option<azalea_core::objectives::ObjectiveCriteria>,
     },
     ScoreboardDisplay {
+        slot: azalea_protocol::packets::game::c_set_display_objective::DisplaySlot,
         name: Option<String>,
     },
     ScoreboardScore {
@@ -243,6 +340,7 @@ pub enum NetworkEvent {
         suffix: Vec<crate::ui::text::TextSpan>,
         color: [f32; 4],
         fill_color: Option<[f32; 4]>,
+        sidebar_slot: Option<azalea_protocol::packets::game::c_set_display_objective::DisplaySlot>,
         members: Option<Vec<String>>,
     },
     ScoreboardTeamMembers {
@@ -328,6 +426,12 @@ pub enum NetworkEvent {
         event: azalea_protocol::packets::game::c_game_event::EventType,
         param: f32,
     },
+    /// Game events not consumed by the packet layer (e.g. WinGame and player
+    /// flags).
+    GameEvent {
+        event: azalea_protocol::packets::game::c_game_event::EventType,
+        param: f32,
+    },
     GameModeChanged {
         game_mode: u8,
         /// `Some` = authoritative previous mode from login/respawn (which may
@@ -389,6 +493,7 @@ pub enum NetworkEvent {
     EntityTeleported {
         id: i32,
         position: Position,
+        relative: Option<azalea_protocol::common::movements::RelativeMovements>,
         /// `TeleportEntity` applies the packet's velocity; `EntityPositionSync`
         /// doesn't (vanilla `setValuesFromPositionPacket` vs
         /// `handleEntityPositionSync`).
@@ -403,17 +508,18 @@ pub enum NetworkEvent {
         data: u32,
     },
     /// `ClientboundLevelParticles`. The handler drops unimplemented particle
-    /// kinds and the `always_show` flag (it only matters below
-    /// `ParticleStatus::All`, and pomme has no particles setting).
+    /// kinds, but preserves the signed count and limiter flags for the
+    /// consumer.
     LevelParticles {
         kind: crate::particle::ServerParticleKind,
         override_limiter: bool,
+        always_show: bool,
         pos: DVec3,
         x_dist: f32,
         y_dist: f32,
         z_dist: f32,
         max_speed: f32,
-        count: u32,
+        count: i32,
     },
     EntitiesRemoved {
         ids: Vec<i32>,
@@ -451,6 +557,15 @@ pub enum NetworkEvent {
     /// `stopSleepInBed(false, false)`, forcing the sleep counter to 100.
     EntityWakeUp {
         id: i32,
+    },
+    /// Entity event 35: a Totem of Undying was used by this entity.
+    TotemUsed {
+        entity_id: i32,
+    },
+    /// Animate actions 4/5: spawn a tracked critical-hit particle emitter.
+    CriticalHit {
+        id: i32,
+        kind: CriticalHitKind,
     },
     SheepEatStart {
         id: i32,
@@ -555,6 +670,14 @@ pub enum NetworkEvent {
     Disconnected {
         reason: String,
     },
+    /// A server's code of conduct must be shown and accepted by the user before
+    /// replying.
+    CodeOfConduct {
+        text: String,
+    },
+    /// Server-directed transfer; only server cookies cross to the next
+    /// connection. Authentication credentials remain owned by UserData.
+    ServerTransfer(ServerTransfer),
     PlayerInfoUpdate {
         actions: crate::player::tab_list::PlayerInfoActions,
         entries: Vec<crate::player::tab_list::PlayerInfoEntry>,

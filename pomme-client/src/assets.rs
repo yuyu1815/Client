@@ -122,6 +122,26 @@ pub fn resolve_asset_path_with_packs(
         .unwrap_or_else(|| jar_assets_dir.join(asset_key))
 }
 
+/// Resolve against an owned active-pack directory snapshot (low to high
+/// priority).
+pub(crate) fn resolve_asset_path_with_pack_dirs(
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    asset_key: &str,
+    pack_dirs: &[PathBuf],
+) -> PathBuf {
+    if !checked_asset_key(asset_key) {
+        return jar_assets_dir.join("__invalid_asset_key__");
+    }
+    pack_dirs
+        .iter()
+        .rev()
+        .map(|root| root.join("assets").join(asset_key))
+        .find(|path| path.exists())
+        .or_else(|| builtin_asset(jar_assets_dir, asset_index, asset_key))
+        .unwrap_or_else(|| jar_assets_dir.join(asset_key))
+}
+
 fn checked_asset_key(asset_key: &str) -> bool {
     let valid = valid_asset_key(asset_key);
     if !valid {

@@ -83,6 +83,7 @@ fn main() {
         ("chunk_border.frag", shaderc::ShaderKind::Fragment),
         ("item_entity.vert", shaderc::ShaderKind::Vertex),
         ("item_entity_world.vert", shaderc::ShaderKind::Vertex),
+        ("item_activation.vert", shaderc::ShaderKind::Vertex),
         ("item_entity.frag", shaderc::ShaderKind::Fragment),
         ("world_shadow.vert", shaderc::ShaderKind::Vertex),
         ("world_shadow.frag", shaderc::ShaderKind::Fragment),

@@ -292,6 +292,8 @@ impl ChatMessageTag {
 pub struct ChatSuggestion {
     pub text: String,
     pub tooltip: Option<Component>,
+    /// Server-provided replacement range, in UTF-16 code units.
+    pub replacement_range: Option<(usize, usize)>,
 }
 
 impl ChatSuggestion {
@@ -299,6 +301,7 @@ impl ChatSuggestion {
         Self {
             text,
             tooltip: None,
+            replacement_range: None,
         }
     }
 }
@@ -692,6 +695,17 @@ impl ChatState {
 
     pub fn push_message(&mut self, spans: Vec<TextSpan>) {
         self.push_message_with_source(spans, None, ChatMessageSource::SystemClient, None);
+    }
+
+    pub(crate) fn apply_game_event_notice(
+        &mut self,
+        event: azalea_protocol::packets::game::c_game_event::EventType,
+    ) {
+        if event == azalea_protocol::packets::game::c_game_event::EventType::NoRespawnBlockAvailable
+        {
+            let component = Component::translate("block.minecraft.spawn.not_valid", Vec::new());
+            self.push_message(format_component_spans(&component, common::WHITE));
+        }
     }
 
     pub fn push_message_with_source(
@@ -1369,11 +1383,29 @@ impl ChatState {
         let set = if options.is_empty() {
             local.clone()
         } else {
-            let Some(start) = utf16_offset_to_byte(request, start) else {
+            let Some(fallback_start) = utf16_offset_to_byte(request, start) else {
                 return;
             };
+            let range = match options
+                .first()
+                .and_then(|suggestion| suggestion.replacement_range)
+            {
+                Some((start, length)) => {
+                    let Some(end) = start.checked_add(length) else {
+                        return;
+                    };
+                    let (Some(start), Some(end)) = (
+                        utf16_offset_to_byte(request, start),
+                        utf16_offset_to_byte(request, end),
+                    ) else {
+                        return;
+                    };
+                    start..end
+                }
+                None => fallback_start..request.len(),
+            };
             SuggestionSet {
-                range: start..request.len(),
+                range,
                 list: options,
             }
         };
@@ -3229,6 +3261,48 @@ mod tests {
         TextSpan::new(text.to_string(), color)
     }
 
+    #[test]
+    fn no_respawn_game_event_appends_localized_system_notice_each_time() {
+        use azalea_protocol::packets::game::c_game_event::EventType;
+
+        let key = "block.minecraft.spawn.not_valid";
+        if crate::lang::translate(key).is_none() {
+            let assets =
+                std::env::temp_dir().join(format!("pomme-chat-lang-{}", std::process::id()));
+            let lang_dir = assets.join("minecraft/lang");
+            std::fs::create_dir_all(&lang_dir).unwrap();
+            std::fs::copy(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../third_party/SteelMC/steel-utils/build_assets/en_us.json"
+                ),
+                lang_dir.join("en_us.json"),
+            )
+            .unwrap();
+            crate::lang::load(&assets);
+        }
+        let expected = crate::lang::translate(key).expect("English game language is loaded");
+        assert_ne!(expected, key);
+
+        let mut chat = ChatState::new();
+        chat.options.delay_secs = 60.0;
+        chat.previous_message_time = Some(Instant::now());
+
+        chat.apply_game_event_notice(EventType::NoRespawnBlockAvailable);
+        assert_eq!(chat.messages.len(), 1);
+        let line = chat.messages.back().unwrap();
+        assert_eq!(line_text(&line.spans), expected);
+        assert_eq!(line.source, ChatMessageSource::SystemClient);
+        assert!(line.signature.is_none());
+        assert!(chat.delayed_messages.is_empty());
+
+        chat.apply_game_event_notice(EventType::StopRaining);
+        assert_eq!(chat.messages.len(), 1);
+        chat.apply_game_event_notice(EventType::NoRespawnBlockAvailable);
+        assert_eq!(chat.messages.len(), 2);
+        assert_eq!(line_text(&chat.messages.back().unwrap().spans), expected);
+    }
+
     fn line_text(line: &[TextSpan]) -> String {
         line.iter().map(|s| s.text.clone()).collect()
     }
@@ -4493,6 +4567,13 @@ mod tests {
         assert_eq!(utf16_offset_to_byte("𝄞x", 2), Some(4));
         assert_eq!(utf16_offset_to_byte("𝄞x", 1), None);
         assert_eq!(utf16_offset_to_byte("abc", 4), None);
+        let request = "😀xyz";
+        let start = utf16_offset_to_byte(request, 2).unwrap();
+        let end = utf16_offset_to_byte(request, 3).unwrap();
+        assert_eq!(
+            apply_suggestion(request, &(start..end), "a"),
+            Some("😀ayz".into())
+        );
     }
 
     #[test]
@@ -4721,6 +4802,7 @@ mod tests {
             vec![ChatSuggestion {
                 text: "value".to_owned(),
                 tooltip: Some(tooltip.clone()),
+                replacement_range: None,
             }],
             None,
         );

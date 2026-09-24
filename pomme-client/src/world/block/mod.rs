@@ -640,8 +640,9 @@ pub fn redstone_wire_rgb(state: BlockState) -> [f32; 3] {
     COLORS[power.min(15)]
 }
 
-/// Vanilla `BlockTintSources.stem`: ARGB.color(age * 32, 255 - age * 8, age * 4).
-/// The state table carries the canonical `age` property as a decimal string.
+/// Vanilla `BlockTintSources.stem`: ARGB.color(age * 32, 255 - age * 8, age *
+/// 4). The state table carries the canonical `age` property as a decimal
+/// string.
 pub fn stem_rgb(state: BlockState) -> [f32; 3] {
     let age = block_properties(state)
         .get("age")

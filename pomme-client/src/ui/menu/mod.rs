@@ -344,6 +344,13 @@ pub const CREDITS_KEY_SPACE: u8 = 1 << 1;
 pub const CREDITS_KEY_CTRL_L: u8 = 1 << 2;
 pub const CREDITS_KEY_CTRL_R: u8 = 1 << 3;
 
+/// State for the credits roll while it temporarily overlays an active game.
+#[derive(Default)]
+pub(crate) struct CreditsRollState {
+    pub(crate) scroll: f32,
+    pub(crate) keys: u8,
+}
+
 impl MenuInput {
     /// Neutral input: builds a screen for its visuals only, with no hover,
     /// click or key state.

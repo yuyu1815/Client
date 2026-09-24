@@ -33,6 +33,7 @@ pub struct HeldItemPipeline {
     pipeline: vk::Pipeline,
     shared: ItemPipelineShared,
     display: DisplayResolver,
+    activation: bool,
     last_draw_trace: Option<serde_json::Value>,
 }
 
@@ -51,12 +52,45 @@ impl HeldItemPipeline {
             pipeline,
             shared,
             display: DisplayResolver::new(jar_assets_dir, "firstperson_righthand"),
+            activation: false,
+            last_draw_trace: None,
+        }
+    }
+
+    /// Owns an independent activation camera UBO/descriptor pool and atlas set.
+    pub fn new_activation(
+        device: &vk::Device,
+        render_pass: vk::RenderPass,
+        allocator: &Arc<Mutex<Allocator>>,
+        atlas: &TextureAtlas,
+        jar_assets_dir: &Path,
+    ) -> Self {
+        let shared = ItemPipelineShared::new(device, allocator, atlas, "totem_activation");
+        let pipeline =
+            item_entity::create_activation_pipeline(device, render_pass, shared.pipeline_layout);
+        Self {
+            pipeline,
+            shared,
+            display: DisplayResolver::new(jar_assets_dir, "fixed"),
+            activation: true,
             last_draw_trace: None,
         }
     }
 
     pub fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
         self.shared.rebind_atlas(device, atlas);
+    }
+
+    pub fn update_display_resources(
+        &mut self,
+        jar_assets_dir: &Path,
+        asset_index: &Option<crate::assets::AssetIndex>,
+        pack_dirs: &[std::path::PathBuf],
+    ) {
+        if self.activation {
+            self.display
+                .update_resources(jar_assets_dir, asset_index, pack_dirs);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -130,6 +164,56 @@ impl HeldItemPipeline {
         }));
     }
 
+    /// Draws with caller-computed activation camera and animation transform,
+    /// composed with the item's resolved FIXED display transform.
+    pub fn update_activation_and_draw(
+        &mut self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        view_projection: Mat4,
+        animation_transform: Mat4,
+        item: &HeldItemInfo,
+        meshes: &ItemEntityPipeline,
+    ) {
+        assert!(self.activation, "activation draw requires new_activation");
+        let Some((buffer, vertex_count)) = meshes.mesh_handle(&item.name) else {
+            self.last_draw_trace = Some(serde_json::json!({
+                "status": "skipped", "reason": "no_item_mesh", "item": item.name,
+                "frameIndex": frame, "vertexCount": 0,
+                "provenance": "activation mesh lookup"
+            }));
+            return;
+        };
+        self.shared
+            .update_camera(frame, &CameraUniform::with_view_proj(view_projection));
+        let fixed = self.display.resolve(
+            &item.name,
+            DisplayTransform {
+                rotation: Vec3::ZERO,
+                translation: Vec3::ZERO,
+                scale: Vec3::ONE,
+            },
+        );
+        let model = animation_transform * fixed.to_matrix();
+        self.shared.bind(cmd, frame, self.pipeline);
+        cmd.bind_vertex_buffers(0, &[buffer], &[0]);
+        push_model_light(cmd, self.shared.pipeline_layout, &model, item.light);
+        push_world_lighting(
+            cmd,
+            self.shared.pipeline_layout,
+            &model,
+            item.nether_lighting,
+        );
+        cmd.draw(vertex_count, 1, 0, 0);
+        self.last_draw_trace = Some(serde_json::json!({
+            "status": "submitted", "source": "actual Vulkan activation draw",
+            "frameIndex": frame, "vertexCount": vertex_count,
+            "item": item.name, "modelMatrixColumnMajor": model.to_cols_array(),
+            "viewProjectionMatrixColumnMajor": view_projection.to_cols_array(),
+            "provenance": "CPU submitted matrices/pipeline draw; not GPU readback"
+        }));
+    }
+
     pub fn probe_draw_trace(&self) -> Option<serde_json::Value> {
         self.last_draw_trace.clone()
     }
@@ -140,11 +224,15 @@ impl HeldItemPipeline {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
-        self.pipeline = item_entity::create_held_pipeline(
-            device,
-            render_pass,
-            self.shared.pipeline_layout,
-        );
+        self.pipeline = if self.activation {
+            item_entity::create_activation_pipeline(
+                device,
+                render_pass,
+                self.shared.pipeline_layout,
+            )
+        } else {
+            item_entity::create_held_pipeline(device, render_pass, self.shared.pipeline_layout)
+        };
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {

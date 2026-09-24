@@ -17,6 +17,7 @@ pub struct PlayerInfoEntry {
     pub latency: i32,
     pub display_name: Option<Vec<TextSpan>>,
     pub list_order: i32,
+    pub show_hat: bool,
     pub chat_session: Option<ValidatedChatSession>,
 }
 
@@ -29,6 +30,7 @@ pub struct PlayerInfoActions {
     pub update_latency: bool,
     pub update_display_name: bool,
     pub update_list_order: bool,
+    pub update_hat: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -42,6 +44,7 @@ pub struct TabListPlayer {
     pub latency: i32,
     pub listed: bool,
     pub list_order: i32,
+    pub show_hat: bool,
     pub chat_session: Option<ValidatedChatSession>,
     chat_chain_valid: bool,
     /// The last accepted message's index and signature.
@@ -114,23 +117,22 @@ impl TabList {
     pub fn apply_update(&mut self, actions: &PlayerInfoActions, entries: &[PlayerInfoEntry]) {
         for e in entries {
             if actions.add_player {
-                self.players.insert(
-                    e.uuid,
-                    TabListPlayer {
-                        uuid: e.uuid,
-                        name: e.name.clone(),
-                        textures: e.textures.clone(),
-                        display_name: e.display_name.clone(),
-                        game_mode: e.game_mode,
-                        latency: e.latency,
-                        listed: e.listed,
-                        list_order: e.list_order,
-                        chat_session: e.chat_session.clone(),
-                        chat_chain_valid: true,
-                        last_chat: None,
-                    },
-                );
-            } else if let Some(p) = self.players.get_mut(&e.uuid) {
+                self.players.entry(e.uuid).or_insert_with(|| TabListPlayer {
+                    uuid: e.uuid,
+                    name: e.name.clone(),
+                    textures: e.textures.clone(),
+                    display_name: e.display_name.clone(),
+                    game_mode: e.game_mode,
+                    latency: e.latency,
+                    listed: e.listed,
+                    list_order: e.list_order,
+                    show_hat: e.show_hat,
+                    chat_session: e.chat_session.clone(),
+                    chat_chain_valid: true,
+                    last_chat: None,
+                });
+            }
+            if let Some(p) = self.players.get_mut(&e.uuid) {
                 if let Some(textures) = &e.textures {
                     p.textures = Some(textures.clone());
                 }
@@ -153,6 +155,9 @@ impl TabList {
                 }
                 if actions.update_list_order {
                     p.list_order = e.list_order;
+                }
+                if actions.update_hat {
+                    p.show_hat = e.show_hat;
                 }
             }
         }
@@ -186,5 +191,81 @@ impl TabList {
         });
         out.truncate(80);
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_add_player_preserves_existing_entry() {
+        let uuid = Uuid::from_u128(1);
+        let entry = |name: &str, game_mode, listed, latency| PlayerInfoEntry {
+            uuid,
+            name: name.into(),
+            textures: None,
+            game_mode,
+            listed,
+            latency,
+            display_name: None,
+            list_order: 0,
+            show_hat: true,
+            chat_session: None,
+        };
+        let mut tab = TabList::new();
+        let add = PlayerInfoActions {
+            add_player: true,
+            ..Default::default()
+        };
+        tab.apply_update(&add, &[entry("original", 0, true, 1)]);
+        tab.apply_update(&add, &[entry("duplicate", 3, false, 99)]);
+
+        let player = &tab.players[&uuid];
+        assert_eq!(player.name, "original");
+        assert_eq!(player.game_mode, 0);
+        assert!(player.listed);
+        assert_eq!(player.latency, 1);
+    }
+
+    #[test]
+    fn update_hat_changes_only_on_hat_action() {
+        let uuid = Uuid::from_u128(2);
+        let mut tab = TabList::new();
+        let mut entry = PlayerInfoEntry {
+            uuid,
+            name: "hat-test".into(),
+            textures: None,
+            game_mode: 0,
+            listed: true,
+            latency: 0,
+            display_name: None,
+            list_order: 0,
+            show_hat: true,
+            chat_session: None,
+        };
+        tab.apply_update(
+            &PlayerInfoActions {
+                add_player: true,
+                ..Default::default()
+            },
+            &[entry.clone()],
+        );
+        entry.show_hat = false;
+        tab.apply_update(
+            &PlayerInfoActions {
+                update_hat: true,
+                ..Default::default()
+            },
+            &[entry.clone()],
+        );
+        tab.apply_update(
+            &PlayerInfoActions {
+                update_latency: true,
+                ..Default::default()
+            },
+            &[entry],
+        );
+        assert!(!tab.players[&uuid].show_hat);
     }
 }

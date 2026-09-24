@@ -61,8 +61,12 @@ pub const CATEGORY_AMBIENT: u8 = SoundCategory::Ambient as u8;
 impl SoundCategory {
     pub const COUNT: usize = Self::Ui as usize + 1;
 
-    pub fn from_index(index: u8) -> Self {
-        match index {
+    /// Checked protocol conversion. Unknown wire ordinals must not silently
+    /// become Master; callers handling untrusted packet values should drop
+    /// them.
+    pub fn try_from_index(index: u8) -> Option<Self> {
+        Some(match index {
+            0 => Self::Master,
             1 => Self::Music,
             2 => Self::Records,
             3 => Self::Weather,
@@ -73,8 +77,14 @@ impl SoundCategory {
             8 => Self::Ambient,
             9 => Self::Voice,
             10 => Self::Ui,
-            _ => Self::Master,
-        }
+            _ => return None,
+        })
+    }
+
+    /// Compatibility conversion for trusted UI indices; packet paths use the
+    /// checked form above.
+    pub fn from_index(index: u8) -> Self {
+        Self::try_from_index(index).unwrap_or(Self::Master)
     }
 }
 
@@ -101,7 +111,7 @@ impl SoundRef {
         Self::event(id.strip_prefix("minecraft:").unwrap_or(&id))
     }
 
-    fn event_name(&self) -> &str {
+    pub(crate) fn event_name(&self) -> &str {
         &self.0
     }
 }
@@ -488,6 +498,9 @@ impl AudioEngine {
         seed: u64,
         entity_id: Option<i32>,
     ) -> bool {
+        let Some(category) = SoundCategory::try_from_index(category) else {
+            return false;
+        };
         let Some(sound) = self.resolve_sound(sound_ref, Some(seed)) else {
             return false;
         };
@@ -511,7 +524,7 @@ impl AudioEngine {
             id,
             sound_id: sound.sound_id,
             path: sound.path,
-            category: SoundCategory::from_index(category),
+            category,
             volume: instance_volume,
             pitch: pitch * sound.entry_pitch,
             position: [pos.x as f32, pos.y as f32, pos.z as f32],
@@ -575,9 +588,16 @@ impl AudioEngine {
             self.stop_all_sounds();
             return;
         }
+        let category = match category {
+            Some(index) => match SoundCategory::try_from_index(index) {
+                Some(category) => Some(category),
+                None => return,
+            },
+            None => None,
+        };
         self.send(AudioCommand::StopMatching {
             sound_id: sound_id.map(canonical_sound_id),
-            category: category.map(SoundCategory::from_index),
+            category,
         });
     }
 
@@ -1315,6 +1335,8 @@ mod tests {
     fn ui_matches_vanilla_sound_source_ordinal() {
         assert_eq!(SoundCategory::Ui as usize, 10);
         assert!(matches!(SoundCategory::from_index(10), SoundCategory::Ui));
+        assert_eq!(SoundCategory::try_from_index(10), Some(SoundCategory::Ui));
+        assert_eq!(SoundCategory::try_from_index(11), None);
     }
 
     /// Drains the worker's view of the command channel, reporting each

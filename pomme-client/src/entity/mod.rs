@@ -115,6 +115,96 @@ fn within_simulation_distance(entity: Position, player: Position, distance: u32)
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EntityPose {
+    #[default]
+    Standing,
+    FallFlying,
+    Sleeping,
+    Swimming,
+    SpinAttack,
+    Crouching,
+    LongJumping,
+    Dying,
+    Croaking,
+    UsingTongue,
+    Sitting,
+    Roaring,
+    Sniffing,
+    Emerging,
+    Digging,
+    Sliding,
+    Shooting,
+    Inhaling,
+}
+
+impl EntityPose {
+    /// 26.2 `Pose.BY_ID`: continuous ordinal map, with unknown ids falling back
+    /// to STANDING.
+    pub fn from_vanilla_id(id: i32) -> Self {
+        match id {
+            1 => Self::FallFlying,
+            2 => Self::Sleeping,
+            3 => Self::Swimming,
+            4 => Self::SpinAttack,
+            5 => Self::Crouching,
+            6 => Self::LongJumping,
+            7 => Self::Dying,
+            8 => Self::Croaking,
+            9 => Self::UsingTongue,
+            10 => Self::Sitting,
+            11 => Self::Roaring,
+            12 => Self::Sniffing,
+            13 => Self::Emerging,
+            14 => Self::Digging,
+            15 => Self::Sliding,
+            16 => Self::Shooting,
+            17 => Self::Inhaling,
+            _ => Self::Standing,
+        }
+    }
+}
+
+/// Vanilla Entity shared-flags byte (bits 0, 3..7); crouching is a pose.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EntityFlags {
+    pub on_fire: bool,
+    pub sprinting: bool,
+    pub swimming: bool,
+    pub invisible: bool,
+    pub glowing: bool,
+    pub fall_flying: bool,
+}
+
+impl From<u8> for EntityFlags {
+    fn from(flags: u8) -> Self {
+        Self {
+            on_fire: flags & 0x01 != 0,
+            sprinting: flags & 0x08 != 0,
+            swimming: flags & 0x10 != 0,
+            invisible: flags & 0x20 != 0,
+            glowing: flags & 0x40 != 0,
+            fall_flying: flags & 0x80 != 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntityEffect {
+    pub effect_id: u32,
+    pub duration: i32,
+    pub amplifier: u8,
+    pub ambient: bool,
+    pub show_particles: bool,
+    pub show_icon: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EntityDimensions {
+    pub width: f64,
+    pub height: f64,
+}
+
 pub struct LivingEntity {
     pub position: Position,
     pub prev_position: Position,
@@ -131,6 +221,15 @@ pub struct LivingEntity {
     pub prev_walk_anim_speed: f32,
     pub is_baby: bool,
     pub is_crouching: bool,
+    pub pose: EntityPose,
+    pub flags: EntityFlags,
+    /// LivingEntity DATA_LIVING_ENTITY_FLAGS: using-item hand bits / riptide
+    /// bit.
+    pub using_item: bool,
+    pub using_offhand: bool,
+    pub riptide_spin: bool,
+    pub attributes: HashMap<String, f64>,
+    pub effects: HashMap<u32, EntityEffect>,
     pub on_ground: bool,
     pub wool_color: Option<u8>,
     /// Sheep wool shorn / bogged mushrooms shorn.
@@ -287,6 +386,13 @@ impl LivingEntity {
             prev_walk_anim_speed: 0.0,
             is_baby: false,
             is_crouching: false,
+            pose: EntityPose::Standing,
+            flags: EntityFlags::default(),
+            using_item: false,
+            using_offhand: false,
+            riptide_spin: false,
+            attributes: HashMap::new(),
+            effects: HashMap::new(),
             // Spawn grounded: on_ground is packet-driven and a stationary
             // entity gets no movement packet for up to 60 ticks.
             on_ground: true,
@@ -787,6 +893,10 @@ impl ItemEntityStore {
         }
     }
 
+    pub fn position(&self, id: i32) -> Option<Position> {
+        self.items.get(&id).map(|entity| entity.position)
+    }
+
     pub fn spawn_item(&mut self, id: i32, uuid: uuid::Uuid, position: Position, velocity: DVec3) {
         let bob_offset =
             ((id as u32).wrapping_mul(2654435761)) as f32 / u32::MAX as f32 * std::f32::consts::TAU;
@@ -1029,15 +1139,156 @@ fn apply_item_fluid_movement(entity: &mut ItemEntity, multiplier: f64) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RideAuthority {
+    Server,
+    Client,
+}
+
+#[derive(Clone, Debug)]
+pub struct VehicleState {
+    /// Missing for SetPassengers-only placeholders.
+    pub kind: Option<EntityKind>,
+    pub position: Position,
+    pub velocity: DVec3,
+    /// None until a real spawn transform arrives; SetPassengers may create
+    /// placeholders.
+    pub look_dir: Option<LookDirection>,
+    pub passengers: Vec<i32>,
+}
+
 pub struct EntityStore {
     pub living: HashMap<i32, LivingEntity>,
+    /// Passenger lists and root transforms for all entity kinds, including
+    /// nonliving vehicles.
+    pub vehicles: HashMap<i32, VehicleState>,
+    pub vehicle_of: HashMap<i32, i32>,
 }
 
 impl EntityStore {
     pub fn new() -> Self {
         Self {
             living: HashMap::new(),
+            vehicles: HashMap::new(),
+            vehicle_of: HashMap::new(),
         }
+    }
+
+    /// Replace a vehicle's ordered passenger list from SetPassengers; order is
+    /// semantically significant.
+    pub fn set_passengers(&mut self, vehicle_id: i32, passengers: &[i32]) {
+        for &passenger in passengers {
+            if let Some(old_vehicle) = self.vehicle_of.get(&passenger).copied()
+                && old_vehicle != vehicle_id
+                && let Some(old) = self.vehicles.get_mut(&old_vehicle)
+            {
+                old.passengers.retain(|&id| id != passenger);
+            }
+        }
+        for passenger in self.vehicle_of.keys().copied().collect::<Vec<_>>() {
+            if self.vehicle_of.get(&passenger) == Some(&vehicle_id) {
+                self.vehicle_of.remove(&passenger);
+            }
+        }
+        let vehicle = self.vehicles.entry(vehicle_id).or_insert(VehicleState {
+            position: self
+                .living
+                .get(&vehicle_id)
+                .map_or(Position::default(), |e| e.position),
+            kind: None,
+            velocity: DVec3::ZERO,
+            look_dir: None,
+            passengers: Vec::new(),
+        });
+        vehicle.passengers.clear();
+        vehicle.passengers.extend_from_slice(passengers);
+        for &passenger in passengers {
+            self.vehicle_of.insert(passenger, vehicle_id);
+        }
+    }
+
+    pub fn set_vehicle_transform(&mut self, id: i32, position: Position, velocity: DVec3) {
+        let state = self.vehicles.entry(id).or_insert(VehicleState {
+            position,
+            kind: None,
+            velocity,
+            look_dir: None,
+            passengers: Vec::new(),
+        });
+        state.position = position;
+        state.velocity = velocity;
+    }
+
+    pub fn set_vehicle_kind(&mut self, id: i32, kind: EntityKind) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id) {
+            vehicle.kind = Some(kind);
+        }
+    }
+
+    pub fn set_vehicle_rotation(&mut self, id: i32, look_dir: LookDirection) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id)
+            && vehicle.look_dir.is_some()
+        {
+            vehicle.look_dir = Some(look_dir);
+        }
+    }
+
+    pub fn set_vehicle_spawn_transform(
+        &mut self,
+        id: i32,
+        position: Position,
+        velocity: DVec3,
+        look_dir: LookDirection,
+    ) {
+        self.set_vehicle_transform(id, position, velocity);
+        if let Some(vehicle) = self.vehicles.get_mut(&id) {
+            vehicle.look_dir = Some(look_dir);
+        }
+    }
+
+    /// Resolve nested mount chains to their root; malformed cycles terminate
+    /// safely.
+    pub fn root_vehicle(&self, entity_id: i32) -> Option<i32> {
+        let mut current = *self.vehicle_of.get(&entity_id)?;
+        let mut steps = 0;
+        while let Some(parent) = self.vehicle_of.get(&current) {
+            current = *parent;
+            steps += 1;
+            if steps > self.vehicle_of.len() {
+                return None;
+            }
+        }
+        Some(current)
+    }
+
+    /// Vanilla's first-passenger controller rule plus caller-supplied official
+    /// entity-tag policy.
+    pub fn ride_authority(&self, passenger_id: i32, can_control_vehicle: bool) -> RideAuthority {
+        let Some(vehicle_id) = self.vehicle_of.get(&passenger_id) else {
+            return RideAuthority::Server;
+        };
+        if can_control_vehicle
+            && self
+                .vehicles
+                .get(vehicle_id)
+                .is_some_and(|v| v.passengers.first() == Some(&passenger_id))
+        {
+            RideAuthority::Client
+        } else {
+            RideAuthority::Server
+        }
+    }
+
+    /// Apply the caller-resolved vanilla vehicle attachment point and passenger
+    /// vehicle offset.
+    pub fn passenger_position(
+        &self,
+        vehicle_id: i32,
+        vehicle_attachment: DVec3,
+        passenger_offset: DVec3,
+    ) -> Option<Position> {
+        let vehicle = self.vehicles.get(&vehicle_id)?;
+        Some((DVec3::from(vehicle.position) + vehicle_attachment - passenger_offset).into())
     }
 
     pub fn spawn_living(
@@ -1091,8 +1342,16 @@ impl EntityStore {
         let kind = entity.entity_type;
         let index = normalize_player_index(kind, normalize_ageable_index(kind, index));
         match (kind, index, value) {
-            // Shared entity flags byte: bit 0x08 = sprinting.
-            (_, 0, Byte(f)) => entity.is_sprinting = f & 0x08 != 0,
+            // Shared entity flags byte, as registered by Entity.DATA_SHARED_FLAGS_ID.
+            (_, 0, Byte(f)) => {
+                entity.flags = f.into();
+                entity.is_sprinting = entity.flags.sprinting;
+            }
+            (_, 8, Byte(f)) => {
+                entity.using_item = f & 0x01 != 0 || f & 0x02 != 0;
+                entity.using_offhand = f & 0x02 != 0;
+                entity.riptide_spin = f & 0x04 != 0;
+            }
             (_, 9, Float(h)) => entity.health = h,
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
             // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
@@ -1180,8 +1439,35 @@ impl EntityStore {
     }
 
     pub fn set_crouching(&mut self, id: i32, is_crouching: bool) {
+        self.set_pose(
+            id,
+            if is_crouching {
+                EntityPose::Crouching
+            } else {
+                EntityPose::Standing
+            },
+        );
+    }
+
+    /// Stores the complete metadata pose without collapsing
+    /// swimming/crawling/sleeping.
+    pub fn set_pose(&mut self, id: i32, pose: EntityPose) {
         if let Some(entity) = self.living.get_mut(&id) {
-            entity.is_crouching = is_crouching;
+            entity.pose = pose;
+            entity.is_crouching = pose == EntityPose::Crouching;
+        }
+    }
+
+    /// Resolve dimensions only where 26.2 defines a common pose override.
+    /// Other poses retain per-EntityType dimensions, which require ingress type
+    /// dimensions.
+    pub fn dimensions_for_pose(base: EntityDimensions, pose: EntityPose) -> EntityDimensions {
+        match pose {
+            EntityPose::Sleeping => EntityDimensions {
+                width: 0.2,
+                height: 0.2,
+            },
+            _ => base,
         }
     }
 
@@ -1267,6 +1553,24 @@ impl EntityStore {
         }
     }
 
+    pub fn set_attribute(&mut self, id: i32, key: impl Into<String>, value: f64) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.attributes.insert(key.into(), value);
+        }
+    }
+
+    pub fn set_effect(&mut self, id: i32, effect: EntityEffect) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.effects.insert(effect.effect_id, effect);
+        }
+    }
+
+    pub fn remove_effect(&mut self, id: i32, effect_id: u32) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.effects.remove(&effect_id);
+        }
+    }
+
     pub fn set_living_motion(&mut self, id: i32, velocity: DVec3) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.velocity = velocity;
@@ -1333,8 +1637,20 @@ impl EntityStore {
         }
     }
 
-    pub fn remove_living(&mut self, id: i32) -> Option<LivingEntity> {
+    /// Remove one entity and direct graph edges without deleting passenger
+    /// subtrees.
+    pub fn remove_entity(&mut self, id: i32) -> Option<LivingEntity> {
+        for vehicle in self.vehicles.values_mut() {
+            vehicle.passengers.retain(|&passenger| passenger != id);
+        }
+        self.vehicle_of.remove(&id);
+        self.vehicle_of.retain(|_, vehicle_id| *vehicle_id != id);
+        self.vehicles.remove(&id);
         self.living.remove(&id)
+    }
+
+    pub fn remove_living(&mut self, id: i32) -> Option<LivingEntity> {
+        self.remove_entity(id)
     }
 
     pub fn has_player_uuid(&self, uuid: &uuid::Uuid) -> bool {
@@ -1448,8 +1764,21 @@ pub fn is_equine(kind: &EntityKind) -> bool {
     )
 }
 
+/// Entity kinds accepted by vanilla's `AbstractHorse` inventory screen gate.
+pub fn supports_horse_inventory(kind: &EntityKind) -> bool {
+    is_equine(kind)
+        || matches!(
+            kind,
+            EntityKind::Llama | EntityKind::TraderLlama | EntityKind::Camel | EntityKind::CamelHusk
+        )
+}
+
 pub fn is_living_mob(kind: &EntityKind) -> bool {
     is_equine(kind)
+        || matches!(
+            kind,
+            EntityKind::Llama | EntityKind::TraderLlama | EntityKind::Camel | EntityKind::CamelHusk
+        )
         || matches!(
             kind,
             EntityKind::Player
@@ -1504,6 +1833,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn horse_inventory_family_is_scoped_and_stored_as_living() {
+        let horse_family = [
+            EntityKind::Horse,
+            EntityKind::Donkey,
+            EntityKind::Mule,
+            EntityKind::SkeletonHorse,
+            EntityKind::ZombieHorse,
+            EntityKind::Llama,
+            EntityKind::TraderLlama,
+            EntityKind::Camel,
+            EntityKind::CamelHusk,
+        ];
+        let mut store = EntityStore::new();
+        for (id, kind) in horse_family.into_iter().enumerate() {
+            assert!(supports_horse_inventory(&kind), "{kind:?}");
+            if is_living_mob(&kind) {
+                store.spawn_living(
+                    id as i32,
+                    kind,
+                    Position::default(),
+                    LookDirection::default(),
+                    0.0,
+                    None,
+                );
+            }
+        }
+        assert!(store.living.contains_key(&5), "Llama enters living store");
+        assert!(
+            store.living.contains_key(&6),
+            "TraderLlama enters living store"
+        );
+        assert!(store.living.contains_key(&7), "Camel enters living store");
+        assert!(
+            store.living.contains_key(&8),
+            "CamelHusk enters living store"
+        );
+
+        for kind in [EntityKind::Pig, EntityKind::Nautilus] {
+            assert!(!supports_horse_inventory(&kind), "{kind:?}");
+        }
+
+        // Inventory acceptance must not expand shared equine animation/metadata
+        // or the explicit equine riding-jump predicate.
+        for kind in [
+            EntityKind::Llama,
+            EntityKind::TraderLlama,
+            EntityKind::Camel,
+            EntityKind::CamelHusk,
+        ] {
+            assert!(!is_equine(&kind), "{kind:?} remains outside is_equine");
+        }
+        assert!(!is_living_mob(&EntityKind::Nautilus));
+    }
+
+    #[test]
     fn same_uuid_stone_shared_invisibility_flag_gates_its_shadow_input() {
         let uuid = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
         let mut store = ItemEntityStore::new();
@@ -1518,6 +1902,128 @@ mod tests {
 
         store.set_shared_flags(1, 0);
         assert!(!store.visible_items(DVec3::new(0.5, 65.0, 1.5), 64.0)[0].invisible);
+    }
+
+    #[test]
+    fn shared_flags_and_living_use_bits_are_retained() {
+        let mut store = EntityStore::new();
+        store.spawn_living(
+            7,
+            EntityKind::Zombie,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        store.apply_entity_data(7, 0, MetaValue::Byte(0xF9));
+        store.apply_entity_data(7, 8, MetaValue::Byte(0x07));
+        let entity = &store.living[&7];
+        assert_eq!(
+            entity.flags,
+            EntityFlags {
+                on_fire: true,
+                sprinting: true,
+                swimming: true,
+                invisible: true,
+                glowing: true,
+                fall_flying: true
+            }
+        );
+        assert!(entity.using_item && entity.using_offhand && entity.riptide_spin);
+        assert!(entity.is_sprinting);
+    }
+
+    #[test]
+    fn pose_ids_match_vanilla_26_2_and_unknown_ids_default_to_standing() {
+        assert_eq!(EntityPose::from_vanilla_id(0), EntityPose::Standing);
+        assert_eq!(EntityPose::from_vanilla_id(3), EntityPose::Swimming);
+        assert_eq!(EntityPose::from_vanilla_id(15), EntityPose::Sliding);
+        assert_eq!(EntityPose::from_vanilla_id(17), EntityPose::Inhaling);
+        assert_eq!(EntityPose::from_vanilla_id(18), EntityPose::Standing);
+        assert_eq!(EntityPose::from_vanilla_id(-1), EntityPose::Standing);
+    }
+
+    #[test]
+    fn pose_dimensions_only_override_sleeping_in_vanilla_common_entity_logic() {
+        let base = EntityDimensions {
+            width: 0.6,
+            height: 1.8,
+        };
+        assert_eq!(
+            EntityStore::dimensions_for_pose(base, EntityPose::Swimming),
+            base
+        );
+        assert_eq!(
+            EntityStore::dimensions_for_pose(base, EntityPose::Crouching),
+            base
+        );
+        assert_eq!(
+            EntityStore::dimensions_for_pose(base, EntityPose::Sleeping),
+            EntityDimensions {
+                width: 0.2,
+                height: 0.2
+            }
+        );
+    }
+
+    #[test]
+    fn remove_entity_detaches_edges_keeps_subtree_and_allows_id_reuse() {
+        let mut s = EntityStore::new();
+        s.set_passengers(99, &[]);
+        assert_eq!(s.vehicles[&99].kind, None);
+        assert_eq!(s.vehicles[&99].look_dir, None);
+        s.set_vehicle_rotation(99, LookDirection::new(1.0, 2.0));
+        assert_eq!(s.vehicles[&99].look_dir, None);
+        s.set_vehicle_spawn_transform(
+            10,
+            Position::default(),
+            DVec3::ZERO,
+            LookDirection::new(30.0, 5.0),
+        );
+        s.set_passengers(10, &[20, 21]);
+        s.set_vehicle_transform(20, Position::default(), DVec3::ZERO);
+        s.set_vehicle_rotation(20, LookDirection::new(45.0, 10.0));
+        s.set_passengers(20, &[30]);
+        s.remove_entity(10);
+        assert!(!s.vehicles.contains_key(&10));
+        assert!(!s.vehicle_of.contains_key(&20));
+        assert_eq!(s.vehicles[&20].passengers, [30]);
+        assert_eq!(s.vehicle_of[&30], 20);
+        assert_eq!(s.root_vehicle(30), Some(20));
+        s.remove_entity(30);
+        assert!(s.vehicles[&20].passengers.is_empty());
+        assert!(!s.vehicle_of.contains_key(&30));
+        s.set_vehicle_spawn_transform(
+            10,
+            Position::new(7.0, 8.0, 9.0),
+            DVec3::ZERO,
+            LookDirection::new(90.0, 20.0),
+        );
+        s.set_passengers(10, &[40]);
+        assert_eq!(s.root_vehicle(40), Some(10));
+        assert_eq!(
+            s.vehicles[&10].look_dir,
+            Some(LookDirection::new(90.0, 20.0))
+        );
+    }
+
+    #[test]
+    fn vehicle_order_root_authority_and_position_contract() {
+        let mut store = EntityStore::new();
+        store.set_vehicle_transform(10, Position::new(4.0, 5.0, 6.0), DVec3::new(1.0, 0.0, 0.0));
+        store.set_passengers(10, &[20, 21]);
+        store.set_passengers(20, &[30]);
+        assert_eq!(store.root_vehicle(30), Some(10));
+        assert_eq!(store.ride_authority(20, true), RideAuthority::Client);
+        assert_eq!(store.ride_authority(21, true), RideAuthority::Server);
+        assert_eq!(store.ride_authority(20, false), RideAuthority::Server);
+        assert_eq!(
+            store.passenger_position(10, DVec3::Y, DVec3::ZERO),
+            Some(Position::new(4.0, 6.0, 6.0))
+        );
+        store.set_passengers(11, &[20]);
+        assert!(!store.vehicles[&10].passengers.contains(&20));
+        assert_eq!(store.root_vehicle(20), Some(11));
     }
 
     #[test]

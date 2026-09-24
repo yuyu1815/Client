@@ -478,14 +478,17 @@ fn parse_command_suggestions(
 ) -> Result<(), ChatPacketError> {
     let id = read_varint_req(raw, pos, "command_suggestions.id")?;
     let start = read_varint_req(raw, pos, "command_suggestions.start")? as usize;
-    // Requests carry the whole input, so the range always runs to its end.
-    let _length = read_varint_req(raw, pos, "command_suggestions.length")?;
+    let length = read_varint_req(raw, pos, "command_suggestions.length")? as usize;
     let count = read_varint_req(raw, pos, "command_suggestions.count")? as usize;
     let mut options = Vec::new();
     for _ in 0..count {
         let text = read_string(raw, pos, 32_767, "command_suggestions.text")?;
         let tooltip = read_optional(raw, pos, read_component)?;
-        options.push(crate::ui::chat::ChatSuggestion { text, tooltip });
+        options.push(crate::ui::chat::ChatSuggestion {
+            text,
+            tooltip,
+            replacement_range: Some((start as usize, length)),
+        });
     }
     ensure_end(raw, *pos, "command_suggestions")?;
     let _ = event_tx.try_send(NetworkEvent::CommandSuggestions { id, start, options });
@@ -704,15 +707,13 @@ fn read_packed_signature(raw: &[u8], pos: &mut usize) -> Result<PackedSignature,
     }
 }
 
-/// Vanilla `ChatTrustLevel.isModifiedStyle`: any font but the default,
-/// object runs included (they render through their own font description).
+/// Vanilla `ChatTrustLevel.isModifiedStyle`: any nested font but the default.
 fn component_has_non_default_font(component: &Component) -> bool {
     let mut modified = false;
     component.visit_text(
         &crate::chat_component::ResolvedStyle::default(),
         &mut |_, style| {
-            modified |= style.inline_object.is_some()
-                || style.font.as_ref().is_some_and(|font| {
+            modified |= style.font.as_ref().is_some_and(|font| {
                     !matches!(font, Value::String(id) if id == "minecraft:default" || id == "default")
                 });
         },
@@ -1134,6 +1135,16 @@ mod tests {
     }
 
     #[test]
+    fn modified_chat_style_matches_vanilla_font_only_rule() {
+        let plain = Component::text("plain");
+        assert!(!component_has_non_default_font(&plain));
+
+        let mut custom_font = Component::text("custom");
+        custom_font.style.font = Some(serde_json::json!("minecraft:uniform"));
+        assert!(component_has_non_default_font(&custom_font));
+    }
+
+    #[test]
     fn partial_filter_builds_dark_gray_hoverable_hashes() {
         let component = filtered_component("abcdef", &[0b001100]);
         let spans = format_component_spans(&component, [1.0; 4]);
@@ -1465,6 +1476,7 @@ mod tests {
         assert_eq!(start, 5);
         assert_eq!(options.len(), 1);
         assert_eq!(options[0].text, "value");
+        assert_eq!(options[0].replacement_range, Some((5, 1)));
         let tooltip = options[0].tooltip.as_ref().expect("tooltip preserved");
         assert_eq!(tooltip.plain_text(), "Native tooltip");
         assert_eq!(tooltip.style.color, Some(0xffaa00));

@@ -46,6 +46,26 @@ pub struct AtlasUVMap {
 }
 
 impl AtlasUVMap {
+    #[cfg(test)]
+    pub(crate) fn test_empty() -> Self {
+        Self {
+            regions: HashMap::new(),
+            sprite_alpha_masks: HashMap::new(),
+            rects: vec![[0; 4]],
+            missing: AtlasRegion {
+                u_min: 0.0,
+                v_min: 0.0,
+                u_max: 1.0,
+                v_max: 1.0,
+                pixel_rect: [0; 4],
+                sprite: 0,
+                opaque: false,
+                translucent: false,
+                alpha_counts: [0; 3],
+            },
+        }
+    }
+
     pub fn get_region(&self, name: &str) -> AtlasRegion {
         self.regions.get(name).copied().unwrap_or(self.missing)
     }

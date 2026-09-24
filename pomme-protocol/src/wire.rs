@@ -6,7 +6,20 @@ use glam::DVec3;
 
 use crate::packets::{Direction, PacketTable, Phase};
 
-const MAIN_HAND: u32 = 0;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionHand {
+    MainHand,
+    OffHand,
+}
+
+impl InteractionHand {
+    const fn protocol_id(self) -> u32 {
+        match self {
+            Self::MainHand => 0,
+            Self::OffHand => 1,
+        }
+    }
+}
 
 pub fn game_serverbound_id(name: &str) -> u32 {
     PacketTable::native()
@@ -16,11 +29,16 @@ pub fn game_serverbound_id(name: &str) -> u32 {
 
 /// Vanilla `ServerboundInteractPacket`: right-click on an entity. `location`
 /// is the hit point relative to the entity origin.
-pub fn encode_interact(entity_id: i32, location: DVec3, sneaking: bool) -> Vec<u8> {
+pub fn encode_interact(
+    entity_id: i32,
+    hand: InteractionHand,
+    location: DVec3,
+    sneaking: bool,
+) -> Vec<u8> {
     let mut buf = Vec::new();
     write_varint(&mut buf, game_serverbound_id("interact"));
     write_varint(&mut buf, entity_id as u32);
-    write_varint(&mut buf, MAIN_HAND);
+    write_varint(&mut buf, hand.protocol_id());
     write_lp_vec3(&mut buf, location);
     buf.push(sneaking as u8);
     buf
@@ -164,14 +182,18 @@ mod tests {
 
     #[test]
     fn interact_packet_layout() {
-        let bytes = encode_interact(42, DVec3::ZERO, true);
+        let bytes = encode_interact(42, InteractionHand::MainHand, DVec3::ZERO, true);
         // id 0x1A, entity id 42, main hand 0, LpVec3 zero byte, sneaking.
         assert_eq!(bytes, [0x1A, 42, 0, 0, 1]);
+
+        let offhand = encode_interact(42, InteractionHand::OffHand, DVec3::ZERO, true);
+        assert_eq!(offhand, [0x1A, 42, 1, 0, 1]);
     }
 
     #[test]
     fn attack_packet_layout() {
         // id 0x01, entity id 42.
+        // Attack has no hand field in the official 26.2 packet codec.
         assert_eq!(encode_attack(42), [0x01, 42]);
     }
 

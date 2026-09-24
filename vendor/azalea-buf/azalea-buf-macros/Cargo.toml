@@ -1,0 +1,21 @@
+[package]
+name = "azalea-buf-macros"
+description = "#[derive(AzBuf)]"
+version = "0.16.0+mc26.2"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/azalea-rs/azalea"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.106"
+quote = "1.0.45"
+syn = { version = "2.0.117", features = ["extra-traits"] }
+
+[lints.clippy]
+str_to_string = "warn"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docsrs_dep)'] }

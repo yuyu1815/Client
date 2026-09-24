@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use azalea_block::BlockState;
 use azalea_core::position::BlockPos;
+use azalea_entity::particle::Particle as ParticleOptions;
+use azalea_protocol::packets::game::c_explode::{ExplosionParticleInfo, Weighted};
 use glam::{DVec3, dvec3};
 
 use crate::physics::aabb::Aabb;
@@ -31,6 +33,7 @@ const MAX_COLLISION_VELOCITY_SQ: f64 = 10000.0;
 /// Terrain particles use the default 0.2-wide, 0.2-tall bounding box.
 const HALF_WIDTH: f64 = 0.1;
 
+#[derive(PartialEq, Eq)]
 enum Kind {
     /// `TerrainParticle` / `BreakingItemParticle`: collision physics,
     /// world-lit, fixed sprite, opaque layer.
@@ -39,12 +42,23 @@ enum Kind {
     /// full-bright, 8-frame animation, fades after half-life, translucent
     /// layer.
     EndRod,
+    /// `TotemParticle` (`SimpleAnimatedParticle`), independently parameterized
+    /// from EndRod despite sharing its official `glitter_7..0` sprite frames.
+    Totem,
+    /// `POOF` uses vanilla `ExplodeParticle`'s short velocity-driven animation.
+    Poof,
+    /// `EXPLOSION` uses vanilla `HugeExplosionParticle`, a large stationary
+    /// quad.
+    Explosion,
+    /// Standard explosion block effect `SMOKE`.
+    Smoke,
+    Crit,
 }
 
 impl Kind {
     /// Vanilla `SingleQuadParticle.getLayer`.
     fn translucent(&self) -> bool {
-        matches!(self, Kind::EndRod)
+        matches!(self, Kind::EndRod | Kind::Totem)
     }
 }
 
@@ -63,6 +77,7 @@ pub struct Particle {
     friction: f64,
     /// Vanilla `quadSize`; the billboard spans twice this.
     size: f32,
+    base_size: f32,
     u0: f32,
     u1: f32,
     v0: f32,
@@ -112,6 +127,7 @@ impl Particle {
             gravity: 1.0,
             friction: 0.98,
             size,
+            base_size: size,
             u0: sprite_u((uo + 1.0) / 4.0),
             u1: sprite_u(uo / 4.0),
             v0: sprite_v(vo / 4.0),
@@ -140,6 +156,7 @@ impl Particle {
             gravity: f64::from(0.0125f32),
             friction: f64::from(0.91f32),
             size,
+            base_size: size,
             u0: 0.0,
             u1: 0.0,
             v0: 0.0,
@@ -147,6 +164,189 @@ impl Particle {
             color: [1.0; 3],
             alpha: 1.0,
             // SimpleAnimatedParticle.getLightCoords is always full-bright.
+            light: 1.0,
+        };
+        p.set_sprite(&frames[0]);
+        p
+    }
+
+    /// `POOF` provider: official 26.2 `ExplodeParticle` behavior.
+    fn poof(pos: DVec3, velocity_arg: DVec3, frames: &[AtlasRegion; 8]) -> Self {
+        let jitter = || ((fastrand::f32() * 2.0 - 1.0) * 0.05) as f64;
+        let vel = velocity_arg + dvec3(jitter(), jitter(), jitter());
+        let shade = fastrand::f32() * 0.3 + 0.7;
+        let size = 0.1 * (fastrand::f32() * fastrand::f32() * 6.0 + 1.0);
+        let lifetime = (16.0 / (f64::from(fastrand::f32()) * 0.8 + 0.2)) as i32 + 2;
+        let mut p = Self {
+            kind: Kind::Poof,
+            pos,
+            prev_pos: pos,
+            vel,
+            age: 0,
+            lifetime,
+            on_ground: false,
+            stopped_by_collision: false,
+            gravity: f64::from(-0.1f32),
+            friction: f64::from(0.9f32),
+            size,
+            base_size: size,
+            u0: 0.0,
+            u1: 0.0,
+            v0: 0.0,
+            v1: 0.0,
+            color: [shade; 3],
+            alpha: 1.0,
+            // Until the first tick samples the world, never render this as full-bright.
+            light: 0.0,
+        };
+        p.set_sprite(&frames[0]);
+        p
+    }
+
+    /// `EXPLOSION` provider: `HugeExplosionParticle` uses xAux as size and
+    /// ignores velocity for its stationary, full-bright quad.
+    fn huge_explosion(pos: DVec3, auxiliary: DVec3, frames: &[AtlasRegion; 16]) -> Self {
+        let lifetime = 6 + fastrand::i32(0..4);
+        let shade = fastrand::f32() * 0.6 + 0.4;
+        let size = 2.0 * (1.0 - auxiliary.x as f32 * 0.5);
+        let mut p = Self {
+            kind: Kind::Explosion,
+            pos,
+            prev_pos: pos,
+            vel: DVec3::ZERO,
+            age: 0,
+            lifetime,
+            on_ground: false,
+            stopped_by_collision: false,
+            gravity: 0.0,
+            friction: 0.98,
+            size,
+            base_size: size,
+            u0: 0.0,
+            u1: 0.0,
+            v0: 0.0,
+            v1: 0.0,
+            color: [shade; 3],
+            alpha: 1.0,
+            light: 1.0,
+        };
+        p.set_sprite(&frames[0]);
+        p
+    }
+
+    /// Standard `SMOKE` block-particle provider based on
+    /// `BaseAshSmokeParticle`.
+    fn smoke(pos: DVec3, velocity: DVec3, frames: &[AtlasRegion; 8]) -> Self {
+        let jitter = || (fastrand::f32() * 2.0 - 1.0) * 0.4;
+        let mut base_velocity = dvec3(
+            f64::from(jitter()),
+            f64::from(jitter()),
+            f64::from(jitter()),
+        );
+        let speed = (fastrand::f32() + fastrand::f32() + 1.0) * 0.15;
+        base_velocity = base_velocity / base_velocity.length() * f64::from(speed * 0.4);
+        base_velocity.y += 0.1;
+        let velocity = base_velocity * 0.1 + velocity;
+        let base_size = 0.1 * (fastrand::f32() * 0.5 + 0.5) * 2.0 * 0.75;
+        let shade = fastrand::f32() * 0.3;
+        let lifetime = (8.0 / (fastrand::f32() * 0.8 + 0.2)) as i32;
+        let mut p = Self {
+            kind: Kind::Smoke,
+            pos,
+            prev_pos: pos,
+            vel: velocity,
+            age: 0,
+            lifetime: lifetime.max(1),
+            on_ground: false,
+            stopped_by_collision: false,
+            gravity: f64::from(-0.1f32),
+            friction: f64::from(0.96f32),
+            size: 0.0,
+            base_size,
+            u0: 0.0,
+            u1: 0.0,
+            v0: 0.0,
+            v1: 0.0,
+            color: [shade; 3],
+            alpha: 1.0,
+            light: 1.0,
+        };
+        p.set_sprite(&frames[0]);
+        p
+    }
+
+    /// `CritParticle` provider; constructor performs one synchronous particle
+    /// tick.
+    fn crit(
+        pos: DVec3,
+        velocity: DVec3,
+        magic: bool,
+        sprite: AtlasRegion,
+        chunks: &ChunkStore,
+    ) -> Self {
+        let size = 0.1 * (fastrand::f32() * 0.5 + 0.5) * 2.0 * 0.75;
+        let shade = fastrand::f32() * 0.3 + 0.6;
+        let lifetime = (6.0 / (fastrand::f32() * 0.8 + 0.6)) as i32;
+        let mut p = Self {
+            kind: Kind::Crit,
+            pos,
+            prev_pos: pos,
+            vel: velocity * 0.4,
+            age: 0,
+            lifetime,
+            on_ground: false,
+            stopped_by_collision: false,
+            gravity: 0.5,
+            friction: 0.7,
+            size,
+            base_size: size,
+            u0: sprite.u_min,
+            u1: sprite.u_max,
+            v0: sprite.v_min,
+            v1: sprite.v_max,
+            color: [shade, shade, shade],
+            alpha: 1.0,
+            light: world_brightness(
+                chunks,
+                pos.x.floor() as i32,
+                pos.y.floor() as i32,
+                pos.z.floor() as i32,
+            ),
+        };
+        if magic {
+            p.color[0] *= 0.3;
+            p.color[1] *= 0.8;
+        }
+        p.tick(chunks, &[sprite; 8], &[sprite; 8], &[sprite; 16]);
+        p
+    }
+
+    /// Vanilla `TotemParticle`: verbatim emitter velocity, full-bright animated
+    /// sprite, and no synchronous constructor tick.
+    fn totem(pos: DVec3, velocity: DVec3, frames: &[AtlasRegion; 8]) -> Self {
+        let size = 0.1 * (fastrand::f32() * 0.5 + 0.5) * 2.0 * 0.75;
+        let lifetime = 60 + fastrand::i32(0..12);
+        let rare = fastrand::u8(0..4) == 0;
+        let color = totem_color(rare, [fastrand::f32(), fastrand::f32(), fastrand::f32()]);
+        let mut p = Self {
+            kind: Kind::Totem,
+            pos,
+            prev_pos: pos,
+            vel: velocity,
+            age: 0,
+            lifetime,
+            on_ground: false,
+            stopped_by_collision: false,
+            gravity: f64::from(1.25f32),
+            friction: f64::from(0.6f32),
+            size,
+            base_size: size,
+            u0: 0.0,
+            u1: 0.0,
+            v0: 0.0,
+            v1: 0.0,
+            color,
+            alpha: 1.0,
             light: 1.0,
         };
         p.set_sprite(&frames[0]);
@@ -171,7 +371,13 @@ impl Particle {
     }
 
     /// Vanilla `Particle.tick`. Returns false when the particle expires.
-    fn tick(&mut self, chunks: &ChunkStore, end_rod_frames: &[AtlasRegion; 8]) -> bool {
+    fn tick(
+        &mut self,
+        chunks: &ChunkStore,
+        end_rod_frames: &[AtlasRegion; 8],
+        generic_frames: &[AtlasRegion; 8],
+        explosion_frames: &[AtlasRegion; 16],
+    ) -> bool {
         self.prev_pos = self.pos;
         if self.age >= self.lifetime {
             return false;
@@ -179,9 +385,15 @@ impl Particle {
         self.age += 1;
         self.vel.y -= 0.04 * self.gravity;
         match self.kind {
-            Kind::Terrain => self.move_with_collision(chunks),
-            // EndRodParticle.move() skips collision entirely.
-            Kind::EndRod => self.pos += self.vel,
+            Kind::Terrain | Kind::Smoke | Kind::Poof => self.move_with_collision(chunks),
+            Kind::EndRod | Kind::Crit => self.pos += self.vel,
+            Kind::Totem => self.move_with_collision(chunks),
+            // HugeExplosionParticle advances age/sprite but never moves.
+            Kind::Explosion => {}
+        }
+        if self.kind == Kind::Smoke && self.pos.y == self.prev_pos.y {
+            self.vel.x *= 1.1;
+            self.vel.z *= 1.1;
         }
         self.vel *= self.friction;
         if self.on_ground {
@@ -189,7 +401,20 @@ impl Particle {
             self.vel.z *= 0.7;
         }
         match self.kind {
-            Kind::Terrain => {
+            Kind::Terrain | Kind::Smoke | Kind::Poof => {
+                self.light = world_brightness(
+                    chunks,
+                    self.pos.x.floor() as i32,
+                    self.pos.y.floor() as i32,
+                    self.pos.z.floor() as i32,
+                );
+            }
+            Kind::Explosion => {
+                self.set_sprite(&explosion_frames[explosion_frame_index(self.age, self.lifetime)])
+            }
+            Kind::Crit => {
+                self.color[1] *= 0.96;
+                self.color[2] *= 0.9;
                 self.light = world_brightness(
                     chunks,
                     self.pos.x.floor() as i32,
@@ -199,14 +424,24 @@ impl Particle {
             }
             // SimpleAnimatedParticle.tick: advance the sprite frame, then
             // after half-life fade alpha out and lerp toward the fade color.
-            Kind::EndRod => {
+            Kind::EndRod | Kind::Totem => {
                 self.set_sprite(&end_rod_frames[(self.age * 7 / self.lifetime) as usize]);
                 if self.age > self.lifetime / 2 {
                     self.alpha = 1.0 - (self.age - self.lifetime / 2) as f32 / self.lifetime as f32;
-                    for (c, f) in self.color.iter_mut().zip(END_ROD_FADE) {
-                        *c += (f - *c) * 0.2;
+                    if self.kind == Kind::EndRod {
+                        for (c, f) in self.color.iter_mut().zip(END_ROD_FADE) {
+                            *c += (f - *c) * 0.2;
+                        }
                     }
                 }
+            }
+        }
+        if matches!(self.kind, Kind::Poof | Kind::Smoke) {
+            let frame = animated_frame_index(self.age, self.lifetime, 8);
+            self.set_sprite(&generic_frames[frame]);
+            if self.kind == Kind::Smoke {
+                self.size = self.base_size
+                    * ((self.age as f32 / self.lifetime as f32) * 32.0).clamp(0.0, 1.0);
             }
         }
         true
@@ -237,8 +472,94 @@ impl Particle {
     }
 }
 
+/// Vanilla `TotemParticle` RGB expressions; samples are branch-local random
+/// floats.
+fn totem_color(rare: bool, samples: [f32; 3]) -> [f32; 3] {
+    let [red, green, blue] = samples;
+    if rare {
+        [0.6 + red * 0.2, 0.6 + green * 0.3, blue * 0.2]
+    } else {
+        [0.1 + red * 0.2, 0.4 + green * 0.3, blue * 0.2]
+    }
+}
+
 /// `SimpleAnimatedParticle.setFadeColor(0xF2DEC9)` in `EndRodParticle`.
 const END_ROD_FADE: [f32; 3] = [242.0 / 255.0, 222.0 / 255.0, 201.0 / 255.0];
+
+/// Exact order in `assets/minecraft/particles/explosion.json`.
+pub const EXPLOSION_SPRITES: [&str; 16] = [
+    "particle/explosion_0",
+    "particle/explosion_1",
+    "particle/explosion_2",
+    "particle/explosion_3",
+    "particle/explosion_4",
+    "particle/explosion_5",
+    "particle/explosion_6",
+    "particle/explosion_7",
+    "particle/explosion_8",
+    "particle/explosion_9",
+    "particle/explosion_10",
+    "particle/explosion_11",
+    "particle/explosion_12",
+    "particle/explosion_13",
+    "particle/explosion_14",
+    "particle/explosion_15",
+];
+
+fn supports_explosion_particle(option: &ParticleOptions) -> bool {
+    matches!(
+        option,
+        ParticleOptions::Explosion
+            | ParticleOptions::ExplosionEmitter
+            | ParticleOptions::EndRod
+            | ParticleOptions::Poof
+            | ParticleOptions::Smoke
+    )
+}
+
+fn explosion_frame_index(age: i32, lifetime: i32) -> usize {
+    ((age.max(0) as usize * 15) / lifetime.max(1) as usize).min(15)
+}
+
+fn animated_frame_index(age: i32, lifetime: i32, frames: usize) -> usize {
+    ((age.max(0) as usize * (frames - 1)) / lifetime.max(1) as usize).min(frames - 1)
+}
+
+/// `crit.json` and `enchanted_hit.json` each register one provider-specific
+/// sprite.
+pub const CRIT_SPRITE: &str = "particle/critical_hit";
+pub const ENCHANTED_HIT_SPRITE: &str = "particle/enchanted_hit";
+
+/// `POOF` and `SMOKE` both use the generic animated particle sheet.
+pub const GENERIC_PARTICLE_SPRITES: [&str; 8] = [
+    "particle/generic_7",
+    "particle/generic_6",
+    "particle/generic_5",
+    "particle/generic_4",
+    "particle/generic_3",
+    "particle/generic_2",
+    "particle/generic_1",
+    "particle/generic_0",
+];
+
+const EXPLOSION_EMITTER_TICKS: u8 = 8;
+const fn explosion_emitter_children(age: u8) -> u8 {
+    if age < EXPLOSION_EMITTER_TICKS { 6 } else { 0 }
+}
+
+fn explosion_emitter_size(age: u8) -> f64 {
+    f64::from(age as f32 / f32::from(EXPLOSION_EMITTER_TICKS))
+}
+
+fn explosion_emitter_child(
+    origin: DVec3,
+    age: u8,
+    mut sample: impl FnMut() -> f64,
+) -> (DVec3, DVec3) {
+    let pos = origin + dvec3(sample() * 4.0, sample() * 4.0, sample() * 4.0);
+    let velocity = dvec3(explosion_emitter_size(age), 0.0, 0.0);
+    (pos, velocity)
+}
 
 /// Frame order from `assets/minecraft/particles/end_rod.json`: frame 0 is
 /// `glitter_7` and the animation walks toward `glitter_0`.
@@ -279,14 +600,190 @@ impl ServerParticleKind {
     }
 }
 
+#[derive(Clone)]
+struct TrackedExplosion {
+    center: DVec3,
+    radius: f32,
+    block_count: i32,
+    block_particles: Vec<Weighted<ExplosionParticleInfo>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PlannedExplosionParticle {
+    particle: ParticleOptions,
+    pos: DVec3,
+    velocity: DVec3,
+}
+
+struct ExplosionEmitter {
+    pos: DVec3,
+    age: u8,
+}
+
+fn plan_explosion_particles(
+    explosions: &[TrackedExplosion],
+    rng: &mut fastrand::Rng,
+    mut is_air: impl FnMut(i32, i32, i32) -> bool,
+) -> Vec<PlannedExplosionParticle> {
+    let total_blocks: i64 = explosions
+        .iter()
+        .map(|e| i64::from(e.block_count.max(0)))
+        .sum();
+    let count = total_blocks.clamp(0, 512) as usize;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut pick = rng.i64(0..total_blocks);
+        let explosion = explosions
+            .iter()
+            .find(|e| {
+                let w = i64::from(e.block_count.max(0));
+                if pick < w {
+                    true
+                } else {
+                    pick -= w;
+                    false
+                }
+            })
+            .expect("positive block count has a weighted explosion");
+        if !explosion.radius.is_finite() || explosion.radius <= 0.0 {
+            continue;
+        }
+        let raw_dir = dvec3(
+            f64::from(rng.f32() * 2.0 - 1.0),
+            f64::from(rng.f32() * 2.0 - 1.0),
+            f64::from(rng.f32() * 2.0 - 1.0),
+        );
+        let length = raw_dir.length();
+        let dir = if length < 1.0e-4 {
+            DVec3::ZERO
+        } else {
+            raw_dir / length
+        };
+        let radius = (f64::from(rng.f32()).cbrt() as f32) * explosion.radius;
+        let local = dir * f64::from(radius);
+        let pos = explosion.center + local;
+        if !is_air(
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        ) {
+            continue;
+        }
+        let speed = 0.5f32 / (radius / explosion.radius + 0.1) * rng.f32() * rng.f32() + 0.3;
+        let weight_total: i64 = explosion
+            .block_particles
+            .iter()
+            .map(|w| i64::from(w.weight.max(0)))
+            .sum();
+        if weight_total <= 0 {
+            continue;
+        }
+        let mut particle_pick = rng.i64(0..weight_total);
+        let info = explosion
+            .block_particles
+            .iter()
+            .find(|w| {
+                let weight = i64::from(w.weight.max(0));
+                if particle_pick < weight {
+                    true
+                } else {
+                    particle_pick -= weight;
+                    false
+                }
+            })
+            .expect("positive particle weight has an entry");
+        out.push(PlannedExplosionParticle {
+            particle: info.value.particle.clone(),
+            pos: explosion.center + local * f64::from(info.value.scaling),
+            velocity: dir * f64::from(speed * info.value.speed),
+        });
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrackingParticleKind {
+    Crit,
+    EnchantedHit,
+    Totem,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TrackingAttachment {
+    pub position: DVec3,
+    pub width: f64,
+    pub height: f64,
+}
+
+struct TrackingEmitter {
+    entity_id: Option<i32>,
+    attachment: TrackingAttachment,
+    age: u8,
+    kind: TrackingParticleKind,
+}
+
+impl TrackingEmitter {
+    fn advance(
+        &mut self,
+        lookup: &mut impl FnMut(i32) -> Option<TrackingAttachment>,
+    ) -> Option<(TrackingParticleKind, TrackingAttachment)> {
+        if let Some(id) = self.entity_id
+            && let Some(attachment) = lookup(id)
+        {
+            self.attachment = attachment;
+        }
+        let lifetime = match self.kind {
+            TrackingParticleKind::Crit | TrackingParticleKind::EnchantedHit => 3,
+            TrackingParticleKind::Totem => 30,
+        };
+        if self.age >= lifetime {
+            return None;
+        }
+        self.age += 1;
+        Some((self.kind, self.attachment))
+    }
+}
+
+fn tracking_sample(
+    attachment: TrackingAttachment,
+    samples: impl IntoIterator<Item = [f64; 3]>,
+) -> Vec<(DVec3, DVec3)> {
+    samples
+        .into_iter()
+        .take(16)
+        .filter_map(|[x, y, z]| {
+            if x * x + y * y + z * z > 1.0 {
+                return None;
+            }
+            Some((
+                attachment.position
+                    + dvec3(
+                        attachment.width * x / 4.0,
+                        attachment.height * (0.5 + y / 4.0),
+                        attachment.width * z / 4.0,
+                    ),
+                dvec3(x, y + 0.2, z),
+            ))
+        })
+        .collect()
+}
+
 pub struct ParticleStore {
     particles: Vec<Particle>,
+    emitters: Vec<ExplosionEmitter>,
+    pending_emitters: Vec<ExplosionEmitter>,
+    tracked_explosions: Vec<TrackedExplosion>,
+    tracking_emitters: Vec<TrackingEmitter>,
+    crit_sprite: AtlasRegion,
+    enchanted_hit_sprite: AtlasRegion,
     /// Spawned this tick; drained after live particles tick, so a particle's
     /// first physics tick is the tick after it spawns (vanilla
     /// `ParticleEngine.particlesToAdd`).
     pending: Vec<Particle>,
     uv_map: AtlasUVMap,
     end_rod_frames: [AtlasRegion; 8],
+    generic_frames: [AtlasRegion; 8],
+    explosion_frames: [AtlasRegion; 16],
     grass_colormap: Arc<Colormap>,
     foliage_colormap: Arc<Colormap>,
     dry_foliage_colormap: Arc<Colormap>,
@@ -300,14 +797,149 @@ impl ParticleStore {
         dry_foliage_colormap: Arc<Colormap>,
     ) -> Self {
         let end_rod_frames = END_ROD_SPRITES.map(|k| uv_map.get_region(k));
+        let generic_frames = GENERIC_PARTICLE_SPRITES.map(|k| uv_map.get_region(k));
+        let explosion_frames = EXPLOSION_SPRITES.map(|k| uv_map.get_region(k));
+        let crit_sprite = uv_map.get_region(CRIT_SPRITE);
+        let enchanted_hit_sprite = uv_map.get_region(ENCHANTED_HIT_SPRITE);
         Self {
             particles: Vec::new(),
             pending: Vec::new(),
+            emitters: Vec::new(),
+            pending_emitters: Vec::new(),
+            tracked_explosions: Vec::new(),
+            tracking_emitters: Vec::new(),
+            crit_sprite,
+            enchanted_hit_sprite,
             uv_map,
             end_rod_frames,
+            generic_frames,
+            explosion_frames,
             grass_colormap,
             foliage_colormap,
             dry_foliage_colormap,
+        }
+    }
+
+    pub(crate) fn add_tracking_emitter(
+        &mut self,
+        entity_id: i32,
+        kind: TrackingParticleKind,
+        attachment: TrackingAttachment,
+        world: &ChunkStore,
+    ) {
+        self.emit_tracking_batch(kind, attachment, world);
+        self.tracking_emitters.push(TrackingEmitter {
+            entity_id: Some(entity_id),
+            attachment,
+            age: 1,
+            kind,
+        });
+    }
+
+    pub(crate) fn detach_tracking_emitter(
+        &mut self,
+        entity_id: i32,
+        final_attachment: Option<TrackingAttachment>,
+    ) {
+        for emitter in &mut self.tracking_emitters {
+            if emitter.entity_id == Some(entity_id) {
+                if let Some(attachment) = final_attachment {
+                    emitter.attachment = attachment;
+                }
+                emitter.entity_id = None;
+            }
+        }
+    }
+
+    fn emit_tracking_batch(
+        &mut self,
+        kind: TrackingParticleKind,
+        attachment: TrackingAttachment,
+        world: &ChunkStore,
+    ) {
+        let samples = (0..16).map(|_| {
+            [
+                fastrand::f64() * 2.0 - 1.0,
+                fastrand::f64() * 2.0 - 1.0,
+                fastrand::f64() * 2.0 - 1.0,
+            ]
+        });
+        for (pos, velocity) in tracking_sample(attachment, samples) {
+            match kind {
+                TrackingParticleKind::Crit => {
+                    self.push(Particle::crit(
+                        pos,
+                        velocity,
+                        false,
+                        self.crit_sprite,
+                        world,
+                    ));
+                }
+                TrackingParticleKind::EnchantedHit => {
+                    self.push(Particle::crit(
+                        pos,
+                        velocity,
+                        true,
+                        self.enchanted_hit_sprite,
+                        world,
+                    ));
+                }
+                TrackingParticleKind::Totem => {
+                    self.push(Particle::totem(pos, velocity, &self.end_rod_frames));
+                }
+            }
+        }
+    }
+
+    /// Spawn supported primary explosion options; unsupported options are
+    /// rejected, never remapped.
+    pub fn add_explosion_particle(
+        &mut self,
+        option: &ParticleOptions,
+        pos: DVec3,
+        velocity: DVec3,
+    ) -> bool {
+        if !supports_explosion_particle(option) {
+            return false;
+        }
+        match option {
+            ParticleOptions::Explosion => self.push(Particle::huge_explosion(
+                pos,
+                velocity,
+                &self.explosion_frames,
+            )),
+
+            ParticleOptions::ExplosionEmitter => {
+                self.pending_emitters.push(ExplosionEmitter { pos, age: 0 })
+            }
+            ParticleOptions::EndRod => {
+                self.push(Particle::end_rod(pos, velocity, &self.end_rod_frames))
+            }
+            ParticleOptions::Poof => self.push(Particle::poof(pos, velocity, &self.generic_frames)),
+            ParticleOptions::Smoke => {
+                self.push(Particle::smoke(pos, velocity, &self.generic_frames))
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Preserve and queue the complete weighted packet list for the next client
+    /// tick.
+    pub fn track_explosion_effects(
+        &mut self,
+        center: DVec3,
+        radius: f32,
+        block_count: i32,
+        block_particles: Vec<Weighted<ExplosionParticleInfo>>,
+    ) {
+        if !block_particles.is_empty() {
+            self.tracked_explosions.push(TrackedExplosion {
+                center,
+                radius,
+                block_count,
+                block_particles,
+            });
         }
     }
 
@@ -447,14 +1079,25 @@ impl ParticleStore {
         &mut self,
         kind: ServerParticleKind,
         override_limiter: bool,
+        always_show: bool,
         pos: DVec3,
         dist: DVec3,
         max_speed: f64,
-        count: u32,
+        count: i32,
         camera_pos: DVec3,
     ) {
+        let Some(count) = packet_particle_count(count) else {
+            return;
+        };
+        let bypass_distance_limit = override_limiter || always_show;
         if count == 0 {
-            self.add_server_particle(kind, override_limiter, pos, dist * max_speed, camera_pos);
+            self.add_server_particle(
+                kind,
+                bypass_distance_limit,
+                pos,
+                dist * max_speed,
+                camera_pos,
+            );
             return;
         }
         for _ in 0..count {
@@ -464,7 +1107,7 @@ impl ParticleStore {
                 next_gaussian() * dist.z,
             );
             let vel = dvec3(next_gaussian(), next_gaussian(), next_gaussian()) * max_speed;
-            self.add_server_particle(kind, override_limiter, pos + scatter, vel, camera_pos);
+            self.add_server_particle(kind, bypass_distance_limit, pos + scatter, vel, camera_pos);
         }
     }
 
@@ -524,6 +1167,15 @@ impl ParticleStore {
         })
     }
 
+    pub(crate) fn clear(&mut self) {
+        self.particles.clear();
+        self.pending.clear();
+        self.emitters.clear();
+        self.pending_emitters.clear();
+        self.tracked_explosions.clear();
+        self.tracking_emitters.clear();
+    }
+
     /// Vanilla `ParticleGroup` caps: hard limit plus probabilistic rejection
     /// once the reservoir fills.
     fn push(&mut self, particle: Particle) {
@@ -541,8 +1193,60 @@ impl ParticleStore {
     }
 
     pub fn tick(&mut self, chunks: &ChunkStore) {
-        let frames = self.end_rod_frames;
-        self.particles.retain_mut(|p| p.tick(chunks, &frames));
+        self.tick_with_entity_lookup(chunks, |_| None);
+    }
+
+    pub(crate) fn tick_with_entity_lookup(
+        &mut self,
+        chunks: &ChunkStore,
+        mut lookup: impl FnMut(i32) -> Option<TrackingAttachment>,
+    ) {
+        let tracking: Vec<_> = self
+            .tracking_emitters
+            .iter_mut()
+            .filter_map(|e| e.advance(&mut lookup))
+            .collect();
+        self.tracking_emitters.retain(|e| {
+            e.age
+                < match e.kind {
+                    TrackingParticleKind::Crit | TrackingParticleKind::EnchantedHit => 3,
+                    TrackingParticleKind::Totem => 30,
+                }
+        });
+        for (kind, attachment) in tracking {
+            self.emit_tracking_batch(kind, attachment, chunks);
+        }
+        self.emitters.append(&mut self.pending_emitters);
+        let mut children = Vec::with_capacity(self.emitters.len() * 6);
+        for emitter in &mut self.emitters {
+            for _ in 0..explosion_emitter_children(emitter.age) {
+                children.push(explosion_emitter_child(emitter.pos, emitter.age, || {
+                    fastrand::f64() - fastrand::f64()
+                }));
+            }
+            emitter.age += 1;
+        }
+        self.emitters.retain(|e| e.age < 8);
+        for (pos, velocity) in children {
+            let _ = self.add_explosion_particle(&ParticleOptions::Explosion, pos, velocity);
+        }
+        if !self.tracked_explosions.is_empty() {
+            let mut rng = fastrand::Rng::new();
+            let spawns = plan_explosion_particles(&self.tracked_explosions, &mut rng, |x, y, z| {
+                is_air(chunks.get_block_state(x, y, z))
+            });
+            for spawn in spawns {
+                if !self.add_explosion_particle(&spawn.particle, spawn.pos, spawn.velocity) {
+                    tracing::debug!(particle = ?spawn.particle, "skipping unsupported explosion block particle option");
+                }
+            }
+            self.tracked_explosions.clear();
+        }
+        let end_frames = self.end_rod_frames;
+        let generic_frames = self.generic_frames;
+        let explosion_frames = self.explosion_frames;
+        self.particles
+            .retain_mut(|p| p.tick(chunks, &end_frames, &generic_frames, &explosion_frames));
         self.particles.append(&mut self.pending);
     }
 
@@ -576,6 +1280,784 @@ impl ParticleStore {
 
 /// `java.util.Random.nextGaussian` (Marsaglia polar method), minus the
 /// second-sample cache.
+pub(crate) fn packet_particle_count(count: i32) -> Option<u32> {
+    u32::try_from(count).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ExplosionParticleInfo, ParticleOptions, TrackedExplosion, Weighted, animated_frame_index,
+        dvec3, explosion_emitter_child, explosion_frame_index, packet_particle_count,
+        plan_explosion_particles, supports_explosion_particle,
+    };
+
+    fn explosion_fixture(block_count: i32, weight: i32) -> TrackedExplosion {
+        TrackedExplosion {
+            center: dvec3(0.5, 0.5, 0.5),
+            radius: 3.0,
+            block_count,
+            block_particles: vec![Weighted {
+                value: ExplosionParticleInfo {
+                    particle: ParticleOptions::Explosion,
+                    scaling: 1.0,
+                    speed: 1.0,
+                },
+                weight,
+            }],
+        }
+    }
+
+    #[test]
+    fn tracking_samples_are_bounded_and_use_entity_dimensions() {
+        let attachment = super::TrackingAttachment {
+            position: dvec3(10.0, 20.0, 30.0),
+            width: 2.0,
+            height: 4.0,
+        };
+        let samples = [[0.5, -0.25, 0.5], [1.0, 1.0, 1.0]];
+        let out = super::tracking_sample(attachment, samples);
+        assert_eq!(out.len(), 1);
+        // Independent contract equations: pos + (width*x/4,
+        // height*(0.5+y/4), width*z/4), aux = (x, y+0.2, z).
+        assert_eq!(out[0].0, dvec3(10.25, 21.75, 30.25));
+        assert!((out[0].1 - dvec3(0.5, -0.05, 0.5)).length() < 1.0e-12);
+        let mut draws = 0;
+        let _ = super::tracking_sample(
+            attachment,
+            std::iter::repeat_with(|| {
+                draws += 1;
+                [0.0; 3]
+            }),
+        );
+        assert_eq!(draws, 16);
+    }
+
+    #[test]
+    fn tracking_store_ticks_three_batches_and_detach_preserves_old_id_snapshot() {
+        use std::sync::Arc;
+
+        use crate::renderer::chunk::atlas::AtlasUVMap;
+        use crate::renderer::chunk::mesher::Colormap;
+        use crate::world::chunk::ChunkStore;
+
+        crate::world::block::init("26.2");
+        let uv = AtlasUVMap::test_empty();
+        let colors = Arc::new(Colormap::test_empty());
+        let mut store = super::ParticleStore::new(uv, colors.clone(), colors.clone(), colors);
+        let chunks = ChunkStore::new(2);
+        let start = super::TrackingAttachment {
+            position: dvec3(1.0, 2.0, 3.0),
+            width: 0.6,
+            height: 1.8,
+        };
+        let moved = super::TrackingAttachment {
+            position: dvec3(4.0, 5.0, 6.0),
+            width: 0.6,
+            height: 1.8,
+        };
+        store.add_tracking_emitter(7, super::TrackingParticleKind::Crit, start, &chunks);
+        assert!((1..=16).contains(&store.pending.len()));
+        assert_eq!(store.tracking_emitters.len(), 1);
+
+        let mut looked_up = Vec::new();
+        store.tick_with_entity_lookup(&chunks, |id| {
+            looked_up.push(id);
+            (id == 7).then_some(moved)
+        });
+        assert_eq!(looked_up, [7]);
+        assert_eq!(store.tracking_emitters[0].attachment, moved);
+        let after_second_batch = store.particles.len();
+        assert!(after_second_batch > 0);
+
+        // Despawn/ID replacement snapshots the old entity before the numeric ID
+        // can resolve to a different entity on the next simulation tick.
+        store.detach_tracking_emitter(7, Some(moved));
+        assert_eq!(store.tracking_emitters[0].entity_id, None);
+        let respawned = super::TrackingAttachment {
+            position: dvec3(20.0, 30.0, 40.0),
+            width: 1.0,
+            height: 2.0,
+        };
+        store.add_tracking_emitter(
+            7,
+            super::TrackingParticleKind::EnchantedHit,
+            respawned,
+            &chunks,
+        );
+        assert_eq!(store.tracking_emitters[0].attachment, moved);
+        assert_eq!(store.tracking_emitters[1].attachment, respawned);
+        let mut looked_up_again = Vec::new();
+        store.tick_with_entity_lookup(&chunks, |id| {
+            looked_up_again.push(id);
+            (id == 7).then_some(respawned)
+        });
+        assert_eq!(looked_up_again, [7]); // only the new emitter resolves the reused ID.
+        assert!(
+            store
+                .tracking_emitters
+                .iter()
+                .all(|e| e.entity_id == Some(7))
+        );
+        assert!(
+            store
+                .tracking_emitters
+                .iter()
+                .any(|e| e.attachment == respawned)
+        );
+        assert!(store.particles.len() > after_second_batch);
+        assert!(store.particles.iter().any(|p| p.age == 2));
+        assert!(store.particles.iter().any(|p| p.age == 1));
+
+        // A clearing transition must also drop any remaining tracking state.
+        store.add_tracking_emitter(8, super::TrackingParticleKind::EnchantedHit, start, &chunks);
+        store.clear();
+        assert!(store.tracking_emitters.is_empty());
+        assert!(store.particles.is_empty());
+        assert!(store.pending.is_empty());
+    }
+
+    #[test]
+    fn tracking_crit_and_enchanted_emitters_keep_three_total_batches() {
+        use std::sync::Arc;
+
+        use crate::renderer::chunk::atlas::AtlasUVMap;
+        use crate::renderer::chunk::mesher::Colormap;
+        use crate::world::chunk::ChunkStore;
+        crate::world::block::init("26.2");
+        let uv = AtlasUVMap::test_empty();
+        let colors = Arc::new(Colormap::test_empty());
+        let mut store = super::ParticleStore::new(uv, colors.clone(), colors.clone(), colors);
+        let chunks = ChunkStore::new(2);
+        let attachment = super::TrackingAttachment {
+            position: dvec3(1.0, 2.0, 3.0),
+            width: 0.6,
+            height: 1.8,
+        };
+        for kind in [
+            super::TrackingParticleKind::Crit,
+            super::TrackingParticleKind::EnchantedHit,
+        ] {
+            store.add_tracking_emitter(4, kind, attachment, &chunks);
+            assert_eq!(store.tracking_emitters.last().unwrap().age, 1);
+            store.tick_with_entity_lookup(&chunks, |_| Some(attachment));
+            assert_eq!(store.tracking_emitters.last().unwrap().age, 2);
+            store.tick_with_entity_lookup(&chunks, |_| Some(attachment));
+            assert!(store.tracking_emitters.is_empty());
+        }
+    }
+
+    #[test]
+    fn totem_tracking_emits_immediately_then_30_total_batches_and_removes() {
+        use std::sync::Arc;
+
+        use crate::renderer::chunk::atlas::AtlasUVMap;
+        use crate::renderer::chunk::mesher::Colormap;
+        use crate::world::chunk::ChunkStore;
+        crate::world::block::init("26.2");
+        let uv = AtlasUVMap::test_empty();
+        let colors = Arc::new(Colormap::test_empty());
+        let mut store = super::ParticleStore::new(uv, colors.clone(), colors.clone(), colors);
+        let chunks = ChunkStore::new(2);
+        let attachment = super::TrackingAttachment {
+            position: dvec3(1.0, 2.0, 3.0),
+            width: 0.6,
+            height: 1.8,
+        };
+        fastrand::seed(0x544f_5445_4d);
+        store.add_tracking_emitter(4, super::TrackingParticleKind::Totem, attachment, &chunks);
+        assert_eq!(store.tracking_emitters[0].age, 1);
+        assert!((1..=16).contains(&store.pending.len()));
+        let mut batches = 1;
+        for _ in 0..29 {
+            store.tick_with_entity_lookup(&chunks, |_| Some(attachment));
+            batches += 1;
+        }
+        assert_eq!(batches, 30);
+        assert!(store.tracking_emitters.is_empty());
+        let totem_count = store
+            .particles
+            .iter()
+            .filter(|p| p.kind == super::Kind::Totem)
+            .count()
+            + store
+                .pending
+                .iter()
+                .filter(|p| p.kind == super::Kind::Totem)
+                .count();
+        let particles_before = store.particles.len() + store.pending.len();
+        store.tick_with_entity_lookup(&chunks, |_| Some(attachment));
+        assert_eq!(store.tracking_emitters.len(), 0);
+        assert_eq!(
+            store
+                .particles
+                .iter()
+                .filter(|p| p.kind == super::Kind::Totem)
+                .count()
+                + store
+                    .pending
+                    .iter()
+                    .filter(|p| p.kind == super::Kind::Totem)
+                    .count(),
+            totem_count
+        );
+        assert!(store.particles.len() + store.pending.len() <= particles_before);
+    }
+
+    #[test]
+    fn totem_move_clips_against_loaded_floor_and_wall() {
+        use crate::renderer::chunk::atlas::AtlasRegion;
+        use crate::world::chunk::ChunkStore;
+        crate::world::block::init("26.2");
+        let frame = AtlasRegion {
+            u_min: 0.0,
+            v_min: 0.0,
+            u_max: 1.0,
+            v_max: 1.0,
+            pixel_rect: [0; 4],
+            sprite: 0,
+            opaque: false,
+            translucent: true,
+            alpha_counts: [0; 3],
+        };
+        let frames = [frame; 8];
+        let mut chunks = ChunkStore::new(1);
+        let _loaded = chunks.chunk_storage.upsert(
+            azalea_core::position::ChunkPos::new(0, 0),
+            azalea_world::chunk::Chunk::default(),
+        );
+        let stone = crate::world::block::first_state_of("stone").unwrap();
+        chunks.set_block_state(0, 60, 0, stone);
+        chunks.set_block_state(1, 61, 0, stone);
+
+        let mut floor =
+            super::Particle::totem(dvec3(0.5, 61.2, 0.5), dvec3(0.2, -0.5, 0.0), &frames);
+        assert!(floor.tick(&chunks, &frames, &frames, &[frame; 16]));
+        assert_eq!(floor.pos, dvec3(0.7, 61.0, 0.5));
+        assert!(floor.on_ground);
+        assert!(!floor.stopped_by_collision);
+        let friction = f64::from(0.6f32);
+        let gravity = f64::from(1.25f32);
+        let expected_floor_velocity = dvec3(
+            0.2 * friction * 0.7,
+            (-0.5 - 0.04 * gravity) * friction,
+            0.0,
+        );
+        assert!((floor.vel - expected_floor_velocity).length() < 1e-6);
+
+        let mut wall = super::Particle::totem(dvec3(0.8, 62.0, 0.5), dvec3(0.5, 0.0, 0.0), &frames);
+        assert!(wall.tick(&chunks, &frames, &frames, &[frame; 16]));
+        assert_eq!(wall.pos, dvec3(0.9, 61.95, 0.5));
+        assert_eq!(wall.vel.x, 0.0);
+        assert!((wall.vel.y - (-0.04 * gravity) * friction).abs() < 1e-6);
+        assert!(!wall.on_ground);
+    }
+
+    #[test]
+    fn totem_constructor_physics_render_and_sprite_tick_contract() {
+        use crate::renderer::chunk::atlas::AtlasRegion;
+        use crate::world::chunk::ChunkStore;
+        crate::world::block::init("26.2");
+        let frames = std::array::from_fn(|i| AtlasRegion {
+            u_min: i as f32 / 8.0,
+            v_min: 0.25,
+            u_max: (i + 1) as f32 / 8.0,
+            v_max: 0.5,
+            pixel_rect: [0; 4],
+            sprite: i as u16,
+            opaque: false,
+            translucent: true,
+            alpha_counts: [0; 3],
+        });
+        let pos = dvec3(2.0, 3.0, 4.0);
+        let velocity = dvec3(0.2, 0.4, -0.3);
+        let mut p = super::Particle::totem(pos, velocity, &frames);
+        assert_eq!(p.age, 0); // Totem constructor does not tick.
+        assert!((60..=71).contains(&p.lifetime));
+        assert!((0.075..=0.15).contains(&p.size));
+        assert_eq!(p.vel, velocity);
+        assert_eq!(
+            (p.gravity, p.friction, p.alpha, p.light),
+            (f64::from(1.25f32), f64::from(0.6f32), 1.0, 1.0)
+        );
+        assert_eq!(
+            (p.u0, p.u1, p.v0, p.v1),
+            (
+                frames[0].u_min,
+                frames[0].u_max,
+                frames[0].v_min,
+                frames[0].v_max
+            )
+        );
+        assert!(p.kind.translucent());
+        let original = p.pos;
+        let chunks = ChunkStore::new(2);
+        assert!(p.tick(&chunks, &frames, &frames, &[frames[0]; 16]));
+        assert_eq!(p.age, 1);
+        assert_eq!(
+            p.pos,
+            original + dvec3(velocity.x, velocity.y - 0.04 * 1.25, velocity.z)
+        );
+        let friction = f64::from(0.6f32);
+        let gravity = f64::from(1.25f32);
+        let expected_velocity =
+            dvec3(velocity.x, velocity.y - 0.04 * gravity, velocity.z) * friction;
+        assert!((p.vel - expected_velocity).length() < 1e-6);
+        assert_eq!(p.light, 1.0);
+        assert!(p.alpha <= 1.0 && p.alpha >= 0.0);
+        assert!(p.color[0] >= 0.1 && p.color[0] < 0.8);
+        assert!(p.color[1] >= 0.4 && p.color[1] < 0.9);
+        assert!((0.0..0.2).contains(&p.color[2])); // Vanilla samples blue independently in both branches.
+        assert_eq!(
+            (p.u0, p.u1),
+            (
+                frames[(p.age * 7 / p.lifetime) as usize].u_min,
+                frames[(p.age * 7 / p.lifetime) as usize].u_max
+            )
+        );
+        p.age = p.lifetime / 2;
+        p.alpha = 1.0;
+        assert!(p.tick(&chunks, &frames, &frames, &[frames[0]; 16]));
+        assert_eq!(p.alpha, 1.0 - 1.0 / p.lifetime as f32);
+        p.age = p.lifetime - 1;
+        assert!(p.tick(&chunks, &frames, &frames, &[frames[0]; 16]));
+        assert_eq!(p.age, p.lifetime);
+        assert_eq!((p.u0, p.u1), (frames[7].u_min, frames[7].u_max));
+        assert!(!p.tick(&chunks, &frames, &frames, &[frames[0]; 16]));
+    }
+
+    #[test]
+    fn totem_color_matches_both_vanilla_branches_including_blue() {
+        let rare = super::totem_color(true, [0.5; 3]);
+        let common = super::totem_color(false, [0.5; 3]);
+        assert!((rare[0] - 0.7).abs() < f32::EPSILON);
+        assert!((rare[1] - 0.75).abs() < f32::EPSILON);
+        assert_eq!(rare[2], 0.1); // Independent expected blue = sample 0.5 * 0.2.
+        assert!((common[0] - 0.2).abs() < f32::EPSILON);
+        assert!((common[1] - 0.55).abs() < f32::EPSILON);
+        assert_eq!(common[2], 0.1);
+    }
+
+    #[test]
+    fn totem_tracking_detach_same_id_reuse_and_clear_use_store() {
+        use std::sync::Arc;
+
+        use crate::renderer::chunk::atlas::AtlasUVMap;
+        use crate::renderer::chunk::mesher::Colormap;
+        use crate::world::chunk::ChunkStore;
+        crate::world::block::init("26.2");
+        fastrand::seed(0x544f_5445_4d);
+        let uv = AtlasUVMap::test_empty();
+        let colors = Arc::new(Colormap::test_empty());
+        let mut store = super::ParticleStore::new(uv, colors.clone(), colors.clone(), colors);
+        let chunks = ChunkStore::new(2);
+        let old = super::TrackingAttachment {
+            position: dvec3(1.0, 2.0, 3.0),
+            width: 0.6,
+            height: 1.8,
+        };
+        let reused = super::TrackingAttachment {
+            position: dvec3(20.0, 30.0, 40.0),
+            width: 1.0,
+            height: 2.0,
+        };
+        store.add_tracking_emitter(9, super::TrackingParticleKind::Totem, old, &chunks);
+        store.detach_tracking_emitter(9, Some(old));
+        store.add_tracking_emitter(9, super::TrackingParticleKind::Totem, reused, &chunks);
+        let mut lookups = 0;
+        for _ in 0..28 {
+            store.tick_with_entity_lookup(&chunks, |_| {
+                lookups += 1;
+                Some(reused)
+            });
+            assert_eq!(store.tracking_emitters[0].attachment, old);
+        }
+        assert_eq!(lookups, 28); // only the reused ID's new emitter is looked up.
+        assert_eq!(store.tracking_emitters.len(), 2);
+        assert_eq!(store.tracking_emitters[0].attachment, old);
+        assert_eq!(store.tracking_emitters[1].attachment, reused);
+        store.tick_with_entity_lookup(&chunks, |_| {
+            lookups += 1;
+            Some(reused)
+        });
+        assert_eq!(lookups, 29);
+        assert!(store.tracking_emitters.is_empty());
+        store.add_tracking_emitter(10, super::TrackingParticleKind::Totem, old, &chunks);
+        store.clear();
+        assert!(store.tracking_emitters.is_empty());
+        assert!(store.particles.is_empty());
+        assert!(store.pending.is_empty());
+    }
+
+    #[test]
+    fn tracking_particle_ctor_and_sprite_contract() {
+        assert_eq!(super::CRIT_SPRITE, "particle/critical_hit");
+        assert_eq!(super::ENCHANTED_HIT_SPRITE, "particle/enchanted_hit");
+        assert_eq!(
+            super::END_ROD_SPRITES,
+            [
+                "particle/glitter_7",
+                "particle/glitter_6",
+                "particle/glitter_5",
+                "particle/glitter_4",
+                "particle/glitter_3",
+                "particle/glitter_2",
+                "particle/glitter_1",
+                "particle/glitter_0"
+            ]
+        );
+        let frame = super::AtlasRegion {
+            u_min: 0.1,
+            v_min: 0.2,
+            u_max: 0.3,
+            v_max: 0.4,
+            pixel_rect: [0; 4],
+            sprite: 0,
+            opaque: true,
+            translucent: false,
+            alpha_counts: [0; 3],
+        };
+        crate::world::block::init("26.2");
+        let chunks = crate::world::chunk::ChunkStore::new(2);
+        let p = super::Particle::crit(
+            dvec3(0.5, 10.0, 0.5),
+            dvec3(0.5, 0.25, -0.5),
+            true,
+            frame,
+            &chunks,
+        );
+        assert_eq!(p.age, 1); // Crit ctor ticks synchronously, unlike its TrackingEmitter.
+        assert!((p.pos - dvec3(0.7, 10.08, 0.3)).length() < 1.0e-12);
+        assert!((p.vel - dvec3(0.14, 0.056, -0.14)).length() < 1.0e-12);
+        assert!(!p.kind.translucent());
+        assert!((4..=10).contains(&p.lifetime));
+        assert_eq!((p.gravity, p.friction), (0.5, 0.7));
+        assert!((0.075..=0.15).contains(&p.size));
+        assert!((0.18..0.27).contains(&p.color[0]));
+        assert!((0.46..0.72).contains(&p.color[1]));
+        assert!((0.48..0.81).contains(&p.color[2]));
+        assert_eq!(
+            (p.u0, p.u1, p.v0, p.v1),
+            (frame.u_min, frame.u_max, frame.v_min, frame.v_max)
+        );
+        assert_eq!(
+            p.light,
+            super::world_brightness(
+                &chunks,
+                p.pos.x.floor() as i32,
+                p.pos.y.floor() as i32,
+                p.pos.z.floor() as i32
+            )
+        );
+    }
+
+    #[test]
+    fn particle_lifetime_keeps_age_life_frame_then_removes_next_tick() {
+        use crate::world::chunk::ChunkStore;
+
+        crate::world::block::init("26.2");
+        let chunks = ChunkStore::new(2);
+        let frame = super::AtlasRegion {
+            u_min: 0.1,
+            v_min: 0.2,
+            u_max: 0.3,
+            v_max: 0.4,
+            pixel_rect: [0; 4],
+            sprite: 0,
+            opaque: true,
+            translucent: false,
+            alpha_counts: [0; 3],
+        };
+        let mut particle = super::Particle::crit(
+            dvec3(0.5, 10.0, 0.5),
+            dvec3(0.0, 0.0, 0.0),
+            false,
+            frame,
+            &chunks,
+        );
+        particle.age = particle.lifetime - 1;
+        assert!(particle.tick(&chunks, &[frame; 8], &[frame; 8], &[frame; 16]));
+        assert_eq!(particle.age, particle.lifetime);
+        assert!(!particle.tick(&chunks, &[frame; 8], &[frame; 8], &[frame; 16]));
+    }
+
+    #[test]
+    fn explosion_frames_and_final_age_match_spriteset_selection() {
+        assert_eq!(super::EXPLOSION_SPRITES.len(), 16);
+        assert_eq!(super::EXPLOSION_SPRITES[0], "particle/explosion_0");
+        assert_eq!(super::EXPLOSION_SPRITES[15], "particle/explosion_15");
+        assert_eq!(explosion_frame_index(0, 20), 0);
+        assert_eq!(explosion_frame_index(19, 20), 14);
+        assert_eq!(explosion_frame_index(20, 20), 15);
+        assert_eq!(animated_frame_index(19, 20, 8), 6);
+        assert_eq!(animated_frame_index(20, 20, 8), 7);
+    }
+
+    #[test]
+    fn emitter_has_eight_ticks_and_emits_six_each_tick() {
+        let mut age = 0;
+        let mut children = 0;
+        while age < super::EXPLOSION_EMITTER_TICKS {
+            children += usize::from(super::explosion_emitter_children(age));
+            age += 1;
+        }
+        assert_eq!((age, children), (8, 48));
+        assert_eq!(super::explosion_emitter_children(8), 0);
+        assert_eq!(
+            [0, 4, 7].map(super::explosion_emitter_size),
+            [0.0, 0.5, 0.875],
+        );
+        let mut draws = [0.25, -0.125, 0.5].into_iter();
+        let child = explosion_emitter_child(dvec3(10.0, 20.0, 30.0), 3, || draws.next().unwrap());
+        assert_eq!(child, (dvec3(11.0, 19.5, 32.0), dvec3(0.375, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn huge_explosion_uses_only_x_aux_as_size_and_never_moves() {
+        let frame = super::AtlasRegion {
+            u_min: 0.0,
+            v_min: 0.0,
+            u_max: 1.0,
+            v_max: 1.0,
+            pixel_rect: [0; 4],
+            sprite: 0,
+            opaque: true,
+            translucent: false,
+            alpha_counts: [0, 0, 1],
+        };
+        let frames = [frame; 16];
+        let pos = dvec3(3.0, 4.0, 5.0);
+        let mut huge = super::Particle::huge_explosion(pos, dvec3(0.5, 100.0, -200.0), &frames);
+        assert_eq!(huge.size, 1.5);
+        assert_eq!(huge.vel, dvec3(0.0, 0.0, 0.0));
+        assert!((6..=9).contains(&huge.lifetime));
+        assert_eq!(huge.light, 1.0);
+        let chunks = crate::world::chunk::ChunkStore::new(2);
+        for _ in 0..huge.lifetime {
+            assert!(huge.tick(&chunks, &[frame; 8], &[frame; 8], &frames));
+        }
+        assert_eq!(huge.pos, pos);
+
+        let primary = super::Particle::huge_explosion(pos, dvec3(1.0, 0.0, 0.0), &frames);
+        assert_eq!(primary.size, 1.0);
+        assert!(supports_explosion_particle(&ParticleOptions::Explosion));
+        assert!(supports_explosion_particle(&ParticleOptions::Poof));
+        assert!(supports_explosion_particle(&ParticleOptions::Smoke));
+    }
+
+    #[test]
+    fn poof_starts_not_fullbright_and_refreshes_world_light_on_tick() {
+        let frame = super::AtlasRegion {
+            u_min: 0.0,
+            v_min: 0.0,
+            u_max: 1.0,
+            v_max: 1.0,
+            pixel_rect: [0; 4],
+            sprite: 0,
+            opaque: true,
+            translucent: false,
+            alpha_counts: [0; 3],
+        };
+        let frames = [frame; 8];
+        crate::world::block::init("26.2");
+        let mut poof = super::Particle::poof(dvec3(3.0, 4.0, 5.0), dvec3(0.0, 0.0, 0.0), &frames);
+        assert_eq!(poof.light, 0.0);
+        let chunks = crate::world::chunk::ChunkStore::new(2);
+        poof.tick(&chunks, &frames, &frames, &[frame; 16]);
+        assert_eq!(poof.light, super::world_brightness(&chunks, 3, 4, 5),);
+        assert_ne!(poof.light, 0.0);
+    }
+
+    #[test]
+    fn poof_and_smoke_advance_frames_and_smoke_grows_during_tick() {
+        let generic_frames = std::array::from_fn(|i| super::AtlasRegion {
+            u_min: i as f32 / 8.0,
+            u_max: (i + 1) as f32 / 8.0,
+            v_min: 0.0,
+            v_max: 1.0,
+            pixel_rect: [0; 4],
+            sprite: i as u16,
+            opaque: true,
+            translucent: false,
+            alpha_counts: [0; 3],
+        });
+        crate::world::block::init("26.2");
+        let chunks = crate::world::chunk::ChunkStore::new(2);
+        let pos = dvec3(3.0, 4.0, 5.0);
+        let mut poof = super::Particle::poof(pos, dvec3(0.0, 0.0, 0.0), &generic_frames);
+        let mut smoke = super::Particle::smoke(pos, dvec3(0.0, 0.0, 0.0), &generic_frames);
+        poof.lifetime = 16;
+        smoke.lifetime = 16;
+        poof.set_sprite(&generic_frames[0]);
+        smoke.set_sprite(&generic_frames[0]);
+        assert_eq!(smoke.size, 0.0);
+
+        for _ in 0..4 {
+            assert!(poof.tick(
+                &chunks,
+                &[generic_frames[0]; 8],
+                &generic_frames,
+                &[generic_frames[0]; 16],
+            ));
+            assert!(smoke.tick(
+                &chunks,
+                &[generic_frames[0]; 8],
+                &generic_frames,
+                &[generic_frames[0]; 16],
+            ));
+        }
+
+        assert_eq!(poof.u0, generic_frames[1].u_min);
+        assert_eq!(smoke.u0, generic_frames[1].u_min);
+        assert!(smoke.size > 0.0);
+    }
+
+    #[test]
+    fn standard_tnt_weighted_options_are_renderable_and_not_skipped() {
+        let mut weighted = explosion_fixture(1, 1);
+        weighted.block_particles[0].value = ExplosionParticleInfo {
+            particle: ParticleOptions::Poof,
+            scaling: 0.5,
+            speed: 1.0,
+        };
+        weighted.block_particles.push(Weighted {
+            value: ExplosionParticleInfo {
+                particle: ParticleOptions::Smoke,
+                scaling: 1.0,
+                speed: 1.0,
+            },
+            weight: 1,
+        });
+        let mut rng = fastrand::Rng::with_seed(0x544e_54);
+        let mut found_poof = false;
+        let mut found_smoke = false;
+        for _ in 0..32 {
+            for spawn in
+                plan_explosion_particles(std::slice::from_ref(&weighted), &mut rng, |_, _, _| true)
+            {
+                assert!(supports_explosion_particle(&spawn.particle));
+                found_poof |= matches!(spawn.particle, ParticleOptions::Poof);
+                found_smoke |= matches!(spawn.particle, ParticleOptions::Smoke);
+            }
+        }
+        assert!(found_poof && found_smoke);
+    }
+
+    #[test]
+    fn weighted_tracker_is_seeded_air_filtered_and_capped_without_mutation() {
+        let effects = vec![explosion_fixture(700, 1)];
+        let before = effects[0].center;
+        let world = std::collections::HashMap::from([((0, 0, 0), 17u32)]);
+        let world_before = world.clone();
+        let mut air_reads = 0;
+        let mut first_rng = fastrand::Rng::with_seed(42);
+        let mut second_rng = fastrand::Rng::with_seed(42);
+        let first = plan_explosion_particles(&effects, &mut first_rng, |x, y, z| {
+            air_reads += 1;
+            let _ = world.get(&(x, y, z));
+            true
+        });
+        let mut false_reads = 0;
+        let second = plan_explosion_particles(&effects, &mut second_rng, |_, _, _| {
+            false_reads += 1;
+            false
+        });
+        assert_eq!(first.len(), 512);
+        assert_eq!(second.len(), 0);
+        assert_eq!(effects[0].center, before);
+        assert_eq!(world, world_before);
+        assert_eq!(air_reads, 700.min(512));
+        assert_eq!(false_reads, 700.min(512));
+        let mut zero_rng = fastrand::Rng::with_seed(42);
+        assert!(
+            plan_explosion_particles(&[explosion_fixture(0, 1)], &mut zero_rng, |_, _, _| {
+                panic!("zero candidates should not read the world")
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn seeded_tracker_applies_exact_scaling_speed_and_sampled_position() {
+        let mut effect = explosion_fixture(1, 1);
+        effect.block_particles[0].value.scaling = 1.25;
+        effect.block_particles[0].value.speed = 0.75;
+        let mut rng = fastrand::Rng::with_seed(0x26_02);
+        let plan =
+            plan_explosion_particles(std::slice::from_ref(&effect), &mut rng, |_, _, _| true);
+        assert_eq!(plan.len(), 1);
+        let particle = &plan[0];
+        for (actual, expected) in [
+            (particle.pos.x, -0.4607938680388368),
+            (particle.pos.y, 1.4011020870320938),
+            (particle.pos.z, -0.6507520787596177),
+            (particle.velocity.x, -0.1254192857517548),
+            (particle.velocity.y, 0.11762729124787932),
+            (particle.velocity.z, -0.1502158877116651),
+        ] {
+            assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
+        }
+
+        effect.radius = 0.0;
+        let mut rng = fastrand::Rng::with_seed(0x26_02);
+        assert!(plan_explosion_particles(&[effect], &mut rng, |_, _, _| true).is_empty());
+    }
+
+    #[test]
+    fn seeded_tracker_uses_block_count_and_inner_particle_weights() {
+        let mut light = explosion_fixture(1, 1);
+        light.block_particles[0].value.particle = ParticleOptions::Explosion;
+        let mut heavy = explosion_fixture(3, 1);
+        heavy.block_particles[0].value.particle = ParticleOptions::EndRod;
+        let mut rng = fastrand::Rng::with_seed(0x26_02);
+        let mut light_count = 0;
+        let mut heavy_count = 0;
+        for _ in 0..250 {
+            let plan =
+                plan_explosion_particles(&[light.clone(), heavy.clone()], &mut rng, |_, _, _| true);
+            for spawn in plan {
+                match spawn.particle {
+                    ParticleOptions::Explosion => light_count += 1,
+                    ParticleOptions::EndRod => heavy_count += 1,
+                    _ => unreachable!(),
+                }
+            }
+        }
+        assert!(heavy_count > light_count * 2);
+
+        let mut weighted = explosion_fixture(1, 1);
+        weighted.block_particles.push(Weighted {
+            value: ExplosionParticleInfo {
+                particle: ParticleOptions::EndRod,
+                scaling: 1.0,
+                speed: 1.0,
+            },
+            weight: 3,
+        });
+        let mut rng = fastrand::Rng::with_seed(77);
+        let mut end_rod_count = 0;
+        for _ in 0..1000 {
+            if matches!(
+                plan_explosion_particles(std::slice::from_ref(&weighted), &mut rng, |_, _, _| {
+                    true
+                })[0]
+                    .particle,
+                ParticleOptions::EndRod
+            ) {
+                end_rod_count += 1;
+            }
+        }
+        assert!((650..850).contains(&end_rod_count));
+    }
+
+    #[test]
+    fn server_particle_count_keeps_negative_distinct_from_directional_zero() {
+        assert_eq!(packet_particle_count(-1), None);
+        assert_eq!(packet_particle_count(0), Some(0));
+        assert_eq!(packet_particle_count(3), Some(3));
+    }
+}
+
 pub(crate) fn next_gaussian() -> f64 {
     loop {
         let v1 = 2.0 * fastrand::f64() - 1.0;

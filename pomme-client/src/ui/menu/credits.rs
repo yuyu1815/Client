@@ -244,9 +244,33 @@ impl MainMenu {
         self.credits_keys = 0;
     }
 
-    /// Vanilla `WinScreen` with `poem = false`: the roll scrolls up from below
-    /// the screen, Up reverses it, Space and Control speed it up, and it
-    /// returns to the credits page once the last line has passed.
+    /// Reuses the credits roll as a modal over the game. `complete` is true
+    /// only on the frame Escape/empty data/end-of-roll closes it; the menu's
+    /// own OptionsCredits return path remains unchanged.
+    pub(crate) fn build_win_credits_roll(
+        &mut self,
+        state: &mut super::CreditsRollState,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+    ) -> (MainMenuResult, bool) {
+        if !matches!(&self.screen, Screen::CreditsRoll) {
+            self.set_screen(Screen::CreditsRoll);
+            self.credits_scroll = state.scroll.max(LOGO_LEAD_IN);
+            self.credits_keys = state.keys;
+        }
+        let (result, complete) = self.draw_credits_roll(sw, sh, input, text_width_fn);
+        state.scroll = self.credits_scroll;
+        state.keys = self.credits_keys;
+        if complete {
+            self.set_screen(Screen::Main);
+        }
+        (result, complete)
+    }
+
+    /// Menu navigation wrapper: completion returns to OptionsCredits. The roll
+    /// renderer itself has no destination and is also used by the game screen.
     pub(super) fn build_credits_roll(
         &mut self,
         sw: f32,
@@ -254,10 +278,24 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
+        let (result, complete) = self.draw_credits_roll(sw, sh, input, text_width_fn);
+        if complete {
+            self.set_screen(Screen::OptionsCredits);
+        }
+        result
+    }
+
+    /// Draws/advances the roll without choosing a destination screen.
+    fn draw_credits_roll(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+    ) -> (MainMenuResult, bool) {
         let lines = credits();
         if input.escape || lines.is_empty() {
-            self.set_screen(Screen::OptionsCredits);
-            return empty_result(2.0);
+            return (empty_result(2.0), true);
         }
 
         let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
@@ -281,8 +319,7 @@ impl MainMenu {
         let sh_units = sh / gs;
         let total_scroll_length = lines.len() as f32 * LINE_H;
         if self.credits_scroll > total_scroll_length + 2.0 * sh_units + 24.0 {
-            self.set_screen(Screen::OptionsCredits);
-            return empty_result(2.0);
+            return (empty_result(2.0), true);
         }
 
         let mut elements = Vec::new();
@@ -356,13 +393,16 @@ impl MainMenu {
         }
         elements.push(MenuElement::ScissorPop);
 
-        MainMenuResult {
-            elements,
-            action: MenuAction::None,
-            cursor_pointer: false,
-            blur: 2.0,
-            clicked_button: false,
-        }
+        (
+            MainMenuResult {
+                elements,
+                action: MenuAction::None,
+                cursor_pointer: false,
+                blur: 2.0,
+                clicked_button: false,
+            },
+            false,
+        )
     }
 }
 

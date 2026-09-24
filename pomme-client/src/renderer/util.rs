@@ -831,14 +831,15 @@ fn record_image_upload(
     );
 }
 
-pub unsafe fn create_linear_sampler_mipmapped(
-    device: &vk::Device,
-    mip_levels: u32,
-) -> vk::Sampler {
+pub unsafe fn create_linear_sampler_mipmapped(device: &vk::Device, mip_levels: u32) -> vk::Sampler {
     let info = vk::SamplerCreateInfo {
         mag_filter: vk::Filter::Linear,
         min_filter: vk::Filter::Linear,
-        mipmap_mode: if mip_levels > 1 { vk::SamplerMipmapMode::Linear } else { vk::SamplerMipmapMode::Nearest },
+        mipmap_mode: if mip_levels > 1 {
+            vk::SamplerMipmapMode::Linear
+        } else {
+            vk::SamplerMipmapMode::Nearest
+        },
         address_mode_u: vk::SamplerAddressMode::ClampToEdge,
         address_mode_v: vk::SamplerAddressMode::ClampToEdge,
         address_mode_w: vk::SamplerAddressMode::ClampToEdge,
@@ -846,7 +847,9 @@ pub unsafe fn create_linear_sampler_mipmapped(
         max_lod: mip_levels.saturating_sub(1) as f32,
         ..Default::default()
     };
-    device.create_sampler(&info, None).expect("failed to create linear sampler")
+    device
+        .create_sampler(&info, None)
+        .expect("failed to create linear sampler")
 }
 
 pub unsafe fn create_nearest_sampler_mipmapped(

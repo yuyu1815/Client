@@ -213,27 +213,39 @@ fn fluid_debug(world: &ChunkStore, x: i32, y: i32, z: i32, state: BlockState) ->
 
 fn item_rows(renderer: &Renderer) -> Vec<Value> {
     [
-        "fern", "bush", "lily_pad", "sugar_cane", "pink_petals", "wildflowers", "ice",
-        "honey_block", "stone",
+        "fern",
+        "bush",
+        "lily_pad",
+        "sugar_cane",
+        "pink_petals",
+        "wildflowers",
+        "ice",
+        "honey_block",
+        "stone",
     ]
-        .into_iter()
-        .map(|name| {
-            let mut row = renderer.probe_item_debug(name);
-            let mut texture_names = Vec::new();
-            if let Some(texture) = row.get("texture").and_then(Value::as_str) {
-                texture_names.push(texture.to_owned());
-            }
-            if let Some(quads) = row.get("quads").and_then(Value::as_array) {
-                for texture in quads.iter().filter_map(|quad| quad.get("texture").and_then(Value::as_str)) {
-                    if !texture_names.iter().any(|seen| seen == texture) {
-                        texture_names.push(texture.to_owned());
-                    }
+    .into_iter()
+    .map(|name| {
+        let mut row = renderer.probe_item_debug(name);
+        let mut texture_names = Vec::new();
+        if let Some(texture) = row.get("texture").and_then(Value::as_str) {
+            texture_names.push(texture.to_owned());
+        }
+        if let Some(quads) = row.get("quads").and_then(Value::as_array) {
+            for texture in quads
+                .iter()
+                .filter_map(|quad| quad.get("texture").and_then(Value::as_str))
+            {
+                if !texture_names.iter().any(|seen| seen == texture) {
+                    texture_names.push(texture.to_owned());
                 }
             }
-            let mut atlas_regions = serde_json::Map::new();
-            for texture in &texture_names {
-                let region = renderer.atlas_uv_map().get_region(texture);
-                atlas_regions.insert(texture.clone(), json!({
+        }
+        let mut atlas_regions = serde_json::Map::new();
+        for texture in &texture_names {
+            let region = renderer.atlas_uv_map().get_region(texture);
+            atlas_regions.insert(
+                texture.clone(),
+                json!({
                     "sprite": region.sprite,
                     "pixelRect": region.pixel_rect,
                     "uv": [region.u_min, region.v_min, region.u_max, region.v_max],
@@ -241,16 +253,17 @@ fn item_rows(renderer: &Renderer) -> Vec<Value> {
                     "translucent": region.translucent,
                     "alphaCounts": region.alpha_counts,
                     "atlasFormat": "R8G8B8A8_SRGB",
-                }));
-            }
-            if let Some(texture) = texture_names.first() {
-                row["selectedSprite"] = atlas_regions[texture].clone();
-                row["selectedSprite"]["key"] = json!(texture);
-            }
-            row["atlasRegions"] = Value::Object(atlas_regions);
-            row
-        })
-        .collect()
+                }),
+            );
+        }
+        if let Some(texture) = texture_names.first() {
+            row["selectedSprite"] = atlas_regions[texture].clone();
+            row["selectedSprite"]["key"] = json!(texture);
+        }
+        row["atlasRegions"] = Value::Object(atlas_regions);
+        row
+    })
+    .collect()
 }
 
 fn sample_rows(

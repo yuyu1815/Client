@@ -1,0 +1,26 @@
+[package]
+name = "azalea-buf"
+description = "Serialize and deserialize buffers from Minecraft."
+version = "0.16.0+mc26.2"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/azalea-rs/azalea"
+
+[dependencies]
+azalea-buf-macros = { version = "0.16.0", default-features = false }
+byteorder = "1.5.0"
+indexmap = "2.14.0"
+serde_json = { version = "1.0.149", optional = true }
+simdnbt = "0.10.0"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+uuid = "1.23.1"
+
+[features]
+serde_json = ["dep:serde_json"]
+
+[lints.clippy]
+str_to_string = "warn"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docsrs_dep)'] }

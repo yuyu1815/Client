@@ -37,28 +37,58 @@ impl DisplayTransform {
 pub struct DisplayResolver {
     key: &'static str,
     cache: RefCell<HashMap<String, DisplayTransform>>,
-    items_dir: PathBuf,
-    models_dir: PathBuf,
+    jar_assets_dir: PathBuf,
+    asset_index: Option<crate::assets::AssetIndex>,
+    pack_dirs: Vec<PathBuf>,
 }
 
 impl DisplayResolver {
     pub fn new(jar_assets_dir: &Path, key: &'static str) -> Self {
-        let mc_base = jar_assets_dir.join("minecraft");
         Self {
             key,
             cache: RefCell::new(HashMap::new()),
-            items_dir: mc_base.join("items"),
-            models_dir: mc_base.join("models"),
+            jar_assets_dir: jar_assets_dir.to_path_buf(),
+            asset_index: None,
+            pack_dirs: Vec::new(),
         }
+    }
+
+    pub fn update_resources(
+        &mut self,
+        jar_assets_dir: &Path,
+        asset_index: &Option<crate::assets::AssetIndex>,
+        pack_dirs: &[PathBuf],
+    ) {
+        self.jar_assets_dir = jar_assets_dir.to_path_buf();
+        self.asset_index = asset_index.clone();
+        self.pack_dirs = pack_dirs.to_vec();
+        self.clear_cache();
+    }
+
+    pub fn clear_cache(&self) {
+        self.cache.borrow_mut().clear();
     }
 
     pub fn resolve(&self, item_name: &str, default: DisplayTransform) -> DisplayTransform {
         if let Some(t) = self.cache.borrow().get(item_name) {
             return *t;
         }
-        let resolved = resolve_item_model_path(item_name, &self.items_dir)
-            .and_then(|path| resolve_display(&path, &self.models_dir, self.key))
-            .unwrap_or(default);
+        let resolved = resolve_item_model_path(
+            item_name,
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &self.pack_dirs,
+        )
+        .and_then(|path| {
+            resolve_display(
+                &path,
+                &self.jar_assets_dir,
+                &self.asset_index,
+                &self.pack_dirs,
+                self.key,
+            )
+        })
+        .unwrap_or(default);
         self.cache
             .borrow_mut()
             .insert(item_name.to_string(), resolved);
@@ -71,8 +101,15 @@ fn read_json(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&s).ok()
 }
 
-fn resolve_item_model_path(name: &str, items_dir: &Path) -> Option<String> {
-    let item_json = read_json(&items_dir.join(format!("{name}.json")))?;
+fn resolve_item_model_path(
+    name: &str,
+    jar: &Path,
+    index: &Option<crate::assets::AssetIndex>,
+    packs: &[PathBuf],
+) -> Option<String> {
+    let key = crate::assets::AssetId::parse(name).asset_key("items", ".json");
+    let file = crate::assets::resolve_asset_path_with_pack_dirs(jar, index, &key, packs);
+    let item_json = read_json(&file)?;
     first_item_model_ref(&item_json)
 }
 
@@ -98,7 +135,13 @@ fn parse_display_transform(json: &serde_json::Value) -> Option<DisplayTransform>
 }
 
 /// First `display.<key>` transform found walking up the model parent chain.
-fn resolve_display(start_path: &str, models_dir: &Path, key: &str) -> Option<DisplayTransform> {
+fn resolve_display(
+    start_path: &str,
+    jar: &Path,
+    index: &Option<crate::assets::AssetIndex>,
+    packs: &[PathBuf],
+    key: &str,
+) -> Option<DisplayTransform> {
     let mut current = Some(start_path.to_string());
     let mut depth = 0u32;
     while let Some(path) = current.take() {
@@ -107,7 +150,8 @@ fn resolve_display(start_path: &str, models_dir: &Path, key: &str) -> Option<Dis
         }
         depth += 1;
 
-        let file = models_dir.join(format!("{path}.json"));
+        let asset_key = crate::assets::AssetId::parse(&path).asset_key("models", ".json");
+        let file = crate::assets::resolve_asset_path_with_pack_dirs(jar, index, &asset_key, packs);
         let json = read_json(&file)?;
 
         if let Some(entry) = json.get("display").and_then(|d| d.get(key))
@@ -123,4 +167,95 @@ fn resolve_display(start_path: &str, models_dir: &Path, key: &str) -> Option<Dis
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(root: &Path, key: &str, json: &str) {
+        let path = root.join("assets").join(key);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, json).unwrap();
+    }
+
+    fn model(root: &Path, name: &str, body: &str) {
+        write(root, &format!("minecraft/models/item/{name}.json"), body);
+    }
+
+    fn scale(resolver: &DisplayResolver) -> f32 {
+        resolver
+            .resolve("totem_of_undying", DisplayTransform::IDENTITY)
+            .scale
+            .x
+    }
+
+    #[test]
+    fn reload_uses_pack_item_parent_priority_and_recreated_context() {
+        let root = std::env::temp_dir().join(format!("display-reload-{}", uuid::Uuid::new_v4()));
+        let jar = root.join("jar");
+        let low = root.join("low");
+        let high = root.join("high");
+        write(
+            &jar,
+            "minecraft/items/totem_of_undying.json",
+            r#"{"model":"minecraft:item/base"}"#,
+        );
+        model(&jar, "base", r#"{"display":{"fixed":{"scale":[1,1,1]}}}"#);
+        let mut resolver = DisplayResolver::new(&jar.join("assets"), "fixed");
+        assert_eq!(scale(&resolver), 1.0);
+
+        write(
+            &low,
+            "minecraft/items/totem_of_undying.json",
+            r#"{"model":"minecraft:item/child"}"#,
+        );
+        model(&low, "child", r#"{"parent":"minecraft:item/parent"}"#);
+        model(&low, "parent", r#"{"display":{"fixed":{"scale":[2,2,2]}}}"#);
+        model(&high, "parent", "{ invalid json");
+        resolver.update_resources(&jar.join("assets"), &None, &[low.clone(), high.clone()]);
+        assert_eq!(
+            scale(&resolver),
+            1.0,
+            "invalid winning JSON does not fall through"
+        );
+
+        model(
+            &high,
+            "parent",
+            r#"{"display":{"fixed":{"scale":[3,3,3]}}}"#,
+        );
+        resolver.update_resources(&jar.join("assets"), &None, &[low.clone(), high.clone()]);
+        assert_eq!(scale(&resolver), 3.0, "higher-priority parent model wins");
+
+        model(
+            &high,
+            "parent",
+            r#"{"display":{"fixed":{"scale":[4,4,4]}}}"#,
+        );
+        resolver.update_resources(&jar.join("assets"), &None, &[low.clone(), high.clone()]);
+        assert_eq!(
+            scale(&resolver),
+            4.0,
+            "same-directory content changes clear cache"
+        );
+
+        resolver.update_resources(&jar.join("assets"), &None, &[low.clone()]);
+        assert_eq!(
+            scale(&resolver),
+            2.0,
+            "removing high-priority pack reveals lower pack"
+        );
+        resolver.update_resources(&jar.join("assets"), &None, &[]);
+        assert_eq!(scale(&resolver), 1.0, "removing packs returns to base");
+
+        let mut recreated = DisplayResolver::new(&jar.join("assets"), "fixed");
+        recreated.update_resources(&jar.join("assets"), &None, &[low, high]);
+        assert_eq!(
+            scale(&recreated),
+            4.0,
+            "new pipeline can receive retained context"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

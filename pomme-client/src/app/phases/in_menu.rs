@@ -21,6 +21,7 @@ fn connect_args(core: &AppCore, transport: Transport, username: String) -> Conne
         access_token: core.user.access_token.clone(),
         view_distance: core.view_distance(),
         chat_options: core.menu.chat_options,
+        server_cookies: Default::default(),
     }
 }
 

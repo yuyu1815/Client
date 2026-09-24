@@ -40,6 +40,17 @@ struct ParticleVertex {
     color: u32,
 }
 
+fn particle_corner_position(
+    center: Vec3,
+    right: Vec3,
+    up: Vec3,
+    nx: f32,
+    ny: f32,
+    quad_size: f32,
+) -> Vec3 {
+    center + (right * nx + up * ny) * quad_size
+}
+
 pub struct ParticlePipeline {
     pipeline: vk::Pipeline,
     translucent_pipeline: vk::Pipeline,
@@ -243,7 +254,7 @@ impl ParticlePipeline {
                 }
                 let center = Vec3::from(quad.pos);
                 let corner = |nx: f32, ny: f32, u: f32, v: f32| ParticleVertex {
-                    position: (center + (right * nx + up * ny) * quad.size).into(),
+                    position: particle_corner_position(center, right, up, nx, ny, quad.size).into(),
                     uv: [u, v],
                     color: quad.color,
                 };
@@ -320,6 +331,23 @@ impl ParticlePipeline {
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);
         device.destroy_descriptor_set_layout(self.atlas_layout, None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::Vec3;
+
+    use super::particle_corner_position;
+
+    #[test]
+    fn particle_quad_size_is_the_vertex_half_extent() {
+        let corner = particle_corner_position(Vec3::ZERO, Vec3::X, Vec3::Y, -1.0, -1.0, 1.5);
+        assert_eq!(corner, Vec3::new(-1.5, -1.5, 0.0));
+        assert_eq!(
+            particle_corner_position(Vec3::ZERO, Vec3::X, Vec3::Y, 1.0, 1.0, 1.5),
+            Vec3::new(1.5, 1.5, 0.0)
+        );
     }
 }
 

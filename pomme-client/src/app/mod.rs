@@ -127,6 +127,65 @@ impl FramerateLimiter {
 /// task, which closes the pipe on a runtime thread, so the server may see the
 /// cancel first; that is fine, since steel's `save_and_shutdown` disconnects
 /// and persists every player still online before it saves the worlds.
+fn transfer_server_address(host: &str, raw_port: u32) -> Result<(String, u16), String> {
+    if host.is_empty()
+        || host.len() > 253
+        || host.contains(':')
+        || host.chars().any(char::is_control)
+        || raw_port == 0
+    {
+        return Err("Server sent an invalid transfer address".into());
+    }
+    let port =
+        u16::try_from(raw_port).map_err(|_| "Server sent an invalid transfer port".to_owned())?;
+    let server = format!("{host}:{port}");
+    let parsed: azalea_protocol::address::ServerAddr = server
+        .as_str()
+        .try_into()
+        .map_err(|_| "Server sent an invalid transfer address".to_owned())?;
+    if parsed.host != host || parsed.port != port {
+        return Err("Server sent an invalid transfer address".into());
+    }
+    Ok((server, port))
+}
+
+fn transfer_connect_args(
+    core: &AppCore,
+    transfer: crate::net::ServerTransfer,
+) -> Result<ConnectArgs, String> {
+    transfer_connect_args_for(
+        &core.user.username,
+        core.user.uuid,
+        core.user.access_token.clone(),
+        core.view_distance(),
+        core.menu.chat_options,
+        transfer,
+    )
+}
+
+fn transfer_connect_args_for(
+    username: &str,
+    uuid: uuid::Uuid,
+    access_token: Option<String>,
+    view_distance: u8,
+    chat_options: crate::ui::chat::ChatOptions,
+    transfer: crate::net::ServerTransfer,
+) -> Result<ConnectArgs, String> {
+    let (server, _) = transfer_server_address(&transfer.host, transfer.port)?;
+    Ok(ConnectArgs {
+        transport: Transport::Remote {
+            server,
+            protocol: None,
+        },
+        username: username.to_owned(),
+        uuid,
+        access_token,
+        view_distance,
+        chat_options,
+        server_cookies: transfer.cookies,
+    })
+}
+
 fn leave_world(
     core: &mut AppCore,
     mut gfx: Gfx,
@@ -300,6 +359,7 @@ impl ApplicationHandler for App {
                             access_token: self.core.user.access_token.clone(),
                             view_distance: self.core.view_distance(),
                             chat_options: self.core.menu.chat_options,
+                            server_cookies: Default::default(),
                         },
                     );
 
@@ -600,8 +660,10 @@ impl ApplicationHandler for App {
                                                 .apply_cursor_grab(&gfx.window, Some(&mut game));
                                         }
                                         KeyCode::Escape
-                                            if game.death_confirm
-                                                && crate::ui::death::buttons_ready(
+                                            if crate::app::phases::in_game::death_confirm_escape_allowed(
+                                                game.death_confirm,
+                                                game.win_credits.is_some(),
+                                            ) && crate::ui::death::buttons_ready(
                                                     game.death_confirm_ticks,
                                                 ) =>
                                         {
@@ -858,6 +920,40 @@ impl ApplicationHandler for App {
                                     AfterSaving::Menu,
                                 )
                             }
+                            ConnectingUpdateResult::Transfer(transfer) => {
+                                match transfer_connect_args(core, transfer) {
+                                    Ok(args) => {
+                                        drop(connection);
+                                        let connection = spawn_connection(&core.tokio_rt, args);
+                                        let game = GameState::new(
+                                            &gfx.renderer,
+                                            &core.resource_packs,
+                                            core.menu.render_distance,
+                                            false,
+                                            core.menu.chat_options,
+                                        );
+                                        AppPhase::Connecting {
+                                            gfx,
+                                            panorama,
+                                            connect_phase: ConnectionPhase::Connecting,
+                                            connection,
+                                            game,
+                                            world: None,
+                                        }
+                                    }
+                                    Err(reason) => {
+                                        core.menu.show_disconnect(reason);
+                                        leave_world(
+                                            core,
+                                            gfx,
+                                            panorama,
+                                            connection,
+                                            world,
+                                            AfterSaving::Menu,
+                                        )
+                                    }
+                                }
+                            }
                             ConnectingUpdateResult::JoinGame => {
                                 if let Some(p) = &mut core.presence {
                                     if world.is_some() {
@@ -906,6 +1002,40 @@ impl ApplicationHandler for App {
                                 world,
                                 AfterSaving::Menu,
                             ),
+                            GameUpdateResult::Transfer(transfer) => {
+                                match transfer_connect_args(core, transfer) {
+                                    Ok(args) => {
+                                        drop(connection);
+                                        let connection = spawn_connection(&core.tokio_rt, args);
+                                        let game = GameState::new(
+                                            &gfx.renderer,
+                                            &core.resource_packs,
+                                            core.menu.render_distance,
+                                            false,
+                                            core.menu.chat_options,
+                                        );
+                                        AppPhase::Connecting {
+                                            gfx,
+                                            panorama: Panorama::new(),
+                                            connect_phase: ConnectionPhase::Connecting,
+                                            connection,
+                                            game,
+                                            world: None,
+                                        }
+                                    }
+                                    Err(reason) => {
+                                        core.menu.show_disconnect(reason);
+                                        leave_world(
+                                            core,
+                                            gfx,
+                                            Panorama::new(),
+                                            connection,
+                                            world,
+                                            AfterSaving::Menu,
+                                        )
+                                    }
+                                }
+                            }
                             GameUpdateResult::Disconnected { reason } => {
                                 core.menu.show_disconnect(reason);
 
@@ -976,5 +1106,60 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    }
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::{Transport, transfer_connect_args_for, transfer_server_address};
+
+    #[test]
+    fn server_transfer_address_is_validated_before_reconnect() {
+        assert_eq!(
+            transfer_server_address("example.org", 25566).unwrap(),
+            ("example.org:25566".into(), 25566)
+        );
+        for (host, port) in [
+            ("", 25565),
+            ("bad\nhost", 25565),
+            ("host:other", 25565),
+            ("host", 0),
+            ("host", 65536),
+        ] {
+            assert!(
+                transfer_server_address(host, port).is_err(),
+                "accepted {host:?}:{port}"
+            );
+        }
+    }
+
+    #[test]
+    fn transfer_cookies_are_copied_to_next_connect_args_without_changing_identity() {
+        let key: azalea_registry::identifier::Identifier = "minecraft:session".parse().unwrap();
+        let cookies = std::collections::HashMap::from([(key.clone(), vec![1, 2, 3])]);
+        let uuid = uuid::Uuid::from_u128(42);
+        let args = transfer_connect_args_for(
+            "player",
+            uuid,
+            Some("secret-token".into()),
+            12,
+            crate::ui::chat::ChatOptions::default(),
+            crate::net::ServerTransfer {
+                host: "example.org".into(),
+                port: 25566,
+                cookies: cookies.clone(),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            args.transport,
+            Transport::Remote { ref server, protocol: None } if server == "example.org:25566"
+        ));
+        assert_eq!(args.username, "player");
+        assert_eq!(args.uuid, uuid);
+        assert_eq!(args.access_token.as_deref(), Some("secret-token"));
+        assert_eq!(args.view_distance, 12);
+        assert_eq!(args.server_cookies, cookies);
     }
 }

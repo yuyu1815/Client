@@ -310,8 +310,8 @@ impl InteractionState {
     }
 
     /// Ports vanilla `LocalPlayer.pick`: block raycast first, entity ray
-    /// truncated at the block hit, the entity wins only if strictly closer.
-    /// An entity hit beyond entity reach is a miss, not a block fallback.
+    /// truncated at the block hit, the entity wins only if strictly closer
+    /// and within entity reach; otherwise the block hit remains available.
     pub fn update_target(
         &mut self,
         eye_pos: Position,
@@ -339,9 +339,8 @@ impl InteractionState {
 
         if let Some(hit) = nearest_entity_hit(from, to, entities) {
             let dist_sq = hit.location.distance_squared(from);
-            if dist_sq < block_dist_sq {
-                self.target =
-                    (dist_sq < entity_reach * entity_reach).then_some(HitResult::Entity(hit));
+            if entity_hit_wins(dist_sq, block_dist_sq, entity_reach) {
+                self.target = Some(HitResult::Entity(hit));
                 return;
             }
         }
@@ -362,6 +361,9 @@ impl InteractionState {
         look: LookDirection,
         on_ground: bool,
         creative: bool,
+        spectator: bool,
+        hand: InteractionHand,
+        hand_on_cooldown: bool,
         food: u32,
         selected_slot: u8,
         held_stack: Option<&ItemStackData>,
@@ -372,13 +374,21 @@ impl InteractionState {
         let mut dirty_chunks = Vec::new();
 
         self.ensure_has_sent_carried_item(sender, selected_slot);
+        if spectator {
+            self.using_item = None;
+            self.clear_destroying_state();
+        }
 
         // Vanilla `Minecraft.tick` order: attack/use input (which triggers the
         // swing) runs first, then `--missTime`, then the player entity advances
         // `updateSwingTime` and `updatingUsingItem`. Running `update_swing`
         // last keeps the swing animation cadence in lockstep with vanilla.
         if !input.is_cursor_captured() {
-            self.stop_destroying(sender);
+            if spectator {
+                self.clear_destroying_state();
+            } else {
+                self.stop_destroying(sender);
+            }
             // No screen-open release in vanilla either: an in-flight use keeps
             // ticking (and completing) while a menu is up.
             self.update_using_item(
@@ -402,6 +412,7 @@ impl InteractionState {
                 player_pos,
                 on_ground,
                 creative,
+                spectator,
                 held_stack,
                 effects,
                 &mut dirty_chunks,
@@ -433,6 +444,9 @@ impl InteractionState {
                 held_stack,
                 food,
                 creative,
+                spectator,
+                hand,
+                hand_on_cooldown,
                 sneaking,
                 suppress_block_use,
                 effects,
@@ -453,7 +467,11 @@ impl InteractionState {
         if !attack_down {
             self.miss_time = 0;
         }
-        if self.using_item.is_none() {
+        if spectator {
+            // Mode changes must not leave an ordinary mining session running;
+            // spectator policy does not emit an ordinary abort-dig packet.
+            self.clear_destroying_state();
+        } else if self.using_item.is_none() {
             if attack_down {
                 self.continue_attack(
                     chunks,
@@ -555,11 +573,12 @@ impl InteractionState {
         player_pos: DVec3,
         on_ground: bool,
         creative: bool,
+        spectator: bool,
         held_stack: Option<&ItemStackData>,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
     ) {
-        if self.miss_time > 0 {
+        if spectator || self.miss_time > 0 {
             return;
         }
 
@@ -672,6 +691,9 @@ impl InteractionState {
         held_stack: Option<&ItemStackData>,
         food: u32,
         creative: bool,
+        spectator: bool,
+        hand: InteractionHand,
+        hand_on_cooldown: bool,
         sneaking: bool,
         suppress_block_use: bool,
         effects: &mut BreakEffects,
@@ -692,17 +714,21 @@ impl InteractionState {
         if let Some(HitResult::Entity(hit)) = self.target {
             sender.send_raw(wire::encode_interact(
                 hit.entity_id,
+                protocol_hand(hand),
                 hit.location - hit.entity_pos,
                 sneaking,
             ));
-            self.swing_use(sender);
+            if !spectator {
+                self.swing_use(sender);
+            }
+            // Spectator entity interaction is packet-only; no local item use.
             return true;
         }
 
         let hit_block = if let Some(HitResult::Block(hit)) = self.target {
             self.seq += 1;
             sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
-                hand: InteractionHand::MainHand,
+                hand,
                 block_hit: BlockHit {
                     block_pos: hit.block_pos,
                     direction: hit.face,
@@ -716,6 +742,11 @@ impl InteractionState {
             // unless sneaking with something in hand.
             // TODO: other interactive blocks (brewing stand, dispenser, ...)
             // should consume the click here too once their menus render.
+            // Spectator block use is packet-only so the server can open/observe
+            // containers; never predict local placement or item use.
+            if spectator {
+                return true;
+            }
             if !suppress_block_use {
                 let target =
                     chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
@@ -723,7 +754,7 @@ impl InteractionState {
                     return true;
                 }
             }
-            if place_block.is_some() {
+            if place_block.is_some() && !hand_on_cooldown {
                 self.swing_use(sender);
                 self.predict_place(
                     hit,
@@ -740,10 +771,26 @@ impl InteractionState {
             false
         };
 
+        // A spectator's air/entity interaction never predicts item use.
+        if spectator {
+            return false;
+        }
+
         // A non-block item passes the block interaction, so vanilla falls
         // through to `useItem` (this is how eating at the ground works).
         self.use_item(
-            sender, audio, chunks, player_pos, eye_pos, look, held_stack, food, creative, effects,
+            sender,
+            audio,
+            chunks,
+            player_pos,
+            eye_pos,
+            look,
+            held_stack,
+            food,
+            creative,
+            hand,
+            hand_on_cooldown,
+            effects,
         ) || hit_block
     }
 
@@ -763,6 +810,8 @@ impl InteractionState {
         held_stack: Option<&ItemStackData>,
         food: u32,
         creative: bool,
+        hand: InteractionHand,
+        hand_on_cooldown: bool,
         effects: &mut BreakEffects,
     ) -> bool {
         let Some(stack) = held_stack else {
@@ -771,11 +820,15 @@ impl InteractionState {
 
         self.seq += 1;
         sender.send(ServerboundGamePacket::UseItem(ServerboundUseItem {
-            hand: InteractionHand::MainHand,
+            hand,
             seq: self.seq,
             y_rot: look.y_rot_deg(),
             x_rot: look.x_rot_deg(),
         }));
+
+        if hand_on_cooldown {
+            return true;
+        }
 
         let Some(consumable) = stack_component::<Consumable>(stack) else {
             return true;
@@ -1202,6 +1255,13 @@ impl InteractionState {
         self.stop_destroying(sender);
     }
 
+    fn clear_destroying_state(&mut self) {
+        self.is_destroying = false;
+        self.destroy_progress = 0.0;
+        self.destroy_ticks = 0.0;
+        self.destroying_item = None;
+    }
+
     fn stop_destroying(&mut self, sender: &PacketSender) {
         if self.is_destroying {
             send_action(
@@ -1453,6 +1513,13 @@ fn play_block_sound(audio: &mut AudioEngine, event: &str, pos: BlockPos, volume:
     );
 }
 
+fn protocol_hand(hand: InteractionHand) -> wire::InteractionHand {
+    match hand {
+        InteractionHand::MainHand => wire::InteractionHand::MainHand,
+        InteractionHand::OffHand => wire::InteractionHand::OffHand,
+    }
+}
+
 /// Record an edited block. The caller (`core::dirty_sections_for_block`)
 /// expands it into the affected 16³ sections, including neighbour
 /// sections/columns when the block is on a boundary.
@@ -1460,6 +1527,10 @@ fn mark_dirty(pos: &BlockPos, dirty: &mut Vec<BlockPos>) {
     if !dirty.contains(pos) {
         dirty.push(*pos);
     }
+}
+
+fn entity_hit_wins(entity_dist_sq: f64, block_dist_sq: f64, reach: f64) -> bool {
+    entity_dist_sq < block_dist_sq && entity_dist_sq < reach * reach
 }
 
 pub fn raycast(
@@ -1735,6 +1806,23 @@ mod tests {
     }
 
     #[test]
+    fn spectator_destroy_state_clear_is_local_only() {
+        let mut state = InteractionState::new();
+        state.is_destroying = true;
+        state.destroy_progress = 0.75;
+        state.destroy_ticks = 3.0;
+        state.destroying_item = Some(ItemStackData::new(ItemKind::Stone, 1));
+
+        state.clear_destroying_state();
+
+        assert!(!state.is_destroying);
+        assert_eq!(state.destroy_progress, 0.0);
+        assert_eq!(state.destroy_ticks, 0.0);
+        assert!(state.destroying_item.is_none());
+        assert!(state.destroy_stage().is_none());
+    }
+
+    #[test]
     fn synced_using_item_flag_clears_server_stopped_use() {
         let mut state = InteractionState::new();
         state.using_item = Some(ActiveUse {
@@ -1778,6 +1866,18 @@ mod tests {
 
     /// Vanilla `isSameItemSameComponents`: count never matters, the item type
     /// does, and the empty hand only matches itself.
+    #[test]
+    fn protocol_hand_preserves_main_and_offhand() {
+        assert_eq!(
+            protocol_hand(InteractionHand::MainHand),
+            wire::InteractionHand::MainHand
+        );
+        assert_eq!(
+            protocol_hand(InteractionHand::OffHand),
+            wire::InteractionHand::OffHand
+        );
+    }
+
     #[test]
     fn item_comparison_ignores_count() {
         let a = ItemStackData::new(ItemKind::Stone, 1);
@@ -1852,6 +1952,13 @@ mod tests {
         let is_on_slab_surface = (hit_point.y - slab_height).abs() < tolerance;
         assert!(is_on_slab_surface, "hit {hit_point:?}");
         assert_eq!(face, Direction::Up);
+    }
+
+    #[test]
+    fn out_of_reach_entity_does_not_hide_a_closer_block_hit() {
+        assert!(!entity_hit_wins(3.1 * 3.1, 4.0 * 4.0, ENTITY_REACH));
+        assert!(entity_hit_wins(2.0 * 2.0, 4.0 * 4.0, ENTITY_REACH));
+        assert!(!entity_hit_wins(2.0 * 2.0, 1.0 * 1.0, ENTITY_REACH));
     }
 
     /// Vanilla `VoxelShape.clip` reports the inside case at the probe point,

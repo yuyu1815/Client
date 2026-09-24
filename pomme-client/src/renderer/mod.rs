@@ -3,10 +3,11 @@ pub mod camera;
 pub mod chunk;
 mod context;
 pub mod entity_model;
+pub(crate) mod item_activation_math;
 pub(crate) mod packing;
 pub mod pipelines;
-pub(crate) mod world_shadow;
 mod screenshot;
+pub(crate) mod world_shadow;
 pub use screenshot::ProbeScreenshotReply;
 pub(crate) mod shader;
 mod swapchain;
@@ -52,10 +53,13 @@ use winit::window::Window;
 use crate::app::input::InputState;
 use crate::assets::AssetIndex;
 use crate::entity::components::{LookDirection, Position};
+use crate::item_activation::ItemActivationDraw;
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
 use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
+use crate::renderer::pipelines::world_border::{WorldBorderPipeline, extract_border};
 use crate::ui::font::FontSources;
 use crate::world::block::registry::BlockRegistry;
+use crate::world::border::WorldBorder;
 
 #[derive(Error, Debug)]
 pub enum RendererError {
@@ -155,6 +159,7 @@ pub struct Renderer {
     registry: BlockRegistry,
     jar_assets_dir: PathBuf,
     asset_index: Option<AssetIndex>,
+    activation_pack_dirs: Vec<PathBuf>,
 
     chunk_pipeline: ChunkPipeline,
     hand_pipeline: HandPipeline,
@@ -166,8 +171,12 @@ pub struct Renderer {
     skin_preview: SkinPreviewPipeline,
     book_preview: BookPreviewPipeline,
     chunk_border_pipeline: ChunkBorderPipeline,
+    world_border_pipeline: WorldBorderPipeline,
+    world_border_state: Option<(WorldBorder, f32)>,
     item_entity_pipeline: ItemEntityPipeline,
     held_item_pipeline: pipelines::held_item::HeldItemPipeline,
+    activation_targets: Option<pipelines::item_activation::ActivationTargets>,
+    activation_pipeline: Option<pipelines::held_item::HeldItemPipeline>,
     weather_pipeline: WeatherPipeline,
     particle_pipeline: ParticlePipeline,
     cloud_pipeline: CloudPipeline,
@@ -276,6 +285,12 @@ impl Renderer {
             .texture_names()
             .chain(generated_item_textures.iter().copied())
             .chain(crate::particle::END_ROD_SPRITES)
+            .chain(crate::particle::GENERIC_PARTICLE_SPRITES)
+            .chain(crate::particle::EXPLOSION_SPRITES)
+            .chain([
+                crate::particle::CRIT_SPRITE,
+                crate::particle::ENCHANTED_HIT_SPRITE,
+            ])
             .collect();
         let atlas = TextureAtlas::build(
             &ctx.device,
@@ -436,6 +451,16 @@ impl Renderer {
             &ctx.allocator,
         );
 
+        let world_border_pipeline = WorldBorderPipeline::new(
+            &ctx.device,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            jar_assets_dir,
+            asset_index,
+        );
+
         let mesh_trace = MeshTraceState::new();
         let chunk_buffers = ChunkBufferStore::new(
             &ctx.device,
@@ -446,18 +471,29 @@ impl Renderer {
         );
 
         let shadow_path = crate::assets::resolve_asset_path_with_packs(
-            jar_assets_dir, asset_index, "minecraft/textures/misc/shadow.png", Some(packs),
+            jar_assets_dir,
+            asset_index,
+            "minecraft/textures/misc/shadow.png",
+            Some(packs),
         );
         let shadow_texture = crate::assets::load_image(&shadow_path).ok().map(|image| {
             let rgba = image.into_rgba8();
             (rgba.width(), rgba.height(), rgba.into_raw())
         });
         if shadow_texture.is_none() {
-            tracing::warn!("Vanilla entity shadow texture unavailable at {:?}; world shadows disabled", shadow_path);
+            tracing::warn!(
+                "Vanilla entity shadow texture unavailable at {:?}; world shadows disabled",
+                shadow_path
+            );
         }
         let mut item_entity_pipeline = pipelines::item_entity::ItemEntityPipeline::new(
-            &ctx.device, swapchain_state.render_pass, &ctx.allocator, &atlas,
-            ctx.graphics_queue, ctx.command_pool, shadow_texture,
+            &ctx.device,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            &atlas,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            shadow_texture,
         );
 
         let held_item_pipeline = pipelines::held_item::HeldItemPipeline::new(
@@ -504,13 +540,14 @@ impl Renderer {
         crate::app::startup_mark("renderer_warm_item_meshes_ready");
         crate::app::startup_mark("renderer_ready");
 
-        Ok(Self {
+        let mut renderer = Self {
             ctx,
             swapchain: swapchain_state,
             camera,
             registry,
             jar_assets_dir: jar_assets_dir.to_path_buf(),
             asset_index: asset_index.clone(),
+            activation_pack_dirs: packs.active_pack_dirs().map(Path::to_path_buf).collect(),
             atlas,
             chunk_pipeline,
             hand_pipeline,
@@ -524,8 +561,12 @@ impl Renderer {
             entity_renderer,
             block_entity_pipeline,
             chunk_border_pipeline,
+            world_border_pipeline,
+            world_border_state: None,
             item_entity_pipeline,
             held_item_pipeline,
+            activation_targets: None,
+            activation_pipeline: None,
             weather_pipeline,
             particle_pipeline,
             cloud_pipeline,
@@ -544,7 +585,43 @@ impl Renderer {
             height: swapchain_extent.height,
             last_timings: RenderTimings::default(),
             startup_menu_presented: false,
-        })
+        };
+
+        renderer.activation_targets = match pipelines::item_activation::ActivationTargets::new(
+            &renderer.ctx,
+            &renderer.swapchain,
+        ) {
+            Ok(targets) => Some(targets),
+            Err(error) => {
+                tracing::warn!("Totem activation renderer disabled: {error}");
+                None
+            }
+        };
+        if let Some(render_pass) = renderer
+            .activation_targets
+            .as_ref()
+            .map(|targets| targets.render_pass)
+        {
+            renderer.activation_pipeline =
+                Some(pipelines::held_item::HeldItemPipeline::new_activation(
+                    &renderer.ctx.device,
+                    render_pass,
+                    &renderer.ctx.allocator,
+                    &renderer.atlas,
+                    &renderer.jar_assets_dir,
+                ));
+            renderer
+                .activation_pipeline
+                .as_mut()
+                .unwrap()
+                .update_display_resources(
+                    &renderer.jar_assets_dir,
+                    &renderer.asset_index,
+                    &renderer.activation_pack_dirs,
+                );
+        }
+
+        Ok(renderer)
     }
 
     fn render_splash(
@@ -724,6 +801,13 @@ impl Renderer {
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
         let _ = self.ctx.device.wait_idle();
 
+        if let Some(mut pipeline) = self.activation_pipeline.take() {
+            pipeline.destroy(&self.ctx.device, &self.ctx.allocator);
+        }
+        if let Some(mut targets) = self.activation_targets.take() {
+            targets.destroy(&self.ctx.device, &self.ctx.allocator);
+        }
+
         for sem in self.render_finished_per_image.drain(..) {
             self.ctx.device.destroy_semaphore(sem, None);
         }
@@ -740,6 +824,37 @@ impl Renderer {
         )?;
         std::mem::swap(&mut self.swapchain, &mut old_swapchain);
         old_swapchain.destroy(&self.ctx.device, &self.ctx.allocator);
+
+        self.activation_targets =
+            match pipelines::item_activation::ActivationTargets::new(&self.ctx, &self.swapchain) {
+                Ok(targets) => Some(targets),
+                Err(error) => {
+                    tracing::warn!("Totem activation renderer disabled: {error}");
+                    None
+                }
+            };
+        if let Some(render_pass) = self
+            .activation_targets
+            .as_ref()
+            .map(|targets| targets.render_pass)
+        {
+            self.activation_pipeline =
+                Some(pipelines::held_item::HeldItemPipeline::new_activation(
+                    &self.ctx.device,
+                    render_pass,
+                    &self.ctx.allocator,
+                    &self.atlas,
+                    &self.jar_assets_dir,
+                ));
+            self.activation_pipeline
+                .as_mut()
+                .unwrap()
+                .update_display_resources(
+                    &self.jar_assets_dir,
+                    &self.asset_index,
+                    &self.activation_pack_dirs,
+                );
+        }
 
         // Adopt the swapchain's actual extent (may differ from the requested
         // window size, e.g. macOS fullscreen) so the viewport, menu layout, blur,
@@ -758,6 +873,8 @@ impl Renderer {
 
         self.hand_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.world_border_pipeline
+            .recreate(&self.ctx.device, self.swapchain.render_pass);
         self.block_overlay_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.sky_pipeline
@@ -1064,9 +1181,14 @@ impl Renderer {
         let tint_targets = samples.iter().filter(|(_, _, _, state)| {
             matches!(
                 crate::world::block::block_id(*state),
-                "potted_fern" | "bush" | "sugar_cane" | "lily_pad"
-                    | "pink_petals" | "wildflowers"
-                    | "pumpkin_stem" | "melon_stem"
+                "potted_fern"
+                    | "bush"
+                    | "sugar_cane"
+                    | "lily_pad"
+                    | "pink_petals"
+                    | "wildflowers"
+                    | "pumpkin_stem"
+                    | "melon_stem"
             )
         });
         let mut seen = HashSet::new();
@@ -1105,10 +1227,12 @@ impl Renderer {
     }
 
     pub(crate) fn probe_gui_item_draw_trace(&self) -> serde_json::Value {
-        self.gui_item_draw_trace.clone().unwrap_or_else(|| serde_json::json!({
-            "status": "not-armed",
-            "guiItemDrawConfirmed": false,
-        }))
+        self.gui_item_draw_trace.clone().unwrap_or_else(|| {
+            serde_json::json!({
+                "status": "not-armed",
+                "guiItemDrawConfirmed": false,
+            })
+        })
     }
 
     pub(crate) fn probe_item_entity_pipeline_trace(&self) -> serde_json::Value {
@@ -1222,6 +1346,15 @@ impl Renderer {
         )
     }
 
+    /// Supply a copy of the latest app-owned border and render partial tick;
+    /// `None` clears/hides it. Net/app integration must call this before
+    /// `render_world` each frame.
+    pub fn set_world_border(&mut self, border: Option<&WorldBorder>, partial_tick: f32) {
+        self.world_border_state = border
+            .copied()
+            .map(|state| (state, partial_tick.clamp(0.0, 1.0)));
+    }
+
     pub fn update_chunk_borders(&mut self, min_y: i32, max_y: i32) {
         self.chunk_border_pipeline.update_lines(
             *self.camera.position,
@@ -1256,6 +1389,7 @@ impl Renderer {
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
         eyes_in_water: bool,
+        item_activation: Option<ItemActivationDraw<'_>>,
     ) -> Result<(), RendererError> {
         // Refresh the far plane before this frame's view/projection and fog.
         self.held_item_gate_trace = Some(serde_json::json!({
@@ -1272,6 +1406,14 @@ impl Renderer {
         // Clear prior trace so it cannot be mistaken for this frame's draw.
         self.held_item_pipeline.clear_probe_trace();
         self.camera.set_render_distance(render_distance);
+        if let Some(ItemActivationDraw {
+            stack: azalea_inventory::ItemStack::Present(stack),
+            ..
+        }) = item_activation
+        {
+            let item_name = crate::player::inventory::item_resource_name(stack.kind);
+            self.ensure_item_mesh(&item_name);
+        }
         let held_item = held_item.map(|(name, light)| {
             let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
             pipelines::held_item::HeldItemInfo {
@@ -1317,6 +1459,7 @@ impl Renderer {
                 book_preview,
                 eyes_in_water,
             },
+            item_activation,
         )
     }
 
@@ -1340,6 +1483,7 @@ impl Renderer {
                 cursor,
                 show_skin,
             },
+            None,
         );
         if result.is_ok() && !self.startup_menu_presented {
             self.startup_menu_presented = true;
@@ -1354,6 +1498,14 @@ impl Renderer {
         packs: &crate::resource_pack::ResourcePackManager,
     ) {
         self.ctx.device.wait_idle().unwrap();
+        self.activation_pack_dirs = packs.active_pack_dirs().map(Path::to_path_buf).collect();
+        if let Some(pipeline) = self.activation_pipeline.as_mut() {
+            pipeline.update_display_resources(
+                &self.jar_assets_dir,
+                &self.asset_index,
+                &self.activation_pack_dirs,
+            );
+        }
 
         let cache_path = game_dir.join(crate::world::block::registry::BLOCK_CACHE_FILE);
         let _ = std::fs::remove_file(&cache_path);
@@ -1376,6 +1528,12 @@ impl Renderer {
             .texture_names()
             .chain(generated_item_textures.iter().copied())
             .chain(crate::particle::END_ROD_SPRITES)
+            .chain(crate::particle::GENERIC_PARTICLE_SPRITES)
+            .chain(crate::particle::EXPLOSION_SPRITES)
+            .chain([
+                crate::particle::CRIT_SPRITE,
+                crate::particle::ENCHANTED_HIT_SPRITE,
+            ])
             .collect();
         self.atlas = TextureAtlas::build(
             &self.ctx.device,
@@ -1398,6 +1556,9 @@ impl Renderer {
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.held_item_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
+        if let Some(pipeline) = self.activation_pipeline.as_ref() {
+            pipeline.rebind_atlas(&self.ctx.device, &self.atlas);
+        }
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
         if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
@@ -1600,6 +1761,7 @@ impl Renderer {
         hide_cursor: bool,
         clear_color: [f32; 4],
         mode: RenderMode<'_>,
+        item_activation: Option<ItemActivationDraw<'_>>,
     ) -> Result<(), RendererError> {
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
@@ -1655,6 +1817,7 @@ impl Renderer {
             self.entity_renderer.update_camera(frame, &uniform);
             self.block_entity_pipeline.update_camera(frame, &uniform);
             self.chunk_border_pipeline.update_camera(frame, &uniform);
+            self.world_border_pipeline.update_camera(frame, &uniform);
             self.item_entity_pipeline.update_camera(frame, &uniform);
             self.weather_pipeline.update_camera(frame, &uniform);
             self.particle_pipeline.update_camera(frame, &uniform);
@@ -1890,7 +2053,13 @@ impl Renderer {
                 let anchor = self.camera.anchor();
                 let eye = self.camera_render_position();
                 self.item_entity_pipeline.draw_shadows(
-                    cmd, frame, chunks, item_entities, eye.to_array(), anchor, dimension,
+                    cmd,
+                    frame,
+                    chunks,
+                    item_entities,
+                    eye.to_array(),
+                    anchor,
+                    dimension,
                 );
 
                 if let Some((block_pos, stage, state)) = destroy_info {
@@ -1957,6 +2126,35 @@ impl Renderer {
                 self.weather_pipeline
                     .update_and_draw(cmd, frame, &self.camera, sky, weather);
 
+                if let Some((border, partial_tick)) = self.world_border_state {
+                    let camera_pos =
+                        *self.camera.position + self.camera.third_person_offset().as_dvec3();
+                    let distance = f64::from(*render_distance) * 16.0;
+                    let offset = (std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        % 3000) as f32
+                        / 3000.0;
+                    let extracted = extract_border(
+                        &border,
+                        partial_tick,
+                        [camera_pos.x, camera_pos.y, camera_pos.z],
+                        distance,
+                        offset,
+                    );
+                    let anchor = self.camera.anchor();
+                    let render_camera = self.camera_render_position();
+                    self.world_border_pipeline.draw(
+                        cmd,
+                        frame,
+                        extracted,
+                        [render_camera.x, render_camera.y, render_camera.z],
+                        [anchor.x, anchor.y, anchor.z],
+                        distance as f32,
+                    );
+                }
+
                 if *show_chunk_borders {
                     self.chunk_border_pipeline.draw(cmd, frame);
                 }
@@ -2012,8 +2210,22 @@ impl Renderer {
                     }
                 }
 
-                self.menu_pipeline
-                    .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
+                let activation_draw = item_activation.and_then(|draw| {
+                    if let azalea_inventory::ItemStack::Present(stack) = draw.stack {
+                        let item_name = crate::player::inventory::item_resource_name(stack.kind);
+                        let targets_ready =
+                            self.activation_targets.is_some() && self.activation_pipeline.is_some();
+                        (targets_ready
+                            && self.item_entity_pipeline.mesh_handle(&item_name).is_some())
+                        .then_some((draw, item_name))
+                    } else {
+                        None
+                    }
+                });
+                if activation_draw.is_none() {
+                    self.menu_pipeline
+                        .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
+                }
                 let vignette_brightness: Vec<f32> = overlay
                     .iter()
                     .filter_map(|element| match element {
@@ -2042,18 +2254,22 @@ impl Renderer {
                             drawn.push(item_name.clone());
                         }
                     }
-                    let expected_count = trace["layout"]["items"]
-                        .as_array()
-                        .map_or(0, Vec::len);
+                    let expected_count = trace["layout"]["items"].as_array().map_or(0, Vec::len);
                     trace["drawnItems"] = serde_json::json!(drawn);
                     trace["atlasReadySlotCount"] = serde_json::json!(item_atlas_uvs.len());
                     trace["expectedItemCount"] = serde_json::json!(expected_count);
-                    trace["meshContracts"] = serde_json::json!(drawn.iter().filter_map(|name| {
-                        self.item_entity_pipeline
-                            .debug_mesh(name)
-                            .map(|mesh| serde_json::json!({"item": name, "mesh": mesh}))
-                    }).collect::<Vec<_>>());
-                    trace["guiItemDrawConfirmed"] = serde_json::json!(drawn.len() == expected_count);
+                    trace["meshContracts"] = serde_json::json!(
+                        drawn
+                            .iter()
+                            .filter_map(|name| {
+                                self.item_entity_pipeline
+                                    .debug_mesh(name)
+                                    .map(|mesh| serde_json::json!({"item": name, "mesh": mesh}))
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                    trace["guiItemDrawConfirmed"] =
+                        serde_json::json!(drawn.len() == expected_count);
                     trace["status"] = serde_json::json!(if drawn.len() == expected_count {
                         "draw-confirmed"
                     } else {
@@ -2096,6 +2312,55 @@ impl Renderer {
                     cmd.set_scissor(0, &[rect]);
                     self.book_preview.draw_in_box(cmd, frame, *p, sw, sh);
                     cmd.set_scissor(0, &[scissor]);
+                }
+
+                if let Some((draw, item_name)) = activation_draw {
+                    let targets = self.activation_targets.as_ref().unwrap();
+                    let pipeline = self.activation_pipeline.as_mut().unwrap();
+                    cmd.end_render_pass();
+                    targets.begin_activation(
+                        &self.ctx,
+                        cmd,
+                        image_index as usize,
+                        self.swapchain.images[image_index as usize],
+                    );
+                    if let (Some(pose), Some(projection)) = (
+                        item_activation_math::activation_pose(
+                            draw.ticks_remaining,
+                            draw.partial_tick,
+                            draw.offset_x,
+                            draw.offset_y,
+                            self.swapchain.extent.width,
+                            self.swapchain.extent.height,
+                            glam::Mat4::IDENTITY,
+                        ),
+                        item_activation_math::activation_projection(
+                            self.swapchain.extent.width,
+                            self.swapchain.extent.height,
+                            self.camera.hud_fov_radians(),
+                        ),
+                    ) {
+                        let has_3d_model = self.registry.get_item_model(&item_name).is_some();
+                        let activation_item = pipelines::held_item::HeldItemInfo {
+                            name: item_name,
+                            light: item_activation_math::ACTIVATION_WORLD_LIGHT,
+                            // Informational registry flag only; never gates use of the real mesh
+                            // handle.
+                            has_3d_model,
+                            nether_lighting: false,
+                        };
+                        pipeline.update_activation_and_draw(
+                            cmd,
+                            frame,
+                            projection,
+                            pose.model,
+                            &activation_item,
+                            &self.item_entity_pipeline,
+                        );
+                    }
+                    // MenuOverlay follows the mesh in this pass; common end_render_pass closes it.
+                    self.menu_pipeline
+                        .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
                 }
 
                 self.last_timings.cull_ms = cull_ms;
@@ -2545,6 +2810,13 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         let _ = self.ctx.device.wait_idle();
 
+        if let Some(mut pipeline) = self.activation_pipeline.take() {
+            pipeline.destroy(&self.ctx.device, &self.ctx.allocator);
+        }
+        if let Some(mut targets) = self.activation_targets.take() {
+            targets.destroy(&self.ctx.device, &self.ctx.allocator);
+        }
+
         self.screenshot
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_buffers
@@ -2572,6 +2844,8 @@ impl Drop for Renderer {
         self.block_entity_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_border_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.world_border_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.item_entity_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);

@@ -237,7 +237,10 @@ fn parse_item_overlay(request: &Value) -> Result<Option<ItemOverlayLayout>> {
     }
     let mut background = [0.0; 4];
     for (out, value) in background[..3].iter_mut().zip(background_rgb) {
-        let n = value.as_u64().filter(|n| *n <= 255).ok_or("invalid backgroundRGB")?;
+        let n = value
+            .as_u64()
+            .filter(|n| *n <= 255)
+            .ok_or("invalid backgroundRGB")?;
         let encoded = n as f32 / 255.0;
         // MenuOverlayPipeline writes to the SRGB swapchain; feed it the exact
         // linear value for the requested neutral byte so Java/Rust panel pixels
@@ -257,8 +260,15 @@ fn parse_item_overlay(request: &Value) -> Result<Option<ItemOverlayLayout>> {
         return Err("itemOverlay requires 1..=12 items".into());
     }
     let allowed = [
-        "fern", "bush", "lily_pad", "sugar_cane", "pink_petals", "wildflowers",
-        "ice", "honey_block", "stone",
+        "fern",
+        "bush",
+        "lily_pad",
+        "sugar_cane",
+        "pink_petals",
+        "wildflowers",
+        "ice",
+        "honey_block",
+        "stone",
     ];
     let mut parsed = Vec::with_capacity(items.len());
     for item in items {
@@ -271,7 +281,10 @@ fn parse_item_overlay(request: &Value) -> Result<Option<ItemOverlayLayout>> {
         }
         let rect = fixed_rect(item, "physicalRect")?;
         if rect[2] != 16.0 * gui_scale as f32 || rect[3] != 16.0 * gui_scale as f32 {
-            return Err(format!("itemOverlay {id} physical rect is not 16x16 at guiScale {gui_scale}").into());
+            return Err(format!(
+                "itemOverlay {id} physical rect is not 16x16 at guiScale {gui_scale}"
+            )
+            .into());
         }
         parsed.push((id.to_owned(), rect));
     }
@@ -356,26 +369,34 @@ impl Probe {
         self.root.join("exit-request.json").is_file()
     }
 
-    pub(crate) fn item_overlay_elements(&self) -> Vec<crate::renderer::pipelines::menu_overlay::MenuElement> {
-        let Some(layout) = &self.item_overlay else { return Vec::new() };
+    pub(crate) fn item_overlay_elements(
+        &self,
+    ) -> Vec<crate::renderer::pipelines::menu_overlay::MenuElement> {
+        let Some(layout) = &self.item_overlay else {
+            return Vec::new();
+        };
         let mut elements = Vec::with_capacity(layout.items.len() + 1);
-        elements.push(crate::renderer::pipelines::menu_overlay::MenuElement::Rect {
-            x: layout.panel[0],
-            y: layout.panel[1],
-            w: layout.panel[2],
-            h: layout.panel[3],
-            corner_radius: 0.0,
-            color: layout.background,
-        });
+        elements.push(
+            crate::renderer::pipelines::menu_overlay::MenuElement::Rect {
+                x: layout.panel[0],
+                y: layout.panel[1],
+                w: layout.panel[2],
+                h: layout.panel[3],
+                corner_radius: 0.0,
+                color: layout.background,
+            },
+        );
         for (item_name, rect) in &layout.items {
-            elements.push(crate::renderer::pipelines::menu_overlay::MenuElement::ItemIcon {
-                x: rect[0],
-                y: rect[1],
-                w: rect[2],
-                h: rect[3],
-                item_name: item_name.clone(),
-                tint: [1.0, 1.0, 1.0, 1.0],
-            });
+            elements.push(
+                crate::renderer::pipelines::menu_overlay::MenuElement::ItemIcon {
+                    x: rect[0],
+                    y: rect[1],
+                    w: rect[2],
+                    h: rect[3],
+                    item_name: item_name.clone(),
+                    tint: [1.0, 1.0, 1.0, 1.0],
+                },
+            );
         }
         elements
     }
@@ -450,9 +471,8 @@ impl Probe {
                         if let Some(mut raw) = raw {
                             raw.metadata["actualFrameCapturedAt"] =
                                 json!(reply.actual_frame_captured_at);
-                            let submitted = reply
-                                .vignette_draw_trace
-                                .unwrap_or(serde_json::Value::Null);
+                            let submitted =
+                                reply.vignette_draw_trace.unwrap_or(serde_json::Value::Null);
                             raw.metadata["vignetteTrace"]["actualSubmittedDraw"] = json!({
                                 "captureFrame": reply.frame,
                                 "renderTrace": submitted,
@@ -696,19 +716,28 @@ impl Probe {
                     return;
                 }
             };
-            self.held_item_draw_enabled = request.get("firstPersonDrawEnabled").and_then(Value::as_bool).unwrap_or(true);
+            self.held_item_draw_enabled = request
+                .get("firstPersonDrawEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             match self.validate_capture(request, renderer, game) {
                 Ok(region) => {
-                    self.held_item_mode = request.get("heldItem").and_then(Value::as_bool) == Some(true);
-                    self.drop_item_mode = request.get("dropItem").and_then(Value::as_bool) == Some(true);
-                    if self.drop_item_mode { game.hide_gui = false; }
+                    self.held_item_mode =
+                        request.get("heldItem").and_then(Value::as_bool) == Some(true);
+                    self.drop_item_mode =
+                        request.get("dropItem").and_then(Value::as_bool) == Some(true);
+                    if self.drop_item_mode {
+                        game.hide_gui = false;
+                    }
                     if let Some(layout) = requested_item_overlay {
                         game.hide_gui = false;
                         renderer.arm_gui_item_draw_trace(layout.metadata.clone());
                         self.item_overlay = Some(layout);
                     } else {
                         self.item_overlay = None;
-                        if self.held_item_mode { game.hide_gui = false; }
+                        if self.held_item_mode {
+                            game.hide_gui = false;
+                        }
                     }
                     if let Err(e) = self.prepare_state_inventory() {
                         self.fail_paired(request, &result_id, e);
@@ -731,7 +760,10 @@ impl Probe {
                         sampling.insert("worldHaloTokenProvenance".into(), json!("world-halo-token-v2: target region plus x/z +/-2 for vanilla 5x5 biome tint blend; fixed x/y/z order; raw state ID, raw sky light, raw block light, biome ID; unloaded input rejects token"));
                         sampling.insert("fluidNeighborWorldHaloToken".into(), json!(halo_token));
                         sampling.insert("preparedWorldHaloToken".into(), json!(halo_token));
-                        sampling.insert("actualDrawDiagnostics".into(), json!("armed: mesher/upload payload, no GPU readback"));
+                        sampling.insert(
+                            "actualDrawDiagnostics".into(),
+                            json!("armed: mesher/upload payload, no GPU readback"),
+                        );
                     }
                     let trace_samples = Self::paired_debug_samples(&region, &game.chunk_store);
                     renderer.arm_actual_draw_trace(&result_id, &halo_token, &trace_samples);
@@ -844,7 +876,9 @@ impl Probe {
         if held_item_mode && item_overlay.is_some() {
             return Err("heldItem mode cannot include itemOverlay".into());
         }
-        if !renderer.is_first_person() || (!game.hide_gui && item_overlay.is_none() && !held_item_mode && !drop_item_mode) {
+        if !renderer.is_first_person()
+            || (!game.hide_gui && item_overlay.is_none() && !held_item_mode && !drop_item_mode)
+        {
             return Err("Probe requires first person; visible HUD requires itemOverlay, heldItem, or dropItem mode".into());
         }
         let p = game.player.position;
@@ -1035,7 +1069,10 @@ impl Probe {
                 "worldInputChanged".into(),
                 json!(actual_halo_token != prepared_halo_token),
             );
-            sampling.insert("actualDrawDiagnostics".into(), json!("captured emitted/upload payload; GPU fragment/readback not captured"));
+            sampling.insert(
+                "actualDrawDiagnostics".into(),
+                json!("captured emitted/upload payload; GPU fragment/readback not captured"),
+            );
         }
         let p = game.player.position;
         let c = renderer.camera_render_position();
@@ -1049,7 +1086,10 @@ impl Probe {
                 let entity_id = *entry.0;
                 let entity = entry.1;
                 let name = entity.player_uuid.and_then(|uuid| {
-                    game.tab_list.players.get(&uuid).map(|player| player.name.as_str())
+                    game.tab_list
+                        .players
+                        .get(&uuid)
+                        .map(|player| player.name.as_str())
                 });
                 should_exclude_peer(
                     self.peer_filter.as_ref(),
@@ -1065,7 +1105,12 @@ impl Probe {
             let resolved_uuid = game.entity_store.living.values().find_map(|entity| {
                 let uuid = entity.player_uuid?;
                 let name = game.tab_list.players.get(&uuid)?.name.as_str();
-                (name == peer.get("peerName").and_then(Value::as_str).unwrap_or_default()).then_some(uuid)
+                (name
+                    == peer
+                        .get("peerName")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default())
+                .then_some(uuid)
             });
             peer.insert("resolvedPeerUuid".into(), json!(resolved_uuid));
         }
@@ -1314,7 +1359,14 @@ mod tests {
 
     #[test]
     fn item_overlay_validation_accepts_bounded_variable_16px_slots() {
-        let ids = ["fern", "bush", "lily_pad", "sugar_cane", "pink_petals", "wildflowers"];
+        let ids = [
+            "fern",
+            "bush",
+            "lily_pad",
+            "sugar_cane",
+            "pink_petals",
+            "wildflowers",
+        ];
         let items: Vec<_> = ids
             .iter()
             .enumerate()

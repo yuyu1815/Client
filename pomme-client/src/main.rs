@@ -15,6 +15,7 @@ mod chat_component;
 mod dirs;
 mod discord;
 mod entity;
+mod item_activation;
 mod lang;
 mod logging;
 mod mob_effect;

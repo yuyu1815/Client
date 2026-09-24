@@ -102,6 +102,10 @@ pub fn handle_game_packet(
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
     batch_size_calculator: &mut ChunkBatchSizeCalculator,
+    server_cookies: &mut std::collections::HashMap<
+        azalea_registry::identifier::Identifier,
+        Vec<u8>,
+    >,
 ) {
     match packet {
         ClientboundGamePacket::Login(p) => {
@@ -134,6 +138,14 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::SecureChatEnforced {
                 enforced: ProfileKeyServices::get().is_some() && p.enforces_secure_chat,
             });
+        }
+        ClientboundGamePacket::ChunksBiomes(p) => {
+            for chunk in &p.chunk_biome_data {
+                let _ = event_tx.try_send(NetworkEvent::ChunkBiomes {
+                    pos: chunk.pos,
+                    data: chunk.buffer.clone(),
+                });
+            }
         }
         ClientboundGamePacket::LevelChunkWithLight(p) => {
             tracing::trace!(
@@ -176,6 +188,17 @@ pub fn handle_game_packet(
                 action_id: p.action_id,
                 action_parameter: p.action_parameter,
             });
+        }
+        ClientboundGamePacket::Explode(p) => {
+            let _ = event_tx.try_send(NetworkEvent::Explosion(super::ExplosionPayload {
+                center: p.center,
+                radius: p.radius,
+                block_count: p.block_count,
+                player_knockback: p.player_knockback,
+                explosion_particle: p.explosion_particle.clone(),
+                explosion_sound: crate::audio::SoundRef::event(p.explosion_sound.to_str()),
+                block_particles: p.block_particles.clone(),
+            }));
         }
         ClientboundGamePacket::Sound(p) => {
             // Coordinates are fixed-point: block position times 8.
@@ -234,9 +257,33 @@ pub fn handle_game_packet(
                 relative: p.relative.clone(),
             });
         }
+        ClientboundGamePacket::PlayerRotation(p) => {
+            let _ = event_tx.try_send(NetworkEvent::PlayerRotation {
+                y_rot: p.y_rot,
+                x_rot: p.x_rot,
+                relative_y: p.relative_y,
+                relative_x: p.relative_x,
+            });
+        }
         ClientboundGamePacket::KeepAlive(p) => {
             sender.send(ServerboundGamePacket::KeepAlive(
                 azalea_protocol::packets::game::s_keep_alive::ServerboundKeepAlive { id: p.id },
+            ));
+        }
+        ClientboundGamePacket::Ping(p) => {
+            sender.send(ServerboundGamePacket::Pong(
+                azalea_protocol::packets::game::s_pong::ServerboundPong { id: p.id },
+            ));
+        }
+        ClientboundGamePacket::StoreCookie(p) => {
+            server_cookies.insert(p.key.clone(), p.payload.clone());
+        }
+        ClientboundGamePacket::CookieRequest(p) => {
+            sender.send(ServerboundGamePacket::CookieResponse(
+                azalea_protocol::packets::game::s_cookie_response::ServerboundCookieResponse {
+                    payload: server_cookies.get(&p.key).cloned(),
+                    key: p.key.clone(),
+                },
             ));
         }
         ClientboundGamePacket::ChunkBatchStart(_) => {
@@ -284,6 +331,61 @@ pub fn handle_game_packet(
                 value: p.value,
             });
         }
+        ClientboundGamePacket::MerchantOffers(p) => {
+            let _ = event_tx.try_send(NetworkEvent::MerchantOffers {
+                container_id: p.container_id,
+                offers: p.offers.clone(),
+                villager_level: p.villager_level,
+                villager_xp: p.villager_xp,
+                show_progress: p.show_progress,
+                can_restock: p.can_restock,
+            });
+        }
+        ClientboundGamePacket::MountScreenOpen(p) => {
+            let _ = event_tx.try_send(NetworkEvent::MountScreenOpen {
+                container_id: p.container_id,
+                inventory_columns: p.inventory_columns,
+                entity_id: p.entity_id.0,
+            });
+        }
+        ClientboundGamePacket::InitializeBorder(p) => {
+            let _ = event_tx.try_send(NetworkEvent::WorldBorderInitialize {
+                center_x: p.new_center_x,
+                center_z: p.new_center_z,
+                old_size: p.old_size,
+                new_size: p.new_size,
+                lerp_time: i64::try_from(p.lerp_time).unwrap_or(i64::MAX),
+                absolute_max_size: p.new_absolute_max_size as i32,
+                warning_blocks: p.warning_blocks as i32,
+                warning_time: p.warning_time as i32,
+            });
+        }
+        ClientboundGamePacket::SetBorderCenter(p) => {
+            let _ = event_tx.try_send(NetworkEvent::WorldBorderCenter {
+                x: p.new_center_x,
+                z: p.new_center_z,
+            });
+        }
+        ClientboundGamePacket::SetBorderSize(p) => {
+            let _ = event_tx.try_send(NetworkEvent::WorldBorderSize { size: p.size });
+        }
+        ClientboundGamePacket::SetBorderLerpSize(p) => {
+            let _ = event_tx.try_send(NetworkEvent::WorldBorderLerpSize {
+                old_size: p.old_size,
+                new_size: p.new_size,
+                lerp_time: i64::try_from(p.lerp_time).unwrap_or(i64::MAX),
+            });
+        }
+        ClientboundGamePacket::SetBorderWarningDistance(p) => {
+            let _ = event_tx.try_send(NetworkEvent::WorldBorderWarningBlocks {
+                warning_blocks: p.warning_blocks as i32,
+            });
+        }
+        ClientboundGamePacket::SetBorderWarningDelay(p) => {
+            let _ = event_tx.try_send(NetworkEvent::WorldBorderWarningTime {
+                warning_time: p.warning_delay as i32,
+            });
+        }
         ClientboundGamePacket::OpenScreen(p) => {
             let _ = event_tx.try_send(NetworkEvent::OpenScreen {
                 container_id: p.container_id,
@@ -305,6 +407,13 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::PlayerExperience {
                 progress: p.experience_progress,
                 level: p.experience_level as i32,
+                total_experience: p.total_experience,
+            });
+        }
+        ClientboundGamePacket::SetPlayerInventory(p) => {
+            let _ = event_tx.try_send(NetworkEvent::SetPlayerInventory {
+                slot: p.slot,
+                item: p.contents.clone(),
             });
         }
         ClientboundGamePacket::UpdateMobEffect(p) => {
@@ -497,42 +606,69 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::SetObjective(p) => {
             use azalea_protocol::packets::game::c_set_objective::Method;
-            let (display, number_format) = match &p.method {
+            let (display, number_format, render_type) = match &p.method {
                 Method::Add {
                     display_name,
                     number_format,
+                    render_type,
                     ..
                 }
                 | Method::Change {
                     display_name,
                     number_format,
+                    render_type,
                     ..
-                } => (
-                    Some(format_text_spans(display_name, [1.0; 4])),
-                    objective_number_format(number_format),
-                ),
-                Method::Remove => (None, None),
+                } => {
+                    let number_format = match objective_number_format(number_format) {
+                        Ok(number_format) => number_format,
+                        Err(error) => {
+                            tracing::warn!(
+                                objective = %p.objective_name,
+                                %error,
+                                "Skipping malformed scoreboard objective number format"
+                            );
+                            return;
+                        }
+                    };
+                    (
+                        Some(format_text_spans(display_name, [1.0; 4])),
+                        number_format,
+                        Some(render_type.clone()),
+                    )
+                }
+                Method::Remove => (None, None, None),
             };
             let _ = event_tx.try_send(NetworkEvent::ScoreboardObjective {
                 name: p.objective_name.clone(),
                 display,
                 number_format,
+                render_type,
             });
         }
-        // TODO: track the other display slots too — vanilla prefers the
-        // local team's `sidebar.team.<color>` slot over SIDEBAR, and LIST
-        // drives the tab-overlay score column.
-        ClientboundGamePacket::SetDisplayObjective(p)
-            if matches!(
-                p.slot,
-                azalea_protocol::packets::game::c_set_display_objective::DisplaySlot::Sidebar
-            ) =>
-        {
+        ClientboundGamePacket::SetDisplayObjective(p) => {
             let _ = event_tx.try_send(NetworkEvent::ScoreboardDisplay {
+                slot: p.slot,
                 name: (!p.objective_name.is_empty()).then(|| p.objective_name.clone()),
             });
         }
         ClientboundGamePacket::SetScore(p) => {
+            let number_format = match p
+                .number_format
+                .as_ref()
+                .map(score_number_format)
+                .transpose()
+            {
+                Ok(number_format) => number_format,
+                Err(error) => {
+                    tracing::warn!(
+                        owner = %p.owner,
+                        objective = %p.objective_name,
+                        %error,
+                        "Skipping malformed scoreboard score number format"
+                    );
+                    return;
+                }
+            };
             let _ = event_tx.try_send(NetworkEvent::ScoreboardScore {
                 owner: p.owner.clone(),
                 objective: p.objective_name.clone(),
@@ -543,7 +679,7 @@ pub fn handle_game_packet(
                     .display
                     .as_ref()
                     .map(|text| format_text_spans(text, [1.0; 4])),
-                number_format: p.number_format.as_ref().map(score_number_format),
+                number_format,
             });
         }
         ClientboundGamePacket::ResetScore(p) => {
@@ -659,7 +795,12 @@ pub fn handle_game_packet(
                         param: p.param,
                     });
                 }
-                _ => {}
+                _ => {
+                    let _ = event_tx.try_send(NetworkEvent::GameEvent {
+                        event: p.event,
+                        param: p.param,
+                    });
+                }
             }
         }
         ClientboundGamePacket::Disconnect(p) => {
@@ -729,6 +870,7 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::EntityTeleported {
                 id: p.id.0,
                 position: p.change.pos.into(),
+                relative: Some(p.relative.clone()),
                 velocity: Some(glam::DVec3::new(delta.x, delta.y, delta.z)),
                 y_rot_deg: p.change.look_direction.y_rot(),
                 x_rot_deg: p.change.look_direction.x_rot(),
@@ -739,6 +881,7 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::EntityTeleported {
                 id: p.id.0,
                 position: p.values.pos.into(),
+                relative: None,
                 velocity: None,
                 y_rot_deg: p.values.look_direction.y_rot(),
                 x_rot_deg: p.values.look_direction.x_rot(),
@@ -956,6 +1099,12 @@ pub fn handle_game_packet(
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 4 => {
             let _ = event_tx.try_send(NetworkEvent::GolemPunch { id: p.entity_id.0 });
         }
+        // Event id 35 = Totem activation, emitted by the entity that used it.
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 35 => {
+            let _ = event_tx.try_send(NetworkEvent::TotemUsed {
+                entity_id: p.entity_id.0,
+            });
+        }
         // Events 11 / 34 = iron golem flower offer start / stop.
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 11 => {
             let _ = event_tx.try_send(NetworkEvent::GolemOfferFlower {
@@ -992,6 +1141,23 @@ pub fn handle_game_packet(
             ) =>
         {
             let _ = event_tx.try_send(NetworkEvent::EntitySwing { id: p.id.0 });
+        }
+        // Critical-hit particle emitters (vanilla Animate actions 4/5).
+        ClientboundGamePacket::Animate(p)
+            if matches!(
+                p.action,
+                azalea_protocol::packets::game::c_animate::AnimationAction::CriticalHit
+                    | azalea_protocol::packets::game::c_animate::AnimationAction::MagicCriticalHit
+            ) =>
+        {
+            let kind = if p.action
+                == azalea_protocol::packets::game::c_animate::AnimationAction::CriticalHit
+            {
+                crate::net::CriticalHitKind::Critical
+            } else {
+                crate::net::CriticalHitKind::Enchanted
+            };
+            let _ = event_tx.try_send(NetworkEvent::CriticalHit { id: p.id.0, kind });
         }
         // Vanilla handleAnimate action 2 -> stopSleepInBed(false, false).
         ClientboundGamePacket::Animate(p)
@@ -1080,6 +1246,7 @@ pub fn handle_game_packet(
                 update_latency: p.actions.update_latency,
                 update_display_name: p.actions.update_display_name,
                 update_list_order: p.actions.update_list_order,
+                update_hat: p.actions.update_hat,
             };
             let entries = p
                 .entries
@@ -1101,6 +1268,7 @@ pub fn handle_game_packet(
                         .as_ref()
                         .map(|c| crate::ui::text::format_text_spans(c, [1.0, 1.0, 1.0, 1.0])),
                     list_order: e.list_order,
+                    show_hat: e.update_hat,
                     chat_session: if p.actions.initialize_chat {
                         match (ProfileKeyServices::get(), e.chat_session.as_ref()) {
                             (Some(services), Some(session)) => match services
@@ -1178,6 +1346,7 @@ fn send_scoreboard_team(
     members: Option<Vec<String>>,
 ) {
     let color = team_color(parameters.color);
+    let sidebar_slot = team_sidebar_slot(parameters.color);
     let _ = event_tx.try_send(NetworkEvent::ScoreboardTeam {
         name: name.into(),
         display_name: format_text_spans(&parameters.display_name, [1.0; 4]),
@@ -1185,22 +1354,29 @@ fn send_scoreboard_team(
         suffix: format_text_spans(&parameters.player_suffix, color),
         color,
         fill_color: parameters.color.color().map(crate::ui::common::rgb),
+        sidebar_slot,
         members,
     });
 }
 
 fn score_number_format(
     format: &azalea_chat::numbers::NumberFormat,
-) -> crate::ui::hud::ScoreNumberFormat {
+) -> Result<crate::ui::hud::ScoreNumberFormat, String> {
     use azalea_chat::numbers::NumberFormat;
 
     use crate::ui::hud::ScoreNumberFormat as F;
     match format {
-        NumberFormat::Blank => F::Blank,
-        // Vanilla applies the style to the plain number; only the color
-        // matters for rendering, an unstyled number stays white.
-        NumberFormat::Styled { style } => F::Styled(styled_color(style).unwrap_or([1.0; 4])),
-        NumberFormat::Fixed { value } => F::Fixed(format_text_spans(value, [1.0; 4])),
+        NumberFormat::Blank => Ok(F::Blank),
+        NumberFormat::Styled { style } => {
+            if style.is_none() {
+                return Err("Styled number format has no NBT style compound".into());
+            }
+            let tag: simdnbt::owned::NbtTag = style.clone().into();
+            crate::chat_component::Style::from_nbt_tag(&tag)
+                .map(F::Styled)
+                .map_err(|error| format!("invalid Styled number format style: {error}"))
+        }
+        NumberFormat::Fixed { value } => Ok(F::Fixed(format_text_spans(value, [1.0; 4]))),
     }
 }
 
@@ -1211,23 +1387,43 @@ fn score_number_format(
 /// the shift for the two recoverable cases.
 fn objective_number_format(
     format: &azalea_chat::numbers::NumberFormat,
-) -> Option<crate::ui::hud::ScoreNumberFormat> {
+) -> Result<Option<crate::ui::hud::ScoreNumberFormat>, String> {
     use azalea_chat::numbers::NumberFormat;
     match format {
-        NumberFormat::Blank => None,
+        NumberFormat::Blank => Ok(None),
+        // Azalea's typed objective decoder shifts vanilla Blank into this
+        // empty Styled value; preserve the established recovery for that path.
         NumberFormat::Styled { style } if style.is_none() => {
-            Some(crate::ui::hud::ScoreNumberFormat::Blank)
+            Ok(Some(crate::ui::hud::ScoreNumberFormat::Blank))
         }
-        other => Some(score_number_format(other)),
+        other => score_number_format(other).map(Some),
     }
 }
 
-fn styled_color(style: &simdnbt::owned::Nbt) -> Option<[f32; 4]> {
-    let color = style
-        .iter()
-        .find_map(|(key, value)| (key.to_str() == "color").then(|| value.string()).flatten())?;
-    let value = azalea_chat::style::TextColor::parse(&color.to_str())?.value;
-    Some(crate::ui::common::rgb(value))
+fn team_sidebar_slot(
+    color: azalea_chat::style::ChatFormatting,
+) -> Option<azalea_protocol::packets::game::c_set_display_objective::DisplaySlot> {
+    use azalea_chat::style::ChatFormatting as C;
+    use azalea_protocol::packets::game::c_set_display_objective::DisplaySlot as S;
+    Some(match color {
+        C::Black => S::TeamBlack,
+        C::DarkBlue => S::TeamDarkBlue,
+        C::DarkGreen => S::TeamDarkGreen,
+        C::DarkAqua => S::TeamDarkAqua,
+        C::DarkRed => S::TeamDarkRed,
+        C::DarkPurple => S::TeamDarkPurple,
+        C::Gold => S::TeamGold,
+        C::Gray => S::TeamGray,
+        C::DarkGray => S::TeamDarkGray,
+        C::Blue => S::TeamBlue,
+        C::Green => S::TeamGreen,
+        C::Aqua => S::TeamAqua,
+        C::Red => S::TeamRed,
+        C::LightPurple => S::TeamLightPurple,
+        C::Yellow => S::TeamYellow,
+        C::White => S::TeamWhite,
+        _ => return None,
+    })
 }
 
 fn team_color(color: azalea_chat::style::ChatFormatting) -> [f32; 4] {
@@ -1340,6 +1536,29 @@ pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bo
     let Ok(packet_id) = u32::azalea_read_var(&mut cur) else {
         return false;
     };
+
+    if packet_id == cooldown_packet_id() {
+        match super::cooldown::decode_payload(&raw[cur.position() as usize..]) {
+            Ok(cooldown) => {
+                let _ = event_tx.try_send(NetworkEvent::ItemCooldown {
+                    group: cooldown.group,
+                    duration: cooldown.duration,
+                });
+            }
+            Err(e) => tracing::warn!("Skipping malformed Cooldown packet: {e}"),
+        }
+        return true;
+    }
+
+    if packet_id == set_objective_packet_id() {
+        match parse_set_objective(&mut cur) {
+            Ok(event) => {
+                let _ = event_tx.try_send(event);
+            }
+            Err(e) => tracing::warn!("Skipping malformed SetObjective packet: {e}"),
+        }
+        return true;
+    }
 
     let sound_ids = sound_packet_ids();
     let sound_result = if packet_id == sound_ids.sound {
@@ -1490,7 +1709,7 @@ fn parse_level_particles(
     cur: &mut std::io::Cursor<&[u8]>,
 ) -> Result<Option<NetworkEvent>, azalea_buf::BufReadError> {
     let override_limiter = bool::azalea_read(cur)?;
-    let _always_show = bool::azalea_read(cur)?;
+    let always_show = bool::azalea_read(cur)?;
     let pos = glam::dvec3(
         f64::azalea_read(cur)?,
         f64::azalea_read(cur)?,
@@ -1501,7 +1720,7 @@ fn parse_level_particles(
     let z_dist = f32::azalea_read(cur)?;
     let max_speed = f32::azalea_read(cur)?;
     // Signed on the wire; Java's `i < count` loop no-ops on negative counts.
-    let count = i32::azalea_read(cur)?.max(0) as u32;
+    let count = i32::azalea_read(cur)?;
     let type_id = u32::azalea_read_var(cur)?;
     // Particle ids shift between versions; translate into the native id
     // space (`ServerParticleKind`'s) when speaking an older protocol.
@@ -1518,6 +1737,7 @@ fn parse_level_particles(
     Ok(Some(NetworkEvent::LevelParticles {
         kind,
         override_limiter,
+        always_show,
         pos,
         x_dist,
         y_dist,
@@ -1525,6 +1745,68 @@ fn parse_level_particles(
         max_speed,
         count,
     }))
+}
+
+fn set_objective_packet_id() -> u32 {
+    use pomme_protocol::{Direction, PacketTable, Phase};
+
+    static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| {
+        PacketTable::native()
+            .id(Phase::Game, Direction::Clientbound, "set_objective")
+            .expect("set_objective in packet table")
+    })
+}
+
+fn parse_set_objective(cur: &mut std::io::Cursor<&[u8]>) -> Result<NetworkEvent, String> {
+    use azalea_buf::AzBuf;
+    use azalea_protocol::packets::game::c_set_objective::MethodKind;
+
+    let name = String::azalea_read(cur).map_err(|error| error.to_string())?;
+    let method = MethodKind::azalea_read(cur).map_err(|error| error.to_string())?;
+    let (display, number_format, render_type) = match method {
+        MethodKind::Remove => (None, None, None),
+        MethodKind::Add | MethodKind::Change => {
+            let text =
+                azalea_chat::FormattedText::azalea_read(cur).map_err(|error| error.to_string())?;
+            let render_type = azalea_core::objectives::ObjectiveCriteria::azalea_read(cur)
+                .map_err(|error| error.to_string())?;
+            let number_format = if bool::azalea_read(cur).map_err(|error| error.to_string())? {
+                Some(
+                    azalea_chat::numbers::NumberFormat::azalea_read(cur)
+                        .map_err(|error| error.to_string())?,
+                )
+            } else {
+                None
+            };
+            let display = format_text_spans(&text, [1.0; 4]);
+            (
+                Some(display),
+                number_format
+                    .as_ref()
+                    .map(score_number_format)
+                    .transpose()?,
+                Some(render_type),
+            )
+        }
+    };
+    Ok(NetworkEvent::ScoreboardObjective {
+        name,
+        display,
+        number_format,
+        render_type,
+    })
+}
+
+fn cooldown_packet_id() -> u32 {
+    use pomme_protocol::{Direction, PacketTable, Phase};
+
+    static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| {
+        PacketTable::native()
+            .id(Phase::Game, Direction::Clientbound, "cooldown")
+            .expect("cooldown in packet table")
+    })
 }
 
 /// `ClientboundLevelParticles`' packet id from the vanilla-derived table
@@ -1596,6 +1878,451 @@ mod tests {
     use pomme_protocol::wire;
 
     use super::*;
+    use crate::net::sender::Outbound;
+
+    #[test]
+    fn animate_critical_actions_dispatch_distinct_events_and_other_actions_do_not() {
+        use azalea_core::entity_id::MinecraftEntityId;
+        use azalea_protocol::packets::game::c_animate::{AnimationAction, ClientboundAnimate};
+
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(out_tx);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(4);
+        let registries = RegistryHolder::default();
+        let command_tree = Arc::new(Mutex::new(None));
+        let mut batches = ChunkBatchSizeCalculator::default();
+        let mut cookies = std::collections::HashMap::new();
+        for (action, expected) in [
+            (
+                AnimationAction::CriticalHit,
+                crate::net::CriticalHitKind::Critical,
+            ),
+            (
+                AnimationAction::MagicCriticalHit,
+                crate::net::CriticalHitKind::Enchanted,
+            ),
+        ] {
+            handle_game_packet(
+                &ClientboundGamePacket::Animate(ClientboundAnimate {
+                    id: MinecraftEntityId(41),
+                    action,
+                }),
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+                &mut batches,
+                &mut cookies,
+            );
+            assert!(
+                matches!(event_rx.recv().unwrap(), NetworkEvent::CriticalHit { id: 41, kind } if kind == expected)
+            );
+        }
+        handle_game_packet(
+            &ClientboundGamePacket::Animate(ClientboundAnimate {
+                id: MinecraftEntityId(41),
+                action: AnimationAction::WakeUp,
+            }),
+            &sender,
+            &event_tx,
+            &registries,
+            &command_tree,
+            &mut batches,
+            &mut cookies,
+        );
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::EntityWakeUp { id: 41 }
+        ));
+        for (event_id, expected) in [(35, Some(41)), (255, None)] {
+            handle_game_packet(
+                &ClientboundGamePacket::EntityEvent(
+                    azalea_protocol::packets::game::c_entity_event::ClientboundEntityEvent {
+                        entity_id: MinecraftEntityId(41),
+                        event_id,
+                    },
+                ),
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+                &mut batches,
+                &mut cookies,
+            );
+            if let Some(id) = expected {
+                assert!(
+                    matches!(event_rx.recv().unwrap(), NetworkEvent::TotemUsed { entity_id } if entity_id == id)
+                );
+            } else {
+                assert!(event_rx.try_recv().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn explosion_ingress_preserves_the_complete_native_payload() {
+        use azalea_core::position::Vec3;
+        use azalea_entity::particle::Particle;
+        use azalea_protocol::packets::game::c_explode::{
+            ClientboundExplode, ExplosionParticleInfo, Weighted,
+        };
+
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(out_tx);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        let registries = RegistryHolder::default();
+        let command_tree = Arc::new(Mutex::new(None));
+        let mut batches = ChunkBatchSizeCalculator::default();
+        let mut cookies = std::collections::HashMap::new();
+        let packet = ClientboundExplode {
+            center: Vec3::new(1.0, 2.0, 3.0),
+            radius: 4.5,
+            block_count: 23,
+            player_knockback: Some(Vec3::new(0.25, -0.5, 0.75)),
+            explosion_particle: Particle::ExplosionEmitter,
+            explosion_sound: SoundEvent::AmbientCave,
+            block_particles: vec![Weighted {
+                value: ExplosionParticleInfo {
+                    particle: Particle::EndRod,
+                    scaling: 1.25,
+                    speed: 0.75,
+                },
+                weight: 9,
+            }],
+        };
+        handle_game_packet(
+            &ClientboundGamePacket::Explode(packet.clone()),
+            &sender,
+            &event_tx,
+            &registries,
+            &command_tree,
+            &mut batches,
+            &mut cookies,
+        );
+        let NetworkEvent::Explosion(event) = event_rx.recv().unwrap() else {
+            panic!("expected Explosion event");
+        };
+        assert_eq!(event.center, packet.center);
+        assert_eq!(event.radius, packet.radius);
+        assert_eq!(event.block_count, packet.block_count);
+        assert_eq!(event.player_knockback, packet.player_knockback);
+        assert_eq!(event.explosion_particle, packet.explosion_particle);
+        assert_eq!(event.block_particles, packet.block_particles);
+        assert_eq!(event.explosion_sound.event_name(), "minecraft:ambient.cave");
+    }
+
+    #[test]
+    fn player_rotation_and_entity_teleport_keep_relative_flags_in_events() {
+        use azalea_core::entity_id::MinecraftEntityId;
+        use azalea_core::position::Vec3;
+        use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+        use azalea_protocol::packets::game::c_entity_position_sync::ClientboundEntityPositionSync;
+        use azalea_protocol::packets::game::c_player_rotation::ClientboundPlayerRotation;
+        use azalea_protocol::packets::game::c_teleport_entity::ClientboundTeleportEntity;
+
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(out_tx);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(8);
+        let registries = RegistryHolder::default();
+        let command_tree = Arc::new(Mutex::new(None));
+        let mut batches = ChunkBatchSizeCalculator::default();
+        let mut cookies = std::collections::HashMap::new();
+        let mut dispatch = |packet: ClientboundGamePacket| {
+            handle_game_packet(
+                &packet,
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+                &mut batches,
+                &mut cookies,
+            );
+        };
+        dispatch(ClientboundGamePacket::PlayerRotation(
+            ClientboundPlayerRotation {
+                y_rot: 12.0,
+                relative_y: true,
+                x_rot: 25.0,
+                relative_x: false,
+            },
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::PlayerRotation {
+                y_rot: 12.0,
+                x_rot: 25.0,
+                relative_y: true,
+                relative_x: false
+            }
+        ));
+
+        dispatch(ClientboundGamePacket::TeleportEntity(
+            ClientboundTeleportEntity {
+                id: MinecraftEntityId(42),
+                change: PositionMoveRotation {
+                    pos: Vec3::new(1.0, 2.0, 3.0),
+                    delta: Vec3::new(4.0, 5.0, 6.0),
+                    look_direction: azalea_entity::LookDirection::new(7.0, 8.0),
+                },
+                relative: RelativeMovements {
+                    x: true,
+                    y: false,
+                    z: true,
+                    y_rot: true,
+                    x_rot: false,
+                    delta_x: true,
+                    delta_y: false,
+                    delta_z: true,
+                    rotate_delta: true,
+                },
+                on_ground: true,
+            },
+        ));
+        let NetworkEvent::EntityTeleported {
+            relative: Some(relative),
+            velocity: Some(velocity),
+            ..
+        } = event_rx.recv().unwrap()
+        else {
+            panic!("TeleportEntity must preserve its relative flags and velocity");
+        };
+        assert!(relative.x && relative.z && relative.y_rot && relative.delta_x && relative.delta_z);
+        assert!(relative.rotate_delta);
+        assert_eq!(velocity, glam::dvec3(4.0, 5.0, 6.0));
+
+        dispatch(ClientboundGamePacket::EntityPositionSync(
+            ClientboundEntityPositionSync {
+                id: MinecraftEntityId(42),
+                values: PositionMoveRotation {
+                    pos: Vec3::new(9.0, 8.0, 7.0),
+                    delta: Vec3::new(6.0, 5.0, 4.0),
+                    look_direction: azalea_entity::LookDirection::new(3.0, 2.0),
+                },
+                on_ground: false,
+            },
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::EntityTeleported {
+                relative: None,
+                velocity: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn merchant_mount_and_border_packets_keep_native_fields_in_events() {
+        use azalea_core::entity_id::MinecraftEntityId;
+        use azalea_inventory::ItemStackData;
+        use azalea_protocol::packets::game::c_initialize_border::ClientboundInitializeBorder;
+        use azalea_protocol::packets::game::c_merchant_offers::{
+            ClientboundMerchantOffers, DataComponentExactPredicate, ItemCost, MerchantOffer,
+        };
+        use azalea_protocol::packets::game::c_mount_screen_open::ClientboundMountScreenOpen;
+        use azalea_protocol::packets::game::c_set_border_center::ClientboundSetBorderCenter;
+        use azalea_protocol::packets::game::c_set_border_lerp_size::ClientboundSetBorderLerpSize;
+        use azalea_protocol::packets::game::c_set_border_size::ClientboundSetBorderSize;
+        use azalea_protocol::packets::game::c_set_border_warning_delay::ClientboundSetBorderWarningDelay;
+        use azalea_protocol::packets::game::c_set_border_warning_distance::ClientboundSetBorderWarningDistance;
+        use azalea_registry::builtin::ItemKind;
+
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(out_tx);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(16);
+        let registries = RegistryHolder::default();
+        let command_tree = Arc::new(Mutex::new(None));
+        let mut batches = ChunkBatchSizeCalculator::default();
+        let mut cookies = std::collections::HashMap::new();
+        let mut dispatch = |packet: ClientboundGamePacket| {
+            handle_game_packet(
+                &packet,
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+                &mut batches,
+                &mut cookies,
+            );
+        };
+        dispatch(ClientboundGamePacket::MerchantOffers(
+            ClientboundMerchantOffers {
+                container_id: 17,
+                offers: vec![MerchantOffer {
+                    base_cost_a: ItemCost {
+                        item: ItemKind::Emerald,
+                        count: 4,
+                        components: DataComponentExactPredicate { expected: vec![] },
+                    },
+                    result: ItemStackData::new(ItemKind::Stone, 2).into(),
+                    cost_b: Some(ItemCost {
+                        item: ItemKind::Diamond,
+                        count: 3,
+                        components: DataComponentExactPredicate { expected: vec![] },
+                    }),
+                    out_of_stock: true,
+                    uses: 5,
+                    max_uses: 12,
+                    xp: 9,
+                    special_price_diff: -2,
+                    price_multiplier: 0.25,
+                    demand: 6,
+                }],
+                villager_level: 4,
+                villager_xp: 81,
+                show_progress: true,
+                can_restock: false,
+            },
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::MerchantOffers {
+                container_id: 17,
+                offers,
+                villager_level: 4,
+                villager_xp: 81,
+                show_progress: true,
+                can_restock: false,
+            } if offers.len() == 1
+                && offers[0].base_cost_a.count == 4
+                && offers[0].result.as_present().is_some_and(|s| s.count == 2)
+                && offers[0].cost_b.as_ref().is_some_and(|c| c.count == 3)
+                && offers[0].out_of_stock
+                && offers[0].uses == 5
+                && offers[0].max_uses == 12
+                && offers[0].xp == 9
+                && offers[0].special_price_diff == -2
+                && offers[0].price_multiplier == 0.25
+                && offers[0].demand == 6
+        ));
+        dispatch(ClientboundGamePacket::MountScreenOpen(
+            ClientboundMountScreenOpen {
+                container_id: 18,
+                inventory_columns: 5,
+                entity_id: MinecraftEntityId(42),
+            },
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::MountScreenOpen {
+                container_id: 18,
+                inventory_columns: 5,
+                entity_id: 42,
+            }
+        ));
+        dispatch(ClientboundGamePacket::InitializeBorder(
+            ClientboundInitializeBorder {
+                new_center_x: 1.5,
+                new_center_z: -2.5,
+                old_size: 100.0,
+                new_size: 50.0,
+                lerp_time: 120,
+                new_absolute_max_size: 29_999_984,
+                warning_blocks: 7,
+                warning_time: 21,
+            },
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::WorldBorderInitialize {
+                center_x: 1.5,
+                center_z: -2.5,
+                old_size: 100.0,
+                new_size: 50.0,
+                lerp_time: 120,
+                absolute_max_size: 29_999_984,
+                warning_blocks: 7,
+                warning_time: 21,
+            }
+        ));
+        dispatch(ClientboundGamePacket::SetBorderCenter(
+            ClientboundSetBorderCenter {
+                new_center_x: 3.0,
+                new_center_z: 4.0,
+            },
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::WorldBorderCenter { x: 3.0, z: 4.0 }
+        ));
+        dispatch(ClientboundGamePacket::SetBorderSize(
+            ClientboundSetBorderSize { size: 75.0 },
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::WorldBorderSize { size: 75.0 }
+        ));
+        dispatch(ClientboundGamePacket::SetBorderLerpSize(
+            ClientboundSetBorderLerpSize {
+                old_size: 75.0,
+                new_size: 25.0,
+                lerp_time: 20,
+            },
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::WorldBorderLerpSize {
+                old_size: 75.0,
+                new_size: 25.0,
+                lerp_time: 20
+            }
+        ));
+        dispatch(ClientboundGamePacket::SetBorderWarningDistance(
+            ClientboundSetBorderWarningDistance { warning_blocks: 11 },
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::WorldBorderWarningBlocks { warning_blocks: 11 }
+        ));
+        dispatch(ClientboundGamePacket::SetBorderWarningDelay(
+            ClientboundSetBorderWarningDelay { warning_delay: 31 },
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::WorldBorderWarningTime { warning_time: 31 }
+        ));
+    }
+
+    #[test]
+    fn raw_cooldown_packet_emits_decoded_group_and_signed_duration() {
+        use azalea_buf::{AzBuf, AzBufVar};
+        use pomme_protocol::{Direction, PacketTable, Phase};
+
+        let mut raw = Vec::new();
+        wire::write_varint(
+            &mut raw,
+            PacketTable::native()
+                .id(Phase::Game, Direction::Clientbound, "cooldown")
+                .unwrap(),
+        );
+        "test:shared".to_string().azalea_write(&mut raw).unwrap();
+        (-1_i32).azalea_write_var(&mut raw).unwrap();
+
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        assert!(handle_raw_game_packet(&raw, &event_tx));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::ItemCooldown { group, duration: -1 }
+                if group == azalea_registry::identifier::Identifier::new("test:shared")
+        ));
+    }
+
+    #[test]
+    fn malformed_raw_cooldown_is_consumed_without_event() {
+        use pomme_protocol::{Direction, PacketTable, Phase};
+
+        let mut raw = Vec::new();
+        wire::write_varint(
+            &mut raw,
+            PacketTable::native()
+                .id(Phase::Game, Direction::Clientbound, "cooldown")
+                .unwrap(),
+        );
+        raw.push(0x80);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        assert!(handle_raw_game_packet(&raw, &event_tx));
+        assert!(event_rx.try_recv().is_err());
+    }
 
     #[test]
     fn set_held_slot_emits_authoritative_hotbar_selection() {
@@ -1612,6 +2339,7 @@ mod tests {
                 &registries,
                 &command_tree,
                 &mut ChunkBatchSizeCalculator::default(),
+                &mut std::collections::HashMap::new(),
             );
         };
 
@@ -1628,6 +2356,90 @@ mod tests {
                 Err(crossbeam_channel::TryRecvError::Empty)
             ));
         }
+    }
+
+    #[test]
+    fn game_ping_is_answered_and_cookies_round_trip() {
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(out_tx);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(4);
+        let registries = RegistryHolder::default();
+        let command_tree = Arc::new(Mutex::new(None));
+        let mut cookies = std::collections::HashMap::new();
+        let mut batches = ChunkBatchSizeCalculator::default();
+        let dispatch = |packet: &ClientboundGamePacket,
+                        cookies: &mut std::collections::HashMap<_, _>,
+                        batches: &mut ChunkBatchSizeCalculator| {
+            handle_game_packet(
+                packet,
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+                batches,
+                cookies,
+            );
+        };
+
+        dispatch(
+            &ClientboundGamePacket::Ping(azalea_protocol::packets::game::c_ping::ClientboundPing {
+                id: 0x1234,
+            }),
+            &mut cookies,
+            &mut batches,
+        );
+        let Outbound::Packet(packet) = out_rx.try_recv().unwrap() else {
+            panic!("expected pong packet");
+        };
+        assert!(matches!(*packet, ServerboundGamePacket::Pong(ref p) if p.id == 0x1234));
+
+        let key = Identifier::new("minecraft:test");
+        dispatch(
+            &ClientboundGamePacket::StoreCookie(
+                azalea_protocol::packets::game::c_store_cookie::ClientboundStoreCookie {
+                    key: key.clone(),
+                    payload: vec![1, 2, 3],
+                },
+            ),
+            &mut cookies,
+            &mut batches,
+        );
+        dispatch(
+            &ClientboundGamePacket::CookieRequest(
+                azalea_protocol::packets::game::c_cookie_request::ClientboundCookieRequest { key },
+            ),
+            &mut cookies,
+            &mut batches,
+        );
+        let Outbound::Packet(packet) = out_rx.try_recv().unwrap() else {
+            panic!("expected cookie response packet");
+        };
+        assert!(matches!(
+            *packet,
+            ServerboundGamePacket::CookieResponse(ref p)
+                if p.payload.as_deref() == Some(&[1, 2, 3])
+        ));
+
+        let pos = ChunkPos::new(-2, 3);
+        dispatch(
+            &ClientboundGamePacket::ChunksBiomes(
+                azalea_protocol::packets::game::c_chunks_biomes::ClientboundChunksBiomes {
+                    chunk_biome_data: vec![
+                        azalea_protocol::packets::game::c_chunks_biomes::ChunkBiomeData {
+                            pos,
+                            buffer: vec![4, 5, 6],
+                        },
+                    ],
+                },
+            ),
+            &mut cookies,
+            &mut batches,
+        );
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            NetworkEvent::ChunkBiomes { pos: event_pos, data }
+                if event_pos == pos && data == [4, 5, 6]
+        ));
     }
 
     fn direct_sound() -> Holder<SoundEvent, CustomSound> {
@@ -1713,12 +2525,32 @@ mod tests {
 }
 
 #[cfg(test)]
+mod scoreboard_display_event_tests {
+    use azalea_protocol::packets::game::c_set_display_objective::DisplaySlot as Slot;
+
+    use crate::net::NetworkEvent;
+
+    #[test]
+    fn display_event_retains_representative_slots_and_objective() {
+        for slot in [Slot::List, Slot::Sidebar, Slot::BelowName, Slot::TeamRed] {
+            let event = NetworkEvent::ScoreboardDisplay {
+                slot,
+                name: Some("objective".to_owned()),
+            };
+            assert!(
+                matches!(event, NetworkEvent::ScoreboardDisplay { slot: got, name: Some(ref name) } if got as usize == slot as usize && name == "objective")
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod dimension_info_tests {
     use std::collections::HashMap;
 
     use simdnbt::owned::NbtTag;
 
-    use super::dimension_info;
+    use super::{dimension_info, parse_set_objective};
     use crate::net::NetworkEvent;
     use crate::world::block::model::CardinalLightType;
 
@@ -1757,6 +2589,142 @@ mod dimension_info_tests {
     }
 
     #[test]
+    fn set_objective_optional_number_formats_decode_without_shifting() {
+        use azalea_buf::{AzBuf, AzBufVar};
+        use azalea_chat::numbers::NumberFormat;
+        use azalea_protocol::packets::game::c_set_objective::MethodKind;
+        use pomme_protocol::{Direction, PacketTable, Phase};
+
+        let packet_id = PacketTable::native()
+            .id(Phase::Game, Direction::Clientbound, "set_objective")
+            .unwrap();
+        let formats = [
+            None,
+            Some(NumberFormat::Blank),
+            Some(NumberFormat::Styled {
+                style: simdnbt::owned::Nbt::new(
+                    "".into(),
+                    simdnbt::owned::NbtCompound::from_values(vec![(
+                        "color".into(),
+                        simdnbt::owned::NbtTag::String("red".into()),
+                    )]),
+                ),
+            }),
+            Some(NumberFormat::Fixed {
+                value: azalea_chat::FormattedText::from("fixed"),
+            }),
+        ];
+
+        for (index, format) in formats.into_iter().enumerate() {
+            let mut bytes = Vec::new();
+            pomme_protocol::wire::write_varint(&mut bytes, packet_id);
+            "objective".to_string().azalea_write(&mut bytes).unwrap();
+            let method = if index < 2 {
+                MethodKind::Add
+            } else {
+                MethodKind::Change
+            };
+            method.azalea_write(&mut bytes).unwrap();
+            azalea_chat::FormattedText::from("Deaths")
+                .azalea_write(&mut bytes)
+                .unwrap();
+            let render_type = if index % 2 == 0 {
+                azalea_core::objectives::ObjectiveCriteria::Integer
+            } else {
+                azalea_core::objectives::ObjectiveCriteria::Hearts
+            };
+            render_type.azalea_write(&mut bytes).unwrap();
+            let format_at = bytes.len();
+            format.is_some().azalea_write(&mut bytes).unwrap();
+            if let Some(NumberFormat::Styled { style }) = &format {
+                azalea_registry::builtin::NumberFormatKind::Styled
+                    .azalea_write(&mut bytes)
+                    .unwrap();
+                style.write(&mut bytes);
+            } else if let Some(format) = &format {
+                format.azalea_write(&mut bytes).unwrap();
+            }
+            let expected_prefix: &[u8] = match &format {
+                None => &[0],
+                Some(NumberFormat::Blank) => &[1, 0],
+                Some(NumberFormat::Styled { .. }) => &[1, 1],
+                Some(NumberFormat::Fixed { .. }) => &[1, 2],
+            };
+            assert_eq!(
+                &bytes[format_at..format_at + expected_prefix.len()],
+                expected_prefix,
+                "wire fixture {index}"
+            );
+
+            let mut cursor = std::io::Cursor::new(bytes.as_slice());
+            let _ = u32::azalea_read_var(&mut cursor).unwrap();
+            let NetworkEvent::ScoreboardObjective {
+                name,
+                display,
+                number_format,
+                render_type: actual_render_type,
+            } = parse_set_objective(&mut cursor)
+                .unwrap_or_else(|error| panic!("fixture {index}: {error}"))
+            else {
+                panic!("wrong objective event");
+            };
+            assert_eq!(name, "objective", "fixture {index}");
+            assert_eq!(display.unwrap()[0].text, "Deaths", "fixture {index}");
+            assert_eq!(actual_render_type, Some(render_type), "fixture {index}");
+            assert!(
+                matches!(
+                    (&format, &number_format),
+                    (None, None)
+                        | (
+                            Some(NumberFormat::Blank),
+                            Some(crate::ui::hud::ScoreNumberFormat::Blank)
+                        )
+                        | (
+                            Some(NumberFormat::Styled { .. }),
+                            Some(crate::ui::hud::ScoreNumberFormat::Styled(_))
+                        )
+                        | (
+                            Some(NumberFormat::Fixed { .. }),
+                            Some(crate::ui::hud::ScoreNumberFormat::Fixed(_))
+                        )
+                ),
+                "fixture {index}"
+            );
+            assert_eq!(cursor.position() as usize, bytes.len(), "fixture {index}");
+        }
+    }
+
+    #[test]
+    fn set_objective_remove_has_no_render_type() {
+        use azalea_buf::{AzBuf, AzBufVar};
+        use azalea_protocol::packets::game::c_set_objective::MethodKind;
+        use pomme_protocol::{Direction, PacketTable, Phase};
+
+        let mut bytes = Vec::new();
+        let packet_id = PacketTable::native()
+            .id(Phase::Game, Direction::Clientbound, "set_objective")
+            .unwrap();
+        pomme_protocol::wire::write_varint(&mut bytes, packet_id);
+        "objective".to_string().azalea_write(&mut bytes).unwrap();
+        MethodKind::Remove.azalea_write(&mut bytes).unwrap();
+        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let _ = u32::azalea_read_var(&mut cursor).unwrap();
+        let NetworkEvent::ScoreboardObjective {
+            display,
+            number_format,
+            render_type,
+            ..
+        } = parse_set_objective(&mut cursor).unwrap()
+        else {
+            panic!("wrong objective event");
+        };
+        assert!(display.is_none());
+        assert!(number_format.is_none());
+        assert!(render_type.is_none());
+        assert_eq!(cursor.position() as usize, bytes.len());
+    }
+
+    #[test]
     fn probe_dimension_info_defaults_to_normal_world_and_cardinal_light() {
         let dim = azalea_core::registry_holder::dimension_type::DimensionKindElement {
             height: 384,
@@ -1777,5 +2745,152 @@ mod dimension_info_tests {
         assert!(has_skylight);
         assert!(!is_debug);
         assert_eq!(cardinal_light, CardinalLightType::Default);
+    }
+}
+
+#[cfg(test)]
+mod team_sidebar_slot_tests {
+    use azalea_chat::style::ChatFormatting as C;
+    use azalea_protocol::packets::game::c_set_display_objective::DisplaySlot as S;
+
+    use super::team_sidebar_slot;
+
+    #[test]
+    fn all_team_colors_map_to_their_protocol_slots_and_reset_has_none() {
+        let colors = [
+            C::Black,
+            C::DarkBlue,
+            C::DarkGreen,
+            C::DarkAqua,
+            C::DarkRed,
+            C::DarkPurple,
+            C::Gold,
+            C::Gray,
+            C::DarkGray,
+            C::Blue,
+            C::Green,
+            C::Aqua,
+            C::Red,
+            C::LightPurple,
+            C::Yellow,
+            C::White,
+        ];
+        let slots = [
+            S::TeamBlack,
+            S::TeamDarkBlue,
+            S::TeamDarkGreen,
+            S::TeamDarkAqua,
+            S::TeamDarkRed,
+            S::TeamDarkPurple,
+            S::TeamGold,
+            S::TeamGray,
+            S::TeamDarkGray,
+            S::TeamBlue,
+            S::TeamGreen,
+            S::TeamAqua,
+            S::TeamRed,
+            S::TeamLightPurple,
+            S::TeamYellow,
+            S::TeamWhite,
+        ];
+        for (color, slot) in colors.into_iter().zip(slots) {
+            assert_eq!(team_sidebar_slot(color), Some(slot));
+        }
+        assert_eq!(team_sidebar_slot(C::Reset), None);
+    }
+}
+#[cfg(test)]
+mod styled_number_format_tests {
+    use azalea_buf::AzBuf;
+    use azalea_chat::numbers::NumberFormat;
+    use simdnbt::owned::{Nbt, NbtCompound, NbtTag};
+
+    use super::score_number_format;
+
+    fn style(fields: Vec<(&str, NbtTag)>) -> Nbt {
+        Nbt::new(
+            "".into(),
+            NbtCompound::from_values(
+                fields
+                    .into_iter()
+                    .map(|(key, value)| (key.to_owned().into(), value))
+                    .collect(),
+            ),
+        )
+    }
+
+    #[test]
+    fn styled_format_preserves_full_style_on_only_the_numeric_literal() {
+        let format = NumberFormat::Styled {
+            style: style(vec![
+                ("bold", NbtTag::Byte(1)),
+                ("italic", NbtTag::Byte(1)),
+                ("underlined", NbtTag::Byte(1)),
+                ("strikethrough", NbtTag::Byte(1)),
+                ("obfuscated", NbtTag::Byte(1)),
+                ("font", NbtTag::String("minecraft:uniform".into())),
+                ("insertion", NbtTag::String("inserted".into())),
+                ("shadow_color", NbtTag::Int(0x80112233u32 as i32)),
+                ("text", NbtTag::String("MUST_NOT_RENDER".into())),
+                ("extra", NbtTag::String("NOR_THIS".into())),
+            ]),
+        };
+        let parsed = score_number_format(&format).unwrap();
+        let spans = crate::ui::hud::format_score_number(73, Some(&parsed), [1.0, 1.0, 0.33, 1.0]);
+        assert_eq!(spans.len(), 1);
+        let span = &spans[0];
+        assert_eq!(span.text, "73");
+        assert_eq!(span.color, [1.0; 4]);
+        assert!(
+            span.bold && span.italic && span.underline && span.strikethrough && span.obfuscated
+        );
+        assert_eq!(span.font.as_deref(), Some("minecraft:uniform"));
+        assert!(span.shadow_color.is_some());
+        let component_style = span.component_style.as_ref().unwrap();
+        assert!(component_style.bold && component_style.italic);
+        assert!(component_style.underlined && component_style.strikethrough);
+        assert!(component_style.obfuscated);
+        assert!(component_style.font.is_some() && component_style.shadow_color.is_some());
+        assert_eq!(component_style.insertion.as_deref(), Some("inserted"));
+
+        let colored = NumberFormat::Styled {
+            style: style(vec![("color", NbtTag::String("red".into()))]),
+        };
+        let parsed = score_number_format(&colored).unwrap();
+        let spans = crate::ui::hud::format_score_number(9, Some(&parsed), [1.0, 1.0, 0.33, 1.0]);
+        assert_eq!(spans[0].color, crate::ui::common::rgb(0xff5555));
+    }
+
+    #[test]
+    fn absent_or_malformed_styled_nbt_is_rejected() {
+        let absent = NumberFormat::Styled { style: Nbt::None };
+        assert!(score_number_format(&absent).is_err());
+        // Only the typed objective decoder's documented blank-recovery path
+        // treats its shifted empty style as Blank.
+        assert!(matches!(
+            super::objective_number_format(&absent),
+            Ok(Some(crate::ui::hud::ScoreNumberFormat::Blank))
+        ));
+
+        let malformed = NumberFormat::Styled {
+            style: style(vec![("bold", NbtTag::String("not-a-bool".into()))]),
+        };
+        assert!(score_number_format(&malformed).is_err());
+
+        let mut payload = Vec::new();
+        "objective".to_string().azalea_write(&mut payload).unwrap();
+        azalea_protocol::packets::game::c_set_objective::MethodKind::Add
+            .azalea_write(&mut payload)
+            .unwrap();
+        azalea_chat::FormattedText::from("Deaths")
+            .azalea_write(&mut payload)
+            .unwrap();
+        azalea_core::objectives::ObjectiveCriteria::Integer
+            .azalea_write(&mut payload)
+            .unwrap();
+        true.azalea_write(&mut payload).unwrap();
+        malformed.azalea_write(&mut payload).unwrap();
+        let mut cursor = std::io::Cursor::new(payload.as_slice());
+        assert!(super::parse_set_objective(&mut cursor).is_err());
     }
 }

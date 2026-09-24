@@ -53,6 +53,8 @@ pub enum ContainerScreen {
     ShulkerBox,
     Anvil,
     Enchantment,
+    Merchant,
+    Horse { columns: u8, entity_id: i32 },
 }
 
 impl ContainerScreen {
@@ -65,6 +67,8 @@ impl ContainerScreen {
             Self::ShulkerBox => ContainerKind::ShulkerBox,
             Self::Anvil => ContainerKind::Anvil,
             Self::Enchantment => ContainerKind::Enchantment,
+            Self::Merchant => ContainerKind::Merchant,
+            Self::Horse { columns, .. } => ContainerKind::Horse { columns },
         }
     }
 }
@@ -86,6 +90,7 @@ pub struct OpenContainer {
     pub anvil: Option<crate::ui::anvil::AnvilState>,
     /// The book animation's state; Some only for the enchantment screen.
     pub enchant: Option<crate::ui::enchantment::EnchantState>,
+    pub merchant: Option<crate::ui::merchant::MerchantModel>,
     /// This menu's latest server state id, echoed in container clicks.
     pub state_id: u32,
 }
@@ -96,6 +101,67 @@ impl OpenContainer {
     fn inv_start(&self) -> usize {
         self.screen.click_kind().inv_start()
     }
+}
+
+fn show_death_screen_param(param: f32) -> bool {
+    param == 0.0
+}
+
+fn limited_crafting_param(param: f32) -> bool {
+    param == 1.0
+}
+
+fn is_win_game_event(
+    event: &azalea_protocol::packets::game::c_game_event::EventType,
+    _param: f32,
+) -> bool {
+    matches!(
+        event,
+        azalea_protocol::packets::game::c_game_event::EventType::WinGame
+    )
+}
+
+fn credits_may_advance(server_modal_pending: bool) -> bool {
+    !server_modal_pending
+}
+
+pub(crate) fn death_confirm_escape_allowed(death_confirm: bool, credits_active: bool) -> bool {
+    death_confirm && !credits_active
+}
+
+fn finish_win_credits(
+    state: &mut Option<crate::ui::menu::CreditsRollState>,
+    complete: bool,
+) -> bool {
+    complete && state.take().is_some()
+}
+
+fn finish_win_credits_if_allowed(
+    state: &mut Option<crate::ui::menu::CreditsRollState>,
+    complete: bool,
+    server_modal_pending: bool,
+) -> bool {
+    credits_may_advance(server_modal_pending) && finish_win_credits(state, complete)
+}
+
+fn tab_list_overlay_visible(
+    requested: bool,
+    hide_gui: bool,
+    paused: bool,
+    gui_open: bool,
+    options_open: bool,
+    chat_open: bool,
+    dead: bool,
+    death_screen_open: bool,
+) -> bool {
+    requested
+        && !hide_gui
+        && !paused
+        && !gui_open
+        && !options_open
+        && !chat_open
+        && !dead
+        && !death_screen_open
 }
 
 pub struct GameState {
@@ -121,6 +187,8 @@ pub struct GameState {
     /// player doesn't tick and sends no movement.
     pub client_loaded: bool,
     pub player: LocalPlayer,
+    pub item_cooldowns: crate::player::cooldown::CooldownTracker,
+    pub world_border: crate::world::border::WorldBorder,
     /// Bubble index the pop sound last played for, so each pop fires once.
     pub last_bubble_pop_sound_played: i32,
     pub biome_climate: Arc<HashMap<u32, BiomeClimate>>,
@@ -134,6 +202,11 @@ pub struct GameState {
     pub dead: bool,
     pub death_screen_open: bool,
     pub show_death_screen: bool,
+    /// Server-side LimitedCrafting flag; vanilla client stores it but does not
+    /// use it to reject local crafting operations.
+    pub do_limited_crafting: bool,
+    /// Game-winning credits roll, independent of the death-screen state.
+    pub win_credits: Option<crate::ui::menu::CreditsRollState>,
     pub hardcore: bool,
     pub death_message: String,
     pub death_screen_ticks: u32,
@@ -150,8 +223,8 @@ pub struct GameState {
     pub cursor_item: azalea_inventory::ItemStack,
     /// The server-opened container screen (crafting table), if any.
     pub open_container: Option<OpenContainer>,
-    /// Which container menu was open last frame (0 = survival inventory), to
-    /// detect the close transition and send a container-close packet.
+    /// Which container menu was open last frame (0 = player inventory,
+    /// including the creative inventory), to detect close transitions.
     pub container_was_open: Option<i32>,
     /// Active survival click-drag (button + slots covered), if any.
     pub inv_drag: Option<(azalea_inventory::operations::QuickCraftKind, Vec<u16>)>,
@@ -162,12 +235,16 @@ pub struct GameState {
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
+    pub code_of_conduct: Option<String>,
+    pub code_of_conduct_scroll: usize,
+    pub pending_server_transfer: Option<crate::net::ServerTransfer>,
     pub dialog_registry: Arc<crate::ui::server_dialog::DialogRegistry>,
     /// The connection is in the configuration phase (the join, or a
     /// reconfiguration), where dialogs can't run commands.
     pub configuring: bool,
     pub command_tree: Option<Arc<crate::net::commands::CommandTree>>,
     pub tab_list: TabList,
+    pub tab_score_state: crate::ui::player_tab::TabScoreState,
     pub server_enforces_secure_chat: bool,
     /// Locator bar waypoints tracked by the server.
     pub waypoints: crate::world::waypoints::WaypointMap,
@@ -178,6 +255,7 @@ pub struct GameState {
     pub action_bar: Option<(Vec<crate::ui::text::TextSpan>, u64)>,
     pub title: crate::ui::title::TitleState,
     pub scoreboard: crate::ui::hud::Scoreboard,
+    pub local_scoreboard_name: Option<String>,
     pub boss_bars: crate::ui::boss_bar::BossBarState,
     pub toasts: crate::ui::toast::ToastState,
     pub subtitles: crate::ui::subtitles::SubtitleOverlayState,
@@ -242,6 +320,7 @@ pub struct GameState {
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
     pub particle_store: crate::particle::ParticleStore,
+    pub item_activation: Option<crate::item_activation::ItemActivation>,
     pub block_entity_anim: BlockEntityAnimStore,
     pub benchmark: Option<Benchmark>,
     pub benchmark_result: Option<BenchmarkResult>,
@@ -338,6 +417,65 @@ pub struct MeshedCol {
 }
 
 impl GameState {
+    /// Resolve a spawned entity's attachment from the dimensions available to
+    /// existing raycast/player state. Pose/attribute-scale mutations beyond
+    /// these sources are not represented by the current shared entity state.
+    pub(crate) fn tracking_attachment_for(
+        player: &LocalPlayer,
+        entities: &EntityStore,
+        items: &ItemEntityStore,
+        id: i32,
+    ) -> Option<crate::particle::TrackingAttachment> {
+        let (position, width, height) = if id == player.entity_id {
+            let bounds = player.bounding_box();
+            (
+                player.position.into(),
+                bounds.max.x - bounds.min.x,
+                player.height(),
+            )
+        } else if let Some(entity) = entities.living.get(&id) {
+            let mut dims = azalea_entity::dimensions::EntityDimensions::from(entity.entity_type);
+            if entity.is_baby {
+                if matches!(
+                    entity.entity_type,
+                    EntityKind::Squid | EntityKind::GlowSquid
+                ) {
+                    dims.width = 0.5;
+                    dims.height = 0.5;
+                } else {
+                    dims.width *= 0.5;
+                    dims.height *= 0.5;
+                }
+            }
+            (
+                entity.position.into(),
+                f64::from(dims.width),
+                f64::from(dims.height),
+            )
+        } else if let Some(position) = items.position(id) {
+            let dims = azalea_entity::dimensions::EntityDimensions::from(EntityKind::Item);
+            (
+                position.into(),
+                f64::from(dims.width),
+                f64::from(dims.height),
+            )
+        } else {
+            let vehicle = entities.vehicles.get(&id)?;
+            let kind = vehicle.kind?;
+            let dims = azalea_entity::dimensions::EntityDimensions::from(kind);
+            (
+                vehicle.position.into(),
+                f64::from(dims.width),
+                f64::from(dims.height),
+            )
+        };
+        Some(crate::particle::TrackingAttachment {
+            position,
+            width,
+            height,
+        })
+    }
+
     pub(crate) fn probe_lightmap_brightness(&self) -> f32 {
         eye_lightmap_brightness(self)
     }
@@ -389,8 +527,11 @@ impl GameState {
                     dry_foliage,
                 )
             },
+            item_activation: None,
             block_entity_anim: BlockEntityAnimStore::default(),
             player: LocalPlayer::new(),
+            item_cooldowns: crate::player::cooldown::CooldownTracker::default(),
+            world_border: crate::world::border::WorldBorder::default(),
             last_bubble_pop_sound_played: 0,
             biome_climate: Arc::new(HashMap::new()),
             player_walk_pos: 0.0,
@@ -402,6 +543,8 @@ impl GameState {
             dead: false,
             death_screen_open: false,
             show_death_screen: true,
+            do_limited_crafting: false,
+            win_credits: None,
             hardcore: false,
             death_message: String::new(),
             death_screen_ticks: 0,
@@ -425,10 +568,14 @@ impl GameState {
             },
             server_dialog: None,
             server_links: Vec::new(),
+            code_of_conduct: None,
+            code_of_conduct_scroll: 0,
+            pending_server_transfer: None,
             dialog_registry: Arc::default(),
             configuring: true,
             command_tree: None,
             tab_list: TabList::new(),
+            tab_score_state: crate::ui::player_tab::TabScoreState::default(),
             server_enforces_secure_chat: false,
             waypoints: crate::world::waypoints::WaypointMap::default(),
             tool_highlight_timer: 0,
@@ -436,6 +583,7 @@ impl GameState {
             action_bar: None,
             title: crate::ui::title::TitleState::default(),
             scoreboard: crate::ui::hud::Scoreboard::default(),
+            local_scoreboard_name: None,
             boss_bars: crate::ui::boss_bar::BossBarState::default(),
             toasts: crate::ui::toast::ToastState::default(),
             subtitles: crate::ui::subtitles::SubtitleOverlayState::default(),
@@ -518,8 +666,14 @@ impl GameState {
         self.server_dialog.is_some() || self.chat.has_pending_modal_prompt()
     }
 
+    fn server_modal_blocks_credits(&self) -> bool {
+        self.code_of_conduct.is_some() || self.dialog_open()
+    }
+
     pub fn gui_open(&self) -> bool {
-        self.inventory_open
+        self.win_credits.is_some()
+            || self.code_of_conduct.is_some()
+            || self.inventory_open
             || self.creative_inventory_open
             || self.open_container.is_some()
             || self.dialog_open()
@@ -531,7 +685,7 @@ impl GameState {
     pub fn open_menu_id(&self) -> Option<i32> {
         if let Some(c) = &self.open_container {
             Some(c.id)
-        } else if self.inventory_open {
+        } else if self.inventory_open || self.creative_inventory_open {
             Some(0)
         } else {
             None
@@ -646,6 +800,31 @@ impl GameState {
         )
     }
 
+    /// Applies the client-owned state carried by vanilla GameEvents. WinGame's
+    /// parameter is intentionally ignored; the other flags use official 26.2
+    /// float comparisons verbatim.
+    pub(crate) fn apply_game_event(
+        &mut self,
+        event: azalea_protocol::packets::game::c_game_event::EventType,
+        param: f32,
+    ) {
+        use azalea_protocol::packets::game::c_game_event::EventType;
+        self.chat.apply_game_event_notice(event.clone());
+        if is_win_game_event(&event, param) {
+            if !self.respawn_sent && self.win_credits.is_none() {
+                self.death_confirm = false;
+                self.death_confirm_ticks = 0;
+                self.win_credits = Some(crate::ui::menu::CreditsRollState::default());
+            }
+            return;
+        }
+        match event {
+            EventType::ImmediateRespawn => self.show_death_screen = show_death_screen_param(param),
+            EventType::LimitedCrafting => self.do_limited_crafting = limited_crafting_param(param),
+            _ => {}
+        }
+    }
+
     /// Closes the death screen and its confirm, and re-arms the respawn send.
     pub fn reset_death_screen(&mut self) {
         self.death_screen_open = false;
@@ -658,6 +837,7 @@ impl GameState {
     /// No menu (pause, inventory, chat) is capturing input.
     pub fn input_live(&self) -> bool {
         !self.paused
+            && self.win_credits.is_none()
             && !self.death_screen_open
             && !self.gui_open()
             && !self.chat.is_open()
@@ -1155,12 +1335,9 @@ impl GameState {
         }
         for ((col, si), _) in sections.into_iter().map(|key| (key, ())) {
             let g = self.bump_section_gen(col, si..si + 1);
-            let mesh = self.mesh_dispatcher.mesh_sections_now(
-                &self.chunk_store,
-                col,
-                si..si + 1,
-                g,
-            );
+            let mesh =
+                self.mesh_dispatcher
+                    .mesh_sections_now(&self.chunk_store, col, si..si + 1, g);
             self.apply_mesh_upload(renderer, mesh);
         }
     }
@@ -1462,6 +1639,7 @@ pub enum GameUpdateResult {
     None,
     ManualDisconnect,
     Disconnected { reason: String },
+    Transfer(crate::net::ServerTransfer),
 }
 
 enum ResultKind {
@@ -1605,6 +1783,122 @@ pub(crate) fn build_server_screens(
     tick: Option<u64>,
     text_events: &[crate::ui::text_edit::TextInputEvent],
 ) {
+    if let Some(text) = game.code_of_conduct.clone() {
+        let fs = common::FONT_SIZE * gs;
+        let x = sw * 0.1;
+        let y = sh * 0.1;
+        let w = sw * 0.8;
+        let h = sh * 0.8;
+        elements.push(MenuElement::Rect {
+            x,
+            y,
+            w,
+            h,
+            corner_radius: 5.0,
+            color: [0.04, 0.04, 0.06, 0.97],
+        });
+        elements.push(MenuElement::Text {
+            x: sw / 2.0,
+            y: y + 12.0,
+            text: "Code of Conduct".into(),
+            scale: fs * 1.5,
+            color: common::WHITE,
+            centered: true,
+        });
+        elements.push(MenuElement::ScissorPush {
+            x: x + 12.0,
+            y: y + 38.0,
+            w: w - 24.0,
+            h: h - 88.0,
+        });
+        let mut lines = Vec::new();
+        let mut line = String::new();
+        for word in text.split_whitespace() {
+            let candidate = if line.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{line} {word}")
+            };
+            if !line.is_empty() && gfx.renderer.menu_text_width(&candidate, fs) > w - 28.0 {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+        let visible = ((h - 88.0) / (fs + 3.0)).floor().max(1.0) as usize;
+        let scroll = core.input.consume_menu_scroll().round() as isize;
+        game.code_of_conduct_scroll = if scroll < 0 {
+            game.code_of_conduct_scroll
+                .saturating_add((-scroll) as usize)
+        } else {
+            game.code_of_conduct_scroll.saturating_sub(scroll as usize)
+        }
+        .min(lines.len().saturating_sub(visible));
+        for (i, line) in lines
+            .iter()
+            .skip(game.code_of_conduct_scroll)
+            .take(visible)
+            .enumerate()
+        {
+            elements.push(MenuElement::Text {
+                x: x + 14.0,
+                y: y + 42.0 + i as f32 * (fs + 3.0),
+                text: line.clone(),
+                scale: fs,
+                color: common::WHITE,
+                centered: false,
+            });
+        }
+        elements.push(MenuElement::ScissorPop);
+        let buttons = [
+            [sw / 2.0 - 108.0, y + h - 38.0, 96.0, 24.0],
+            [sw / 2.0 + 12.0, y + h - 38.0, 96.0, 24.0],
+        ];
+        for (rect, label) in buttons.into_iter().zip(["Accept", "Decline"]) {
+            elements.push(MenuElement::Rect {
+                x: rect[0],
+                y: rect[1],
+                w: rect[2],
+                h: rect[3],
+                corner_radius: 3.0,
+                color: [0.2, 0.3, 0.2, 1.0],
+            });
+            elements.push(MenuElement::Text {
+                x: rect[0] + rect[2] / 2.0,
+                y: rect[1] + 7.0,
+                text: label.into(),
+                scale: fs,
+                color: common::WHITE,
+                centered: true,
+            });
+        }
+        let cursor = core.input.cursor_pos();
+        let clicked = core.input.left_just_pressed();
+        let hit = |r: [f32; 4]| {
+            cursor.0 >= r[0]
+                && cursor.0 <= r[0] + r[2]
+                && cursor.1 >= r[1]
+                && cursor.1 <= r[1] + r[3]
+        };
+        let decision = if core.input.escape_pressed() || (clicked && hit(buttons[1])) {
+            Some(false)
+        } else if core.input.enter_pressed() || (clicked && hit(buttons[0])) {
+            Some(true)
+        } else {
+            None
+        };
+        if let Some(accept) = decision {
+            connection.packet_tx.decide_code_of_conduct(accept);
+            game.code_of_conduct = None;
+            core.input.clear_just_pressed_actions();
+        }
+        return;
+    }
     let modal_open = game.chat.has_pending_modal_prompt();
     if let Some(dialog) = game.server_dialog.as_mut() {
         // The dialog types while it is the top screen; a confirm screen over
@@ -2000,7 +2294,12 @@ pub fn update_game(
 
     let disconnect_reason =
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
+    if let Some(transfer) = game.pending_server_transfer.take() {
+        game.tab_score_state.set_visible(false);
+        return GameUpdateResult::Transfer(transfer);
+    }
     if let Some(reason) = disconnect_reason {
+        game.tab_score_state.set_visible(false);
         return GameUpdateResult::Disconnected { reason };
     }
 
@@ -2036,13 +2335,25 @@ pub fn update_game(
     core.tick_accumulator += dt;
     while core.tick_accumulator >= TICK_RATE {
         game.tick_count = game.tick_count.wrapping_add(1);
+        if game
+            .item_activation
+            .as_mut()
+            .is_some_and(|activation| !activation.tick())
+        {
+            game.item_activation = None;
+        }
+        game.item_cooldowns.tick();
+        // ClientLevel ticks the border on each fixed client/world tick, even
+        // when the world clock is frozen or running at a modified rate.
+        game.world_border.tick();
         // Vanilla `Minecraft.tick` order: `gameMode.tick` drives the connection
         // tick (and so the level load tracker) before the level's entities,
         // i.e. before the local player moves or sends anything.
         AppCore::tick_level_load(&gfx.renderer, connection, game);
         // Vanilla Gui.tick falls back from dead health alone when no screen is
         // open, so death UI/auto-respawn must not depend on PlayerCombatKill.
-        let has_screen = game.death_screen_open
+        let has_screen = game.win_credits.is_some()
+            || game.death_screen_open
             || game.paused
             || game.options_from_game
             || game.gui_open()
@@ -2067,7 +2378,13 @@ pub fn update_game(
             game.player.tick_sleep();
         }
         game.item_entity_store.tick(&game.chunk_store);
-        game.particle_store.tick(&game.chunk_store);
+        let chunks = &game.chunk_store;
+        let player = &game.player;
+        let entities = &game.entity_store;
+        let items = &game.item_entity_store;
+        game.particle_store.tick_with_entity_lookup(chunks, |id| {
+            GameState::tracking_attachment_for(player, entities, items, id)
+        });
         game.block_entity_anim.tick();
         game.title.tick();
         tick_tool_highlight(core, game);
@@ -2125,7 +2442,7 @@ pub fn update_game(
         && game.player.is_sleeping()
         && core.input.action_just_pressed(input::Action::Jump)
     {
-        core.send_stop_sleeping(connection);
+        core.send_stop_sleeping(connection, game.player.entity_id);
     }
     // TODO: remaining vanilla keybinds with no backing feature yet:
     // L advancements, P social interactions, O friends overlay (in-game),
@@ -2557,12 +2874,15 @@ pub fn update_game(
             bar,
             game.player.game_mode,
             game.player.inventory.hotbar_slots(),
+            &game.item_cooldowns,
+            partial_tick,
             game.tool_highlight_timer,
             game.action_bar
                 .as_ref()
                 .map(|(spans, tick)| (spans.as_slice(), game.tick_count.wrapping_sub(*tick))),
             &|spans, s| gfx.renderer.menu_spans_width(spans, s),
             &game.scoreboard,
+            game.local_scoreboard_name.as_deref(),
             &game.player.effects,
             &game.boss_bars,
             gfx.renderer.is_first_person(),
@@ -2581,14 +2901,18 @@ pub fn update_game(
         hud::build_sleep_overlay(&mut elements, sw, sh, game.player.sleep_counter);
     }
 
-    if core.input.performing_action(input::Action::ViewPlayerList)
-        && !game.hide_gui
-        && !game.paused
-        && !game.gui_open()
-        && !game.chat.is_open()
-        && !game.dead
-        && !game.death_screen_open
-    {
+    let tab_list_visible = tab_list_overlay_visible(
+        core.input.performing_action(input::Action::ViewPlayerList),
+        game.hide_gui,
+        game.paused,
+        game.gui_open(),
+        game.options_from_game,
+        game.chat.is_open(),
+        game.dead,
+        game.death_screen_open,
+    );
+    game.tab_score_state.set_visible(tab_list_visible);
+    if tab_list_visible {
         let r = &gfx.renderer;
         crate::ui::player_tab::build_player_tab_overlay(
             &mut elements,
@@ -2598,6 +2922,8 @@ pub fn update_game(
             gs,
             &|t, s| r.menu_text_width(t, s),
             &|spans, s| r.menu_spans_width(spans, s),
+            &mut game.tab_score_state,
+            game.tick_count,
         );
     }
 
@@ -2843,7 +3169,22 @@ pub fn update_game(
     // (vanilla's `previousScreen`) but neither draw nor take input. The Hud
     // still draws, so chat keeps its unfocused backlog.
     let dialog_open = game.dialog_open();
-    if game.options_from_game && !dialog_open {
+    let mut win_credits_complete = false;
+    let server_modal_blocks_credits = game.server_modal_blocks_credits();
+    if let Some(state) = game.win_credits.as_mut()
+        && credits_may_advance(server_modal_blocks_credits)
+    {
+        let menu_input = core.build_menu_input(dt);
+        let r = &gfx.renderer;
+        let (result, complete) =
+            core.menu
+                .build_win_credits_roll(state, sw, sh, &menu_input, &|t, s| {
+                    r.menu_text_width(t, s)
+                });
+        elements.extend(result.elements);
+        core.input.clear_just_pressed_actions();
+        win_credits_complete = complete;
+    } else if game.options_from_game && !dialog_open {
         core.menu.server_render_distance = game.server_render_distance;
         let mut menu_input = core.build_menu_input(dt);
         // Chat consumed the enter/tab latches earlier this frame; hand them on.
@@ -2905,6 +3246,16 @@ pub fn update_game(
         core.input.clear_just_pressed_actions();
     }
 
+    if finish_win_credits_if_allowed(
+        &mut game.win_credits,
+        win_credits_complete,
+        server_modal_blocks_credits,
+    ) {
+        // Taking the state makes this callback edge-triggered; send_respawn is
+        // independently guarded by GameState::respawn_sent.
+        core.send_respawn(connection, game);
+    }
+
     let mut player_preview = None;
     let mut book_preview = None;
     if (game.inventory_open || game.open_container.is_some()) && !dialog_open {
@@ -2940,8 +3291,47 @@ pub fn update_game(
                     name,
                 }));
         }
-        let (clicked_outside, ops) = if let Some(container) = &game.open_container {
+        let mut select_trade = None;
+        let (clicked_outside, ops) = if let Some(container) = &mut game.open_container {
             let result = match container.screen {
+                ContainerScreen::Merchant => {
+                    let model = container
+                        .merchant
+                        .as_mut()
+                        .expect("merchant screen has model");
+                    let scroll = core.input.consume_menu_scroll();
+                    model.scroll_by(scroll.round() as i32);
+                    let result = crate::ui::merchant::build_merchant(
+                        &mut elements,
+                        sw,
+                        sh,
+                        core.input.cursor_pos(),
+                        &input,
+                        model,
+                        &container.slots,
+                        &container.title,
+                        &game.cursor_item,
+                        &mut game.inv_drag,
+                        &mut game.inv_last_click,
+                        gs,
+                    );
+                    select_trade = result.select_trade;
+                    result.container
+                }
+                ContainerScreen::Horse { columns, .. } => crate::ui::horse::build_horse(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    crate::ui::horse::HorseLayout { columns },
+                    &container.slots,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                ),
                 ContainerScreen::CraftingTable => crate::ui::crafting_table::build_crafting_table(
                     &mut elements,
                     sw,
@@ -3074,6 +3464,9 @@ pub fn update_game(
             (result.clicked_outside, result.ops)
         };
         close_inventory = clicked_outside;
+        if let Some(index) = select_trade {
+            connection.packet_tx.select_trade(index);
+        }
         send_container_clicks(game, connection, ops);
         core.input.clear_just_pressed_actions();
     }
@@ -3584,8 +3977,15 @@ pub fn update_game(
     // Recompute after this frame's state changes (a finished benchmark releases
     // the cursor mid-frame), so the renderer doesn't re-hide it from a stale value.
     let hide_cursor = game.input_live() && !game.dead && core.input.is_cursor_captured();
+    gfx.renderer.set_world_border(
+        game.client_loaded.then_some(&game.world_border),
+        partial_tick,
+    );
     let show_hand = !game.hide_gui
-        && core.probe.as_ref().is_none_or(|probe| probe.held_item_draw_enabled());
+        && core
+            .probe
+            .as_ref()
+            .is_none_or(|probe| probe.held_item_draw_enabled());
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
         hide_cursor,
@@ -3613,6 +4013,9 @@ pub fn update_game(
         player_preview,
         book_preview,
         game.player.eyes_in_water,
+        game.item_activation
+            .as_ref()
+            .and_then(|activation| activation.draw(partial_tick)),
     ) {
         tracing::error!("Render error: {e}");
     }
@@ -3646,6 +4049,7 @@ pub fn update_game(
             core.send_respawn(connection, game);
         }
         DeathAction::TitleScreen => {
+            game.tab_score_state.set_visible(false);
             return GameUpdateResult::ManualDisconnect;
         }
         DeathAction::ShowConfirm => {
@@ -3666,6 +4070,7 @@ pub fn update_game(
             core.apply_cursor_grab(&gfx.window, Some(game));
         }
         PauseAction::Disconnect => {
+            game.tab_score_state.set_visible(false);
             return GameUpdateResult::ManualDisconnect;
         }
         PauseAction::OpenBenchmark => {
@@ -4004,14 +4409,31 @@ fn build_item_render_infos(
         let actual_age_f = item.age as f32 + age_partial_tick;
         let actual_bob_offset = item.bob_offset;
         let target_trace = std::env::var_os("POMME_ITEM_ENTITY_TRACE").is_some()
-            && std::env::var("POMME_DROP_TARGET_UUID").is_ok_and(|target| target == item.uuid.to_string());
-        let phase_age = std::env::var("POMME_DROP_PHASE_AGE").ok().and_then(|v| v.parse::<f32>().ok());
-        let phase_bob = std::env::var("POMME_DROP_PHASE_BOB_OFFSET").ok().and_then(|v| v.parse::<f32>().ok());
-        let bob_input = std::env::var("POMME_DROP_BOB_OFFSET").ok().and_then(|v| v.parse::<f32>().ok());
+            && std::env::var("POMME_DROP_TARGET_UUID")
+                .is_ok_and(|target| target == item.uuid.to_string());
+        let phase_age = std::env::var("POMME_DROP_PHASE_AGE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok());
+        let phase_bob = std::env::var("POMME_DROP_PHASE_BOB_OFFSET")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok());
+        let bob_input = std::env::var("POMME_DROP_BOB_OFFSET")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok());
         let controlled_phase = target_trace && phase_age.is_some() && phase_bob.is_some();
         let bob_controlled = target_trace && bob_input.is_some();
-        let age_f = if controlled_phase { phase_age.unwrap_or(actual_age_f) } else { actual_age_f };
-        let bob_offset = if bob_controlled { bob_input.unwrap_or(actual_bob_offset) } else if controlled_phase { phase_bob.unwrap_or(actual_bob_offset) } else { actual_bob_offset };
+        let age_f = if controlled_phase {
+            phase_age.unwrap_or(actual_age_f)
+        } else {
+            actual_age_f
+        };
+        let bob_offset = if bob_controlled {
+            bob_input.unwrap_or(actual_bob_offset)
+        } else if controlled_phase {
+            phase_bob.unwrap_or(actual_bob_offset)
+        } else {
+            actual_bob_offset
+        };
         let lerped = item.prev_position.lerp(item.position, partial_tick as f64);
         let light = get_entity_light(chunk_store, lerped);
         let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &item.item_name);
@@ -4566,10 +4988,117 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_server_time, bump_loaded_content_generations, has_red_overlay, section_bit,
-        section_bits, server_tick_runs,
+        advance_server_time, bump_loaded_content_generations, credits_may_advance,
+        death_confirm_escape_allowed, finish_win_credits, finish_win_credits_if_allowed,
+        has_red_overlay, is_win_game_event, limited_crafting_param, section_bit, section_bits,
+        server_tick_runs, show_death_screen_param,
     };
     use crate::renderer::SkyState;
+
+    #[test]
+    fn tab_overlay_visibility_requires_every_existing_gate() {
+        use super::tab_list_overlay_visible as visible;
+        assert!(visible(
+            true, false, false, false, false, false, false, false
+        ));
+        for gate in 1..8 {
+            let mut args = [true, false, false, false, false, false, false, false];
+            args[gate] = true;
+            assert!(!visible(
+                args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]
+            ));
+        }
+    }
+
+    #[test]
+    fn tracking_attachment_uses_local_living_and_spawned_nonliving_dimensions() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::DVec3;
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::{LookDirection, Position};
+        use crate::player::LocalPlayer;
+
+        let player = LocalPlayer::new();
+        let mut entities = EntityStore::new();
+        let mut items = crate::entity::ItemEntityStore::new();
+        let local =
+            super::GameState::tracking_attachment_for(&player, &entities, &items, player.entity_id)
+                .unwrap();
+        assert_eq!(local.position, DVec3::from(player.position));
+        assert_eq!(
+            local.width,
+            player.bounding_box().max.x - player.bounding_box().min.x
+        );
+        assert_eq!(local.height, player.height());
+
+        entities.spawn_living(
+            41,
+            EntityKind::Zombie,
+            Position::new(2.0, 3.0, 4.0),
+            LookDirection::new(0.0, 0.0),
+            0.0,
+            None,
+        );
+        let living =
+            super::GameState::tracking_attachment_for(&player, &entities, &items, 41).unwrap();
+        let living_dimensions =
+            azalea_entity::dimensions::EntityDimensions::from(EntityKind::Zombie);
+        assert_eq!(living.position, DVec3::new(2.0, 3.0, 4.0));
+        assert_eq!(living.width, f64::from(living_dimensions.width));
+        assert_eq!(living.height, f64::from(living_dimensions.height));
+
+        entities.set_vehicle_spawn_transform(
+            42,
+            Position::new(5.0, 6.0, 7.0),
+            DVec3::ZERO,
+            LookDirection::new(0.0, 0.0),
+        );
+        entities.set_vehicle_kind(42, EntityKind::Minecart);
+        let nonliving =
+            super::GameState::tracking_attachment_for(&player, &entities, &items, 42).unwrap();
+        let vehicle_dimensions =
+            azalea_entity::dimensions::EntityDimensions::from(EntityKind::Minecart);
+        assert_eq!(nonliving.position, DVec3::new(5.0, 6.0, 7.0));
+        assert_eq!(nonliving.width, f64::from(vehicle_dimensions.width));
+        assert_eq!(nonliving.height, f64::from(vehicle_dimensions.height));
+
+        // Item-only lookup uses authoritative base position, never render bob.
+        items.spawn_item(
+            45,
+            uuid::Uuid::nil(),
+            Position::new(8.0, 9.0, 10.0),
+            DVec3::ZERO,
+        );
+        let item =
+            super::GameState::tracking_attachment_for(&player, &entities, &items, 45).unwrap();
+        let item_dimensions = azalea_entity::dimensions::EntityDimensions::from(EntityKind::Item);
+        assert_eq!(item.position, DVec3::new(8.0, 9.0, 10.0));
+        assert_eq!(item.width, f64::from(item_dimensions.width));
+        assert_eq!(item.height, f64::from(item_dimensions.height));
+        items.teleport(45, Position::new(11.0, 12.0, 13.0), None, false);
+        assert_eq!(
+            super::GameState::tracking_attachment_for(&player, &entities, &items, 45)
+                .unwrap()
+                .position,
+            DVec3::new(11.0, 12.0, 13.0)
+        );
+        assert!(
+            super::GameState::tracking_attachment_for(&player, &entities, &items, 46).is_none()
+        );
+
+        entities.set_passengers(43, &[]);
+        entities.set_vehicle_transform(44, Position::default(), DVec3::ZERO);
+        assert!(
+            super::GameState::tracking_attachment_for(&player, &entities, &items, 43).is_none()
+        );
+        assert!(
+            super::GameState::tracking_attachment_for(&player, &entities, &items, 44).is_none()
+        );
+        assert!(
+            super::GameState::tracking_attachment_for(&player, &entities, &items, 999).is_none()
+        );
+    }
 
     #[test]
     fn frozen_ticks_only_run_when_step_budget_exists() {
@@ -4613,10 +5142,11 @@ mod tests {
 
     #[test]
     fn item_age_follows_simulation_ticks_not_client_ticks_or_daytime() {
-        use crate::entity::ItemEntityStore;
-        use crate::entity::components::Position;
         use glam::DVec3;
         use uuid::Uuid;
+
+        use crate::entity::ItemEntityStore;
+        use crate::entity::components::Position;
 
         let mut sky = SkyState::default_day();
         let mut items = ItemEntityStore::new();
@@ -4656,6 +5186,7 @@ mod tests {
     #[test]
     fn unload_and_reload_dirty_the_remaining_3x3_dependency_set() {
         use std::collections::{HashMap, HashSet};
+
         use azalea_core::position::ChunkPos;
 
         let center = ChunkPos::new(0, 0);
@@ -4663,7 +5194,10 @@ mod tests {
             .into_iter()
             .collect();
         let mut generations = HashMap::new();
-        assert_eq!(bump_loaded_content_generations(&mut generations, [center], &loaded).len(), 9);
+        assert_eq!(
+            bump_loaded_content_generations(&mut generations, [center], &loaded).len(),
+            9
+        );
         assert!(generations.values().all(|&generation| generation == 1));
 
         let mut after_unload = loaded.clone();
@@ -4676,7 +5210,11 @@ mod tests {
         let dirty = bump_loaded_content_generations(&mut generations, [center], &loaded);
         assert_eq!(dirty.len(), 9);
         assert_eq!(generations[&center], 2);
-        assert!(dirty.iter().all(|pos| generations[pos] == 3 || *pos == center));
+        assert!(
+            dirty
+                .iter()
+                .all(|pos| generations[pos] == 3 || *pos == center)
+        );
     }
 
     #[test]
@@ -4684,5 +5222,48 @@ mod tests {
         assert!(has_red_overlay(1, 0));
         assert!(has_red_overlay(0, 1));
         assert!(!has_red_overlay(0, 0));
+    }
+
+    #[test]
+    fn immediate_respawn_flag_uses_official_zero_polarity() {
+        assert!(show_death_screen_param(0.0));
+        assert!(!show_death_screen_param(1.0));
+        assert!(!show_death_screen_param(-1.0));
+    }
+
+    #[test]
+    fn limited_crafting_flag_is_true_only_at_one() {
+        assert!(limited_crafting_param(1.0));
+        assert!(!limited_crafting_param(0.0));
+        assert!(!limited_crafting_param(2.0));
+    }
+
+    #[test]
+    fn win_game_ignores_its_parameter() {
+        use azalea_protocol::packets::game::c_game_event::EventType;
+        for param in [0.0, 1.0, -1.0, 99.0] {
+            assert!(is_win_game_event(&EventType::WinGame, param));
+        }
+        assert!(!is_win_game_event(&EventType::ImmediateRespawn, 1.0));
+    }
+
+    #[test]
+    fn completed_credits_closes_and_dispatches_callback_once() {
+        let mut state = Some(crate::ui::menu::CreditsRollState::default());
+        assert!(!finish_win_credits(&mut state, false));
+        assert!(finish_win_credits(&mut state, true));
+        assert!(!finish_win_credits(&mut state, true));
+    }
+
+    #[test]
+    fn server_modal_owns_input_over_pending_credits() {
+        let mut credits = Some(crate::ui::menu::CreditsRollState::default());
+        assert!(!credits_may_advance(true));
+        assert!(!finish_win_credits_if_allowed(&mut credits, true, true));
+        assert!(credits.is_some());
+        assert!(finish_win_credits_if_allowed(&mut credits, true, false));
+        assert!(credits.is_none());
+        assert!(!death_confirm_escape_allowed(true, true));
+        assert!(death_confirm_escape_allowed(true, false));
     }
 }

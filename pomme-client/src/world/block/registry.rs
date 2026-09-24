@@ -174,10 +174,7 @@ impl BlockRegistry {
     }
 
     pub fn get_flat_item_tint(&self, name: &str) -> model::ItemTint {
-        self.flat_item_tints
-            .get(name)
-            .cloned()
-            .unwrap_or_default()
+        self.flat_item_tints.get(name).cloned().unwrap_or_default()
     }
 
     pub fn get_item_ground_transform(&self, name: &str) -> Option<glam::Mat4> {
@@ -268,7 +265,9 @@ impl BlockRegistry {
     }
 
     pub fn get_baked_model(&self, state: BlockState) -> Option<&BakedModel> {
-        self.get_baked_alternatives(state)?.first().map(|choice| &choice.model)
+        self.get_baked_alternatives(state)?
+            .first()
+            .map(|choice| &choice.model)
     }
 
     /// Selects a variant with the same position-seeded weighted lookup as
@@ -372,9 +371,9 @@ impl BlockRegistry {
 
         let baked_textures = self.baked.values().flat_map(|variants| {
             variants.values().flat_map(|choices| {
-                choices.iter().flat_map(|choice| {
-                    choice.model.quads.iter().map(|q| q.texture.as_str())
-                })
+                choices
+                    .iter()
+                    .flat_map(|choice| choice.model.quads.iter().map(|q| q.texture.as_str()))
             })
         });
 

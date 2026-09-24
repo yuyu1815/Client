@@ -26,6 +26,11 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
         // weathering stage only picks the texture.
         s if s.ends_with("copper_chest") => Some(BlockEntityKind::Chest),
         s if s == "shulker_box" || s.ends_with("_shulker_box") => Some(BlockEntityKind::ShulkerBox),
+        s if (s.ends_with("_sign") || s.ends_with("_wall_sign"))
+            && !s.ends_with("_hanging_sign") =>
+        {
+            Some(BlockEntityKind::Sign)
+        }
         _ => None,
     }
 }
@@ -39,6 +44,7 @@ fn is_rendered(kind: BlockEntityKind) -> bool {
             | BlockEntityKind::TrappedChest
             | BlockEntityKind::EnderChest
             | BlockEntityKind::ShulkerBox
+            | BlockEntityKind::Sign
     )
 }
 
@@ -127,17 +133,31 @@ pub fn is_block_entity_block(name: &str) -> bool {
 pub fn is_invisible_block(name: &str) -> bool {
     matches!(
         name,
-        "air"
-            | "cave_air"
-            | "void_air"
-            | "barrier"
-            | "light"
-            | "structure_void"
-            | "moving_piston"
-            | "heavy_core"
+        "air" | "cave_air" | "void_air" | "barrier" | "light" | "structure_void" | "moving_piston"
     )
 }
 
 pub fn is_fluid_block(name: &str) -> bool {
     matches!(name, "water" | "lava" | "bubble_column")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standing_and_wall_signs_use_the_sign_renderer_but_hanging_signs_do_not() {
+        assert_eq!(rendered_kind("oak_sign"), Some(BlockEntityKind::Sign));
+        assert_eq!(
+            rendered_kind("spruce_wall_sign"),
+            Some(BlockEntityKind::Sign)
+        );
+        assert_eq!(rendered_kind("oak_hanging_sign"), None);
+        assert!(is_block_entity_block("oak_sign"));
+    }
+
+    #[test]
+    fn heavy_core_is_not_hidden_as_an_invisible_block() {
+        assert!(!is_invisible_block("heavy_core"));
+    }
 }

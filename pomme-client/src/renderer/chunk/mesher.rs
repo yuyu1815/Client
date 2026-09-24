@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use azalea_block::BlockState;
-use serde_json::{Value, json};
 use azalea_core::position::ChunkPos;
 use pyronyx::vk;
+use serde_json::{Value, json};
 
 use super::greedy;
 use super::occlusion_graph::{VisibilitySet, compute_visibility};
@@ -247,7 +247,10 @@ pub struct MeshTraceState(Arc<Mutex<TraceCapture>>);
 
 impl MeshTraceState {
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(TraceCapture { config: None, records: Vec::new() })))
+        Self(Arc::new(Mutex::new(TraceCapture {
+            config: None,
+            records: Vec::new(),
+        })))
     }
 
     pub fn arm(&self, config: MeshTraceConfig) {
@@ -400,6 +403,13 @@ pub struct Colormap {
 }
 
 impl Colormap {
+    #[cfg(test)]
+    pub(crate) fn test_empty() -> Self {
+        Self {
+            pixels: vec![[0; 3]; 256 * 256],
+        }
+    }
+
     pub fn load(
         jar_assets_dir: &std::path::Path,
         asset_index: &Option<crate::assets::AssetIndex>,
@@ -507,6 +517,10 @@ fn apply_grass_modifier(modifier: GrassColorModifier, base: [f32; 3], x: i32, z:
 
 fn to_u8(f: f32) -> u8 {
     (f * 255.0).round() as u8
+}
+
+fn flat_quad_light(world_light: f32, shade: f32) -> f32 {
+    world_light * shade
 }
 
 struct SimplexNoise {
@@ -1729,8 +1743,18 @@ fn mesh_chunk_snapshot(
                     });
                     let mut emitted_trace = Vec::new();
                     emit_baked_model(
-                        sink, block_pos, state, &baked, snapshot, registry, uv_map, bx, by, bz,
-                        trace_target, &mut emitted_trace,
+                        sink,
+                        block_pos,
+                        state,
+                        &baked,
+                        snapshot,
+                        registry,
+                        uv_map,
+                        bx,
+                        by,
+                        bz,
+                        trace_target,
+                        &mut emitted_trace,
                     );
                     sink.trace.extend(emitted_trace);
                 } else if let Some(quads) = registry.get_multipart_quads_at(state, bx, by, bz) {
@@ -1744,8 +1768,18 @@ fn mesh_chunk_snapshot(
                     });
                     let mut emitted_trace = Vec::new();
                     emit_multipart(
-                        sink, block_pos, state, &quads, snapshot, registry, uv_map, bx, by, bz,
-                        trace_target, &mut emitted_trace,
+                        sink,
+                        block_pos,
+                        state,
+                        &quads,
+                        snapshot,
+                        registry,
+                        uv_map,
+                        bx,
+                        by,
+                        bz,
+                        trace_target,
+                        &mut emitted_trace,
                     );
                     sink.trace.extend(emitted_trace);
                 } else if let Some(textures) = registry.get_textures(state) {
@@ -1813,23 +1847,23 @@ fn mesh_chunk_snapshot(
                 .get(start..start.saturating_add(count))
                 .unwrap_or(&[])
                 .iter()
-                .map(|v| json!({
-                    "pos": v.pos,
-                    "uv": v.uv,
-                    "sprite": v.sprite,
-                    "lightTintBytes": v.light_tint,
-                }))
+                .map(|v| {
+                    json!({
+                        "pos": v.pos,
+                        "uv": v.uv,
+                        "sprite": v.sprite,
+                        "lightTintBytes": v.light_tint,
+                    })
+                })
                 .collect::<Vec<_>>();
             record["finalPackBytesDecoded"] = json!(decoded);
             record["vertexStride"] = json!(size_of::<PackedVertex>());
             record["sectionIndex"] = json!(i);
-            record["indexStartFinal"] = json!(
-                if record["indexList"].as_str() == Some("cutout") {
-                    solid_index_count as u64 + record["indexStart"].as_u64().unwrap_or(0)
-                } else {
-                    record["indexStart"].as_u64().unwrap_or(0)
-                }
-            );
+            record["indexStartFinal"] = json!(if record["indexList"].as_str() == Some("cutout") {
+                solid_index_count as u64 + record["indexStart"].as_u64().unwrap_or(0)
+            } else {
+                record["indexStart"].as_u64().unwrap_or(0)
+            });
         }
         pool.recycle_scratch(sink.vertices);
         sections.push(SectionMesh {
@@ -1896,7 +1930,10 @@ fn emit_baked_model(
         let lights = if let Some(dir) = quad.cullface {
             compute_face_ao(snapshot, registry, bx, by, bz, dir, quad.shade_face)
         } else {
-            [snapshot.shade(quad.shade_face); 4]
+            [flat_quad_light(
+                snapshot.get_light(bx, by, bz),
+                snapshot.shade(quad.shade_face),
+            ); 4]
         };
         emit_face(
             sink,
@@ -2556,7 +2593,10 @@ fn emit_multipart(
             block_pos,
             &quad.positions,
             &quad.uvs,
-            [snapshot.shade(quad.shade_face); 4],
+            [flat_quad_light(
+                snapshot.get_light(bx, by, bz),
+                snapshot.shade(quad.shade_face),
+            ); 4],
             region,
             tint,
         );
@@ -2879,14 +2919,21 @@ pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4
 
 #[cfg(test)]
 mod terrain_uv_tests {
-    use super::{
-        add_weighted_fluid_height, fluid_height_with_above, fluid_top_uv_values, pack_sprite_uv,
-        unpack_sprite_uv, MeshTraceConfig, MeshTraceState, TraceTarget,
-    };
     use serde_json::json;
+
+    use super::{
+        MeshTraceConfig, MeshTraceState, TraceTarget, add_weighted_fluid_height, flat_quad_light,
+        fluid_height_with_above, fluid_top_uv_values, pack_sprite_uv, unpack_sprite_uv,
+    };
 
     fn wrapped(x: f32) -> f32 {
         x - x.floor()
+    }
+
+    #[test]
+    fn non_cullface_quad_light_uses_world_light_and_face_shade() {
+        assert!((flat_quad_light(0.4, 0.8) - 0.32).abs() < f32::EPSILON);
+        assert_eq!(flat_quad_light(1.0, 1.0), 1.0);
     }
 
     #[test]
@@ -2956,7 +3003,12 @@ mod terrain_uv_tests {
         state.arm(MeshTraceConfig {
             trace_id: "test".into(),
             world_token: "token".into(),
-            targets: vec![TraceTarget { x: 1, y: 2, z: 3, block: "stone".into() }],
+            targets: vec![TraceTarget {
+                x: 1,
+                y: 2,
+                z: 3,
+                block: "stone".into(),
+            }],
         });
         for i in 0..80 {
             state.record(json!({"i": i}));

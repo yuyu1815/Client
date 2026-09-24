@@ -21,6 +21,7 @@ pub enum Outbound {
         id: String,
         payload: Option<simdnbt::owned::NbtTag>,
     },
+    CodeOfConductDecision(bool),
 }
 
 /// A `LastSeenMessagesTracker` update, recorded by the chat UI.
@@ -43,6 +44,14 @@ impl PacketSender {
         self.queue(Outbound::Packet(Box::new(packet)));
     }
 
+    /// Select a merchant offer using the dedicated 26.2 ServerboundSelectTrade
+    /// packet (not ServerboundContainerButtonClick).
+    pub fn select_trade(&self, index: u32) {
+        self.send(ServerboundGamePacket::SelectTrade(
+            azalea_protocol::packets::game::s_select_trade::ServerboundSelectTrade { item: index },
+        ));
+    }
+
     pub fn send_raw(&self, bytes: Vec<u8>) {
         self.queue(Outbound::Raw(bytes));
     }
@@ -63,9 +72,34 @@ impl PacketSender {
         self.queue(Outbound::CustomClick { id, payload });
     }
 
+    pub fn decide_code_of_conduct(&self, accept: bool) {
+        self.queue(Outbound::CodeOfConductDecision(accept));
+    }
+
     fn queue(&self, out: Outbound) {
         if let Err(e) = self.tx.send(out) {
             tracing::error!("Failed to queue outbound packet: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use azalea_protocol::packets::game::ServerboundGamePacket;
+    use tokio::sync::mpsc;
+
+    use super::{Outbound, PacketSender};
+
+    #[test]
+    fn select_trade_queues_the_dedicated_trade_index_packet() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        PacketSender::new(tx).select_trade(6);
+        let Outbound::Packet(packet) = rx.try_recv().unwrap() else {
+            panic!("trade selection must be a game packet");
+        };
+        let ServerboundGamePacket::SelectTrade(packet) = *packet else {
+            panic!("trade selection must not use ContainerButtonClick");
+        };
+        assert_eq!(packet.item, 6);
     }
 }

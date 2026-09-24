@@ -87,9 +87,7 @@ fn validate_weight_values(weights: impl IntoIterator<Item = u64>) -> Result<u32,
         if weight > MAX_MODEL_WEIGHT {
             return Err("weight exceeds POSITIVE_INT/i32::MAX");
         }
-        total = total
-            .checked_add(weight)
-            .ok_or("weight sum overflow")?;
+        total = total.checked_add(weight).ok_or("weight sum overflow")?;
         if total > MAX_MODEL_WEIGHT {
             return Err("weight sum exceeds i32::MAX");
         }
@@ -348,7 +346,8 @@ pub enum ItemTint {
     Untinted,
     /// Vanilla `Constant` source, decoded from opaque ARGB/RGB input.
     Constant([u8; 3]),
-    /// Vanilla `GrassColorSource`; the RGB is the source's level-independent result.
+    /// Vanilla `GrassColorSource`; the RGB is the source's level-independent
+    /// result.
     Grass {
         temperature: f32,
         downfall: f32,
@@ -398,7 +397,8 @@ pub struct BakedQuad {
     pub uvs: [[f32; 2]; 4],
     pub texture: String,
     pub cullface: Option<Direction>,
-    /// Original vanilla face tint index; retained for probe parity with Java quads.
+    /// Original vanilla face tint index; retained for probe parity with Java
+    /// quads.
     #[serde(default)]
     pub tint_index: Option<i32>,
     pub tint: super::registry::Tint,
@@ -476,9 +476,8 @@ fn choose_weighted<'a>(models: &'a [WeightedBakedModel], seed: i64) -> Option<&'
 /// bounded integer used by `WeightedList`. This keeps model alternatives
 /// position-dependent instead of silently selecting the first JSON entry.
 pub(crate) fn model_seed_for_position(x: i32, y: i32, z: i32) -> i64 {
-    let mut seed = (x as i64).wrapping_mul(3_129_871)
-        ^ (z as i64).wrapping_mul(116_129_781)
-        ^ y as i64;
+    let mut seed =
+        (x as i64).wrapping_mul(3_129_871) ^ (z as i64).wrapping_mul(116_129_781) ^ y as i64;
     seed = seed
         .wrapping_mul(seed)
         .wrapping_mul(42_317_861)
@@ -487,10 +486,7 @@ pub(crate) fn model_seed_for_position(x: i32, y: i32, z: i32) -> i64 {
 }
 
 fn legacy_next(seed: &mut u64, bits: u32) -> u32 {
-    *seed = seed
-        .wrapping_mul(25_214_903_917)
-        .wrapping_add(11)
-        & ((1u64 << 48) - 1);
+    *seed = seed.wrapping_mul(25_214_903_917).wrapping_add(11) & ((1u64 << 48) - 1);
     (*seed >> (48 - bits)) as u32
 }
 
@@ -600,7 +596,10 @@ pub fn bake_all_models(
             if let Some(variants) = &blockstate.variants {
                 for (variant_key, variant_entry) in variants {
                     if let Err(error) = validate_weight_values(
-                        variant_entry.refs().iter().map(|model_ref| model_ref.weight as u64),
+                        variant_entry
+                            .refs()
+                            .iter()
+                            .map(|model_ref| model_ref.weight as u64),
                     ) {
                         tracing::warn!(
                             "Skipping invalid weighted blockstate model {block_name} variant {variant_key}: {error}"
@@ -640,7 +639,10 @@ pub fn bake_all_models(
                 let mut entries = Vec::new();
                 for case in multipart {
                     if let Err(error) = validate_weight_values(
-                        case.apply.refs().iter().map(|model_ref| model_ref.weight as u64),
+                        case.apply
+                            .refs()
+                            .iter()
+                            .map(|model_ref| model_ref.weight as u64),
                     ) {
                         tracing::warn!(
                             "Skipping invalid weighted multipart models for {block_name}: {error}"
@@ -1155,7 +1157,11 @@ pub fn first_item_model_ref(json: &serde_json::Value) -> Option<String> {
 
 fn find_first_model_tints(json: &serde_json::Value) -> Vec<ItemTint> {
     fn find(node: &serde_json::Value) -> Option<Vec<ItemTint>> {
-        if node.get("model").and_then(serde_json::Value::as_str).is_some() {
+        if node
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        {
             return Some(parse_item_tints(node));
         }
         match node {
@@ -1188,11 +1194,13 @@ fn parse_item_tint(value: &serde_json::Value) -> ItemTint {
         "constant" => value
             .get("value")
             .and_then(serde_json::Value::as_i64)
-            .map(|value| ItemTint::Constant([
-                (value as u32 >> 16) as u8,
-                (value as u32 >> 8) as u8,
-                value as u8,
-            ]))
+            .map(|value| {
+                ItemTint::Constant([
+                    (value as u32 >> 16) as u8,
+                    (value as u32 >> 8) as u8,
+                    value as u8,
+                ])
+            })
             .unwrap_or_else(|| ItemTint::Unknown {
                 kind: "constant".to_string(),
             }),
@@ -1696,14 +1704,9 @@ fn bake_resolved_model(
     uvlock: bool,
     tint_for_index: impl Fn(Option<i32>) -> super::registry::Tint,
 ) -> Option<BakedModel> {
-    bake_resolved_model_with_item_tints(
-        resolved,
-        rot_x,
-        rot_y,
-        uvlock,
-        tint_for_index,
-        |_| ItemTint::Untinted,
-    )
+    bake_resolved_model_with_item_tints(resolved, rot_x, rot_y, uvlock, tint_for_index, |_| {
+        ItemTint::Untinted
+    })
 }
 
 fn bake_resolved_model_with_item_tints(
@@ -1894,8 +1897,8 @@ fn uvlock_uv(dir: Direction, uv: [f32; 2], rot_x: i32, rot_y: i32) -> [f32; 2] {
     // generic X/Y/Z basis mirrors the rotated wall/pane faces.
     let (u_axis, v_axis) = face_uv_basis(dir);
     let normal = Vec3::from_array(dir.offset().map(|value| value as f32));
-    let target = nearest_cardinal_direction(rotate_vector(normal, rot_x, rot_y))
-        .unwrap_or(Direction::Up);
+    let target =
+        nearest_cardinal_direction(rotate_vector(normal, rot_x, rot_y)).unwrap_or(Direction::Up);
     let (target_u, target_v) = face_uv_basis(target);
     let local = u_axis * (uv[0] - 0.5) + v_axis * (uv[1] - 0.5);
     let rotated = rotate_vector(local, rot_x, rot_y);
@@ -2206,9 +2209,12 @@ fn determine_tint_for_index(block_name: &str, tint_index: Option<i32>) -> Tint {
     if matches!(block_name, "pink_petals" | "wildflowers") {
         return if index == 1 { Tint::Grass } else { Tint::None };
     }
-    if index == 0 { determine_block_tint(block_name) } else { Tint::None }
+    if index == 0 {
+        determine_block_tint(block_name)
+    } else {
+        Tint::None
+    }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2218,11 +2224,7 @@ mod tests {
     fn gui_item_lighting_uses_vanilla_items_3d_pose_order() {
         let (light0, light1) = items_3d_lights();
         for (actual, expected) in [
-            (light0, [
-                -0.9334393_f32,
-                -0.26269472_f32,
-                -0.24430018_f32,
-            ]),
+            (light0, [-0.9334393_f32, -0.26269472_f32, -0.24430018_f32]),
             (light1, [-0.10357136_f32, -0.97660685_f32, 0.18844643_f32]),
         ] {
             for (actual, expected) in actual.into_iter().zip(expected) {
@@ -2234,7 +2236,12 @@ mod tests {
     #[test]
     fn gui_item_lighting_replaces_terrain_cardinal_shade() {
         let mut quad = BakedQuad {
-            positions: [[0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0]],
+            positions: [
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ],
             uvs: [[0.0, 0.0]; 4],
             texture: "stone".to_string(),
             cullface: Some(Direction::Up),
@@ -2302,21 +2309,57 @@ mod tests {
             assert_eq!(determine_block_tint(name), expected, "{name}");
         }
         assert_eq!(determine_tint_for_index("pink_petals", Some(0)), Tint::None);
-        assert_eq!(determine_tint_for_index("pink_petals", Some(1)), Tint::Grass);
+        assert_eq!(
+            determine_tint_for_index("pink_petals", Some(1)),
+            Tint::Grass
+        );
         assert_eq!(determine_tint_for_index("pink_petals", Some(2)), Tint::None);
-        assert_eq!(determine_tint_for_index("lily_pad", Some(0)), determine_block_tint("lily_pad"));
+        assert_eq!(
+            determine_tint_for_index("lily_pad", Some(0)),
+            determine_block_tint("lily_pad")
+        );
         assert_eq!(determine_tint_for_index("lily_pad", Some(1)), Tint::None);
-        assert_eq!(parse_item_tint(&serde_json::json!({
-            "type": "minecraft:grass", "temperature": 0.5, "downfall": 1.0
-        })).rgb(), [124, 189, 107]);
-        assert_eq!(parse_item_tint(&serde_json::json!({
-            "type": "minecraft:constant", "value": -9321636
-        })).rgb(), [113, 195, 92]);
-        assert_eq!(parse_item_tints(&serde_json::json!({"type": "minecraft:model"})), Vec::<ItemTint>::new());
-        assert!(matches!(parse_item_tint(&serde_json::json!({"type": "minecraft:dye"})), ItemTint::Unknown { .. }));
-        assert_eq!(resolve_item_tint(&[ItemTint::Constant([1, 2, 3])], Some(0)).rgb(), [1, 2, 3]);
-        assert!(matches!(resolve_item_tint(&[ItemTint::Constant([1, 2, 3])], Some(1)), ItemTint::Unknown { .. }));
-        assert_eq!(resolve_item_tint(&[ItemTint::Grass { temperature: 0.5, downfall: 1.0, rgb: [1, 2, 3] }], Some(-1)), ItemTint::Untinted);
+        assert_eq!(
+            parse_item_tint(&serde_json::json!({
+                "type": "minecraft:grass", "temperature": 0.5, "downfall": 1.0
+            }))
+            .rgb(),
+            [124, 189, 107]
+        );
+        assert_eq!(
+            parse_item_tint(&serde_json::json!({
+                "type": "minecraft:constant", "value": -9321636
+            }))
+            .rgb(),
+            [113, 195, 92]
+        );
+        assert_eq!(
+            parse_item_tints(&serde_json::json!({"type": "minecraft:model"})),
+            Vec::<ItemTint>::new()
+        );
+        assert!(matches!(
+            parse_item_tint(&serde_json::json!({"type": "minecraft:dye"})),
+            ItemTint::Unknown { .. }
+        ));
+        assert_eq!(
+            resolve_item_tint(&[ItemTint::Constant([1, 2, 3])], Some(0)).rgb(),
+            [1, 2, 3]
+        );
+        assert!(matches!(
+            resolve_item_tint(&[ItemTint::Constant([1, 2, 3])], Some(1)),
+            ItemTint::Unknown { .. }
+        ));
+        assert_eq!(
+            resolve_item_tint(
+                &[ItemTint::Grass {
+                    temperature: 0.5,
+                    downfall: 1.0,
+                    rgb: [1, 2, 3]
+                }],
+                Some(-1)
+            ),
+            ItemTint::Untinted
+        );
         assert_eq!(resolve_item_tint(&[], None), ItemTint::Untinted);
         assert_eq!(resolve_item_tint(&[], Some(0)), ItemTint::Untinted);
     }
@@ -2363,7 +2406,10 @@ mod tests {
             Some(Direction::South)
         );
         // Model rotation changes geometry, but uvlock=false leaves explicit UVs alone.
-        assert_eq!(baked.quads[0].uvs, [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+        assert_eq!(
+            baked.quads[0].uvs,
+            [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]
+        );
         assert!((baked.quads[0].shade_light - Direction::South.shade_light()).abs() < 1.0e-6);
     }
 
@@ -2649,22 +2695,39 @@ mod tests {
             "AND": [{"north": "true"}, {"shape": "inner_left|outer_left"}]
         }))
         .unwrap();
-        let pipe = parse_condition(&serde_json::json!({"shape": "inner_right|inner_left"})).unwrap();
+        let pipe =
+            parse_condition(&serde_json::json!({"shape": "inner_right|inner_left"})).unwrap();
         let negated = parse_condition(&serde_json::json!({"north": "!false"})).unwrap();
         assert!(or.matches(&props));
         assert!(and.matches(&props));
         assert!(pipe.matches(&props));
         assert!(negated.matches(&props));
-        assert!(!parse_condition(&serde_json::json!({"missing": "true"}))
-            .unwrap()
-            .matches(&props));
+        assert!(
+            !parse_condition(&serde_json::json!({"missing": "true"}))
+                .unwrap()
+                .matches(&props)
+        );
         assert_eq!(parse_when_condition(&None), WhenCondition::Always);
-        assert_eq!(parse_condition(&serde_json::json!({})).unwrap(), WhenCondition::Always);
-        assert!(parse_condition(&serde_json::json!({"AND": []})).unwrap().matches(&props));
-        assert!(!parse_condition(&serde_json::json!({"OR": []})).unwrap().matches(&props));
+        assert_eq!(
+            parse_condition(&serde_json::json!({})).unwrap(),
+            WhenCondition::Always
+        );
+        assert!(
+            parse_condition(&serde_json::json!({"AND": []}))
+                .unwrap()
+                .matches(&props)
+        );
+        assert!(
+            !parse_condition(&serde_json::json!({"OR": []}))
+                .unwrap()
+                .matches(&props)
+        );
         assert!(parse_condition(&serde_json::json!({"NOT": {"north": "false"}})).is_err());
         assert!(parse_condition(&serde_json::json!({"XOR": []})).is_err());
-        assert_eq!(parse_when_condition(&Some(serde_json::json!({"OR": true}))), WhenCondition::Never);
+        assert_eq!(
+            parse_when_condition(&Some(serde_json::json!({"OR": true}))),
+            WhenCondition::Never
+        );
     }
 
     #[test]
@@ -2699,32 +2762,72 @@ mod tests {
             assert!((actual[1] - expected[1]).abs() < 1.0e-6);
         }
         assert_eq!(
-            face_uvs(Direction::South, [0.0; 3], [1.0; 3], None, None, false, 0, 90),
-            face_uvs(Direction::South, [0.0; 3], [1.0; 3], None, None, false, 0, 0)
+            face_uvs(
+                Direction::South,
+                [0.0; 3],
+                [1.0; 3],
+                None,
+                None,
+                false,
+                0,
+                90
+            ),
+            face_uvs(
+                Direction::South,
+                [0.0; 3],
+                [1.0; 3],
+                None,
+                None,
+                false,
+                0,
+                0
+            )
         );
     }
 
     #[test]
     fn invalid_weights_are_rejected_without_panicking() {
-        assert_eq!(validate_weight_values([0]), Err("weight must be a positive int"));
-        assert_eq!(validate_weight_values([u64::MAX]), Err("weight exceeds POSITIVE_INT/i32::MAX"));
-        assert_eq!(validate_weight_values([1u64 << 32]), Err("weight exceeds POSITIVE_INT/i32::MAX"));
-        assert_eq!(validate_weight_values([i32::MAX as u64, 1]), Err("weight sum exceeds i32::MAX"));
+        assert_eq!(
+            validate_weight_values([0]),
+            Err("weight must be a positive int")
+        );
+        assert_eq!(
+            validate_weight_values([u64::MAX]),
+            Err("weight exceeds POSITIVE_INT/i32::MAX")
+        );
+        assert_eq!(
+            validate_weight_values([1u64 << 32]),
+            Err("weight exceeds POSITIVE_INT/i32::MAX")
+        );
+        assert_eq!(
+            validate_weight_values([i32::MAX as u64, 1]),
+            Err("weight sum exceeds i32::MAX")
+        );
         assert_eq!(validate_weight_values([1, 2]), Ok(3));
-        assert!(serde_json::from_str::<ModelRef>(
-            r#"{"model":"minecraft:block/test","weight":-1}"#
-        )
-        .is_err());
+        assert!(
+            serde_json::from_str::<ModelRef>(r#"{"model":"minecraft:block/test","weight":-1}"#)
+                .is_err()
+        );
         assert!(choose_baked_model(&[], 0).is_none());
     }
 
     #[test]
     fn weighted_selection_matches_legacy_random_anchor_seeds() {
-        let a = BakedModel { quads: Vec::new(), is_full_cube: false, occludes: false };
+        let a = BakedModel {
+            quads: Vec::new(),
+            is_full_cube: false,
+            occludes: false,
+        };
         let b = a.clone();
         let choices = vec![
-            WeightedBakedModel { weight: 1, model: a },
-            WeightedBakedModel { weight: 1, model: b },
+            WeightedBakedModel {
+                weight: 1,
+                model: a,
+            },
+            WeightedBakedModel {
+                weight: 1,
+                model: b,
+            },
         ];
         let first = &choices[0].model as *const _;
         let second = &choices[1].model as *const _;
@@ -2741,11 +2844,21 @@ mod tests {
             multipart_seed_for_position(3, 70, 1),
             -1_913_033_443_730_608_672
         );
-        let a = BakedModel { quads: Vec::new(), is_full_cube: false, occludes: false };
+        let a = BakedModel {
+            quads: Vec::new(),
+            is_full_cube: false,
+            occludes: false,
+        };
         let b = a.clone();
         let choices = vec![
-            WeightedBakedModel { weight: 1, model: a },
-            WeightedBakedModel { weight: 1, model: b },
+            WeightedBakedModel {
+                weight: 1,
+                model: a,
+            },
+            WeightedBakedModel {
+                weight: 1,
+                model: b,
+            },
         ];
         let first = &choices[0].model as *const _;
         let second = &choices[1].model as *const _;

@@ -202,8 +202,8 @@ pub fn variant_for_block(
             .and_then(|s| name_index(&DYE_COLOR_NAMES, s))
             .unwrap_or(16),
         BlockEntityKind::Sign => name
-            .strip_suffix("_sign")
-            .or_else(|| name.strip_suffix("_wall_sign"))
+            .strip_suffix("_wall_sign")
+            .or_else(|| name.strip_suffix("_sign"))
             .and_then(|s| name_index(&SIGN_WOOD_NAMES, s))
             .unwrap_or(0),
         _ => 0,

@@ -3,8 +3,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
-use serde_json::Value;
 use pyronyx::vk;
+use serde_json::Value;
 
 use super::util;
 
