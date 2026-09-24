@@ -2165,6 +2165,21 @@ fn calculate_average_fluid_height(
     weighted[0] / weighted[1]
 }
 
+fn fluid_flow_neighbor_height(
+    current: crate::world::block::Fluid,
+    neighbor: crate::world::block::Fluid,
+    below: impl FnOnce() -> crate::world::block::Fluid,
+) -> Option<f32> {
+    if crate::world::block::same_fluid(current, neighbor) {
+        Some(neighbor.height())
+    } else if neighbor.kind == crate::world::block::FluidKind::Empty {
+        let below = below();
+        crate::world::block::same_fluid(current, below).then(|| below.height())
+    } else {
+        None
+    }
+}
+
 fn fluid_flow_vector(
     snapshot: &ChunkStoreSnapshot,
     current: crate::world::block::Fluid,
@@ -2176,17 +2191,11 @@ fn fluid_flow_vector(
     for (dx, dz) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
         let state = snapshot.get_block_state(bx + dx, by, bz + dz);
         let neighbor = crate::world::block::fluid(state);
-        if !crate::world::block::same_fluid(current, neighbor) {
+        let Some(height) = fluid_flow_neighbor_height(current, neighbor, || {
+            crate::world::block::fluid(snapshot.get_block_state(bx + dx, by - 1, bz + dz))
+        }) else {
             continue;
-        }
-        let mut height = neighbor.height();
-        if height == 0.0 && !crate::world::block::is_air(state) {
-            let below =
-                crate::world::block::fluid(snapshot.get_block_state(bx + dx, by - 1, bz + dz));
-            if crate::world::block::same_fluid(current, below) {
-                height = below.height();
-            }
-        }
+        };
         if height > 0.0 {
             let delta = current.height() - height;
             flow[0] += dx as f32 * delta;
@@ -2923,7 +2932,8 @@ mod terrain_uv_tests {
 
     use super::{
         MeshTraceConfig, MeshTraceState, TraceTarget, add_weighted_fluid_height, flat_quad_light,
-        fluid_height_with_above, fluid_top_uv_values, pack_sprite_uv, unpack_sprite_uv,
+        fluid_flow_neighbor_height, fluid_height_with_above, fluid_top_uv_values, pack_sprite_uv,
+        unpack_sprite_uv,
     };
 
     fn wrapped(x: f32) -> f32 {
@@ -2975,6 +2985,53 @@ mod terrain_uv_tests {
         assert!((flow[0][0] - 0.75).abs() < 1e-6);
         assert!((flow[0][1] - 0.25).abs() < 1e-6);
         assert_ne!(flow, still);
+    }
+
+    #[test]
+    fn flow_neighbor_height_uses_below_only_for_empty_neighbor() {
+        use crate::world::block::{Fluid, FluidKind};
+
+        let water = Fluid {
+            kind: FluidKind::Water,
+            amount: 8,
+            falling: false,
+        };
+        let lava = Fluid {
+            kind: FluidKind::Lava,
+            amount: 8,
+            falling: false,
+        };
+        let air = crate::world::block::fluid(azalea_block::BlockState::AIR);
+        let mut checked_below = false;
+        assert_eq!(
+            fluid_flow_neighbor_height(water, air, || {
+                checked_below = true;
+                water
+            }),
+            Some(8.0 / 9.0),
+        );
+        assert!(checked_below, "AIR neighbor must inspect the fluid below");
+
+        let mut checked_below = false;
+        assert_eq!(
+            fluid_flow_neighbor_height(water, lava, || {
+                checked_below = true;
+                water
+            }),
+            None,
+            "different nonempty fluid must not contribute water below it",
+        );
+        assert!(!checked_below, "different fluid must not inspect below");
+
+        assert_eq!(
+            fluid_flow_neighbor_height(water, water, || Fluid {
+                kind: FluidKind::Empty,
+                amount: 0,
+                falling: false,
+            }),
+            Some(8.0 / 9.0),
+            "same-fluid neighbor uses its own height",
+        );
     }
 
     #[test]
