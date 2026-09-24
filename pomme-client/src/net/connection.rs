@@ -1177,7 +1177,14 @@ fn outbound_frame(
         Outbound::Packet(mut packet) => match translation {
             Some(t) => {
                 t.remap_outbound(&mut packet);
-                Some(serialize_frame(&*packet)?)
+                match &*packet {
+                    ServerboundGamePacket::SetCreativeModeSlot(p)
+                        if t.creative_slot_delimited() =>
+                    {
+                        Some(super::native_codecs::encode_native_creative_slot(p)?)
+                    }
+                    _ => Some(serialize_frame(&*packet)?),
+                }
             }
             None if crate::version::session_protocol()
                 == pomme_protocol::version::NATIVE.protocol =>
@@ -1315,6 +1322,63 @@ mod tests {
     use pomme_protocol::version::NATIVE;
 
     use super::*;
+
+    #[test]
+    fn translated_creative_slot_uses_delimited_components_since_1_21_5() {
+        use azalea_inventory::components::Damage;
+        use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
+        use azalea_protocol::packets::game::s_set_creative_mode_slot::ServerboundSetCreativeModeSlot;
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+        use uuid::Uuid;
+
+        let mut patch = DataComponentPatch::default();
+        unsafe {
+            patch.unchecked_insert_component(
+                DataComponentKind::Damage,
+                Some(Damage { amount: 7 }.into()),
+            );
+        }
+        let mut stack = ItemStackData::new(ItemKind::Stone, 1);
+        stack.component_patch = patch;
+        let packet = ServerboundGamePacket::SetCreativeModeSlot(ServerboundSetCreativeModeSlot {
+            slot_num: 36,
+            item_stack: ItemStack::Present(stack),
+        });
+        let translation = super::super::translate::Translation::for_protocol(770).unwrap();
+
+        let mut remapped = packet.clone();
+        translation.remap_outbound(&mut remapped);
+        let ServerboundGamePacket::SetCreativeModeSlot(expected_packet) = &remapped else {
+            unreachable!();
+        };
+        let expected_native =
+            super::super::native_codecs::encode_native_creative_slot(expected_packet).unwrap();
+        let mut expected_native_pos = 0;
+        let native_id =
+            pomme_protocol::wire::read_varint(&expected_native, &mut expected_native_pos).unwrap();
+        let wire_id = pomme_protocol::PacketTable::for_protocol(770)
+            .unwrap()
+            .id(Phase::Game, Direction::Serverbound, "set_creative_mode_slot")
+            .unwrap();
+        let mut expected = Vec::new();
+        pomme_protocol::wire::write_varint(&mut expected, wire_id);
+        expected.extend_from_slice(&expected_native[expected_native_pos..]);
+        assert_ne!(native_id, wire_id);
+        assert!(expected.ends_with(&[1, 7])); // value length=1, damage=7
+
+        let (key_tx, _key_rx) = mpsc::unbounded_channel();
+        let mut chat = ChatSender::new(Uuid::nil(), Uuid::nil(), None, key_tx);
+        let tree = crate::net::commands::SharedCommandTree::default();
+        let frame = outbound_frame(
+            Outbound::Packet(Box::new(packet)),
+            Some(&translation),
+            &mut chat,
+            &tree,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(translation.translate_outbound_game_frame(frame), [expected]);
+    }
 
     /// A server that accepts pomme's known-pack claim sends the biomes as ids
     /// alone; the climate the mesher colours with then comes entirely from the

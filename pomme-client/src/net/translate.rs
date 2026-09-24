@@ -359,6 +359,7 @@ use pomme_protocol::{
 };
 
 pub struct Translation {
+    creative_slot_delimited: bool,
     to_native: &'static RegistryRemaps,
     from_native: &'static RegistryRemaps,
     login_finished_id: u32,
@@ -862,6 +863,10 @@ impl Translation {
         let native = PacketTable::native();
         let id = |phase, name| required_id(native, phase, Direction::Clientbound, name);
         Some(Translation {
+            // 1.21.5 (770) changed serverbound creative-slot component values
+            // to length-prefixed entries; Azalea's typed writer still emits the
+            // older bare-value layout.
+            creative_slot_delimited: protocol >= 770,
             to_native: RegistryRemaps::to_native(protocol)?,
             from_native: RegistryRemaps::from_native(protocol)?,
             // Login-phase ids are identical across all supported versions.
@@ -885,6 +890,10 @@ impl Translation {
                 .name_of(Phase::Configuration, Direction::Clientbound, 0)
                 .is_none(),
         })
+    }
+
+    pub(crate) fn creative_slot_delimited(&self) -> bool {
+        self.creative_slot_delimited
     }
 
     /// Rewrites a native-layout serverbound login frame into the wire
@@ -1426,8 +1435,8 @@ impl Translation {
     /// Remaps an outbound packet's static-registry ids into the launched
     /// version's id space. Never drops the packet; entries the older version
     /// lacks degrade to empty (the server resyncs the slot).
-    /// TODO: delimit `set_creative_mode_slot` component values for 1.21.5 and
-    /// up once pomme owns the encoder (see the azalea-divergence list).
+    /// `set_creative_mode_slot` component values for 1.21.5 and up are
+    /// delimited by the outbound encoder.
     pub fn remap_outbound(&self, packet: &mut ServerboundGamePacket) {
         match packet {
             ServerboundGamePacket::ContainerClick(p) => {
