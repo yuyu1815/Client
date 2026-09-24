@@ -3577,6 +3577,7 @@ impl AppCore {
             &game.chunk_store,
             &game.entity_store,
             crate::player::is_creative(game.player.game_mode),
+            &game.world_border,
         );
 
         let held_stack_item = game

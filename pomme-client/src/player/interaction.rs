@@ -62,6 +62,8 @@ pub struct BlockHitResult {
     pub block_pos: BlockPos,
     pub face: Direction,
     pub hit_point: DVec3,
+    pub inside: bool,
+    pub world_border: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -319,6 +321,7 @@ impl InteractionState {
         chunks: &ChunkStore,
         entities: &EntityStore,
         creative: bool,
+        world_border: &crate::world::border::WorldBorder,
     ) {
         let entity_reach = ENTITY_REACH
             + if creative {
@@ -330,7 +333,7 @@ impl InteractionState {
 
         let from: DVec3 = eye_pos.into();
         let dir = look_dir.as_vec();
-        let block_hit = raycast(from, dir, REACH, chunks);
+        let block_hit = raycast(from, dir, REACH, chunks, world_border);
 
         let block_dist_sq = block_hit
             .map(|h| h.hit_point.distance_squared(from))
@@ -733,8 +736,8 @@ impl InteractionState {
                     block_pos: hit.block_pos,
                     direction: hit.face,
                     location: azalea_vec3(hit.hit_point),
-                    inside: false,
-                    world_border: false,
+                    inside: hit.inside,
+                    world_border: hit.world_border,
                 },
                 seq: self.seq,
             }));
@@ -1538,6 +1541,7 @@ pub fn raycast(
     dir: Vec3,
     max_dist: f32,
     chunks: &ChunkStore,
+    world_border: &crate::world::border::WorldBorder,
 ) -> Option<BlockHitResult> {
     let dir = dir.as_dvec3();
     let mut bx = origin.x.floor() as i32;
@@ -1592,11 +1596,7 @@ pub fn raycast(
             };
             let outline = block_shape::outline_shape(state);
             if let Some((hit_point, face)) = clip_shape(origin, reach_end, block_pos, outline) {
-                return Some(BlockHitResult {
-                    block_pos,
-                    face,
-                    hit_point,
-                });
+                return Some(border_hit(origin, hit_point, block_pos, face, world_border));
             }
         }
         if t_max_x < t_max_y && t_max_x < t_max_z {
@@ -1613,7 +1613,79 @@ pub fn raycast(
             bz += step_z;
         }
     }
-    None
+    let block_pos = BlockPos::new(
+        reach_end.x.floor() as i32,
+        reach_end.y.floor() as i32,
+        reach_end.z.floor() as i32,
+    );
+    Some(border_hit(
+        origin,
+        reach_end,
+        block_pos,
+        Direction::nearest(azalea_vec3(dir)).opposite(),
+        world_border,
+    ))
+    .filter(|hit| hit.world_border)
+}
+
+fn border_hit(
+    origin: DVec3,
+    raw_location: DVec3,
+    original_block_pos: BlockPos,
+    original_face: Direction,
+    world_border: &crate::world::border::WorldBorder,
+) -> BlockHitResult {
+    let world_border_hit = world_border.contains(origin.x, origin.z)
+        && !world_border.contains(raw_location.x, raw_location.z);
+    let hit_point = if world_border_hit {
+        world_border.clamp_location(raw_location)
+    } else {
+        raw_location
+    };
+    BlockHitResult {
+        block_pos: if world_border_hit {
+            BlockPos::new(
+                hit_point.x.floor() as i32,
+                hit_point.y.floor() as i32,
+                hit_point.z.floor() as i32,
+            )
+        } else {
+            original_block_pos
+        },
+        // Minecraft 26.2 CollisionGetter.approximateNearestDirection uses
+        // hit.location - start; a ray crossing +X/+Z faces East/South.
+        face: if world_border_hit {
+            approximate_nearest_direction(raw_location - origin)
+        } else {
+            original_face
+        },
+        hit_point,
+        inside: false,
+        world_border: world_border_hit,
+    }
+}
+
+/// Minecraft 26.2 `CollisionGetter.approximateNearestDirection`: choose the
+/// cardinal direction with the greatest positive dot product, preserving the
+/// vanilla tie order. The caller passes `hit.location - start` (not its inverse).
+fn approximate_nearest_direction(delta: DVec3) -> Direction {
+    let (x, y, z) = (delta.x as f32, delta.y as f32, delta.z as f32);
+    let mut result = Direction::North;
+    let mut highest_dot = f32::from_bits(1);
+    for (direction, dot) in [
+        (Direction::Down, -y),
+        (Direction::Up, y),
+        (Direction::North, -z),
+        (Direction::South, z),
+        (Direction::West, -x),
+        (Direction::East, x),
+    ] {
+        if dot > highest_dot {
+            highest_dot = dot;
+            result = direction;
+        }
+    }
+    result
 }
 
 /// Ports vanilla `ProjectileUtil.getEntityHitResult`: clips the ray against
@@ -1775,6 +1847,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn approximate_nearest_direction_keeps_north_at_smallest_subnormal_dot() {
+        let smallest_positive_subnormal = f32::from_bits(1);
+        let delta = dvec3(0.0, 0.0, f64::from(smallest_positive_subnormal));
+        assert_eq!(delta.z as f32, smallest_positive_subnormal);
+        assert_eq!(approximate_nearest_direction(delta), Direction::North);
+    }
+
+    #[test]
+    fn approximate_nearest_direction_uses_f32_ties_and_vanilla_order() {
+        let delta = dvec3(1.0, 0.0, 1.0 + 1e-8);
+        assert_eq!(delta.x as f32, delta.z as f32);
+        assert_eq!(approximate_nearest_direction(delta), Direction::South);
+    }
+
+    fn border_test_world() -> (ChunkStore, crate::world::border::WorldBorder) {
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        let _chunk = chunks.chunk_storage.upsert(
+            azalea_core::position::ChunkPos::new(0, 0),
+            azalea_world::chunk::Chunk::default(),
+        );
+        let mut border = crate::world::border::WorldBorder::default();
+        border.set_size(10.0);
+        (chunks, border)
+    }
+
+    #[test]
+    fn raycast_block_hit_crossing_border_synthesizes_vanilla_result() {
+        let (mut chunks, border) = border_test_world();
+        let stone = crate::world::block::first_state_of("stone").unwrap();
+        chunks.set_block_state(6, 64, 0, stone);
+
+        let hit = raycast(dvec3(3.0, 64.5, 0.5), Vec3::X, 5.0, &chunks, &border).unwrap();
+        assert_eq!(hit.hit_point, dvec3(5.0 - f64::from(1.0E-5_f32), 64.5, 0.5));
+        assert_eq!(hit.block_pos, BlockPos::new(4, 64, 0));
+        assert_eq!(hit.face, Direction::East);
+        assert!(!hit.inside);
+        assert!(hit.world_border);
+    }
+
+    #[test]
+    fn raycast_miss_end_crossing_positive_z_synthesizes_vanilla_result() {
+        let (chunks, border) = border_test_world();
+        let hit = raycast(dvec3(0.5, 64.5, 3.0), Vec3::Z, 5.0, &chunks, &border).unwrap();
+        assert_eq!(hit.hit_point, dvec3(0.5, 64.5, 5.0 - f64::from(1.0E-5_f32)));
+        assert_eq!(hit.block_pos, BlockPos::new(0, 64, 4));
+        assert_eq!(hit.face, Direction::South);
+        assert!(!hit.inside);
+        assert!(hit.world_border);
+    }
+
+    #[test]
+    fn raycast_in_bounds_block_hit_is_not_a_border_hit() {
+        let (mut chunks, border) = border_test_world();
+        let stone = crate::world::block::first_state_of("stone").unwrap();
+        chunks.set_block_state(2, 64, 0, stone);
+
+        let hit = raycast(dvec3(0.5, 64.5, 0.5), Vec3::X, 4.0, &chunks, &border).unwrap();
+        assert_eq!(hit.hit_point, dvec3(2.0, 64.5, 0.5));
+        assert_eq!(hit.block_pos, BlockPos::new(2, 64, 0));
+        assert_eq!(hit.face, Direction::West);
+        assert!(!hit.inside);
+        assert!(!hit.world_border);
+    }
+
+    #[test]
+    fn raycast_starting_outside_does_not_synthesize_border_hit() {
+        let (chunks, border) = border_test_world();
+        let origin = dvec3(6.0, 64.5, 0.5);
+        assert!(raycast(origin, Vec3::X, 2.0, &chunks, &border).is_none());
+
+        let not_a_border_hit = border_hit(
+            origin,
+            dvec3(8.0, 64.5, 0.5),
+            BlockPos::new(8, 64, 0),
+            Direction::West,
+            &border,
+        );
+        assert_eq!(not_a_border_hit.hit_point, dvec3(8.0, 64.5, 0.5));
+        assert_eq!(not_a_border_hit.block_pos, BlockPos::new(8, 64, 0));
+        assert_eq!(not_a_border_hit.face, Direction::West);
+        assert!(!not_a_border_hit.inside);
+        assert!(!not_a_border_hit.world_border);
+    }
+
+    #[test]
     fn respawn_resets_player_owned_interaction_transients() {
         let mut state = InteractionState::new();
         state.swinging = true;
@@ -1905,6 +2063,8 @@ mod tests {
             block_pos: BlockPos::new(-1, 64, 3),
             face: Direction::North,
             hit_point: DVec3::ZERO,
+            inside: false,
+            world_border: false,
         }));
         interaction.pick_block_or_entity(&sender, true);
         match rx.try_recv().expect("block pick packet") {

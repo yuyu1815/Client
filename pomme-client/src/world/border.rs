@@ -188,10 +188,22 @@ impl WorldBorder {
         ]
     }
 
-    /// Tests a point against the current half-open XZ border bounds.
+    /// Tests a point against the default (partial-tick zero) half-open XZ bounds.
     pub fn contains(&self, x: f64, z: f64) -> bool {
-        let [min_x, max_x, min_z, max_z] = self.bounds_at(1.0);
+        let [min_x, max_x, min_z, max_z] = self.bounds_at(0.0);
         x >= min_x && x < max_x && z >= min_z && z < max_z
+    }
+
+    /// Clamps a ray location to this border's current XZ bounds, matching
+    /// Vanilla `WorldBorder.clampToBounds(Vec3)` for hit-result synthesis.
+    pub fn clamp_location(&self, point: glam::DVec3) -> glam::DVec3 {
+        let [min_x, max_x, min_z, max_z] = self.bounds_at(0.0);
+        let epsilon = f64::from(1.0E-5_f32);
+        glam::dvec3(
+            point.x.clamp(min_x, max_x - epsilon),
+            point.y,
+            point.z.clamp(min_z, max_z - epsilon),
+        )
     }
 
     /// Whether the point is within `distance` of any current border edge.
@@ -244,6 +256,21 @@ mod tests {
         assert_eq!(border.bounds_at(1.0), [-25.0, 0.0, -25.0, 10.0]);
         assert!(border.contains(-20.0, -10.0));
         assert!(!border.contains(0.0, -10.0));
+    }
+
+    #[test]
+    fn contains_and_clamp_use_default_bounds_during_size_lerp() {
+        let mut border = WorldBorder::default();
+        border.lerp_size_between(10.0, 20.0, 2);
+        border.tick();
+
+        assert_eq!(border.bounds_at(0.0), [-5.0, 5.0, -5.0, 5.0]);
+        assert_eq!(border.bounds_at(1.0), [-7.5, 7.5, -7.5, 7.5]);
+        assert!(!border.contains(6.0, 0.0));
+        assert_eq!(
+            border.clamp_location(glam::dvec3(9.0, 0.0, 0.0)),
+            glam::dvec3(5.0 - f64::from(1.0E-5_f32), 0.0, 0.0)
+        );
     }
 
     #[test]
