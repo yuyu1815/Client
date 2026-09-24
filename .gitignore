@@ -5,3 +5,5 @@
 /logs
 /tools/stategen/out
 /tmp
+
+*.pyc
