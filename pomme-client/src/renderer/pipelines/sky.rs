@@ -20,6 +20,10 @@ const SUNRISE_STEPS: u32 = 16;
 
 const MOON_BRIGHTNESS_PER_PHASE: [f32; 8] = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75];
 
+fn moon_phase(day_time: u64) -> usize {
+    ((day_time / TICKS_PER_DAY as u64) % 8) as usize
+}
+
 const STAR_BRIGHTNESS_KEYFRAMES: &[(f32, f32)] = &[
     (92.0, 0.037),
     (627.0, 0.0),
@@ -533,7 +537,7 @@ impl SkyPipeline {
 
         let sunrise_argb = sample_argb_keyframes(day_tick, SUNRISE_COLOR_KEYFRAMES, TICKS_PER_DAY);
 
-        let moon_phase_idx = ((sky.game_time / TICKS_PER_DAY as u64) % 8) as usize;
+        let moon_phase_idx = moon_phase(sky.day_time);
         let moon_brightness = MOON_BRIGHTNESS_PER_PHASE[moon_phase_idx];
 
         let celestial_alpha = 1.0 - sky.rain();
@@ -1267,6 +1271,13 @@ mod tests {
         wrapped.apply_clock_update(0, 23_999, 0.0, 1.0);
         wrapped.advance_clock_tick();
         assert_eq!(wrapped.day_tick(), 0.0);
+    }
+
+    #[test]
+    fn moon_phase_uses_world_day_time() {
+        assert_eq!(super::moon_phase(0), 0);
+        assert_eq!(super::moon_phase(24_000), 1);
+        assert_eq!(super::moon_phase(8 * 24_000), 0);
     }
 
     #[test]
