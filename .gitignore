@@ -10,3 +10,4 @@
 *.log
 **/debug
 nul
+Cargo.lock
