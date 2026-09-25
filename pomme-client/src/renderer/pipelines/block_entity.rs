@@ -28,6 +28,14 @@ pub struct BlockEntityRenderInfo {
     /// Lid openness for chest/shulker, 0.0=closed to 1.0=open. Raw (un-eased);
     /// the pipeline applies a cubic ease at draw time.
     pub lid_open: f32,
+    /// Plain-text sign faces extracted from the block entity's render messages.
+    pub sign_front: Option<[String; 4]>,
+    pub sign_back: Option<[String; 4]>,
+    pub sign_front_color: [f32; 3],
+    pub sign_front_glowing: bool,
+    pub sign_back_color: [f32; 3],
+    pub sign_back_glowing: bool,
+    pub sign_wall: bool,
 }
 
 struct TextureSlot {

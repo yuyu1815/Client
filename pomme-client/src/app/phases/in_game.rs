@@ -107,6 +107,45 @@ impl OpenContainer {
     }
 }
 
+/// Vanilla sign dye RGB values; the renderer applies the 0.4 darkening for
+/// non-glowing text and keeps this full color for glowing text.
+fn sign_render_style(nbt: &simdnbt::owned::NbtCompound) -> (([f32; 3], bool), ([f32; 3], bool)) {
+    const DYES: [(&str, [f32; 3]); 16] = [
+        ("white", [249.0 / 255.0, 1.0, 254.0 / 255.0]),
+        ("orange", [249.0 / 255.0, 128.0 / 255.0, 29.0 / 255.0]),
+        ("magenta", [199.0 / 255.0, 78.0 / 255.0, 189.0 / 255.0]),
+        ("light_blue", [58.0 / 255.0, 179.0 / 255.0, 218.0 / 255.0]),
+        ("yellow", [254.0 / 255.0, 216.0 / 255.0, 61.0 / 255.0]),
+        ("lime", [128.0 / 255.0, 199.0 / 255.0, 31.0 / 255.0]),
+        ("pink", [243.0 / 255.0, 139.0 / 255.0, 170.0 / 255.0]),
+        ("gray", [71.0 / 255.0, 79.0 / 255.0, 82.0 / 255.0]),
+        ("light_gray", [157.0 / 255.0, 157.0 / 255.0, 151.0 / 255.0]),
+        ("cyan", [22.0 / 255.0, 156.0 / 255.0, 156.0 / 255.0]),
+        ("purple", [137.0 / 255.0, 50.0 / 255.0, 184.0 / 255.0]),
+        ("blue", [60.0 / 255.0, 68.0 / 255.0, 170.0 / 255.0]),
+        ("brown", [131.0 / 255.0, 84.0 / 255.0, 50.0 / 255.0]),
+        ("green", [94.0 / 255.0, 124.0 / 255.0, 22.0 / 255.0]),
+        ("red", [176.0 / 255.0, 46.0 / 255.0, 38.0 / 255.0]),
+        ("black", [29.0 / 255.0, 29.0 / 255.0, 33.0 / 255.0]),
+    ];
+    let face_style = |face: &str| {
+        let Some(compound) = nbt.get(face).and_then(|tag| tag.compound()) else {
+            return ([0.1, 0.1, 0.1], false);
+        };
+        let color = compound
+            .string("color")
+            .and_then(|value| {
+                let name = value.to_str();
+                DYES.iter()
+                    .find(|(candidate, _)| *candidate == name.as_ref())
+                    .map(|(_, rgb)| *rgb)
+            })
+            .unwrap_or([0.1, 0.1, 0.1]);
+        (color, compound.byte("has_glowing_text").unwrap_or(0) != 0)
+    };
+    (face_style("front_text"), face_style("back_text"))
+}
+
 fn show_death_screen_param(param: f32) -> bool {
     param == 0.0
 }
@@ -798,6 +837,9 @@ impl GameState {
     /// hotkeys. The anvil field is editable only while its input slot is
     /// filled, matching vanilla.
     pub fn wants_text_input(&self) -> bool {
+        if self.recipe_book.wants_text_input() {
+            return true;
+        }
         if self
             .server_dialog
             .as_ref()
@@ -2580,6 +2622,7 @@ pub fn update_game(
     } else {
         Vec::new()
     };
+    game.recipe_book.handle_text_events(&text_events);
     let text_sw = gfx.renderer.screen_width() as f32;
     let text_gs = hud::gui_scale(
         text_sw,
@@ -3002,39 +3045,41 @@ pub fn update_game(
                             }
                         }
                         for marker in &map.decorations {
-                            let mx = x + 64.0 + marker.x as f32 / 2.0;
-                            let my = y + 64.0 + marker.y as f32 / 2.0;
-                            elements.push(MenuElement::RotatedRect {
-                                cx: mx,
-                                cy: my - 2.0,
-                                w: 1.5,
-                                h: 5.0,
-                                radians: f32::from(marker.rotation).rem_euclid(16.0)
-                                    * std::f32::consts::TAU
-                                    / 16.0,
-                                color: [0.08, 0.08, 0.08, 1.0],
-                            });
-                            let color =
-                                if marker.asset == crate::world::maps::MapDecorationAsset::Player {
-                                    [1.0, 0.25, 0.2, 1.0]
-                                } else {
-                                    [0.25, 0.5, 1.0, 1.0]
-                                };
-                            elements.push(MenuElement::Rect {
-                                x: mx - 1.5,
-                                y: my - 1.5,
-                                w: 3.0,
-                                h: 3.0,
-                                corner_radius: 0.0,
-                                color,
+                            let rotation = f32::from(marker.rotation).rem_euclid(16.0)
+                                * std::f32::consts::TAU
+                                / 16.0;
+                            let (sin, cos) = rotation.sin_cos();
+                            let mx = x + f32::from(marker.x) / 2.0 + 64.0;
+                            let my = y + f32::from(marker.y) / 2.0 + 64.0;
+                            // Vanilla MapRenderer scales its [-1, 1] quad by four,
+                            // after translating it by (-0.125, 0.125) in local space.
+                            let sprite_cx = mx - 0.5 * cos - 0.5 * sin;
+                            let sprite_cy = my - 0.5 * sin + 0.5 * cos;
+                            elements.push(MenuElement::RotatedImage {
+                                cx: sprite_cx,
+                                cy: sprite_cy,
+                                w: 8.0,
+                                h: 8.0,
+                                radians: rotation,
+                                sprite: crate::renderer::pipelines::menu_overlay::SpriteId::MapDecoration(
+                                    marker.asset,
+                                ),
+                                tint: [1.0; 4],
                             });
                             if let Some(name) = &marker.name {
+                                let width = gfx
+                                    .renderer
+                                    .menu_text_width(name, crate::ui::common::FONT_SIZE);
+                                let text_scale = if width > 0.0 {
+                                    crate::ui::common::FONT_SIZE * (25.0 / width).min(6.0 / 9.0)
+                                } else {
+                                    crate::ui::common::FONT_SIZE * (6.0 / 9.0)
+                                };
                                 elements.push(MenuElement::Text {
                                     x: mx,
                                     y: my + 4.0,
                                     text: name.clone(),
-                                    scale: crate::ui::common::FONT_SIZE
-                                        * (25.0 / (name.chars().count() as f32 * 6.0).max(25.0)),
+                                    scale: text_scale,
                                     color: [1.0; 4],
                                     centered: true,
                                 });
@@ -3501,7 +3546,7 @@ pub fn update_game(
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
                     gs,
-                    &game.recipe_book,
+                    &mut game.recipe_book,
                     native_recipes,
                 ),
                 ContainerScreen::Furnace(variant) => crate::ui::furnace::build_furnace(
@@ -3519,7 +3564,7 @@ pub fn update_game(
                     &mut game.inv_last_click,
                     gs,
                     &|t, s| gfx.renderer.menu_text_width(t, s),
-                    &game.recipe_book,
+                    &mut game.recipe_book,
                     native_recipes,
                 ),
                 ContainerScreen::Chest { rows } => crate::ui::chest::build_chest(
@@ -3642,7 +3687,7 @@ pub fn update_game(
                 &mut game.inv_drag,
                 &mut game.inv_last_click,
                 gs,
-                &game.recipe_book,
+                &mut game.recipe_book,
                 native_recipes,
             );
             place_recipe = result
@@ -3652,6 +3697,23 @@ pub fn update_game(
             (result.clicked_outside, result.ops)
         };
         close_inventory = clicked_outside;
+        if game.recipe_book.settings_dirty {
+            let book_type = match game.open_container.as_ref().map(|c| &c.screen) {
+                Some(ContainerScreen::Furnace(crate::ui::furnace::FurnaceVariant::Furnace)) => 1,
+                Some(ContainerScreen::Furnace(
+                    crate::ui::furnace::FurnaceVariant::BlastFurnace,
+                )) => 2,
+                Some(ContainerScreen::Furnace(crate::ui::furnace::FurnaceVariant::Smoker)) => 3,
+                _ => 0,
+            };
+            game.recipe_book.store_settings(book_type);
+            connection.packet_tx.recipe_book_settings(
+                book_type,
+                game.recipe_book.open,
+                game.recipe_book.craftable_only,
+            );
+            game.recipe_book.settings_dirty = false;
+        }
         if let Some(index) = select_trade {
             connection.packet_tx.select_trade(index);
         }
@@ -4101,12 +4163,30 @@ pub fn update_game(
                     let partner = BlockPos::new(pos.x + dx, pos.y, pos.z + dz);
                     lid_open = lid_open.max(openness_at(&partner));
                 }
+                let is_sign = be.kind == BlockEntityKind::Sign;
+                let sign_front =
+                    is_sign.then(|| crate::world::block_entity::sign_lines(&be.nbt, true));
+                let sign_back =
+                    is_sign.then(|| crate::world::block_entity::sign_lines(&be.nbt, false));
+                let ((sign_front_color, sign_front_glowing), (sign_back_color, sign_back_glowing)) =
+                    if is_sign {
+                        sign_render_style(&be.nbt)
+                    } else {
+                        (([0.0; 3], false), ([0.0; 3], false))
+                    };
                 Some(crate::renderer::BlockEntityRenderInfo {
                     pos: *pos,
                     kind: be.kind,
                     yaw,
                     variant,
                     lid_open,
+                    sign_front,
+                    sign_back,
+                    sign_front_color,
+                    sign_front_glowing,
+                    sign_back_color,
+                    sign_back_glowing,
+                    sign_wall: props.get("facing").is_some(),
                 })
             })
             .collect()

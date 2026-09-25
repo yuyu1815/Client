@@ -1,7 +1,7 @@
 use std::slice;
 use std::sync::{Arc, Mutex};
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
@@ -30,6 +30,7 @@ pub struct ParticleQuad {
     /// Vanilla `SingleQuadParticle.Layer`: false = opaque/cutout terrain
     /// layer, true = alpha-blended translucent layer.
     pub translucent: bool,
+    pub rotation: [f32; 4],
 }
 
 #[repr(C)]
@@ -253,8 +254,19 @@ impl ParticlePipeline {
                     return;
                 }
                 let center = Vec3::from(quad.pos);
+                let rotation = Quat::from_array(quad.rotation);
+                let rotated_right = rotation * right;
+                let rotated_up = rotation * up;
                 let corner = |nx: f32, ny: f32, u: f32, v: f32| ParticleVertex {
-                    position: particle_corner_position(center, right, up, nx, ny, quad.size).into(),
+                    position: particle_corner_position(
+                        center,
+                        rotated_right,
+                        rotated_up,
+                        nx,
+                        ny,
+                        quad.size,
+                    )
+                    .into(),
                     uv: [u, v],
                     color: quad.color,
                 };
@@ -336,7 +348,7 @@ impl ParticlePipeline {
 
 #[cfg(test)]
 mod tests {
-    use glam::Vec3;
+    use glam::{Quat, Vec3};
 
     use super::particle_corner_position;
 
@@ -348,6 +360,8 @@ mod tests {
             particle_corner_position(Vec3::ZERO, Vec3::X, Vec3::Y, 1.0, 1.0, 1.5),
             Vec3::new(1.5, 1.5, 0.0)
         );
+        let rotated = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2) * Vec3::X;
+        assert!((rotated - Vec3::Y).length() < 1e-6);
     }
 }
 

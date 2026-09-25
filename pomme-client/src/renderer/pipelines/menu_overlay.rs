@@ -888,6 +888,30 @@ impl MenuOverlayPipeline {
                         push_textured_quad(&mut vertices, *x, *y, *w, *h, region, *tint, 2.0);
                     }
                 }
+                MenuElement::RotatedImage {
+                    cx,
+                    cy,
+                    w,
+                    h,
+                    radians,
+                    sprite,
+                    tint,
+                } => {
+                    if let Some(region) = self.sprite_atlas.regions.get(sprite) {
+                        let start = vertices.len();
+                        push_textured_quad(
+                            &mut vertices,
+                            *cx - *w * 0.5,
+                            *cy - *h * 0.5,
+                            *w,
+                            *h,
+                            region,
+                            *tint,
+                            2.0,
+                        );
+                        rotate_verts(&mut vertices[start..], (*cx, *cy), *radians);
+                    }
+                }
                 MenuElement::NineSlice {
                     x,
                     y,
@@ -1831,6 +1855,15 @@ pub enum MenuElement {
         sprite: SpriteId,
         tint: [f32; 4],
     },
+    RotatedImage {
+        cx: f32,
+        cy: f32,
+        w: f32,
+        h: f32,
+        radians: f32,
+        sprite: SpriteId,
+        tint: [f32; 4],
+    },
     NineSlice {
         x: f32,
         y: f32,
@@ -1959,6 +1992,7 @@ pub enum MenuElement {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SpriteId {
+    MapDecoration(crate::world::maps::MapDecorationAsset),
     Hotbar,
     HotbarSelection,
     HeartContainer,
@@ -3091,12 +3125,60 @@ fn build_sprite_atlas(
         );
         boss_bar_sprite(SpriteId::BossBarNotchedProgress(i as u8), name, "progress");
     }
+    let map_decoration_assets = [
+        crate::world::maps::MapDecorationAsset::Player,
+        crate::world::maps::MapDecorationAsset::Frame,
+        crate::world::maps::MapDecorationAsset::RedMarker,
+        crate::world::maps::MapDecorationAsset::BlueMarker,
+        crate::world::maps::MapDecorationAsset::TargetX,
+        crate::world::maps::MapDecorationAsset::TargetPoint,
+        crate::world::maps::MapDecorationAsset::PlayerOffMap,
+        crate::world::maps::MapDecorationAsset::PlayerOffLimits,
+        crate::world::maps::MapDecorationAsset::WoodlandMansion,
+        crate::world::maps::MapDecorationAsset::OceanMonument,
+        crate::world::maps::MapDecorationAsset::WhiteBanner,
+        crate::world::maps::MapDecorationAsset::OrangeBanner,
+        crate::world::maps::MapDecorationAsset::MagentaBanner,
+        crate::world::maps::MapDecorationAsset::LightBlueBanner,
+        crate::world::maps::MapDecorationAsset::YellowBanner,
+        crate::world::maps::MapDecorationAsset::LimeBanner,
+        crate::world::maps::MapDecorationAsset::PinkBanner,
+        crate::world::maps::MapDecorationAsset::GrayBanner,
+        crate::world::maps::MapDecorationAsset::LightGrayBanner,
+        crate::world::maps::MapDecorationAsset::CyanBanner,
+        crate::world::maps::MapDecorationAsset::PurpleBanner,
+        crate::world::maps::MapDecorationAsset::BlueBanner,
+        crate::world::maps::MapDecorationAsset::BrownBanner,
+        crate::world::maps::MapDecorationAsset::GreenBanner,
+        crate::world::maps::MapDecorationAsset::RedBanner,
+        crate::world::maps::MapDecorationAsset::BlackBanner,
+        crate::world::maps::MapDecorationAsset::RedX,
+        crate::world::maps::MapDecorationAsset::DesertVillage,
+        crate::world::maps::MapDecorationAsset::PlainsVillage,
+        crate::world::maps::MapDecorationAsset::SavannaVillage,
+        crate::world::maps::MapDecorationAsset::SnowyVillage,
+        crate::world::maps::MapDecorationAsset::TaigaVillage,
+        crate::world::maps::MapDecorationAsset::JungleTemple,
+        crate::world::maps::MapDecorationAsset::SwampHut,
+        crate::world::maps::MapDecorationAsset::TrialChambers,
+    ];
+    let map_decoration_sprites = map_decoration_assets.into_iter().map(|asset| {
+        (
+            SpriteId::MapDecoration(asset),
+            format!(
+                "minecraft/textures/map/decorations/{}.png",
+                asset.asset_key()
+            ),
+            0.0,
+        )
+    });
     let mut images: Vec<(SpriteId, Vec<u8>, u32, u32, f32)> = Vec::new();
     for (id, asset_key, border) in sprites
         .iter()
         .map(|&(id, key, border)| (id, key.to_string(), border))
         .chain(effect_icons)
         .chain(boss_bar_sprites)
+        .chain(map_decoration_sprites)
     {
         let path = resolve_asset_path(jar_assets_dir, asset_index, &asset_key);
         match crate::assets::load_image(&path) {

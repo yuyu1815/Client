@@ -9,7 +9,7 @@ use azalea_block::BlockState;
 use azalea_core::position::BlockPos;
 use azalea_entity::particle::Particle as ParticleOptions;
 use azalea_protocol::packets::game::c_explode::{ExplosionParticleInfo, Weighted};
-use glam::{DVec3, dvec3};
+use glam::{DVec3, EulerRot, Quat, dvec3};
 
 use crate::physics::aabb::Aabb;
 use crate::physics::block_shape::{self, LocalBox};
@@ -38,6 +38,10 @@ enum Kind {
     /// `TerrainParticle` / `BreakingItemParticle`: collision physics,
     /// world-lit, fixed sprite, opaque layer.
     Terrain,
+    /// `BreakingItemParticle`: terrain-like physics with an item-model particle
+    /// icon.
+    Item,
+    ItemTranslucent,
     /// `EndRodParticle` (a `SimpleAnimatedParticle`): no collision,
     /// full-bright, 8-frame animation, fades after half-life, translucent
     /// layer.
@@ -54,12 +58,18 @@ enum Kind {
     Smoke,
     Crit,
     Dust,
+    Shriek,
+    Trail,
+    Vibration,
 }
 
 impl Kind {
     /// Vanilla `SingleQuadParticle.getLayer`.
     fn translucent(&self) -> bool {
-        matches!(self, Kind::EndRod | Kind::Totem)
+        matches!(
+            self,
+            Kind::ItemTranslucent | Kind::EndRod | Kind::Totem | Kind::Shriek | Kind::Vibration
+        )
     }
 }
 
@@ -86,6 +96,15 @@ pub struct Particle {
     color: [f32; 3],
     alpha: f32,
     light: f32,
+    target: Option<DVec3>,
+    entity_target: Option<(i32, f32)>,
+    delay: i32,
+    rotation: Quat,
+    second_rotation: Option<Quat>,
+    rot: f32,
+    rot_o: f32,
+    pitch: f32,
+    pitch_o: f32,
 }
 
 impl Particle {
@@ -136,6 +155,15 @@ impl Particle {
             color,
             alpha: 1.0,
             light,
+            target: None,
+            entity_target: None,
+            delay: 0,
+            rotation: Quat::IDENTITY,
+            second_rotation: None,
+            rot: 0.0,
+            rot_o: 0.0,
+            pitch: 0.0,
+            pitch_o: 0.0,
         }
     }
 
@@ -166,6 +194,15 @@ impl Particle {
             alpha: 1.0,
             // SimpleAnimatedParticle.getLightCoords is always full-bright.
             light: 1.0,
+            target: None,
+            entity_target: None,
+            delay: 0,
+            rotation: Quat::IDENTITY,
+            second_rotation: None,
+            rot: 0.0,
+            rot_o: 0.0,
+            pitch: 0.0,
+            pitch_o: 0.0,
         };
         p.set_sprite(&frames[0]);
         p
@@ -199,6 +236,15 @@ impl Particle {
             alpha: 1.0,
             // Until the first tick samples the world, never render this as full-bright.
             light: 0.0,
+            target: None,
+            entity_target: None,
+            delay: 0,
+            rotation: Quat::IDENTITY,
+            second_rotation: None,
+            rot: 0.0,
+            rot_o: 0.0,
+            pitch: 0.0,
+            pitch_o: 0.0,
         };
         p.set_sprite(&frames[0]);
         p
@@ -230,6 +276,15 @@ impl Particle {
             color: [shade; 3],
             alpha: 1.0,
             light: 1.0,
+            target: None,
+            entity_target: None,
+            delay: 0,
+            rotation: Quat::IDENTITY,
+            second_rotation: None,
+            rot: 0.0,
+            rot_o: 0.0,
+            pitch: 0.0,
+            pitch_o: 0.0,
         };
         p.set_sprite(&frames[0]);
         p
@@ -271,6 +326,15 @@ impl Particle {
             color: [shade; 3],
             alpha: 1.0,
             light: 1.0,
+            target: None,
+            entity_target: None,
+            delay: 0,
+            rotation: Quat::IDENTITY,
+            second_rotation: None,
+            rot: 0.0,
+            rot_o: 0.0,
+            pitch: 0.0,
+            pitch_o: 0.0,
         };
         p.set_sprite(&frames[0]);
         p
@@ -310,6 +374,15 @@ impl Particle {
             color,
             alpha: 1.0,
             light: 0.0,
+            target: None,
+            entity_target: None,
+            delay: 0,
+            rotation: Quat::IDENTITY,
+            second_rotation: None,
+            rot: 0.0,
+            rot_o: 0.0,
+            pitch: 0.0,
+            pitch_o: 0.0,
         };
         particle.set_sprite(&sprite);
         particle
@@ -352,6 +425,15 @@ impl Particle {
                 pos.y.floor() as i32,
                 pos.z.floor() as i32,
             ),
+            target: None,
+            entity_target: None,
+            delay: 0,
+            rotation: Quat::IDENTITY,
+            second_rotation: None,
+            rot: 0.0,
+            rot_o: 0.0,
+            pitch: 0.0,
+            pitch_o: 0.0,
         };
         if magic {
             p.color[0] *= 0.3;
@@ -388,9 +470,139 @@ impl Particle {
             color,
             alpha: 1.0,
             light: 1.0,
+            target: None,
+            entity_target: None,
+            delay: 0,
+            rotation: Quat::IDENTITY,
+            second_rotation: None,
+            rot: 0.0,
+            rot_o: 0.0,
+            pitch: 0.0,
+            pitch_o: 0.0,
         };
         p.set_sprite(&frames[0]);
         p
+    }
+
+    fn shriek(pos: DVec3, delay: i32, sprite: AtlasRegion) -> Self {
+        let mut p = Self::special(Kind::Shriek, pos, DVec3::ZERO, None, 30, 0.85, sprite);
+        p.delay = delay.max(0);
+        p.vel.y = 0.1;
+        p.rotation = Quat::from_rotation_x(-1.0472);
+        p.second_rotation = Some(Quat::from_euler(
+            EulerRot::YXZ,
+            -std::f32::consts::PI,
+            1.0472,
+            0.0,
+        ));
+        p
+    }
+
+    fn trail(
+        pos: DVec3,
+        velocity: DVec3,
+        target: DVec3,
+        color: i32,
+        duration: i32,
+        sprite: AtlasRegion,
+    ) -> Self {
+        let color = color as u32;
+        let variation = || fastrand::f32() * 0.25 + 0.875;
+        let c = [
+            ((color >> 16) & 0xff) as f32 / 255.0 * variation(),
+            ((color >> 8) & 0xff) as f32 / 255.0 * variation(),
+            (color & 0xff) as f32 / 255.0 * variation(),
+        ];
+        Self::special(
+            Kind::Trail,
+            pos,
+            velocity,
+            Some(target),
+            duration.max(1),
+            0.26,
+            sprite,
+        )
+        .with_color(c)
+    }
+
+    fn vibration(pos: DVec3, target: DVec3, arrival_ticks: i32, sprite: AtlasRegion) -> Self {
+        Self::special(
+            Kind::Vibration,
+            pos,
+            DVec3::ZERO,
+            Some(target),
+            arrival_ticks.max(1),
+            0.3,
+            sprite,
+        )
+    }
+
+    fn vibration_entity(
+        pos: DVec3,
+        entity_id: i32,
+        y_offset: f32,
+        arrival_ticks: i32,
+        sprite: AtlasRegion,
+    ) -> Self {
+        let mut particle = Self::special(
+            Kind::Vibration,
+            pos,
+            DVec3::ZERO,
+            None,
+            arrival_ticks.max(1),
+            0.3,
+            sprite,
+        );
+        particle.entity_target = Some((entity_id, y_offset));
+        particle
+    }
+
+    fn special(
+        kind: Kind,
+        pos: DVec3,
+        velocity: DVec3,
+        target: Option<DVec3>,
+        lifetime: i32,
+        size: f32,
+        sprite: AtlasRegion,
+    ) -> Self {
+        let mut p = Self {
+            kind,
+            pos,
+            prev_pos: pos,
+            vel: velocity,
+            age: 0,
+            lifetime,
+            on_ground: false,
+            stopped_by_collision: false,
+            gravity: 0.0,
+            friction: 1.0,
+            size,
+            base_size: size,
+            u0: sprite.u_min,
+            u1: sprite.u_max,
+            v0: sprite.v_min,
+            v1: sprite.v_max,
+            color: [1.0; 3],
+            alpha: 1.0,
+            light: 1.0,
+            target,
+            entity_target: None,
+            delay: 0,
+            rotation: Quat::IDENTITY,
+            second_rotation: None,
+            rot: 0.0,
+            rot_o: 0.0,
+            pitch: 0.0,
+            pitch_o: 0.0,
+        };
+        p.set_sprite(&sprite);
+        p
+    }
+
+    fn with_color(mut self, color: [f32; 3]) -> Self {
+        self.color = color;
+        self
     }
 
     /// Vanilla `SingleQuadParticle.setSprite`.
@@ -406,6 +618,11 @@ impl Particle {
     /// the halved quad size and quarter sub-tile sampling with terrain.
     fn breaking_item(pos: DVec3, velocity: DVec3, region: AtlasRegion, light: f32) -> Self {
         let mut p = Self::terrain(pos, DVec3::ZERO, region, [1.0; 3], light);
+        p.kind = if region.translucent {
+            Kind::ItemTranslucent
+        } else {
+            Kind::Item
+        };
         p.vel = p.vel * 0.1 + velocity;
         p
     }
@@ -418,19 +635,68 @@ impl Particle {
         generic_frames: &[AtlasRegion; 8],
         explosion_frames: &[AtlasRegion; 16],
     ) -> bool {
+        self.tick_with_entity_lookup(
+            chunks,
+            end_rod_frames,
+            generic_frames,
+            explosion_frames,
+            &mut |_| None,
+        )
+    }
+
+    fn tick_with_entity_lookup(
+        &mut self,
+        chunks: &ChunkStore,
+        end_rod_frames: &[AtlasRegion; 8],
+        generic_frames: &[AtlasRegion; 8],
+        explosion_frames: &[AtlasRegion; 16],
+        lookup: &mut impl FnMut(i32) -> Option<TrackingAttachment>,
+    ) -> bool {
         self.prev_pos = self.pos;
         if self.age >= self.lifetime {
             return false;
         }
+        if self.kind == Kind::Shriek && self.delay > 0 {
+            self.delay -= 1;
+            return true;
+        }
         self.age += 1;
         self.vel.y -= 0.04 * self.gravity;
         match self.kind {
-            Kind::Terrain | Kind::Smoke | Kind::Poof | Kind::Dust => {
-                self.move_with_collision(chunks)
-            }
-            Kind::EndRod | Kind::Crit => self.pos += self.vel,
+            Kind::Terrain
+            | Kind::Item
+            | Kind::ItemTranslucent
+            | Kind::Smoke
+            | Kind::Poof
+            | Kind::Dust => self.move_with_collision(chunks),
+            Kind::EndRod | Kind::Crit | Kind::Shriek => self.pos += self.vel,
             Kind::Totem => self.move_with_collision(chunks),
-            // HugeExplosionParticle advances age/sprite but never moves.
+            Kind::Trail | Kind::Vibration => {
+                if let Some((entity_id, y_offset)) = self.entity_target {
+                    let Some(attachment) = lookup(entity_id) else {
+                        return false;
+                    };
+                    self.target = Some(attachment.position + dvec3(0.0, f64::from(y_offset), 0.0));
+                }
+                if let Some(target) = self.target {
+                    let remaining = self.lifetime - self.age;
+                    self.pos = target_step(self.pos, target, remaining);
+                    if self.kind == Kind::Vibration {
+                        let delta = self.pos - target;
+                        self.rot_o = self.rot;
+                        self.pitch_o = self.pitch;
+                        self.rot = delta.x.atan2(delta.z) as f32;
+                        self.pitch = delta
+                            .y
+                            .atan2((delta.x * delta.x + delta.z * delta.z).sqrt())
+                            as f32;
+                        if self.age == 1 {
+                            self.rot_o = self.rot;
+                            self.pitch_o = self.pitch;
+                        }
+                    }
+                }
+            }
             Kind::Explosion => {}
         }
         if self.kind == Kind::Smoke && self.pos.y == self.prev_pos.y {
@@ -443,7 +709,12 @@ impl Particle {
             self.vel.z *= 0.7;
         }
         match self.kind {
-            Kind::Terrain | Kind::Smoke | Kind::Poof | Kind::Dust => {
+            Kind::Terrain
+            | Kind::Item
+            | Kind::ItemTranslucent
+            | Kind::Smoke
+            | Kind::Poof
+            | Kind::Dust => {
                 self.light = world_brightness(
                     chunks,
                     self.pos.x.floor() as i32,
@@ -477,6 +748,10 @@ impl Particle {
                     }
                 }
             }
+            Kind::Shriek | Kind::Trail | Kind::Vibration => self.light = 1.0,
+        }
+        if self.kind == Kind::Shriek {
+            self.alpha = 1.0 - (self.age as f32 / self.lifetime as f32).clamp(0.0, 1.0);
         }
         if matches!(self.kind, Kind::Poof | Kind::Smoke) {
             let frame = animated_frame_index(self.age, self.lifetime, 8);
@@ -578,7 +853,7 @@ pub const ENCHANTED_HIT_SPRITE: &str = "particle/enchanted_hit";
 
 /// `POOF` and `SMOKE` use the first eight entries. Dust is included last so
 /// the atlas builder also packs its static sprite.
-pub const GENERIC_PARTICLE_SPRITES: [&str; 9] = [
+pub const GENERIC_PARTICLE_SPRITES: [&str; 12] = [
     "particle/generic_7",
     "particle/generic_6",
     "particle/generic_5",
@@ -588,6 +863,9 @@ pub const GENERIC_PARTICLE_SPRITES: [&str; 9] = [
     "particle/generic_1",
     "particle/generic_0",
     "particle/dust",
+    "particle/shriek",
+    "particle/generic_0",
+    "particle/vibration",
 ];
 
 const DUST_SPRITE: &str = "particle/dust";
@@ -637,15 +915,55 @@ pub enum ServerParticleKind {
     Totem,
     Dust,
     Block,
+    Item,
+    Shriek,
+    Trail,
+    Vibration,
 }
 
 /// Wire options retained with a server particle. Only known exact codecs are
 /// represented; unknown payload layouts are never assumed to be empty.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum ServerParticleOptions {
     Simple,
-    Dust { packed_color: i32, scale: f32 },
+    Dust {
+        packed_color: i32,
+        scale: f32,
+    },
     Block(BlockState),
+    Item {
+        item_id: u32,
+        count: i32,
+        components: azalea_inventory::DataComponentPatch,
+    },
+    Shriek {
+        delay: i32,
+    },
+    Trail {
+        target: DVec3,
+        color: i32,
+        duration: i32,
+    },
+    VibrationBlock {
+        target: BlockPos,
+        arrival_ticks: i32,
+    },
+    VibrationEntity {
+        entity_id: i32,
+        y_offset: f32,
+        arrival_ticks: i32,
+    },
+}
+
+/// Resolve the particle sprite from the baked item cache. Prefer the model's
+/// own baked texture (which honors model-definition overrides), then the
+/// generated flat icon key; deliberately do not guess `item/{name}`.
+fn item_particle_texture<'a>(registry: &'a BlockRegistry, name: &str) -> Option<&'a str> {
+    registry
+        .get_item_model(name)
+        .and_then(|model| model.quads.first())
+        .map(|quad| quad.texture.as_str())
+        .or_else(|| registry.get_flat_item_texture_key(name))
 }
 
 impl ServerParticleKind {
@@ -662,13 +980,20 @@ impl ServerParticleKind {
             75 => Some(Self::Totem),
             21 => Some(Self::Dust),
             1 => Some(Self::Block),
+            54 => Some(Self::Item),
+            55 => Some(Self::Vibration),
+            56 => Some(Self::Trail),
+            112 => Some(Self::Shriek),
             _ => None,
         }
     }
 
     /// Vanilla `ParticleType.getOverrideLimiter`.
     fn override_limiter(self) -> bool {
-        matches!(self, Self::ExplosionEmitter | Self::Explosion | Self::Poof)
+        matches!(
+            self,
+            Self::ExplosionEmitter | Self::Explosion | Self::Poof | Self::Vibration
+        )
     }
 }
 
@@ -1190,7 +1515,7 @@ impl ParticleStore {
             let vel = dvec3(next_gaussian(), next_gaussian(), next_gaussian()) * max_speed;
             self.add_server_particle(
                 kind,
-                options,
+                options.clone(),
                 bypass_distance_limit,
                 pos + scatter,
                 vel,
@@ -1286,6 +1611,107 @@ impl ParticleStore {
                         .get_region(faces.particle.as_deref().unwrap_or(&faces.top)),
                     color,
                     world_brightness(chunks, block_pos.x, block_pos.y, block_pos.z),
+                ));
+            }
+            ServerParticleKind::Shriek => {
+                let ServerParticleOptions::Shriek { delay } = options else {
+                    return;
+                };
+                self.push(Particle::shriek(
+                    pos,
+                    delay,
+                    self.uv_map.get_region(GENERIC_PARTICLE_SPRITES[9]),
+                ));
+            }
+            ServerParticleKind::Trail => {
+                let ServerParticleOptions::Trail {
+                    target,
+                    color,
+                    duration,
+                } = options
+                else {
+                    return;
+                };
+                self.push(Particle::trail(
+                    pos,
+                    vel,
+                    target,
+                    color,
+                    duration,
+                    self.uv_map.get_region(GENERIC_PARTICLE_SPRITES[10]),
+                ));
+            }
+            ServerParticleKind::Vibration => {
+                let sprite = self.uv_map.get_region(GENERIC_PARTICLE_SPRITES[11]);
+                match options {
+                    ServerParticleOptions::VibrationBlock {
+                        target,
+                        arrival_ticks,
+                    } => {
+                        self.push(Particle::vibration(
+                            pos,
+                            dvec3(
+                                target.x as f64 + 0.5,
+                                target.y as f64 + 0.5,
+                                target.z as f64 + 0.5,
+                            ),
+                            arrival_ticks,
+                            sprite,
+                        ));
+                    }
+                    ServerParticleOptions::VibrationEntity {
+                        entity_id,
+                        y_offset,
+                        arrival_ticks,
+                    } => {
+                        self.push(Particle::vibration_entity(
+                            pos,
+                            entity_id,
+                            y_offset,
+                            arrival_ticks,
+                            sprite,
+                        ));
+                    }
+                    _ => return,
+                }
+            }
+            ServerParticleKind::Item => {
+                let ServerParticleOptions::Item {
+                    item_id,
+                    count: _,
+                    components,
+                } = options
+                else {
+                    return;
+                };
+                let Some(kind) =
+                    <azalea_registry::builtin::ItemKind as azalea_registry::Registry>::from_u32(
+                        item_id,
+                    )
+                else {
+                    return;
+                };
+                let name = crate::player::inventory::item_resource_name(kind);
+                // Keep the decoded component patch alive through icon resolution. The
+                // current baked item cache is name-keyed and cannot resolve component
+                // selected item models; never substitute an invented item/name path.
+                let _stack_components = components;
+                let Some(texture) = item_particle_texture(registry, &name) else {
+                    return;
+                };
+                if !self.uv_map.has_region(texture) {
+                    return;
+                }
+                self.push(Particle::breaking_item(
+                    pos,
+                    vel,
+                    self.uv_map.get_region(texture),
+                    world_brightness(
+                        chunks,
+                        pos.x.floor() as i32,
+                        pos.y.floor() as i32,
+                        pos.z.floor() as i32,
+                    ),
                 ));
             }
             ServerParticleKind::Dust => {
@@ -1424,8 +1850,15 @@ impl ParticleStore {
         let end_frames = self.end_rod_frames;
         let generic_frames = self.generic_frames;
         let explosion_frames = self.explosion_frames;
-        self.particles
-            .retain_mut(|p| p.tick(chunks, &end_frames, &generic_frames, &explosion_frames));
+        self.particles.retain_mut(|p| {
+            p.tick_with_entity_lookup(
+                chunks,
+                &end_frames,
+                &generic_frames,
+                &explosion_frames,
+                &mut lookup,
+            )
+        });
         self.particles.append(&mut self.pending);
     }
 
@@ -1434,16 +1867,40 @@ impl ParticleStore {
     pub fn extract(&self, partial_tick: f32, anchor: DVec3) -> Vec<ParticleQuad> {
         self.particles
             .iter()
-            .map(|p| {
+            .flat_map(|p| {
+                if p.kind == Kind::Shriek && p.delay > 0 {
+                    return Vec::new();
+                }
                 let pos = (p.prev_pos.lerp(p.pos, partial_tick as f64) - anchor).as_vec3();
                 let channel = |c: f32| (c * p.light * 255.0).round() as u8;
-                ParticleQuad {
+                let t = (p.age as f32 + partial_tick) / p.lifetime as f32;
+                let size = match p.kind {
+                    Kind::Dust => dust_quad_size(p.base_size, p.age, p.lifetime, partial_tick),
+                    Kind::Shriek => p.size * (t * 0.75).clamp(0.0, 1.0),
+                    _ => p.size,
+                };
+                let alpha = if p.kind == Kind::Shriek {
+                    1.0 - t.clamp(0.0, 1.0)
+                } else {
+                    p.alpha
+                };
+                let sway =
+                    ((p.age as f32 + partial_tick - std::f32::consts::TAU) * 0.05).sin() * 2.0;
+                let rot = p.rot_o + (p.rot - p.rot_o) * partial_tick;
+                let pitch = p.pitch_o + (p.pitch - p.pitch_o) * partial_tick;
+                let primary = if p.kind == Kind::Vibration {
+                    Quat::from_euler(
+                        EulerRot::YXZ,
+                        rot,
+                        -pitch - std::f32::consts::FRAC_PI_2,
+                        sway,
+                    )
+                } else {
+                    p.rotation
+                };
+                let quad = |rotation: Quat| ParticleQuad {
                     pos: pos.into(),
-                    size: if p.kind == Kind::Dust {
-                        dust_quad_size(p.base_size, p.age, p.lifetime, partial_tick)
-                    } else {
-                        p.size
-                    },
+                    size,
                     u0: p.u0,
                     u1: p.u1,
                     v0: p.v0,
@@ -1452,13 +1909,38 @@ impl ParticleStore {
                         channel(p.color[0]),
                         channel(p.color[1]),
                         channel(p.color[2]),
-                        (p.alpha * 255.0).round() as u8,
+                        (alpha * 255.0).round() as u8,
                     ]),
                     translucent: p.kind.translucent(),
+                    rotation: rotation.to_array(),
+                };
+                let second = p.second_rotation.or_else(|| {
+                    (p.kind == Kind::Vibration).then(|| {
+                        Quat::from_euler(
+                            EulerRot::YXZ,
+                            -std::f32::consts::PI + rot,
+                            pitch + std::f32::consts::FRAC_PI_2,
+                            sway,
+                        )
+                    })
+                });
+                let mut quads = vec![quad(primary)];
+                if let Some(rotation) = second {
+                    quads.push(quad(rotation));
                 }
+                quads
             })
             .collect()
     }
+}
+
+fn target_step(current: DVec3, target: DVec3, ticks_remaining: i32) -> DVec3 {
+    let factor = if ticks_remaining <= 1 {
+        1.0
+    } else {
+        1.0 / ticks_remaining as f64
+    };
+    current.lerp(target, factor)
 }
 
 /// `java.util.Random.nextGaussian` (Marsaglia polar method), minus the
@@ -1475,6 +1957,7 @@ mod tests {
         explosion_emitter_child, explosion_frame_index, packet_particle_count,
         plan_explosion_particles, supports_explosion_particle,
     };
+    use crate::world::chunk::ChunkStore;
 
     #[test]
     fn block_particle_id_is_typed_and_unhandled_payload_kinds_stay_unknown() {
@@ -1484,6 +1967,130 @@ mod tests {
         ));
         assert!(ServerParticleKind::from_id(43).is_none()); // item requires its own codec
         assert!(ServerParticleKind::from_id(44).is_none()); // vibration requires target data
+        assert!(matches!(
+            ServerParticleKind::from_id(54),
+            Some(ServerParticleKind::Item)
+        ));
+        assert!(matches!(
+            ServerParticleKind::from_id(55),
+            Some(ServerParticleKind::Vibration)
+        ));
+        assert!(matches!(
+            ServerParticleKind::from_id(56),
+            Some(ServerParticleKind::Trail)
+        ));
+        assert!(matches!(
+            ServerParticleKind::from_id(112),
+            Some(ServerParticleKind::Shriek)
+        ));
+    }
+
+    #[test]
+    fn special_target_step_reaches_destination_on_final_tick() {
+        assert_eq!(
+            super::target_step(dvec3(0.0, 0.0, 0.0), dvec3(10.0, 0.0, 0.0), 2),
+            dvec3(5.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            super::target_step(dvec3(5.0, 0.0, 0.0), dvec3(10.0, 0.0, 0.0), 1),
+            dvec3(10.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn entity_vibration_resolves_moving_target_and_expires_when_missing() {
+        let sprite = AtlasUVMap::test_empty().missing_region();
+        let frames = [sprite; 8];
+        let mut particle = Particle::vibration_entity(dvec3(0.0, 0.0, 0.0), 17, 1.5, 4, sprite);
+        let chunks = ChunkStore::new(2);
+        assert!(particle.tick_with_entity_lookup(
+            &chunks,
+            &frames,
+            &frames,
+            &[sprite; 16],
+            &mut |id| {
+                assert_eq!(id, 17);
+                Some(super::TrackingAttachment {
+                    position: dvec3(9.0, 18.0, 27.0),
+                    width: 1.0,
+                    height: 2.0,
+                })
+            }
+        ));
+        assert_eq!(particle.target, Some(dvec3(9.0, 19.5, 27.0)));
+        assert_eq!(particle.pos, dvec3(3.0, 6.5, 9.0));
+
+        assert!(particle.tick_with_entity_lookup(
+            &chunks,
+            &frames,
+            &frames,
+            &[sprite; 16],
+            &mut |_| {
+                Some(super::TrackingAttachment {
+                    position: dvec3(21.0, 42.0, 63.0),
+                    width: 1.0,
+                    height: 2.0,
+                })
+            }
+        ));
+        assert_eq!(particle.target, Some(dvec3(21.0, 43.5, 63.0)));
+        assert_eq!(particle.pos, dvec3(12.0, 25.0, 36.0));
+        assert!(!particle.tick_with_entity_lookup(
+            &chunks,
+            &frames,
+            &frames,
+            &[sprite; 16],
+            &mut |_| None
+        ));
+    }
+
+    #[test]
+    fn item_breaking_particle_matches_vanilla_terrain_base() {
+        let sprite = AtlasUVMap::test_empty().missing_region();
+        let particle =
+            Particle::breaking_item(dvec3(1.0, 2.0, 3.0), dvec3(0.2, 0.3, 0.4), sprite, 0.5);
+        assert!(matches!(
+            particle.kind,
+            super::Kind::Item | super::Kind::ItemTranslucent
+        ));
+        assert_eq!(particle.gravity, 1.0);
+        assert_eq!(particle.friction, 0.98);
+        assert!((4..=40).contains(&particle.lifetime));
+        assert!((0.05..=0.1).contains(&particle.size));
+        assert!(particle.vel.distance(dvec3(0.2, 0.3, 0.4)) < 0.05);
+        assert_eq!(particle.color, [1.0; 3]);
+        assert_eq!(particle.light, 0.5);
+    }
+
+    #[test]
+    fn specialized_particles_keep_options_and_vanilla_lifetimes() {
+        let sprite = AtlasUVMap::test_empty().missing_region();
+        let shriek = Particle::shriek(dvec3(1.0, 2.0, 3.0), 7, sprite);
+        assert_eq!((shriek.delay, shriek.lifetime), (7, 30));
+        assert_eq!(shriek.vel.y, 0.1);
+        assert!(shriek.second_rotation.is_some());
+
+        let trail = Particle::trail(
+            dvec3(0.0, 0.0, 0.0),
+            dvec3(1.0, 2.0, 3.0),
+            dvec3(9.0, 0.0, 0.0),
+            0x804020,
+            12,
+            sprite,
+        );
+        assert!(matches!(&trail.kind, super::Kind::Trail));
+        assert_eq!(
+            (trail.lifetime, trail.target),
+            (12, Some(dvec3(9.0, 0.0, 0.0)))
+        );
+        assert_eq!(trail.light, 1.0);
+        assert!(trail.color.iter().all(|c| (0.0..=1.0).contains(c)));
+
+        let vibration = Particle::vibration(dvec3(0.0, 0.0, 0.0), dvec3(4.5, 5.5, 6.5), 20, sprite);
+        assert!(matches!(&vibration.kind, super::Kind::Vibration));
+        assert_eq!(vibration.lifetime, 20);
+        assert_eq!(vibration.target, Some(dvec3(4.5, 5.5, 6.5)));
+        assert_eq!(vibration.light, 1.0);
     }
 
     #[test]
@@ -2307,8 +2914,10 @@ mod tests {
         assert!(matches!(Kind::from_id(75), Some(Kind::Totem)));
         assert!(matches!(Kind::from_id(21), Some(Kind::Dust))); // RGB + scale decoded separately.
         assert!(matches!(Kind::from_id(1), Some(Kind::Block))); // Block carries a block-state ID.
-        assert!(Kind::from_id(54).is_none()); // Item requires an item stack.
-        assert!(Kind::from_id(55).is_none()); // Vibration requires a destination.
+        assert!(matches!(Kind::from_id(54), Some(Kind::Item))); // item
+        assert!(matches!(Kind::from_id(55), Some(Kind::Vibration))); // vibration
+        assert!(matches!(Kind::from_id(56), Some(Kind::Trail))); // trail
+        assert!(matches!(Kind::from_id(112), Some(Kind::Shriek))); // shriek
     }
 }
 

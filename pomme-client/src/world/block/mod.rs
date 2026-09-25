@@ -135,6 +135,8 @@ struct BlockData {
     is_air: bool,
     /// Vanilla `hasCollision` (`BlockBehaviour.Properties.noCollision()`).
     collides: bool,
+    /// Derived `blocksMotion` flag used by FlowingFluid's open-side test.
+    blocks_motion: bool,
     fluid: Fluid,
     light: LightProps,
 }
@@ -431,6 +433,9 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
                 outline,
                 is_air,
                 collides,
+                // The collision shape is the source of truth for motion here;
+                // non-solid collision blocks (webs/plants) do not block fluid.
+                blocks_motion: collides && name != "cobweb",
                 fluid,
                 light,
             });
@@ -533,6 +538,7 @@ fn block_data(state: BlockState) -> &'static BlockData {
         outline: None,
         is_air: false,
         collides: true,
+        blocks_motion: true,
         fluid: NO_FLUID,
         light: BEDROCK_LIGHT,
     });
@@ -553,11 +559,26 @@ pub(crate) fn first_state_of(name: &str) -> Option<BlockState> {
     all_states().find(|(_, d)| d.id == name).map(|(s, _)| s)
 }
 
+/// Exact registered-state lookup for serialized block-state properties.
+pub(crate) fn state_with_properties(
+    name: &str,
+    properties: &[(String, String)],
+) -> Option<BlockState> {
+    all_states()
+        .find(|(_, data)| {
+            data.id == name
+                && data.properties.entries().count() == properties.len()
+                && data
+                    .properties
+                    .entries()
+                    .all(|(key, value)| properties.iter().any(|(k, v)| k == key && v == value))
+        })
+        .map(|(state, _)| state)
+}
+
 /// Exact registered state lookup for NBT forms that omit `Properties`.
 pub(crate) fn state_without_properties(name: &str) -> Option<BlockState> {
-    all_states()
-        .find(|(_, data)| data.id == name && data.properties.entries().next().is_none())
-        .map(|(state, _)| state)
+    state_with_properties(name, &[])
 }
 
 pub(crate) fn water_source_state() -> BlockState {
@@ -671,6 +692,37 @@ pub fn is_air(state: BlockState) -> bool {
 /// Whether the state's block collides with entities (vanilla `hasCollision`).
 pub fn has_collision(state: BlockState) -> bool {
     block_data(state).collides
+}
+
+/// Fluid `FlowingFluid.getFlow` uses this independently of entity collision.
+pub fn blocks_motion(state: BlockState) -> bool {
+    block_data(state).blocks_motion
+}
+
+/// Whether a horizontal face provides FULL support, as used by the falling-
+/// fluid downward-flow bias. This derives from baked collision boxes.
+pub fn has_full_horizontal_sturdy_face(state: BlockState, dx: i32, dz: i32) -> bool {
+    if dx == 0 && dz == 0 {
+        return false;
+    }
+    let full_cube = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+    let boxes = block_data(state)
+        .shape
+        .as_deref()
+        .unwrap_or(std::slice::from_ref(&full_cube));
+    boxes.iter().any(|b| {
+        if dx != 0 {
+            b[if dx > 0 { 3 } else { 0 }] == if dx > 0 { 1.0 } else { 0.0 }
+                && b[2] == 0.0
+                && b[5] == 1.0
+                && b[4] == 1.0
+        } else {
+            b[if dz > 0 { 5 } else { 2 }] == if dz > 0 { 1.0 } else { 0.0 }
+                && b[0] == 0.0
+                && b[3] == 1.0
+                && b[4] == 1.0
+        }
+    })
 }
 
 pub fn fluid(state: BlockState) -> Fluid {

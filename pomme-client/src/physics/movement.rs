@@ -878,7 +878,7 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
                             cell_flow.x += dx as f64 * difference;
                             cell_flow.z += dz as f64 * difference;
                         } else if neighbor.kind == FluidKind::Empty
-                            && !blocks_motion_for_fluid(neighbor_state)
+                            && !crate::world::block::blocks_motion(neighbor_state)
                         {
                             let below = fluid(chunks.get_block_state(x + dx, y - 1, z + dz));
                             if below.kind == kind {
@@ -896,9 +896,13 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
                                     let side = chunks.get_block_state(x + dx, y, z + dz);
                                     let above = chunks.get_block_state(x + dx, y + 1, z + dz);
                                     (crate::world::block::block_id(side) != "ice"
-                                        && face_sturdy_for_fluid(side, dx, dz))
+                                        && crate::world::block::has_full_horizontal_sturdy_face(
+                                            side, dx, dz,
+                                        ))
                                         || (crate::world::block::block_id(above) != "ice"
-                                            && face_sturdy_for_fluid(above, dx, dz))
+                                            && crate::world::block::has_full_horizontal_sturdy_face(
+                                                above, dx, dz,
+                                            ))
                                 });
                         if has_solid_side {
                             let horizontal = cell_flow.normalize_or_zero();
@@ -929,32 +933,6 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
             player.velocity = (*player.velocity + impulse).into();
         }
     }
-}
-
-fn blocks_motion_for_fluid(state: azalea_block::BlockState) -> bool {
-    let id = crate::world::block::block_id(state);
-    crate::world::block::has_collision(state) && !matches!(id, "cobweb" | "bamboo_sapling")
-}
-
-/// Approximate SupportType.FULL using the state's collision shape; contextual
-/// support predicates cannot be resolved without world/entity context.
-fn face_sturdy_for_fluid(state: azalea_block::BlockState, dx: i32, dz: i32) -> bool {
-    let full_cube = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-    let boxes = match crate::physics::block_shape::partial_shape(state) {
-        Some(boxes) => boxes,
-        None => std::slice::from_ref(&full_cube),
-    };
-    boxes.iter().any(|b| {
-        if dx > 0 {
-            b[3] == 1.0 && b[2] == 0.0 && b[5] == 1.0 && b[4] == 1.0
-        } else if dx < 0 {
-            b[0] == 0.0 && b[2] == 0.0 && b[5] == 1.0 && b[4] == 1.0
-        } else if dz > 0 {
-            b[5] == 1.0 && b[0] == 0.0 && b[3] == 1.0 && b[4] == 1.0
-        } else {
-            b[2] == 0.0 && b[0] == 0.0 && b[3] == 1.0 && b[4] == 1.0
-        }
-    })
 }
 
 fn touches_block_id(chunks: &ChunkStore, aabb: &Aabb, id: &str) -> bool {
@@ -1476,10 +1454,12 @@ mod tests {
         crate::world::block::init("26.2");
         let stone = crate::world::block::find_state("stone", &[]);
         let cobweb = crate::world::block::find_state("cobweb", &[]);
-        assert!(blocks_motion_for_fluid(stone));
-        assert!(!blocks_motion_for_fluid(cobweb));
-        assert!(face_sturdy_for_fluid(stone, 1, 0));
-        assert!(!face_sturdy_for_fluid(
+        assert!(crate::world::block::blocks_motion(stone));
+        assert!(!crate::world::block::blocks_motion(cobweb));
+        assert!(crate::world::block::has_full_horizontal_sturdy_face(
+            stone, 1, 0
+        ));
+        assert!(!crate::world::block::has_full_horizontal_sturdy_face(
             crate::world::block::find_state(
                 "oak_slab",
                 &[("type", "bottom"), ("waterlogged", "false")]

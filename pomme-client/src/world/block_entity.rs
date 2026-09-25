@@ -183,10 +183,19 @@ pub fn is_block_entity_block(name: &str) -> bool {
     )
 }
 
-/// Resolve only unambiguous moving-piston payloads whose moved block state has
-/// no properties. Unsupported/malformed payloads intentionally remain inert.
-/// This is collision support only; moving pistons still have no render path.
-pub fn moving_block_collision(nbt: &NbtCompound) -> Option<(BlockState, glam::DVec3)> {
+#[derive(Clone, Copy)]
+pub struct MovingBlockRender {
+    pub state: BlockState,
+    pub offset: glam::DVec3,
+    pub source: bool,
+    pub extending: bool,
+    pub progress: f32,
+    pub direction: glam::DVec3,
+}
+
+/// Resolve the moved state and vanilla's piston translation from the 26.2
+/// update-tag fields. Invalid or stale payloads intentionally remain invisible.
+pub fn moving_block_render_details(nbt: &NbtCompound) -> Option<MovingBlockRender> {
     use simdnbt::owned::NbtTag;
 
     let number = |key: &str| -> Option<f32> {
@@ -202,10 +211,11 @@ pub fn moving_block_collision(nbt: &NbtCompound) -> Option<(BlockState, glam::DV
         }
     };
     let progress = number("progress")?;
-    if !(0.0..=1.0).contains(&progress) || boolean("source")? {
+    if !(0.0..=1.0).contains(&progress) {
         return None;
     }
     let extending = boolean("extending")?;
+    let source = boolean("source")?;
     let direction = match nbt.get("facing")? {
         NbtTag::String(value) => match value.to_str().as_ref() {
             "down" => glam::DVec3::NEG_Y,
@@ -229,17 +239,45 @@ pub fn moving_block_collision(nbt: &NbtCompound) -> Option<(BlockState, glam::DV
         }
         _ => return None,
     };
-    if moved.get("Properties").is_some() {
-        return None;
-    }
-    let state = crate::world::block::state_without_properties(&name)?;
+    let properties = match moved.get("Properties") {
+        None => Vec::new(),
+        Some(tag) => tag
+            .compound()?
+            .iter()
+            .map(|(key, value)| {
+                Some((
+                    key.to_str().into_owned(),
+                    value.string()?.to_str().into_owned(),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?,
+    };
+    let state = crate::world::block::state_with_properties(&name, &properties)?;
     let offset = direction
         * f64::from(if extending {
             progress - 1.0
         } else {
             1.0 - progress
         });
-    Some((state, offset))
+    Some(MovingBlockRender {
+        state,
+        offset,
+        source,
+        extending,
+        progress,
+        direction,
+    })
+}
+
+pub fn moving_block_render(nbt: &NbtCompound) -> Option<(BlockState, glam::DVec3)> {
+    moving_block_render_details(nbt).map(|render| (render.state, render.offset))
+}
+
+pub fn moving_block_collision(nbt: &NbtCompound) -> Option<(BlockState, glam::DVec3)> {
+    if matches!(nbt.get("source")?, simdnbt::owned::NbtTag::Byte(value) if *value != 0) {
+        return None;
+    }
+    moving_block_render(nbt)
 }
 
 pub fn is_invisible_block(name: &str) -> bool {

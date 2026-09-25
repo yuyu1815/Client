@@ -923,6 +923,14 @@ impl MeshDispatcher {
             height: chunk_store.height(),
             debug_world: chunk_store.debug_world,
             trace: self.trace_state.config(),
+            moving_blocks: chunk_store
+                .block_entities
+                .iter()
+                .filter(|(block_pos, _)| {
+                    block_pos.x.div_euclid(16) == pos.x && block_pos.z.div_euclid(16) == pos.z
+                })
+                .map(|(block_pos, entity)| (*block_pos, entity.nbt.clone()))
+                .collect(),
         }
     }
 
@@ -1235,6 +1243,7 @@ struct ChunkStoreSnapshot {
     height: u32,
     debug_world: Option<crate::world::block::DebugWorld>,
     trace: Option<MeshTraceConfig>,
+    moving_blocks: Vec<(azalea_core::position::BlockPos, simdnbt::owned::NbtCompound)>,
 }
 
 impl ChunkStoreSnapshot {
@@ -1825,6 +1834,100 @@ fn mesh_chunk_snapshot(
         local_z += step;
     }
 
+    if lod == 0 {
+        for (block_pos, nbt) in &snapshot.moving_blocks {
+            if block_pos.y < by_start
+                || block_pos.y >= by_end
+                || crate::world::block::block_id(snapshot.get_block_state(
+                    block_pos.x,
+                    block_pos.y,
+                    block_pos.z,
+                )) != "moving_piston"
+            {
+                continue;
+            }
+            let Some(render) = crate::world::block_entity::moving_block_render_details(nbt) else {
+                continue;
+            };
+            let section = ((block_pos.y - min_y) / 16) as usize;
+            let sink = &mut sinks[section];
+            let world_base = glam::IVec3::new(block_pos.x, block_pos.y, block_pos.z);
+            let moved_pos = world_base
+                - glam::IVec3::new(
+                    render.direction.x as i32,
+                    render.direction.y as i32,
+                    render.direction.z as i32,
+                );
+            let render_at = |state, pos: glam::IVec3, sink: &mut MeshSink| {
+                let local = [
+                    (pos.x - world_x) as f32 + render.offset.x as f32,
+                    (pos.y - (min_y + section as i32 * 16)) as f32 + render.offset.y as f32,
+                    (pos.z - world_z) as f32 + render.offset.z as f32,
+                ];
+                emit_moving_state(
+                    sink, local, state, snapshot, registry, uv_map, pos.x, pos.y, pos.z,
+                );
+            };
+
+            if crate::world::block::block_id(render.state) == "piston_head" {
+                let short = render.progress <= 0.5;
+                if let Some(state) = moving_state_with_properties(
+                    render.state,
+                    &[("short", if short { "true" } else { "false" })],
+                ) {
+                    render_at(state, moved_pos, sink);
+                }
+            } else if render.source && !render.extending {
+                let moved_id = crate::world::block::block_id(render.state);
+                let Some(facing) =
+                    crate::world::block::block_properties(render.state).get("facing")
+                else {
+                    continue;
+                };
+                if !matches!(moved_id, "piston" | "sticky_piston")
+                    || !matches!(facing, "down" | "up" | "north" | "south" | "west" | "east")
+                {
+                    continue;
+                }
+                let Some(head) = crate::world::block::state_with_properties(
+                    "piston_head",
+                    &vec![
+                        ("facing".into(), facing.into()),
+                        (
+                            "short".into(),
+                            if render.progress >= 0.5 {
+                                "true"
+                            } else {
+                                "false"
+                            }
+                            .into(),
+                        ),
+                        (
+                            "type".into(),
+                            if moved_id == "sticky_piston" {
+                                "sticky"
+                            } else {
+                                "normal"
+                            }
+                            .into(),
+                        ),
+                    ],
+                ) else {
+                    continue;
+                };
+                let Some(base) =
+                    moving_state_with_properties(render.state, &[("extended", "true")])
+                else {
+                    continue;
+                };
+                render_at(head, moved_pos, sink);
+                render_at(base, world_base, sink);
+            } else {
+                render_at(render.state, world_base, sink);
+            }
+        }
+    }
+
     // Finalize each non-empty section: concatenate cutout indices after solid
     // (recording the split), take the section-local AABB from the float
     // positions, then quantize so upload is a plain memcpy. Empty in-range
@@ -1891,6 +1994,79 @@ fn mesh_chunk_snapshot(
         timing: None,
         queue_ms: 0.0,
         mesh_ms: 0.0,
+    }
+}
+
+fn moving_state_with_properties(
+    state: BlockState,
+    replacements: &[(&str, &str)],
+) -> Option<BlockState> {
+    let properties = crate::world::block::block_properties(state);
+    let pairs = properties
+        .entries()
+        .map(|(key, value)| {
+            (
+                key.to_owned(),
+                replacements
+                    .iter()
+                    .find_map(|(replace_key, replace_value)| {
+                        (*replace_key == key).then_some(*replace_value)
+                    })
+                    .unwrap_or(value)
+                    .to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if replacements
+        .iter()
+        .any(|(key, _)| properties.get(key).is_none())
+    {
+        return None;
+    }
+    crate::world::block::state_with_properties(crate::world::block::block_id(state), &pairs)
+}
+
+fn emit_moving_state(
+    sink: &mut MeshSink,
+    local: [f32; 3],
+    state: BlockState,
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    uv_map: &AtlasUVMap,
+    x: i32,
+    y: i32,
+    z: i32,
+) {
+    if let Some(model) = registry.get_baked_model_at(state, x, y, z) {
+        emit_baked_model(
+            sink,
+            local,
+            state,
+            &model,
+            snapshot,
+            registry,
+            uv_map,
+            x,
+            y,
+            z,
+            None,
+            &mut Vec::new(),
+        );
+    } else if let Some(quads) = registry.get_multipart_quads_at(state, x, y, z) {
+        emit_multipart(
+            sink,
+            local,
+            state,
+            &quads,
+            snapshot,
+            registry,
+            uv_map,
+            x,
+            y,
+            z,
+            None,
+            &mut Vec::new(),
+        );
     }
 }
 
@@ -2961,12 +3137,36 @@ mod terrain_uv_tests {
 
     use super::{
         MeshTraceConfig, MeshTraceState, TraceTarget, add_weighted_fluid_height, flat_quad_light,
-        fluid_flow_neighbor_height, fluid_height_with_above, fluid_top_uv_values, pack_sprite_uv,
-        unpack_sprite_uv,
+        fluid_flow_neighbor_height, fluid_height_with_above, fluid_top_uv_values,
+        moving_state_with_properties, pack_sprite_uv, unpack_sprite_uv,
     };
 
     fn wrapped(x: f32) -> f32 {
         x - x.floor()
+    }
+
+    #[test]
+    fn moving_piston_state_changes_require_exact_registered_properties() {
+        crate::world::block::init("26.2");
+        let state = crate::world::block::state_with_properties(
+            "sticky_piston",
+            &[
+                ("extended".into(), "false".into()),
+                ("facing".into(), "north".into()),
+            ],
+        )
+        .unwrap();
+        let extended = moving_state_with_properties(state, &[("extended", "true")]).unwrap();
+        assert_eq!(crate::world::block::block_id(extended), "sticky_piston");
+        assert_eq!(
+            crate::world::block::block_properties(extended).get("extended"),
+            Some("true")
+        );
+        assert_eq!(
+            crate::world::block::block_properties(extended).get("facing"),
+            Some("north")
+        );
+        assert!(moving_state_with_properties(state, &[("missing", "true")]).is_none());
     }
 
     #[test]

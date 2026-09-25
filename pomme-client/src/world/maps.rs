@@ -8,7 +8,7 @@ pub struct MapData {
     pub locked: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MapDecorationAsset {
     Player,
     Frame,

@@ -1841,6 +1841,54 @@ fn parse_level_particles(
             };
             crate::particle::ServerParticleOptions::Block(state)
         }
+        crate::particle::ServerParticleKind::Item => {
+            let (item_id, count) = if super::translate::active().is_some() {
+                // Translated payloads use Azalea ItemStack's count/id ordering.
+                let count = i32::azalea_read_var(cur)?;
+                (u32::azalea_read_var(cur)?, count)
+            } else {
+                // 26.2 ItemStackTemplate writes item id, then count.
+                let item_id = u32::azalea_read_var(cur)?;
+                (item_id, i32::azalea_read_var(cur)?)
+            };
+            let components = azalea_inventory::DataComponentPatch::azalea_read(cur)?;
+            crate::particle::ServerParticleOptions::Item {
+                item_id,
+                count,
+                components,
+            }
+        }
+        crate::particle::ServerParticleKind::Shriek => {
+            crate::particle::ServerParticleOptions::Shriek {
+                delay: i32::azalea_read_var(cur)?,
+            }
+        }
+        crate::particle::ServerParticleKind::Trail => {
+            crate::particle::ServerParticleOptions::Trail {
+                target: glam::dvec3(
+                    f64::azalea_read(cur)?,
+                    f64::azalea_read(cur)?,
+                    f64::azalea_read(cur)?,
+                ),
+                color: i32::azalea_read(cur)?,
+                duration: i32::azalea_read_var(cur)?,
+            }
+        }
+        crate::particle::ServerParticleKind::Vibration => {
+            let source_type = u32::azalea_read_var(cur)?;
+            match source_type {
+                0 => crate::particle::ServerParticleOptions::VibrationBlock {
+                    target: BlockPos::azalea_read(cur)?,
+                    arrival_ticks: i32::azalea_read_var(cur)?,
+                },
+                1 => crate::particle::ServerParticleOptions::VibrationEntity {
+                    entity_id: i32::azalea_read_var(cur)?,
+                    y_offset: f32::azalea_read(cur)?,
+                    arrival_ticks: i32::azalea_read_var(cur)?,
+                },
+                _ => return Ok(None),
+            }
+        }
         _ => crate::particle::ServerParticleOptions::Simple,
     };
     Ok(Some(NetworkEvent::LevelParticles {

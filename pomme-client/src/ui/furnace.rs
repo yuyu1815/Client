@@ -74,7 +74,7 @@ pub fn build_furnace(
     last_click: &mut Option<(u16, Instant)>,
     gs: f32,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
-    recipe_book: &crate::ui::recipe_book::RecipeBookState,
+    recipe_book: &mut crate::ui::recipe_book::RecipeBookState,
     native_recipes: bool,
 ) -> ContainerResult {
     let (background, lit_sprite, burn_sprite) = variant.sprites();
@@ -122,8 +122,10 @@ pub fn build_furnace(
     push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
 
     let mut gesture_input = *input;
-    if recipe_id.is_some() {
+    if recipe_id.is_some() || recipe_book.clicked_ui {
         gesture_input.left_pressed = false;
+        gesture_input.right_pressed = false;
+        gesture_input.middle_pressed = false;
     }
     let (ops, clicked_outside) = resolve_gesture(
         &gesture_input,

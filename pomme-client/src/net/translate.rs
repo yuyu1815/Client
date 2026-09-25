@@ -242,11 +242,16 @@
 //! 1.20.6's plus):
 //! - items are `bool + id + byte count + NBT`; inbound stacks translate the
 //!   legacy root into `custom_data` (retaining unknown NBT) and convert exact
-//!   `Damage`, `RepairCost`, `Unbreakable`, `CustomModelData`, `display.color`,
-//!   `display.Name` and `display.Lore` fields to native components when each
-//!   key is unique and correctly typed. Other/invalid/duplicate fields remain
-//!   in `custom_data`. Merchant costs have no component patch and outbound
-//!   `container_click`/`set_creative_mode_slot` still use bare stacks
+//!   `Damage`, `RepairCost`, `Unbreakable`, `CustomModelData`,
+//!   `CustomPotionColor`, `display.color`, `display.Name` and `display.Lore`
+//!   fields to native components when each key is unique and correctly typed.
+//!   Other/invalid/duplicate fields remain in `custom_data`. Enchantments,
+//!   potion/effect registry names, adventure block predicates, and UUID-backed
+//!   attribute modifiers are not guessed: the dynamic source
+//!   registries/modifier identifiers needed by their 26.2 codecs are
+//!   unavailable to this item walker. Merchant costs have no component patch
+//!   and outbound `container_click`/`set_creative_mode_slot` still use bare
+//!   stacks
 //! - the configuration phase diverges for the first time: ids remap, and the
 //!   single whole-holder NBT `registry_data` packet fans out into the
 //!   per-registry form (entries reordered by their explicit ids, which the
@@ -2414,6 +2419,9 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
         .and_then(|tag| tag.int())
         .filter(|value| (*value as f32) as i64 == i64::from(*value))
         .map(|value| value as f32);
+    // PotionContents can represent this custom color without a potion/effect
+    // registry lookup. Those registry-backed legacy fields stay in custom_data.
+    let potion_color = unique_nbt_field(&nbt, "CustomPotionColor").and_then(|tag| tag.int());
     let dyed_color = unique_nbt_field(&nbt, "display")
         .and_then(|tag| tag.compound())
         .and_then(|display| unique_nbt_field(display, "color"))
@@ -2457,6 +2465,7 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
         + usize::from(repair_cost.is_some())
         + usize::from(unbreakable.is_some())
         + usize::from(custom_model_data.is_some())
+        + usize::from(potion_color.is_some())
         + usize::from(dyed_color.is_some())
         + usize::from(display_name.is_some())
         + usize::from(display_lore.is_some());
@@ -2469,6 +2478,7 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
                 || (key_str == "RepairCost" && repair_cost.is_some())
                 || (key_str == "Unbreakable" && unbreakable.is_some())
                 || (key_str == "CustomModelData" && custom_model_data.is_some())
+                || (key_str == "CustomPotionColor" && potion_color.is_some())
             {
                 continue;
             }
@@ -2510,6 +2520,13 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
         wire::write_varint(&mut components, 0); // flags
         wire::write_varint(&mut components, 0); // strings
         wire::write_varint(&mut components, 0); // colors
+    }
+    if let Some(color) = potion_color {
+        wire::write_varint(&mut components, DataComponentKind::PotionContents.to_u32());
+        components.extend_from_slice(&[0, 1]); // no potion; custom color present
+        components.extend_from_slice(&color.to_be_bytes());
+        wire::write_varint(&mut components, 0); // no custom effects
+        components.push(0); // no custom name
     }
     if let Some(color) = dyed_color {
         wire::write_varint(&mut components, DataComponentKind::DyedColor.to_u32());
@@ -5389,6 +5406,30 @@ mod tests {
         expected.extend_from_slice(&[1, 0x42, 0x28, 0, 0, 0, 0, 0]); // [42.0f32], other lists empty
         wire::write_varint(&mut expected, DataComponentKind::DyedColor.to_u32());
         expected.extend_from_slice(&[0, 0x11, 0x22, 0x33]);
+        assert_eq!(actual, expected);
+        assert_eq!(input.position() as usize, fixture.len());
+    }
+
+    #[test]
+    fn legacy_custom_potion_color_uses_potion_contents_codec() {
+        // 1.20.4 stack with only CustomPotionColor=0x123456.
+        let fixture = [
+            1, 1, 1, 10, 3, 0, 17, b'C', b'u', b's', b't', b'o', b'm', b'P', b'o', b't', b'i',
+            b'o', b'n', b'C', b'o', b'l', b'o', b'r', 0, 0x12, 0x34, 0x56, 0,
+        ];
+        let mut input = Cursor::new(fixture.as_slice());
+        let mut actual = Vec::new();
+        translate_item_765(&mut input, &mut actual, false).expect("valid legacy slot");
+
+        let mut expected = vec![1, 1, 2, 0]; // count, item, additions, removals
+        let mut custom_data = Vec::new();
+        simdnbt::owned::Nbt::new("".into(), simdnbt::owned::NbtCompound::new())
+            .azalea_write(&mut custom_data)
+            .expect("custom_data codec");
+        wire::write_varint(&mut expected, DataComponentKind::CustomData.to_u32());
+        expected.extend_from_slice(&custom_data);
+        wire::write_varint(&mut expected, DataComponentKind::PotionContents.to_u32());
+        expected.extend_from_slice(&[0, 1, 0x00, 0x12, 0x34, 0x56, 0, 0]);
         assert_eq!(actual, expected);
         assert_eq!(input.position() as usize, fixture.len());
     }

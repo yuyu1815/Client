@@ -172,66 +172,297 @@ pub fn push_clipped_sprite(
 pub fn push_recipe_entries(
     elements: &mut Vec<MenuElement>,
     panel: &Panel,
-    book: &crate::ui::recipe_book::RecipeBookState,
+    book: &mut crate::ui::recipe_book::RecipeBookState,
     cursor: (f32, f32),
     clicked: bool,
     native: bool,
     furnace_variant: Option<crate::ui::furnace::FurnaceVariant>,
     use_max_items: bool,
-    columns: usize,
-    rows: usize,
+    _columns: usize,
+    _rows: usize,
     x: f32,
     y: f32,
 ) -> Option<(u32, bool)> {
+    book.clicked_ui = false;
     if !native {
         panel.label(elements, x, y, "Recipe book unavailable");
         return None;
     }
-    let mut selected = None;
-    let mut index = 0;
+    let book_type = match furnace_variant {
+        None => 0,
+        Some(crate::ui::furnace::FurnaceVariant::Furnace) => 1,
+        Some(crate::ui::furnace::FurnaceVariant::BlastFurnace) => 2,
+        Some(crate::ui::furnace::FurnaceVariant::Smoker) => 3,
+    };
+    book.load_settings(book_type);
+    let button_rect = [
+        panel.ox + x * panel.scale,
+        panel.oy + y * panel.scale,
+        18.0 * panel.scale,
+        18.0 * panel.scale,
+    ];
+    let button_hover = crate::ui::common::hit_test(cursor, button_rect);
+    panel.image(
+        elements,
+        if book.open {
+            SpriteId::RecipeBookButtonHighlighted
+        } else {
+            SpriteId::RecipeBookButton
+        },
+        x,
+        y,
+        18.0,
+        18.0,
+    );
+    if button_hover && clicked {
+        book.clicked_ui = true;
+        book.open = !book.open;
+        book.search_focused = false;
+        book.settings_dirty = true;
+    }
+    if !book.open {
+        return None;
+    }
+    let bx = x - 86.0;
+    let by = y - 16.0;
+    let r = [
+        panel.ox + bx * panel.scale,
+        panel.oy + by * panel.scale,
+        147.0 * panel.scale,
+        166.0 * panel.scale,
+    ];
+    if clicked && crate::ui::common::hit_test(cursor, r) {
+        book.clicked_ui = true;
+    }
+    elements.push(MenuElement::Rect {
+        x: r[0],
+        y: r[1],
+        w: r[2],
+        h: r[3],
+        corner_radius: 0.0,
+        color: [0.12, 0.12, 0.12, 0.96],
+    });
+    let search = [
+        r[0] + 25.0 * panel.scale,
+        r[1] + 13.0 * panel.scale,
+        81.0 * panel.scale,
+        14.0 * panel.scale,
+    ];
+    elements.push(MenuElement::Rect {
+        x: search[0],
+        y: search[1],
+        w: search[2],
+        h: search[3],
+        corner_radius: 0.0,
+        color: [0.04, 0.04, 0.04, 1.0],
+    });
+    let search_hover = crate::ui::common::hit_test(cursor, search);
+    if clicked {
+        book.search_focused = search_hover;
+        book.clicked_ui |= search_hover;
+    }
+    panel.label(
+        elements,
+        bx + 27.0,
+        by + 14.0,
+        if book.search.is_empty() {
+            "Search..."
+        } else {
+            &book.search
+        },
+    );
+    let filter = [
+        r[0] + 110.0 * panel.scale,
+        r[1] + 12.0 * panel.scale,
+        26.0 * panel.scale,
+        16.0 * panel.scale,
+    ];
+    elements.push(MenuElement::Rect {
+        x: filter[0],
+        y: filter[1],
+        w: filter[2],
+        h: filter[3],
+        corner_radius: 0.0,
+        color: if book.craftable_only {
+            [0.2, 0.65, 0.2, 1.0]
+        } else {
+            [0.3, 0.3, 0.3, 1.0]
+        },
+    });
+    panel.label(
+        elements,
+        bx + 119.0,
+        by + 15.0,
+        if book.craftable_only { "✓" } else { "·" },
+    );
+    if crate::ui::common::hit_test(cursor, filter) && clicked {
+        book.clicked_ui = true;
+        book.craftable_only = !book.craftable_only;
+        book.settings_dirty = true;
+        book.page = 0;
+    }
+    let mut categories: Vec<_> = book
+        .categories
+        .values()
+        .copied()
+        .filter(|c| match furnace_variant {
+            Some(v) => furnace_category_matches(v, c),
+            None => matches!(
+                c,
+                azalea_registry::builtin::RecipeBookCategory::CraftingEquipment
+                    | azalea_registry::builtin::RecipeBookCategory::CraftingBuildingBlocks
+                    | azalea_registry::builtin::RecipeBookCategory::CraftingMisc
+                    | azalea_registry::builtin::RecipeBookCategory::CraftingRedstone
+            ),
+        })
+        .collect();
+    categories.sort_by_key(|c| match c {
+        azalea_registry::builtin::RecipeBookCategory::FurnaceFood
+        | azalea_registry::builtin::RecipeBookCategory::SmokerFood => 0,
+        azalea_registry::builtin::RecipeBookCategory::FurnaceBlocks
+        | azalea_registry::builtin::RecipeBookCategory::BlastFurnaceBlocks => 1,
+        azalea_registry::builtin::RecipeBookCategory::FurnaceMisc
+        | azalea_registry::builtin::RecipeBookCategory::BlastFurnaceMisc => 2,
+        azalea_registry::builtin::RecipeBookCategory::CraftingEquipment => 0,
+        azalea_registry::builtin::RecipeBookCategory::CraftingBuildingBlocks => 1,
+        azalea_registry::builtin::RecipeBookCategory::CraftingMisc => 2,
+        azalea_registry::builtin::RecipeBookCategory::CraftingRedstone => 3,
+        _ => 4,
+    });
+    categories.dedup();
+    if book.category.is_some_and(|c| !categories.contains(&c)) {
+        book.category = None;
+    }
+    for (i, category) in categories.iter().take(5).enumerate() {
+        let tab = [
+            r[0] - 30.0 * panel.scale,
+            r[1] + (3.0 + 27.0 * i as f32) * panel.scale,
+            35.0 * panel.scale,
+            27.0 * panel.scale,
+        ];
+        elements.push(MenuElement::Rect {
+            x: tab[0],
+            y: tab[1],
+            w: tab[2],
+            h: tab[3],
+            corner_radius: 0.0,
+            color: if book.category == Some(*category) {
+                [0.56, 0.42, 0.22, 1.0]
+            } else {
+                [0.2, 0.2, 0.2, 1.0]
+            },
+        });
+        let label = match category {
+            azalea_registry::builtin::RecipeBookCategory::CraftingEquipment => "Gear",
+            azalea_registry::builtin::RecipeBookCategory::CraftingBuildingBlocks => "Build",
+            azalea_registry::builtin::RecipeBookCategory::CraftingMisc => "Misc",
+            azalea_registry::builtin::RecipeBookCategory::CraftingRedstone => "Red",
+            azalea_registry::builtin::RecipeBookCategory::FurnaceFood
+            | azalea_registry::builtin::RecipeBookCategory::BlastFurnaceBlocks
+            | azalea_registry::builtin::RecipeBookCategory::SmokerFood => "Food",
+            azalea_registry::builtin::RecipeBookCategory::FurnaceBlocks
+            | azalea_registry::builtin::RecipeBookCategory::BlastFurnaceMisc => "Blocks",
+            _ => "Misc",
+        };
+        panel.label(elements, bx - 28.0, by + 11.0 + 27.0 * i as f32, label);
+        if crate::ui::common::hit_test(cursor, tab) && clicked {
+            book.clicked_ui = true;
+            book.category = Some(*category);
+            book.page = 0;
+        }
+    }
+    let mut recipes = Vec::new();
     for (id, display) in &book.displays {
+        let Some(category) = book.categories.get(id) else {
+            continue;
+        };
+        if !categories.contains(category) || book.category.is_some_and(|c| c != *category) {
+            continue;
+        }
         let result = match (furnace_variant, display) {
-            (Some(variant), azalea_protocol::common::recipe::RecipeDisplayData::Furnace(d))
-                if book
-                    .categories
-                    .get(id)
-                    .is_some_and(|category| furnace_category_matches(variant, category)) =>
-            {
-                &d.result
-            }
+            (Some(_), azalea_protocol::common::recipe::RecipeDisplayData::Furnace(d)) => &d.result,
             (None, azalea_protocol::common::recipe::RecipeDisplayData::Shapeless(d)) => &d.result,
             (None, azalea_protocol::common::recipe::RecipeDisplayData::Shaped(d)) => &d.result,
             _ => continue,
         };
-        let (name, count) = match result {
-            azalea_protocol::common::recipe::SlotDisplayData::Item(d) => {
-                (crate::player::inventory::item_resource_name(d.item), 1)
-            }
-            azalea_protocol::common::recipe::SlotDisplayData::ItemStack(d) => match &d.stack {
-                azalea_inventory::ItemStack::Present(stack) => (
-                    crate::player::inventory::item_resource_name(stack.kind),
-                    stack.count,
-                ),
-                azalea_inventory::ItemStack::Empty => continue,
-            },
-            _ => continue,
+        let Some((name, count)) = recipe_output_icon(result) else {
+            continue;
         };
-        if columns == 0 || rows == 0 || index >= columns * rows {
-            break;
+        let haystack = name.to_ascii_lowercase().replace('_', " ");
+        if !book.search.is_empty() && !haystack.contains(&book.search.to_ascii_lowercase()) {
+            continue;
         }
-        let (x, y) = (
-            x + (index % columns) as f32 * 19.0,
-            y + (index / columns) as f32 * 19.0,
+        recipes.push((*id, name, count));
+    }
+    let pages = recipes.len().div_ceil(20).max(1);
+    book.page = book.page.min(pages - 1);
+    let previous = [
+        r[0] + 38.0 * panel.scale,
+        r[1] + 137.0 * panel.scale,
+        12.0 * panel.scale,
+        17.0 * panel.scale,
+    ];
+    let next = [
+        r[0] + 93.0 * panel.scale,
+        r[1] + 137.0 * panel.scale,
+        12.0 * panel.scale,
+        17.0 * panel.scale,
+    ];
+    if book.page > 0 {
+        elements.push(MenuElement::Rect {
+            x: previous[0],
+            y: previous[1],
+            w: previous[2],
+            h: previous[3],
+            corner_radius: 0.0,
+            color: [0.55, 0.55, 0.55, 1.0],
+        });
+    }
+    if book.page + 1 < pages {
+        elements.push(MenuElement::Rect {
+            x: next[0],
+            y: next[1],
+            w: next[2],
+            h: next[3],
+            corner_radius: 0.0,
+            color: [0.55, 0.55, 0.55, 1.0],
+        });
+    }
+    if clicked && crate::ui::common::hit_test(cursor, previous) && book.page > 0 {
+        book.clicked_ui = true;
+        book.page -= 1;
+    }
+    if clicked && crate::ui::common::hit_test(cursor, next) && book.page + 1 < pages {
+        book.clicked_ui = true;
+        book.page += 1;
+    }
+    if pages > 1 {
+        panel.label(
+            elements,
+            bx + 68.0,
+            by + 142.0,
+            &format!("{} / {pages}", book.page + 1),
         );
-        if x + 18.0 > 176.0 || y + 18.0 > 166.0 {
-            break;
-        }
-        index += 1;
-        let px = panel.ox + x * panel.scale;
-        let py = panel.oy + y * panel.scale;
+    }
+    let mut selected = None;
+    for (index, (id, name, count)) in recipes.iter().skip(book.page * 20).take(20).enumerate() {
+        let gx = bx + 11.0 + (index % 5) as f32 * 25.0;
+        let gy = by + 31.0 + (index / 5) as f32 * 25.0;
+        let px = panel.ox + gx * panel.scale;
+        let py = panel.oy + gy * panel.scale;
         let size = 18.0 * panel.scale;
         let rect = [px, py, size, size];
         let hovered = crate::ui::common::hit_test(cursor, rect);
+        if book.flags.get(id).is_some_and(|flags| flags & 2 != 0) {
+            elements.push(MenuElement::Rect {
+                x: px,
+                y: py,
+                w: size,
+                h: size,
+                corner_radius: 0.0,
+                color: [0.85, 0.65, 0.12, 0.8],
+            });
+        }
         if hovered {
             elements.push(MenuElement::Rect {
                 x: px,
@@ -239,10 +470,14 @@ pub fn push_recipe_entries(
                 w: size,
                 h: size,
                 corner_radius: 0.0,
-                color: [0.35, 0.35, 0.35, 0.8],
+                color: [0.45, 0.45, 0.45, 0.9],
             });
             if clicked {
+                book.clicked_ui = true;
                 selected = Some((*id, use_max_items));
+                if let Some(flags) = book.flags.get_mut(id) {
+                    *flags &= !2;
+                }
             }
         }
         elements.push(MenuElement::ItemIcon {
@@ -250,10 +485,10 @@ pub fn push_recipe_entries(
             y: py,
             w: size,
             h: size,
-            item_name: name,
+            item_name: name.clone(),
             tint: [1.0; 4],
         });
-        if count > 1 {
+        if *count > 1 {
             elements.push(MenuElement::TextFlat {
                 x: px + size * 0.52,
                 y: py + size * 0.58,
@@ -264,6 +499,33 @@ pub fn push_recipe_entries(
         }
     }
     selected
+}
+
+/// Resolve the representative item vanilla exposes for wrapped slot displays.
+/// Component-specific variants keep their underlying item icon; the GUI item
+/// atlas does not yet render arbitrary item components.
+fn recipe_output_icon(
+    display: &azalea_protocol::common::recipe::SlotDisplayData,
+) -> Option<(String, u8)> {
+    use azalea_protocol::common::recipe::SlotDisplayData as D;
+
+    match display {
+        D::Empty | D::AnyFuel | D::Tag(_) => None,
+        D::Item(item) => Some((crate::player::inventory::item_resource_name(item.item), 1)),
+        D::ItemStack(item) => match &item.stack {
+            azalea_inventory::ItemStack::Present(stack) => Some((
+                crate::player::inventory::item_resource_name(stack.kind),
+                u8::try_from(stack.count).ok()?,
+            )),
+            azalea_inventory::ItemStack::Empty => None,
+        },
+        D::WithAnyPotion(item) => recipe_output_icon(&item.contents),
+        D::OnlyWithComponent(item) => recipe_output_icon(&item.contents),
+        D::Dyed(item) => recipe_output_icon(&item.target),
+        D::SmithingTrim(item) => recipe_output_icon(&item.base),
+        D::WithRemainder(item) => recipe_output_icon(&item.input),
+        D::Composite(item) => item.contents.iter().find_map(recipe_output_icon),
+    }
 }
 
 fn furnace_category_matches(

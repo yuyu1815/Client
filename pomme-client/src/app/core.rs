@@ -274,13 +274,15 @@ fn update_block_entity(
     pos: azalea_core::position::BlockPos,
     kind: azalea_registry::builtin::BlockEntityKind,
     nbt: Option<simdnbt::owned::NbtCompound>,
-) {
-    let Some(nbt) = nbt else { return };
+) -> bool {
+    let Some(nbt) = nbt else { return false };
     if let Some(existing) = block_entities.get_mut(&pos)
         && existing.kind == kind
     {
         existing.nbt = nbt;
+        return true;
     }
+    false
 }
 
 /// Queues a column's packet light for the per-tick apply. Chunk loads enable
@@ -2179,6 +2181,7 @@ impl AppCore {
                 NetworkEvent::RecipeBookRemove(ids) => game.recipe_book.remove(&ids),
                 NetworkEvent::RecipeBookSettings(settings) => {
                     game.recipe_book.settings = Some(settings);
+                    game.recipe_book.settings_loaded = false;
                 }
                 NetworkEvent::UpdateRecipes(update) => {
                     game.recipe_book.updates = Some(update);
@@ -2327,8 +2330,18 @@ impl AppCore {
                         pos.x.div_euclid(16),
                         pos.z.div_euclid(16),
                     );
-                    if game.chunk_store.get_chunk(&chunk_pos).is_some() {
-                        update_block_entity(&mut game.chunk_store.block_entities, pos, kind, nbt);
+                    if game.chunk_store.get_chunk(&chunk_pos).is_some()
+                        && update_block_entity(&mut game.chunk_store.block_entities, pos, kind, nbt)
+                    {
+                        game.bump_loaded_mesh_neighborhoods([chunk_pos]);
+                        dirty_sections_for_block(
+                            &mut priority_remesh,
+                            pos.x,
+                            pos.y,
+                            pos.z,
+                            game.chunk_store.min_y(),
+                            game.chunk_store.section_count(),
+                        );
                     }
                 }
                 NetworkEvent::BlockEvent {

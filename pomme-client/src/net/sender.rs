@@ -56,6 +56,22 @@ fn encode_sign_update(
     frame
 }
 
+fn encode_recipe_book_settings(
+    packet_id: u32,
+    book_type: u32,
+    open: bool,
+    filtering: bool,
+) -> Vec<u8> {
+    use pomme_protocol::wire;
+
+    let mut frame = Vec::with_capacity(4);
+    wire::write_varint(&mut frame, packet_id);
+    wire::write_varint(&mut frame, book_type);
+    frame.push(u8::from(open));
+    frame.push(u8::from(filtering));
+    frame
+}
+
 fn encode_place_recipe(
     packet_id: u32,
     container_id: i32,
@@ -97,6 +113,29 @@ impl PacketSender {
                 primary,
                 secondary,
             },
+        ));
+    }
+
+    /// Sends the native recipe-book type and its open/filter settings.
+    pub fn recipe_book_settings(&self, book_type: u32, open: bool, filtering: bool) {
+        if crate::version::session_protocol() != pomme_protocol::version::NATIVE.protocol {
+            return;
+        }
+        use pomme_protocol::{Direction, PacketTable, Phase};
+        let Some(packet_id) = PacketTable::for_protocol(crate::version::session_protocol())
+            .and_then(|table| {
+                table.id(
+                    Phase::Game,
+                    Direction::Serverbound,
+                    "recipe_book_change_settings",
+                )
+            })
+        else {
+            tracing::warn!("Native 26.2 recipe-book settings packet ID is unavailable");
+            return;
+        };
+        self.send_raw(encode_recipe_book_settings(
+            packet_id, book_type, open, filtering,
         ));
     }
 
@@ -206,6 +245,17 @@ mod tests {
             ]
         );
         assert_eq!(&bytes[9..], &[0, 1, b'a', 1, b'b', 0, 1, b'd']);
+    }
+
+    #[test]
+    fn recipe_book_settings_wire_order_matches_native_26_2_packet() {
+        // protocol-26.2.json game.serverbound index 46 => packet ID 0x2e.
+        for (book_type, encoded_type) in [(0, 0), (1, 1), (2, 2), (3, 3)] {
+            assert_eq!(
+                super::encode_recipe_book_settings(0x2e, book_type, true, false),
+                [0x2e, encoded_type, 1, 0]
+            );
+        }
     }
 
     #[test]
