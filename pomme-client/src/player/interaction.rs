@@ -87,10 +87,11 @@ struct ServerVerifiedState {
     player_pos: DVec3,
 }
 
-/// An in-progress main-hand item use (eating/drinking), vanilla
+/// An in-progress item use (eating/drinking), vanilla
 /// `LivingEntity.useItem` + `useItemRemaining` plus the `Consumable`
 /// component data resolved at start.
 struct ActiveUse {
+    hand: InteractionHand,
     kind: ItemKind,
     anim: ItemUseAnimation,
     sound: SoundRef,
@@ -121,6 +122,7 @@ pub struct InteractionState {
     miss_time: u32,
     use_delay: u32,
     using_item: Option<ActiveUse>,
+    using_bow: bool,
     swinging: bool,
     swing_time: i32,
     attack_anim: f32,
@@ -156,6 +158,7 @@ impl InteractionState {
             miss_time: 0,
             use_delay: 0,
             using_item: None,
+            using_bow: false,
             swinging: false,
             swing_time: 0,
             attack_anim: 0.0,
@@ -380,6 +383,7 @@ impl InteractionState {
         self.ensure_has_sent_carried_item(sender, selected_slot);
         if spectator {
             self.using_item = None;
+            self.using_bow = false;
             self.clear_destroying_state();
         }
 
@@ -396,7 +400,14 @@ impl InteractionState {
             // No screen-open release in vanilla either: an in-flight use keeps
             // ticking (and completing) while a menu is up.
             self.update_using_item(
-                held_stack, audio, chunks, player_pos, eye_pos, look, effects,
+                held_stack,
+                offhand_stack,
+                audio,
+                chunks,
+                player_pos,
+                eye_pos,
+                look,
+                effects,
             );
             self.tick_attack_cooldown(held_stack);
             self.update_swing();
@@ -405,7 +416,7 @@ impl InteractionState {
 
         // Vanilla `handleKeybinds` drains attack clicks while an item is in
         // use, and `continueAttack` early-returns on `isUsingItem`.
-        let using = self.using_item.is_some();
+        let using = self.using_item.is_some() || self.using_bow;
 
         if !using && input.action_just_pressed(input::Action::Destroy) {
             self.start_attack(
@@ -505,7 +516,14 @@ impl InteractionState {
             self.use_delay -= 1;
         }
         self.update_using_item(
-            held_stack, audio, chunks, player_pos, eye_pos, look, effects,
+            held_stack,
+            offhand_stack,
+            audio,
+            chunks,
+            player_pos,
+            eye_pos,
+            look,
+            effects,
         );
         self.tick_attack_cooldown(held_stack);
         self.update_swing();
@@ -772,7 +790,23 @@ impl InteractionState {
                 );
                 return true;
             }
-            true
+            if held_stack.is_none() && offhand_stack.is_some() {
+                self.seq += 1;
+                sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
+                    hand: InteractionHand::OffHand,
+                    block_hit: BlockHit {
+                        block_pos: hit.block_pos,
+                        direction: hit.face,
+                        location: azalea_vec3(hit.hit_point),
+                        inside: hit.inside,
+                        world_border: hit.world_border,
+                    },
+                    seq: self.seq,
+                }));
+                false
+            } else {
+                true
+            }
         } else {
             false
         };
@@ -802,18 +836,29 @@ impl InteractionState {
             return true;
         }
 
-        // Vanilla can fall through to the offhand when the main hand is empty.
-        // Only do this for air use: a block/entity interaction may be consumed
-        // server-side, and this client cannot determine PASS from its response.
-        if self.target.is_none() && held_stack.is_none() && offhand_stack.is_some() {
-            self.seq += 1;
-            sender.send(ServerboundGamePacket::UseItem(ServerboundUseItem {
-                hand: InteractionHand::OffHand,
-                seq: self.seq,
-                y_rot: look.y_rot_deg(),
-                x_rot: look.x_rot_deg(),
-            }));
-            return true;
+        // Vanilla checks the offhand after the main-hand interaction passes.
+        // Entity interactions stay conservative because their PASS result is
+        // server-authoritative here; block PASS is approximated above.
+        if should_try_offhand(
+            self.target.is_none(),
+            !hit_block,
+            held_stack.is_none(),
+            offhand_stack.is_some(),
+        ) {
+            return self.use_item(
+                sender,
+                audio,
+                chunks,
+                player_pos,
+                eye_pos,
+                look,
+                offhand_stack,
+                food,
+                creative,
+                InteractionHand::OffHand,
+                false,
+                effects,
+            );
         }
         hit_block
     }
@@ -853,6 +898,7 @@ impl InteractionState {
         if hand_on_cooldown {
             return true;
         }
+        self.using_bow = stack.kind == ItemKind::Bow;
 
         let Some(consumable) = stack_component::<Consumable>(stack) else {
             return true;
@@ -868,6 +914,7 @@ impl InteractionState {
 
         let duration = (consumable.consume_seconds * 20.0) as i32;
         let active = ActiveUse {
+            hand,
             kind: stack.kind,
             anim: consumable.animation,
             sound: SoundRef::resolve(&consumable.sound),
@@ -901,6 +948,7 @@ impl InteractionState {
     /// longer-lived interaction controller; block prediction/sequences remain.
     pub fn reset_player_transients_for_respawn(&mut self) {
         self.using_item = None;
+        self.using_bow = false;
         self.swinging = false;
         self.swing_time = 0;
         self.attack_anim = 0.0;
@@ -918,6 +966,7 @@ impl InteractionState {
         // UseItem send.
         if !is_using {
             self.using_item = None;
+            self.using_bow = false;
         }
     }
 
@@ -928,6 +977,7 @@ impl InteractionState {
     pub fn tick_dead_living_state(
         &mut self,
         held_stack: Option<&ItemStackData>,
+        offhand_stack: Option<&ItemStackData>,
         audio: &mut AudioEngine,
         chunks: &ChunkStore,
         player_pos: DVec3,
@@ -936,7 +986,14 @@ impl InteractionState {
         effects: &mut BreakEffects,
     ) {
         self.update_using_item(
-            held_stack, audio, chunks, player_pos, eye_pos, look, effects,
+            held_stack,
+            offhand_stack,
+            audio,
+            chunks,
+            player_pos,
+            eye_pos,
+            look,
+            effects,
         );
     }
 
@@ -964,6 +1021,7 @@ impl InteractionState {
     fn update_using_item(
         &mut self,
         held_stack: Option<&ItemStackData>,
+        offhand_stack: Option<&ItemStackData>,
         audio: &mut AudioEngine,
         chunks: &ChunkStore,
         player_pos: DVec3,
@@ -974,7 +1032,8 @@ impl InteractionState {
         let Some(active) = &self.using_item else {
             return;
         };
-        if held_stack.map(|s| s.kind) != Some(active.kind) {
+        let active_stack = stack_for_hand(active.hand, held_stack, offhand_stack);
+        if active_stack.map(|s| s.kind) != Some(active.kind) {
             self.using_item = None;
             return;
         }
@@ -1009,6 +1068,7 @@ impl InteractionState {
             0,
         );
         self.using_item = None;
+        self.using_bow = false;
     }
 
     /// Client `LivingEntity.completeUsingItem` (entity event 9) →
@@ -1049,7 +1109,7 @@ impl InteractionState {
 
     /// First-person use-animation state for the held-item renderer, vanilla
     /// `ItemInHandRenderer.applyEatTransform` inputs. `None` unless an
-    /// eat/drink use is active with ticks remaining.
+    /// eat/drink use is active with ticks remaining; the hand is preserved.
     pub fn use_animation(&self, partial_tick: f32) -> Option<UseAnim> {
         let active = self.using_item.as_ref()?;
         if active.remaining <= 0
@@ -1060,6 +1120,7 @@ impl InteractionState {
         Some(UseAnim {
             curr_usage_time: active.remaining as f32 - partial_tick + 1.0,
             duration: active.duration as f32,
+            left_hand: active.hand == InteractionHand::OffHand,
         })
     }
 
@@ -1537,6 +1598,26 @@ fn play_block_sound(audio: &mut AudioEngine, event: &str, pos: BlockPos, volume:
     );
 }
 
+fn should_try_offhand(
+    target_is_air: bool,
+    block_interaction_passed: bool,
+    main_hand_empty: bool,
+    offhand_nonempty: bool,
+) -> bool {
+    (target_is_air || block_interaction_passed) && main_hand_empty && offhand_nonempty
+}
+
+fn stack_for_hand<'a>(
+    hand: InteractionHand,
+    main_hand: Option<&'a ItemStackData>,
+    off_hand: Option<&'a ItemStackData>,
+) -> Option<&'a ItemStackData> {
+    match hand {
+        InteractionHand::MainHand => main_hand,
+        InteractionHand::OffHand => off_hand,
+    }
+}
+
 fn protocol_hand(hand: InteractionHand) -> wire::InteractionHand {
     match hand {
         InteractionHand::MainHand => wire::InteractionHand::MainHand,
@@ -1956,6 +2037,27 @@ mod tests {
     }
 
     #[test]
+    fn offhand_eat_use_animation_keeps_remaining_time_and_hand() {
+        let mut state = InteractionState::new();
+        state.using_item = Some(ActiveUse {
+            hand: InteractionHand::OffHand,
+            kind: ItemKind::Apple,
+            anim: ItemUseAnimation::Eat,
+            sound: SoundRef::event("entity.generic.eat"),
+            has_particles: true,
+            texture: "item/apple".to_string(),
+            use_effects: UseEffects::default(),
+            duration: 32,
+            remaining: 12,
+        });
+
+        let anim = state.use_animation(0.25).unwrap();
+        assert_eq!(anim.curr_usage_time, 12.75);
+        assert_eq!(anim.duration, 32.0);
+        assert!(anim.left_hand);
+    }
+
+    #[test]
     fn respawn_resets_player_owned_interaction_transients() {
         let mut state = InteractionState::new();
         state.swinging = true;
@@ -1965,6 +2067,7 @@ mod tests {
         state.attack_strength_ticker = 7;
         state.last_item_in_main_hand = Some(ItemStackData::new(ItemKind::Stone, 1));
         state.using_item = Some(ActiveUse {
+            hand: InteractionHand::MainHand,
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
             sound: SoundRef::event("entity.generic.eat"),
@@ -2007,6 +2110,7 @@ mod tests {
     fn synced_using_item_flag_clears_server_stopped_use() {
         let mut state = InteractionState::new();
         state.using_item = Some(ActiveUse {
+            hand: InteractionHand::MainHand,
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
             sound: SoundRef::event("entity.generic.eat"),
@@ -2019,8 +2123,10 @@ mod tests {
 
         state.sync_using_item_flag(true);
         assert!(state.using_item.is_some());
+        state.using_bow = true;
         state.sync_using_item_flag(false);
         assert!(state.using_item.is_none());
+        assert!(!state.using_bow);
     }
 
     #[test]
@@ -2042,6 +2148,33 @@ mod tests {
         assert_eq!(
             state.attack_strength_ticker, 2,
             "Player.tick state after super.tick still advances once on the removal tick"
+        );
+    }
+
+    #[test]
+    fn offhand_use_falls_through_after_air_or_passed_block_interaction() {
+        assert!(should_try_offhand(true, false, true, true));
+        assert!(should_try_offhand(false, true, true, true));
+        assert!(!should_try_offhand(false, false, true, true));
+        assert!(!should_try_offhand(true, false, false, true));
+        assert!(!should_try_offhand(true, false, true, false));
+    }
+
+    #[test]
+    fn active_use_checks_the_stack_in_its_own_hand() {
+        let main = ItemStackData::new(ItemKind::Stone, 1);
+        let off = ItemStackData::new(ItemKind::Apple, 1);
+        assert_eq!(
+            stack_for_hand(InteractionHand::MainHand, Some(&main), Some(&off))
+                .unwrap()
+                .kind,
+            ItemKind::Stone
+        );
+        assert_eq!(
+            stack_for_hand(InteractionHand::OffHand, Some(&main), Some(&off))
+                .unwrap()
+                .kind,
+            ItemKind::Apple
         );
     }
 

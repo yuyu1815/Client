@@ -14,5 +14,5 @@ pub mod wire;
 
 pub use known_packs::{KnownPack, KnownPackTable};
 pub use packets::{Direction, PacketTable, Phase};
-pub use registries::{ClientRegistry, RegistryRemaps, RegistryTable};
+pub use registries::{ClientRegistry, DynamicRegistries, RegistryRemaps, RegistryTable};
 pub use version::ProtocolVersion;

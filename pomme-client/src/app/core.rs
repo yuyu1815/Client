@@ -1953,42 +1953,72 @@ impl AppCore {
                 }
                 NetworkEvent::OpenBook { hand } => {
                     use azalea_inventory::ItemStack;
-                    use azalea_inventory::components::WritableBookContent;
+                    use azalea_inventory::components::{WritableBookContent, WrittenBookContent};
                     use azalea_protocol::packets::game::s_interact::InteractionHand;
+                    use azalea_registry::builtin::ItemKind;
 
                     use crate::player::inventory::HOTBAR_START;
-                    let (slot, stack) = match hand {
+                    let (stack, edit_slot) = match hand {
                         InteractionHand::MainHand => {
                             let selected = self.input.selected_slot().min(8);
                             (
-                                selected as u32,
                                 game.player.inventory.slot(HOTBAR_START + selected as usize),
+                                selected as u32,
                             )
                         }
-                        InteractionHand::OffHand => (40, game.player.inventory.slot(45)),
+                        InteractionHand::OffHand => (game.player.inventory.slot(45), 40),
                     };
                     if let ItemStack::Present(data) = stack {
-                        if data.kind == azalea_registry::builtin::ItemKind::WritableBook {
-                            let component = data
-                                .component_patch
-                                .get::<WritableBookContent>()
-                                .cloned()
-                                .or_else(|| {
-                                    azalea_inventory::default_components::get_default_component::<
-                                        WritableBookContent,
-                                    >(data.kind)
-                                });
-                            if let Some(component) = component {
-                                let pages = component.pages.into_iter().map(|p| p.raw).collect();
+                        match data.kind {
+                            ItemKind::WrittenBook => {
+                                let pages = data
+                                    .component_patch
+                                    .get::<WrittenBookContent>()
+                                    .cloned()
+                                    .or_else(|| {
+                                        azalea_inventory::default_components::get_default_component::<
+                                            WrittenBookContent,
+                                        >(data.kind)
+                                    })
+                                    .map(|book| {
+                                        book.pages
+                                            .into_iter()
+                                            .map(|page| page.raw.to_string())
+                                            .collect()
+                                    });
+                                if let Some(pages) = pages {
+                                    game.paused = false;
+                                    game.book_edit = None;
+                                    game.book_view =
+                                        Some(crate::ui::book::BookViewState::new(pages));
+                                    self.apply_cursor_grab(window, Some(game));
+                                }
+                            }
+                            ItemKind::WritableBook => {
+                                let pages = data
+                                    .component_patch
+                                    .get::<WritableBookContent>()
+                                    .cloned()
+                                    .or_else(|| {
+                                        azalea_inventory::default_components::get_default_component::<
+                                            WritableBookContent,
+                                        >(data.kind)
+                                    })
+                                    .map(|book| {
+                                        book.pages.into_iter().map(|page| page.raw).collect()
+                                    })
+                                    .unwrap_or_default();
                                 game.paused = false;
+                                game.book_view = None;
                                 game.book_edit = Some(crate::ui::book::BookEditState::new(
-                                    slot,
+                                    edit_slot,
                                     pages,
                                     String::new(),
-                                    self.user.username.clone(),
+                                    String::new(),
                                 ));
                                 self.apply_cursor_grab(window, Some(game));
                             }
+                            _ => {}
                         }
                     }
                 }
@@ -2186,6 +2216,7 @@ impl AppCore {
                 NetworkEvent::UpdateRecipes(update) => {
                     game.recipe_book.updates = Some(update);
                 }
+                NetworkEvent::RecipeItemTags(tags) => game.recipe_book.update_item_tags(&tags),
                 NetworkEvent::TitleText { spans } => {
                     game.title.set_title(spans);
                 }
@@ -3060,6 +3091,25 @@ impl AppCore {
                     game.item_entity_store
                         .set_item_data(id, item_name, item_id, damage, count);
                 }
+                NetworkEvent::ItemFrameDirection { id, direction } => {
+                    game.entity_store.set_item_frame_direction(id, direction);
+                }
+                NetworkEvent::ItemFrameItem { id, item } => {
+                    if let azalea_inventory::ItemStack::Present(data) = &item
+                        && !data.is_empty()
+                    {
+                        renderer.ensure_item_mesh(&crate::player::inventory::item_resource_name(
+                            data.kind,
+                        ));
+                    }
+                    game.entity_store.set_item_frame_item(id, item);
+                }
+                NetworkEvent::ItemFrameRotation { id, rotation } => {
+                    game.entity_store.set_item_frame_rotation(id, rotation);
+                }
+                NetworkEvent::TextDisplayText { id, text } => {
+                    game.entity_store.set_text_display_text(id, text);
+                }
                 NetworkEvent::EntityData { id, index, value } => {
                     if id == game.player.entity_id
                         && index == 0
@@ -3098,6 +3148,8 @@ impl AppCore {
                     {
                         game.item_entity_store.set_shared_flags(id, flags);
                     }
+                    game.entity_store
+                        .set_text_display_metadata(id, index, value);
                     game.entity_store.apply_entity_data(id, index, value);
                 }
                 NetworkEvent::EntityPose { id, pose } => {
@@ -3108,10 +3160,11 @@ impl AppCore {
                         game.entity_store.set_pose(id, pose);
                     }
                 }
-                // TODO: remote players' sleeping pose rendering.
                 NetworkEvent::EntitySleepingPos { id, pos } => {
                     if id == game.player.entity_id {
                         game.player.sleeping_pos = pos;
+                    } else {
+                        game.entity_store.set_sleeping_pos(id, pos);
                     }
                 }
                 NetworkEvent::EntityWakeUp { id } => {
@@ -3610,8 +3663,15 @@ impl AppCore {
                 .inventory
                 .held_stack(self.input.selected_slot())
                 .cloned();
+            let offhand_stack = match game.player.inventory.offhand() {
+                azalea_inventory::ItemStack::Present(stack) if stack.count > 0 => {
+                    Some(stack.clone())
+                }
+                _ => None,
+            };
             game.interaction.tick_dead_living_state(
                 held_stack.as_ref(),
+                offhand_stack.as_ref(),
                 &mut self.audio,
                 &game.chunk_store,
                 game.player.position.into(),

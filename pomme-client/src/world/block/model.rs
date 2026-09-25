@@ -730,6 +730,9 @@ pub struct BakedItemModels {
     pub models: HashMap<String, BakedModel>,
     pub generated_textures: HashSet<String>,
     pub flat_texture_keys: HashMap<String, String>,
+    /// Resolved `particle` material (or generated item's `layer0`), not a mesh
+    /// quad.
+    pub particle_icons: HashMap<String, String>,
     pub flat_tints: HashMap<String, ItemTint>,
     pub ground_transforms: HashMap<String, Mat4>,
 }
@@ -768,6 +771,7 @@ pub fn bake_item_models(
     let mut item_models: HashMap<String, BakedModel> = HashMap::new();
     let mut flat_item_textures: HashSet<String> = HashSet::new();
     let mut flat_keys: HashMap<String, String> = HashMap::new();
+    let mut particle_icons: HashMap<String, String> = HashMap::new();
     let mut flat_tints: HashMap<String, ItemTint> = HashMap::new();
     let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
@@ -789,6 +793,10 @@ pub fn bake_item_models(
             continue;
         }
 
+        // A select/condition/range-dispatch definition has no single particle
+        // icon. The renderer currently bakes a representative first leaf for
+        // those trees, but that is not a stack-resolved getParticleIcon().
+        let static_icon = item_definition_is_static(&json);
         // Item models do not carry the terrain block state; in particular a
         // stem block's item is a seed and must not inherit the age tint.
         let mut merged: Option<BakedModel> = None;
@@ -797,7 +805,7 @@ pub fn bake_item_models(
         // composite disagrees (beds share `block/template_bed`), so the first
         // part's wins and a disagreement is logged rather than modelled.
         let mut ground_transform: Option<Mat4> = None;
-        for part in &parts {
+        for (part_index, part) in parts.iter().enumerate() {
             let resolved = resolve_model(
                 &part.path,
                 jar_assets_dir,
@@ -805,6 +813,16 @@ pub fn bake_item_models(
                 &mut model_cache,
                 packs,
             );
+            if static_icon && part_index == 0 {
+                let slot = if resolved.elements.is_empty() {
+                    "layer0"
+                } else {
+                    "particle"
+                };
+                if let Some(icon) = resolved.textures.get(slot).and_then(|v| texture_to_name(v)) {
+                    particle_icons.insert(item_name.to_string(), icon);
+                }
+            }
             match ground_transform {
                 None => ground_transform = Some(resolved.ground_transform),
                 Some(existing) if existing.abs_diff_eq(resolved.ground_transform, 1.0e-6) => {}
@@ -864,9 +882,29 @@ pub fn bake_item_models(
         }
     }
 
+    for (name, model_id) in [
+        ("pomme:item_frame_body", "minecraft:block/item_frame"),
+        (
+            "pomme:glow_item_frame_body",
+            "minecraft:block/glow_item_frame",
+        ),
+    ] {
+        let resolved = resolve_model(
+            model_id,
+            jar_assets_dir,
+            asset_index,
+            &mut model_cache,
+            packs,
+        );
+        if let Some(model) = bake_resolved_model(&resolved, 0, 0, false, |_| Tint::None) {
+            item_models.insert(name.to_string(), model);
+        }
+    }
+
     item_models.insert("chest".to_string(), bake_chest_item_model());
     ground_transforms.insert("chest".to_string(), default_block_ground_transform());
     flat_keys.remove("chest");
+    particle_icons.remove("chest");
 
     tracing::info!(
         "Baked {} item models, {} flat items, and registered {} generated-item textures",
@@ -878,6 +916,7 @@ pub fn bake_item_models(
         models: item_models,
         generated_textures: flat_item_textures,
         flat_texture_keys: flat_keys,
+        particle_icons,
         flat_tints,
         ground_transforms,
     }
@@ -1135,6 +1174,28 @@ struct ModelPart {
     path: String,
     transform: Option<Mat4>,
     tints: Vec<ItemTint>,
+}
+
+/// Only these two node types are baked without stack-dependent selection.
+fn item_definition_is_static(json: &serde_json::Value) -> bool {
+    fn static_node(node: &serde_json::Value) -> bool {
+        match node
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(strip_mc_prefix)
+        {
+            Some("model") => node
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            Some("composite") => node
+                .get("models")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|parts| !parts.is_empty() && parts.iter().all(static_node)),
+            _ => false,
+        }
+    }
+    json.get("model").is_some_and(static_node)
 }
 
 /// Model references to bake for one item. `minecraft:composite` contributes
@@ -2625,6 +2686,19 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
+            items.join("test_block.json"),
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/test_block"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("test_block.json"),
+            r##"{"textures":{"particle":"minecraft:block/particle_only","all":"minecraft:block/visible_face"},"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"north":{"texture":"#all"}}}]}"##,
+        ).unwrap();
+        std::fs::write(
+            items.join("dynamic_item.json"),
+            r#"{"model":{"type":"minecraft:select","property":"minecraft:custom_model_data","cases":[{"when":"alternate","model":{"type":"minecraft:model","model":"minecraft:item/base"}}],"fallback":{"type":"minecraft:model","model":"minecraft:item/test_block"}}}"#,
+        ).unwrap();
+        std::fs::write(
             pack_items.join("test_item.json"),
             r#"{"model":{"type":"minecraft:model","model":"other:item/replacement"}}"#,
         )
@@ -2652,6 +2726,20 @@ mod tests {
             baked.flat_texture_keys.get("pack_only").map(String::as_str),
             Some("other:item/replacement")
         );
+        assert_eq!(
+            baked.particle_icons.get("test_item").map(String::as_str),
+            Some("other:item/replacement")
+        );
+        assert_eq!(
+            baked.particle_icons.get("pack_only").map(String::as_str),
+            Some("other:item/replacement")
+        );
+        assert_eq!(
+            baked.particle_icons.get("test_block").map(String::as_str),
+            Some("particle_only")
+        );
+        assert_eq!(baked.models["test_block"].quads[0].texture, "visible_face");
+        assert!(!baked.particle_icons.contains_key("dynamic_item"));
         let transform = baked.ground_transforms["test_item"];
         let origin = transform.transform_point3(Vec3::ZERO);
         assert!((origin - Vec3::new(0.0, 2.0 / 16.0, 0.0)).length() < 1.0e-6);

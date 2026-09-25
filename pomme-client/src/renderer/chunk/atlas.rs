@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
@@ -117,9 +118,15 @@ pub struct TextureAtlas {
     sprite_rects_allocation: Option<Allocation>,
     staging_buffer: vk::Buffer,
     staging_allocation: Option<Allocation>,
+    animations: Vec<AnimatedSprite>,
+    animation_staging: Vec<Option<(vk::Buffer, Allocation, usize)>>,
+    animation_started: Instant,
+    mip_level: u32,
 }
 
 const MISSING_TILE: u32 = 16;
+// Fire overlays are atlas sprites but aren't referenced by block models.
+const FIRE_SPRITES: [&str; 4] = ["fire_0", "fire_1", "soul_fire_0", "soul_fire_1"];
 
 /// Maximum block-atlas mip level. Vanilla requests four levels and then lowers
 /// this globally when any stitched block-atlas sprite cannot support them.
@@ -155,6 +162,7 @@ impl Source {
     }
 }
 
+#[derive(Clone)]
 struct MipSource {
     full_data: Vec<u8>,
     full_width: u32,
@@ -162,6 +170,68 @@ struct MipSource {
     animation: AnimationLayout,
     strategy: MipmapStrategy,
     alpha_cutoff_bias: f32,
+}
+
+struct AnimatedSprite {
+    x: u32,
+    y: u32,
+    full_width: u32,
+    animation: AnimationLayout,
+    mip_pixels: Vec<Vec<u8>>,
+    last_sample: Option<AnimationSample>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AnimationSample {
+    current: u32,
+    next: u32,
+    blend: u8,
+}
+
+fn sample_animation(layout: &AnimationLayout, elapsed_ticks: f64) -> AnimationSample {
+    let total_ticks: f64 = layout
+        .sequence
+        .iter()
+        .map(|(_, ticks)| f64::from(*ticks))
+        .sum();
+    let mut phase = elapsed_ticks.rem_euclid(total_ticks);
+    for (index, &(frame, duration)) in layout.sequence.iter().enumerate() {
+        if phase < f64::from(duration) {
+            let next = layout.sequence[(index + 1) % layout.sequence.len()].0;
+            let blend = if layout.interpolate && next != frame {
+                ((phase / f64::from(duration) * 255.0).round() as u16).min(255) as u8
+            } else {
+                0
+            };
+            return AnimationSample {
+                current: frame,
+                next: if blend == 0 { frame } else { next },
+                blend,
+            };
+        }
+        phase -= f64::from(duration);
+    }
+    AnimationSample {
+        current: layout.sequence[0].0,
+        next: layout.sequence[0].0,
+        blend: 0,
+    }
+}
+
+// The 26.2 animate_sprite_interpolate pipeline mixes RGBA8_UNORM frame texels.
+fn blend_animation_frames(current: &[u8], next: &[u8], blend: u8) -> Vec<u8> {
+    debug_assert_eq!(current.len(), next.len());
+    let amount = f32::from(blend) / 255.0;
+    let mut output = Vec::with_capacity(current.len());
+    for (a, b) in current.chunks_exact(4).zip(next.chunks_exact(4)) {
+        for channel in 0..4 {
+            output.push(
+                (f32::from(a[channel]) * (1.0 - amount) + f32::from(b[channel]) * amount).round()
+                    as u8,
+            );
+        }
+    }
+    output
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -195,8 +265,8 @@ struct AnimationMetadata {
     height: Option<u32>,
     frames: Option<Vec<AnimationFrameSpec>>,
     frametime: Option<u32>,
-    #[serde(rename = "interpolate")]
-    _interpolate: Option<bool>,
+    #[serde(default)]
+    interpolate: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -224,6 +294,8 @@ struct AnimationLayout {
     frame_height: u32,
     frames_per_row: u32,
     unique_frames: Vec<u32>,
+    sequence: Vec<(u32, u32)>,
+    interpolate: bool,
     initial_display_frame: u32,
 }
 
@@ -233,6 +305,8 @@ fn static_animation_layout(width: u32, height: u32) -> AnimationLayout {
         frame_height: height,
         frames_per_row: 1,
         unique_frames: vec![0],
+        sequence: vec![(0, 1)],
+        interpolate: false,
         initial_display_frame: 0,
     }
 }
@@ -285,15 +359,25 @@ fn animation_layout_from_metadata(
 
     let frames_per_row = width / frame_width;
     let total_frames = frames_per_row * (height / frame_height);
-    let listed_frames: Vec<u32> = metadata
+    let frame_time = metadata.frametime.unwrap_or(1);
+    let sequence: Vec<(u32, u32)> = metadata
         .frames
         .as_ref()
-        .map(|frames| frames.iter().map(AnimationFrameSpec::index).collect())
-        .unwrap_or_else(|| (0..total_frames).collect());
-    let valid_frames: Vec<u32> = listed_frames
-        .into_iter()
-        .filter(|frame| *frame < total_frames)
-        .collect();
+        .map(|frames| {
+            frames
+                .iter()
+                .filter_map(|frame| {
+                    let index = frame.index();
+                    let time = match frame {
+                        AnimationFrameSpec::Index(_) => frame_time,
+                        AnimationFrameSpec::Timed { time, .. } => time.unwrap_or(frame_time),
+                    };
+                    (index < total_frames && time > 0).then_some((index, time))
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| (0..total_frames).map(|frame| (frame, frame_time)).collect());
+    let valid_frames: Vec<u32> = sequence.iter().map(|(frame, _)| *frame).collect();
 
     // SpriteContents drops the AnimatedTexture wrapper when zero or one valid
     // frame remains. In that case frame lookups ignore the metadata index and
@@ -304,6 +388,8 @@ fn animation_layout_from_metadata(
             frame_height,
             frames_per_row,
             unique_frames: vec![0],
+            sequence: vec![(0, 1)],
+            interpolate: false,
             initial_display_frame: 0,
         });
     }
@@ -320,6 +406,8 @@ fn animation_layout_from_metadata(
         frame_height,
         frames_per_row,
         unique_frames,
+        sequence,
+        interpolate: metadata.interpolate,
         initial_display_frame,
     })
 }
@@ -458,14 +546,15 @@ fn load_source(
             let display =
                 extract_frame_rgba(&data, width, &animation, animation.initial_display_frame);
             let texture = metadata.texture.as_ref();
-            let mip_source = uses_block_atlas_mip_chain(name).then(|| MipSource {
-                full_data: data,
-                full_width: width,
-                full_height: height,
-                animation: animation.clone(),
-                strategy: texture.map(|t| t.mipmap_strategy).unwrap_or_default(),
-                alpha_cutoff_bias: texture.map(|t| t.alpha_cutoff_bias).unwrap_or(0.0),
-            });
+            let mip_source = (uses_block_atlas_mip_chain(name) || animation.sequence.len() > 1)
+                .then(|| MipSource {
+                    full_data: data,
+                    full_width: width,
+                    full_height: height,
+                    animation: animation.clone(),
+                    strategy: texture.map(|t| t.mipmap_strategy).unwrap_or_default(),
+                    alpha_cutoff_bias: texture.map(|t| t.alpha_cutoff_bias).unwrap_or(0.0),
+                });
             Source {
                 name: name.to_string(),
                 data: display,
@@ -498,8 +587,10 @@ impl TextureAtlas {
         generated_item_textures: &HashSet<&str>,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> Result<Self, vk::Error> {
+        let texture_names: HashSet<&str> =
+            texture_names.iter().copied().chain(FIRE_SPRITES).collect();
         let mut sources: Vec<Source> = Vec::with_capacity(texture_names.len());
-        for &name in texture_names {
+        for &name in &texture_names {
             sources.push(load_source(
                 name,
                 jar_assets_dir,
@@ -599,6 +690,43 @@ impl TextureAtlas {
 
         let staging_pixels =
             build_mip_chain(atlas_pixels, atlas_size, mip_level, &sources, &placements);
+        let mut animations = Vec::new();
+        for source in &mut sources {
+            let animated = source
+                .mip_source
+                .as_ref()
+                .is_some_and(|mip| mip.animation.sequence.len() > 1);
+            let Some(Some((x, y))) = animated
+                .then(|| placements.get(source.name.as_str()).copied())
+                .flatten()
+            else {
+                continue;
+            };
+            let mip_source = source.mip_source.take().unwrap();
+            let source_mip_level = mip_level.min(
+                mip_source
+                    .animation
+                    .frame_width
+                    .trailing_zeros()
+                    .min(mip_source.animation.frame_height.trailing_zeros()),
+            );
+            let mip_pixels = generate_rgba_mips(
+                mip_source.full_data,
+                mip_source.full_width,
+                mip_source.full_height,
+                source_mip_level,
+                mip_source.strategy,
+                mip_source.alpha_cutoff_bias,
+            );
+            animations.push(AnimatedSprite {
+                x,
+                y,
+                full_width: mip_source.full_width,
+                last_sample: Some(sample_animation(&mip_source.animation, 0.0)),
+                animation: mip_source.animation,
+                mip_pixels,
+            });
+        }
 
         let (image, view, allocation, mip_levels) = util::create_gpu_image_mipmapped(
             device,
@@ -623,7 +751,7 @@ impl TextureAtlas {
             mip_levels,
         );
 
-        let sampler = unsafe { util::create_linear_sampler_mipmapped(device, mip_levels) };
+        let sampler = unsafe { util::create_nearest_sampler_mipmapped(device, mip_levels) };
 
         tracing::info!(
             "Atlas built: {atlas_size}x{atlas_size}, mip level {mip_level}, {} regions",
@@ -640,7 +768,109 @@ impl TextureAtlas {
             sprite_rects_allocation: Some(sprite_rects_allocation),
             staging_buffer,
             staging_allocation: Some(staging_allocation),
+            animations,
+            animation_staging: std::iter::repeat_with(|| None)
+                .take(crate::renderer::MAX_FRAMES_IN_FLIGHT)
+                .collect(),
+            animation_started: Instant::now(),
+            mip_level,
         })
+    }
+
+    /// Record .png.mcmeta updates into the current frame command buffer. Each
+    /// frame slot has staging memory protected by that frame's fence.
+    pub fn update_animations(
+        &mut self,
+        cmd: &vk::CommandBuffer,
+        frame_slot: usize,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+    ) {
+        if self.animations.is_empty() {
+            return;
+        }
+        let elapsed_ticks = self.animation_started.elapsed().as_secs_f64() * 20.0;
+        let mut pixels = Vec::new();
+        let mut regions = Vec::new();
+        for sprite in &mut self.animations {
+            let sample = sample_animation(&sprite.animation, elapsed_ticks);
+            if sprite.last_sample == Some(sample) {
+                continue;
+            }
+            let source_mip_level = sprite.mip_pixels.len() as u32 - 1;
+            for level in 0..=self.mip_level {
+                let source_level = level.min(source_mip_level);
+                let width = (sprite.animation.frame_width >> level).max(1);
+                let height = (sprite.animation.frame_height >> level).max(1);
+                let full_width = (sprite.full_width >> source_level).max(1);
+                let current = extract_frame_rgba_at_mip(
+                    &sprite.mip_pixels[source_level as usize],
+                    full_width,
+                    &sprite.animation,
+                    sample.current,
+                    source_level,
+                );
+                let frame_pixels = if sample.blend == 0 {
+                    current
+                } else {
+                    let next = extract_frame_rgba_at_mip(
+                        &sprite.mip_pixels[source_level as usize],
+                        full_width,
+                        &sprite.animation,
+                        sample.next,
+                        source_level,
+                    );
+                    blend_animation_frames(&current, &next, sample.blend)
+                };
+                let buffer_offset = pixels.len() as u64;
+                pixels.extend_from_slice(&frame_pixels);
+                regions.push(vk::BufferImageCopy {
+                    buffer_offset,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::Color,
+                        mip_level: level,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_offset: vk::Offset3D {
+                        x: (sprite.x >> level) as i32,
+                        y: (sprite.y >> level) as i32,
+                        z: 0,
+                    },
+                    image_extent: vk::Extent3D {
+                        width,
+                        height,
+                        depth: 1,
+                    },
+                });
+            }
+            sprite.last_sample = Some(sample);
+        }
+        if pixels.is_empty() {
+            return;
+        }
+        let slot = &mut self.animation_staging[frame_slot];
+        if slot
+            .as_ref()
+            .is_none_or(|(_, _, capacity)| *capacity < pixels.len())
+        {
+            if let Some((buffer, allocation, _)) = slot.take() {
+                device.destroy_buffer(buffer, None);
+                allocator.lock().unwrap().free(allocation).ok();
+            }
+            let (buffer, allocation) =
+                util::create_staging_buffer(device, allocator, &pixels, "animated_atlas_staging");
+            *slot = Some((buffer, allocation, pixels.len()));
+        } else if let Some((_, allocation, _)) = slot {
+            allocation
+                .mapped_slice_mut()
+                .expect("animation staging memory must be host mapped")[..pixels.len()]
+                .copy_from_slice(&pixels);
+        }
+        let (staging, _, _) = slot.as_ref().unwrap();
+        util::record_image_regions(cmd, *staging, self.image, self.mip_level + 1, &regions);
     }
 
     /// Byte size of `sprite_rects`, for its descriptor range.
@@ -667,13 +897,21 @@ impl TextureAtlas {
             }
             device.destroy_buffer(buffer, None);
         }
+        for (buffer, allocation, _) in self.animation_staging.iter_mut().filter_map(Option::take) {
+            device.destroy_buffer(buffer, None);
+            allocator.lock().unwrap().free(allocation).ok();
+        }
     }
 }
 
 fn effective_mip_level(sources: &[Source]) -> u32 {
     sources
         .iter()
-        .filter(|source| !source.data.is_empty() && source.mip_source.is_some())
+        .filter(|source| {
+            !source.data.is_empty()
+                && uses_block_atlas_mip_chain(&source.name)
+                && source.mip_source.is_some()
+        })
         .fold(MAX_MIP_LEVEL, |level, source| {
             level.min(source.w.trailing_zeros().min(source.h.trailing_zeros()))
         })
@@ -718,6 +956,9 @@ fn build_mip_chain(
         let Some(Some((x, y))) = placements.get(source.name.as_str()) else {
             continue;
         };
+        if !uses_block_atlas_mip_chain(&source.name) {
+            continue;
+        }
         let Some(mip_source) = &source.mip_source else {
             continue;
         };
@@ -1411,7 +1652,7 @@ mod tests {
                 AnimationFrameSpec::Index(0),
             ]),
             frametime: None,
-            _interpolate: None,
+            interpolate: false,
         };
         let layout = animation_layout_from_metadata(Some(&metadata), 4, 2).unwrap();
         assert_eq!(layout.initial_display_frame, 2);
@@ -1423,6 +1664,54 @@ mod tests {
         rgba[frame_two_offset..frame_two_offset + 4].copy_from_slice(&[9, 8, 7, 255]);
         let frame = extract_frame_rgba(&rgba, 4, &layout, layout.initial_display_frame);
         assert_eq!(&frame[..4], &[9, 8, 7, 255]);
+    }
+
+    #[test]
+    fn animation_clock_uses_per_frame_time_and_interpolation() {
+        let metadata = AnimationMetadata {
+            width: None,
+            height: None,
+            frames: Some(vec![
+                AnimationFrameSpec::Timed {
+                    index: 0,
+                    time: Some(5),
+                },
+                AnimationFrameSpec::Index(1),
+            ]),
+            frametime: Some(3),
+            interpolate: true,
+        };
+        let layout = animation_layout_from_metadata(Some(&metadata), 1, 2).unwrap();
+        assert_eq!(layout.sequence, vec![(0, 5), (1, 3)]);
+        assert_eq!(
+            sample_animation(&layout, 0.0),
+            AnimationSample {
+                current: 0,
+                next: 0,
+                blend: 0
+            }
+        );
+        assert_eq!(
+            sample_animation(&layout, 2.5),
+            AnimationSample {
+                current: 0,
+                next: 1,
+                blend: 128
+            }
+        );
+        assert_eq!(
+            sample_animation(&layout, 5.0),
+            AnimationSample {
+                current: 1,
+                next: 1,
+                blend: 0
+            }
+        );
+        assert_eq!(sample_animation(&layout, 8.0).current, 0);
+        assert_eq!(
+            blend_animation_frames(&[0, 0, 0, 0], &[255, 255, 255, 255], 128),
+            [128, 128, 128, 128]
+        );
     }
 
     #[test]
@@ -1439,7 +1728,7 @@ mod tests {
                 AnimationFrameSpec::Index(2),
             ]),
             frametime: None,
-            _interpolate: None,
+            interpolate: false,
         };
         let layout = animation_layout_from_metadata(Some(&metadata), 2, 6).unwrap();
         assert_eq!(layout.frame_width, 2);
@@ -1482,7 +1771,7 @@ mod tests {
             height: None,
             frames: Some(vec![AnimationFrameSpec::Index(2)]),
             frametime: None,
-            _interpolate: None,
+            interpolate: false,
         };
         let layout = animation_layout_from_metadata(Some(&metadata), 2, 6).unwrap();
 
@@ -1501,7 +1790,7 @@ mod tests {
             height: None,
             frames: Some(Vec::new()),
             frametime: None,
-            _interpolate: None,
+            interpolate: false,
         };
         let layout = animation_layout_from_metadata(Some(&metadata), 2, 6).unwrap();
 

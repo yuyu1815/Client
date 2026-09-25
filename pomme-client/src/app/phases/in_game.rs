@@ -34,7 +34,7 @@ use crate::renderer::pipelines::entity_renderer::{
     EntityRenderInfo, MAX_OVERLAYS, WHITE_TINT, dye_color_tint, jeb_sheep_tint, wool_color_tint,
 };
 use crate::renderer::pipelines::menu_overlay::MenuElement;
-use crate::renderer::{Renderer, SkyState};
+use crate::renderer::{MapQuadDraw, Renderer, SkyState};
 use crate::resource_pack::ResourcePackManager;
 use crate::ui::chat::{ChatState, ChatUiAction};
 use crate::ui::death::{self, DeathAction};
@@ -266,8 +266,10 @@ pub struct GameState {
     pub cursor_item: azalea_inventory::ItemStack,
     /// The server-opened container screen (crafting table), if any.
     pub open_container: Option<OpenContainer>,
-    /// Writable-book editor opened by the server's OpenBook packet.
+    /// Writable-book editor entered through the local use flow.
     pub book_edit: Option<crate::ui::book::BookEditState>,
+    /// Read-only view opened by the server's OpenBook packet.
+    pub book_view: Option<crate::ui::book::BookViewState>,
     pub sign_edit: Option<crate::ui::sign::SignEditState>,
     /// Which container menu was open last frame (0 = player inventory,
     /// including the creative inventory), to detect close transitions.
@@ -606,6 +608,7 @@ impl GameState {
             cursor_item: azalea_inventory::ItemStack::Empty,
             open_container: None,
             book_edit: None,
+            book_view: None,
             sign_edit: None,
             container_was_open: None,
             inv_drag: None,
@@ -729,6 +732,7 @@ impl GameState {
             || self.creative_inventory_open
             || self.open_container.is_some()
             || self.book_edit.is_some()
+            || self.book_view.is_some()
             || self.sign_edit.is_some()
             || self.dialog_open()
             || self.game_mode_switcher.is_some()
@@ -1868,6 +1872,25 @@ pub(crate) fn build_server_screens(
                 game.sign_edit = None;
                 core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
             }
+        }
+        return;
+    }
+    if game.book_view.is_some() {
+        let cursor = core.input.cursor_pos();
+        let action = core
+            .input
+            .left_just_pressed()
+            .then(|| crate::ui::book::clicked_action(cursor, sw, sh, gs))
+            .flatten();
+        if let Some(book) = &mut game.book_view {
+            if let Some(index @ 0..=1) = action {
+                book.navigate(index);
+            }
+            book.draw(elements, sw, sh, gs);
+        }
+        if core.input.escape_pressed() {
+            game.book_view = None;
+            core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
         }
         return;
     }
@@ -3091,6 +3114,54 @@ pub fn update_game(
         }
     }
 
+    let mut map_quads = Vec::new();
+    for frame in game.entity_store.vehicles.values().filter(|entity| {
+        matches!(
+            entity.kind,
+            Some(azalea_registry::builtin::EntityKind::ItemFrame)
+                | Some(azalea_registry::builtin::EntityKind::GlowItemFrame)
+        )
+    }) {
+        let azalea_inventory::ItemStack::Present(stack) = &frame.item_frame_item else {
+            continue;
+        };
+        let Some(map_id) = stack.get_component::<azalea_inventory::components::MapId>() else {
+            continue;
+        };
+        if map_id.id < 0 {
+            continue;
+        }
+        let map_id = map_id.id as u32;
+        let Some(map) = game.maps.0.get(&map_id) else {
+            continue;
+        };
+        let direction = frame
+            .item_frame_direction
+            .unwrap_or(azalea_core::direction::Direction::North);
+        let (rotation_y, rotation_x): (f32, f32) = match direction {
+            azalea_core::direction::Direction::Down => (0.0, 90.0),
+            azalea_core::direction::Direction::Up => (0.0, -90.0),
+            azalea_core::direction::Direction::North => (180.0, 0.0),
+            azalea_core::direction::Direction::South => (0.0, 0.0),
+            azalea_core::direction::Direction::West => (-90.0, 0.0),
+            azalea_core::direction::Direction::East => (90.0, 0.0),
+        };
+        let frame_rotation = glam::Mat4::from_rotation_y(rotation_y.to_radians())
+            * glam::Mat4::from_rotation_x(rotation_x.to_radians())
+            * glam::Mat4::from_rotation_z((frame.item_frame_rotation as f32 * 45.0).to_radians());
+        let map_center = *frame.position
+            + frame_rotation
+                .transform_point3(glam::Vec3::new(0.0, 0.0, 0.4375))
+                .as_dvec3()
+            - gfx.renderer.camera_anchor();
+        map_quads.push(MapQuadDraw {
+            map_id,
+            map_data: map.clone(),
+            position: map_center.as_vec3(),
+            rotation: frame_rotation.to_scale_rotation_translation().1,
+        });
+    }
+
     // Vanilla Hud.extractSleepOverlay sits outside the isHidden gate: above
     // the hotbar/effects/boss bar, below chat and the tab list.
     // TODO: vanilla draws the scoreboard sidebar, action bar, and nameplates
@@ -3125,21 +3196,34 @@ pub fn update_game(
         );
     }
 
-    if !benchmark_running && !game.hide_gui {
+    if !benchmark_running {
         let renderer = &gfx.renderer;
-        crate::ui::player_tab::build_player_nameplates(
+        let project_text_display =
+            |position| renderer.project_world_to_screen_with_vulkan_depth(position);
+        crate::ui::player_tab::build_text_display_overlays(
             &mut elements,
-            crate::ui::player_tab::PlayerNameplates {
-                entity_store: &game.entity_store,
-                tab_list: &game.tab_list,
-                scoreboard: &game.scoreboard,
-                local_uuid: core.user.uuid,
-                partial_tick,
-                gs,
-                camera_pos: renderer.camera_render_position(),
-                project: &|position| renderer.project_world_to_screen(position),
-            },
+            &game.entity_store,
+            renderer.screen_height(),
+            renderer.camera_fov_degrees(),
+            renderer.camera_render_position(),
+            &project_text_display,
         );
+        if !game.hide_gui {
+            crate::ui::player_tab::build_player_nameplates(
+                &mut elements,
+                crate::ui::player_tab::PlayerNameplates {
+                    entity_store: &game.entity_store,
+                    tab_list: &game.tab_list,
+                    scoreboard: &game.scoreboard,
+                    local_uuid: core.user.uuid,
+                    partial_tick,
+                    screen_height: renderer.screen_height(),
+                    fov_degrees: renderer.camera_fov_degrees(),
+                    camera_pos: renderer.camera_render_position(),
+                    project: &|position| renderer.project_world_to_screen_with_depth(position),
+                },
+            );
+        }
     }
 
     if let Some(switcher) = &mut game.game_mode_switcher {
@@ -3689,6 +3773,7 @@ pub fn update_game(
                 gs,
                 &mut game.recipe_book,
                 native_recipes,
+                game.advanced_item_tooltips,
             );
             place_recipe = result
                 .recipe_id
@@ -3919,11 +4004,32 @@ pub fn update_game(
                     return None;
                 }
                 let interp_pos = e.prev_position.lerp(e.position, partial_tick as f64);
+                let sleep_orientation = e.sleeping_pos.and_then(|bed| {
+                    let state = game.chunk_store.get_block_state(bed.x, bed.y, bed.z);
+                    match crate::world::block::block_properties(state).get("facing")? {
+                        "south" => Some((90.0, 0.0, 1.0)),
+                        "west" => Some((0.0, -1.0, 0.0)),
+                        "north" => Some((270.0, 0.0, -1.0)),
+                        "east" => Some((180.0, 1.0, 0.0)),
+                        _ => None,
+                    }
+                });
+                let render_pos = sleep_orientation.map_or(interp_pos, |(_, step_x, step_z)| {
+                    let dimensions =
+                        azalea_entity::dimensions::EntityDimensions::from(e.entity_type);
+                    let eye_height = dimensions.eye_height * if e.is_baby { 0.5 } else { 1.0 };
+                    let head_offset = f64::from(eye_height - 0.1);
+                    Position::new(
+                        interp_pos.x - step_x * head_offset,
+                        interp_pos.y,
+                        interp_pos.z - step_z * head_offset,
+                    )
+                });
                 let extras =
                     entity_extras(entity_id, e, partial_tick, game.sky_state.game_time as i64);
 
                 Some(EntityRenderInfo {
-                    position: interp_pos + extras.render_offset,
+                    position: render_pos + extras.render_offset,
                     head_y_rot_deg: lerp_angle(
                         e.prev_head_y_rot_deg,
                         e.head_y_rot_deg,
@@ -3940,6 +4046,8 @@ pub fn update_game(
                     ),
                     is_baby: e.is_baby,
                     is_crouching: e.is_crouching,
+                    is_sleeping: e.sleeping_pos.is_some(),
+                    sleeping_yaw_deg: sleep_orientation.map(|(angle, _, _)| angle),
                     walk_anim_pos: e.walk_pos(partial_tick),
                     walk_anim_speed: e.walk_speed(partial_tick),
                     entity_kind: e.entity_type,
@@ -4116,6 +4224,7 @@ pub fn update_game(
     } else {
         build_item_render_infos(
             &game.item_entity_store,
+            &game.entity_store,
             &game.chunk_store,
             &gfx.renderer,
             game.cardinal_light,
@@ -4141,7 +4250,12 @@ pub fn update_game(
                     return None;
                 }
                 let props = crate::world::block::block_properties(state);
-                let variant = block_entity::variant_for_block(be.kind, id, props);
+                let statue =
+                    crate::world::block_entity::copper_golem_statue_render_state(id, props);
+                let variant = statue.map_or_else(
+                    || block_entity::variant_for_block(be.kind, id, props),
+                    |(_, oxidation)| oxidation,
+                );
                 let yaw = block_entity::yaw_for_block(be.kind, props);
                 let openness_at = |p: &BlockPos| {
                     game.block_entity_anim
@@ -4177,6 +4291,7 @@ pub fn update_game(
                 Some(crate::renderer::BlockEntityRenderInfo {
                     pos: *pos,
                     kind: be.kind,
+                    statue_pose: statue.map(|(pose, _)| pose),
                     yaw,
                     variant,
                     lid_open,
@@ -4187,6 +4302,11 @@ pub fn update_game(
                     sign_back_color,
                     sign_back_glowing,
                     sign_wall: props.get("facing").is_some(),
+                    sign_light: if is_sign {
+                        lightmap_brightness(&game.chunk_store, &game.dimension, pos.x, pos.y, pos.z)
+                    } else {
+                        1.0
+                    },
                 })
             })
             .collect()
@@ -4216,10 +4336,10 @@ pub fn update_game(
         core.menu.render_distance
     };
     let held_item = if benchmark_running {
-        None
+        (None, None)
     } else {
-        match game.player.inventory.hotbar_slots()[core.input.selected_slot() as usize] {
-            azalea_inventory::ItemStack::Present(ref data) => {
+        let held_item = |held_stack: &azalea_inventory::ItemStack| match held_stack {
+            azalea_inventory::ItemStack::Present(data) if data.count > 0 => {
                 let name = crate::player::inventory::item_resource_name(data.kind);
                 (name != "air").then(|| {
                     let light =
@@ -4228,7 +4348,11 @@ pub fn update_game(
                 })
             }
             _ => None,
-        }
+        };
+        (
+            held_item(&game.player.inventory.hotbar_slots()[core.input.selected_slot() as usize]),
+            held_item(game.player.inventory.offhand()),
+        )
     };
     // Last element pushed: vanilla draws the saving indicator on its own
     // stratum above screens, with the GUI hidden (F1) included.
@@ -4288,6 +4412,7 @@ pub fn update_game(
         &game.chunk_store,
         player_preview,
         book_preview,
+        &map_quads,
         game.player.eyes_in_water,
         game.item_activation
             .as_ref()
@@ -4671,6 +4796,7 @@ fn emit_item_copies(
 
 fn build_item_render_infos(
     entity_store: &crate::entity::ItemEntityStore,
+    entities: &crate::entity::EntityStore,
     chunk_store: &ChunkStore,
     renderer: &Renderer,
     cardinal_light: CardinalLightType,
@@ -4769,6 +4895,101 @@ fn build_item_render_infos(
             *pickup.position,
             pickup.count,
         );
+    }
+
+    // Frame bodies use the baked block/item_frame or block/glow_item_frame
+    // model. The held stack is sent through the existing item mesh path; map
+    // contents still need the dedicated dynamic-map renderer.
+    for frame in entities.vehicles.values().filter(|entity| {
+        matches!(
+            entity.kind,
+            Some(azalea_registry::builtin::EntityKind::ItemFrame)
+                | Some(azalea_registry::builtin::EntityKind::GlowItemFrame)
+        )
+    }) {
+        let Some(kind) = frame.kind else { continue };
+        let item_name = if kind == azalea_registry::builtin::EntityKind::GlowItemFrame {
+            "pomme:glow_item_frame_body"
+        } else {
+            "pomme:item_frame_body"
+        };
+        let position = *frame.position;
+        // ItemFrame metadata direction is authoritative; entity yaw doesn't
+        // represent floor/ceiling mounting and is not used to infer facing.
+        let direction = frame
+            .item_frame_direction
+            .unwrap_or(azalea_core::direction::Direction::North);
+        let (rotation_y, rotation_x): (f32, f32) = match direction {
+            azalea_core::direction::Direction::Down => (0.0, 90.0),
+            azalea_core::direction::Direction::Up => (0.0, -90.0),
+            azalea_core::direction::Direction::North => (180.0, 0.0),
+            azalea_core::direction::Direction::South => (0.0, 0.0),
+            azalea_core::direction::Direction::West => (-90.0, 0.0),
+            azalea_core::direction::Direction::East => (90.0, 0.0),
+        };
+        let base_matrix = glam::Mat4::from_translation((position - anchor).as_vec3())
+            * glam::Mat4::from_rotation_y(rotation_y.to_radians())
+            * glam::Mat4::from_rotation_x(rotation_x.to_radians());
+        infos.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
+            item_name: item_name.to_owned(),
+            model_matrix: base_matrix
+                * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.4375)),
+            light: get_entity_light(
+                chunk_store,
+                Position::new(position.x, position.y, position.z),
+            ),
+            nether_lighting,
+            entity_uuid: None,
+            invisible: false,
+            actual_age: None,
+            actual_render_age: 0.0,
+            age_f: 0.0,
+            actual_spin: 0.0,
+            spin: 0.0,
+            bob_offset: 0.0,
+            actual_bob_offset: 0.0,
+            controlled_phase: false,
+            bob_controlled: false,
+            position: position.to_array(),
+            stack_count: 1,
+        });
+
+        if let azalea_inventory::ItemStack::Present(stack) = &frame.item_frame_item
+            && !stack.is_empty()
+            && stack
+                .get_component::<azalea_inventory::components::MapId>()
+                .is_none()
+        {
+            let name = crate::player::inventory::item_resource_name(stack.kind);
+            let frame_item_transform = base_matrix
+                * glam::Mat4::from_rotation_z(
+                    (frame.item_frame_rotation as f32 * 45.0).to_radians(),
+                )
+                * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.4375))
+                * dropped_item_geometry(renderer, &name).0;
+            infos.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
+                item_name: name,
+                model_matrix: frame_item_transform,
+                light: get_entity_light(
+                    chunk_store,
+                    Position::new(position.x, position.y, position.z),
+                ),
+                nether_lighting,
+                entity_uuid: None,
+                invisible: false,
+                actual_age: None,
+                actual_render_age: 0.0,
+                age_f: 0.0,
+                actual_spin: 0.0,
+                spin: 0.0,
+                bob_offset: 0.0,
+                actual_bob_offset: 0.0,
+                controlled_phase: false,
+                bob_controlled: false,
+                position: position.to_array(),
+                stack_count: stack.count,
+            });
+        }
     }
 
     infos
@@ -4882,8 +5103,9 @@ fn entity_extras(
         EntityKind::Wolf => wolf_extras(e, alpha, game_time),
         EntityKind::Cat => cat_extras(e, alpha),
         EntityKind::Horse => {
-            // Markings overlay; id 0 = NONE.
-            let (overlay_tints, overlay_variants) = slot0_overlay((e.variant >> 8) & 0xFF);
+            // Markings overlay; id 0 = NONE. Slot 1 is the saddle equipment layer.
+            let (mut overlay_tints, overlay_variants) = slot0_overlay((e.variant >> 8) & 0xFF);
+            overlay_tints[1] = e.saddled.then_some(WHITE_TINT);
             EntityExtras {
                 variant_index: e.variant & 0xFF,
                 overlay_tints,

@@ -67,7 +67,7 @@ azalea-buf-macros = { path = "vendor/azalea-buf/azalea-buf-macros" }
 opt-level = 1
 # Backtraces and profilers keep file:line; full local-variable debuginfo is
 # opt-in via CARGO_PROFILE_DEV_DEBUG=full.
-debug = "line-tables-only"
+debug = 1
 
 [profile.dev.package."*"]
 opt-level = 2

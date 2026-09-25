@@ -637,9 +637,16 @@ fn apply_collision_with_context(
         let multiplier = if has_effect_named(player, "weaving") {
             dvec3(0.5, 0.25, 0.5)
         } else {
-            dvec3(0.25, 0.05, 0.25)
+            dvec3(0.25, 0.05_f32 as f64, 0.25)
         };
         delta *= multiplier;
+        *player.velocity = dvec3(0.0, 0.0, 0.0);
+        player.fall_distance = 0.0;
+    }
+    if intersects_block_id(chunk_store, &aabb, "powder_snow") {
+        // PowderSnowBlock.entityInside schedules this multiplier for the next
+        // Entity.move; the inside-block pass has no persistent state here.
+        delta *= dvec3(0.9_f32 as f64, 1.5_f32 as f64, 0.9_f32 as f64);
         *player.velocity = dvec3(0.0, 0.0, 0.0);
         player.fall_distance = 0.0;
     }
@@ -659,7 +666,7 @@ fn apply_collision_with_context(
     );
     let step_height =
         player.attribute_value("minecraft:generic.step_height", f64::from(STEP_HEIGHT));
-    let (resolved, on_ground) = super::collision::resolve_collision_with_context(
+    let (resolved, on_ground) = super::collision::resolve_collision_for_player(
         chunk_store,
         aabb,
         delta.into(),
@@ -667,6 +674,11 @@ fn apply_collision_with_context(
         player.on_ground,
         entity_aabbs,
         border_bounds,
+        Some((
+            input.performing_action(input::Action::Sneak),
+            has_leather_boots(player),
+            player.fall_distance,
+        )),
     );
 
     // Vanilla horizontal collision flags use Mth.equal(double, double), whose
@@ -715,10 +727,18 @@ fn apply_collision_with_context(
             && !input.performing_action(input::Action::Sneak)
             && crate::world::block::block_id(chunk_store.get_block_state(
                 player.position.x.floor() as i32,
-                (player.bounding_box().min.y - 1.0e-7).floor() as i32,
+                (player.bounding_box().min.y - f64::from(0.2_f32)).floor() as i32,
                 player.position.z.floor() as i32,
             )) == "slime_block";
-        player.velocity.y = if landed_on_slime { -delta.y } else { 0.0 };
+        // Entity.restituteMovementAfterCollisions compensates gravity and
+        // blends air drag by the fraction of the downward move completed.
+        player.velocity.y = if landed_on_slime && -delta.y >= GRAVITY {
+            let portion = (resolved.y / delta.y).clamp(0.0, 1.0);
+            let air_drag = f64::from(VERTICAL_DRAG);
+            (portion * GRAVITY - delta.y) * (1.0 + (air_drag - 1.0) * portion)
+        } else {
+            0.0
+        };
     }
 
     if (horizontal_collision || input.performing_action(input::Action::Jump))
@@ -952,30 +972,33 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
                     if current.kind != kind {
                         continue;
                     }
-                    let height = if current.falling {
+                    let above_fluid = fluid(chunks.get_block_state(x, y + 1, z));
+                    let surface = if above_fluid.kind == kind {
                         1.0
                     } else {
-                        current.height()
+                        f64::from(current.height())
                     };
+                    if y as f64 + surface < bb.min.y + 0.001 {
+                        continue;
+                    }
                     let mut cell_flow = dvec3(0.0, 0.0, 0.0);
                     for (dx, dz) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
-                        let neighbor = fluid(chunks.get_block_state(x + dx, y, z + dz));
                         let neighbor_state = chunks.get_block_state(x + dx, y, z + dz);
+                        let neighbor = fluid(neighbor_state);
+                        // FlowingFluid.getFlow uses getOwnHeight (even for falling
+                        // fluid), and only probes below an empty neighbor.
                         if neighbor.kind == kind {
-                            let neighbor_height = if neighbor.falling {
-                                1.0
-                            } else {
-                                neighbor.height()
-                            };
-                            let difference = f64::from(height - neighbor_height);
+                            let difference = f64::from(current.height() - neighbor.height());
                             cell_flow.x += dx as f64 * difference;
                             cell_flow.z += dz as f64 * difference;
                         } else if neighbor.kind == FluidKind::Empty
                             && !crate::world::block::blocks_motion(neighbor_state)
                         {
                             let below = fluid(chunks.get_block_state(x + dx, y - 1, z + dz));
-                            if below.kind == kind {
-                                let difference = f64::from(height - (below.height() - 0.888_888_9));
+                            if below.kind == kind && below.amount > 0 {
+                                let difference = f64::from(
+                                    current.height() - (below.height() - 0.888_888_9_f32),
+                                );
                                 cell_flow.x += dx as f64 * difference;
                                 cell_flow.z += dz as f64 * difference;
                             }
@@ -988,11 +1011,19 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
                                 .any(|(dx, dz)| {
                                     let side = chunks.get_block_state(x + dx, y, z + dz);
                                     let above = chunks.get_block_state(x + dx, y + 1, z + dz);
-                                    (crate::world::block::block_id(side) != "ice"
+                                    (fluid(side).kind != kind
+                                        && !matches!(
+                                            crate::world::block::block_id(side),
+                                            "ice" | "frosted_ice"
+                                        )
                                         && crate::world::block::has_full_horizontal_sturdy_face(
                                             side, dx, dz,
                                         ))
-                                        || (crate::world::block::block_id(above) != "ice"
+                                        || (fluid(above).kind != kind
+                                            && !matches!(
+                                                crate::world::block::block_id(above),
+                                                "ice" | "frosted_ice"
+                                            )
                                             && crate::world::block::has_full_horizontal_sturdy_face(
                                                 above, dx, dz,
                                             ))

@@ -555,7 +555,6 @@ dependencies = [
 [[package]]
 name = "azalea-buf"
 version = "0.16.0+mc26.2"
-source = "git+https://github.com/azalea-rs/azalea?branch=26.2#ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32"
 dependencies = [
  "azalea-buf-macros",
  "byteorder",
@@ -570,7 +569,6 @@ dependencies = [
 [[package]]
 name = "azalea-buf-macros"
 version = "0.16.0+mc26.2"
-source = "git+https://github.com/azalea-rs/azalea?branch=26.2#ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32"
 dependencies = [
  "proc-macro2",
  "quote",

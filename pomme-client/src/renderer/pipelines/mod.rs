@@ -13,6 +13,7 @@ pub mod held_item;
 pub mod item_activation;
 pub mod item_display;
 pub mod item_entity;
+pub mod map_quad;
 pub mod menu_overlay;
 pub mod panorama;
 pub mod particle;

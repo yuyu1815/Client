@@ -2,7 +2,7 @@ default:
     @just --list
 
 launcher-dev *args:
-    @pnpm --filter pomme-launcher tauri dev {{ args }}
+    @mise exec -- pnpm --filter pomme-launcher tauri dev {{ args }}
 
 launcher-build *args:
     @pnpm --filter pomme-launcher tauri build {{ args }}

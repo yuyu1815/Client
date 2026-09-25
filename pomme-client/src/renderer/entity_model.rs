@@ -1447,6 +1447,42 @@ pub fn bake_horse_model() -> BakedEntityModel {
     bake_root_scaled(equine_parts(), 1.1, 64, 64)
 }
 
+/// Vanilla 26.2 `EquineSaddleModel.createSaddleLayer` mesh, using
+/// HORSE_SADDLE's 1.1 mesh transform.
+pub fn bake_horse_saddle_model() -> BakedEntityModel {
+    let mut parts = equine_parts();
+    for part in &mut parts {
+        part.cubes.clear();
+    }
+    let body = part_index(&parts, "body");
+    parts[body].cubes.push(ModelCube {
+        deformation: 0.5,
+        ..vbox((26, 0), (-5.0, -8.0, -9.0), (10.0, 9.0, 9.0))
+    });
+    let head = part_index(&parts, "head_parts");
+    parts[head].cubes.extend([
+        vbox((29, 5), (2.0, -9.0, -6.0), (1.0, 2.0, 2.0)),
+        vbox((29, 5), (-3.0, -9.0, -6.0), (1.0, 2.0, 2.0)),
+        ModelCube {
+            deformation: 0.22,
+            ..vbox((1, 1), (-3.0, -11.0, -1.9), (6.0, 5.0, 6.0))
+        },
+        ModelCube {
+            deformation: 0.2,
+            ..vbox((19, 0), (-2.0, -11.0, -4.0), (4.0, 5.0, 2.0))
+        },
+    ]);
+    for (name, x) in [("left_ear", 3.1), ("right_ear", -3.1)] {
+        let i = part_index(&parts, name);
+        parts[i].offset = Vec3::ZERO;
+        parts[i].default_rotation.x = -std::f32::consts::FRAC_PI_6;
+        parts[i].parent = Some(head);
+        parts[i].cubes = vec![vbox((32, 2), (x, -6.0, -8.0), (0.0, 3.0, 16.0))];
+    }
+    // Horse and saddle layers share the vanilla 1.1-scaled horse mesh.
+    bake_root_scaled(parts, 1.1, 64, 64)
+}
+
 pub fn bake_undead_horse_model() -> BakedEntityModel {
     bake_model(equine_parts(), 64, 64)
 }
@@ -2287,6 +2323,296 @@ pub fn bake_iron_golem_model() -> BakedEntityModel {
         ),
     ];
     bake_model(parts, 128, 128)
+}
+
+/// Vanilla CopperGolemModel's four static body layers used by
+/// CopperGolemStatueBlockRenderer (standing, running, sitting, star).
+pub fn bake_copper_golem_statue_models() -> Vec<BakedEntityModel> {
+    use std::f32::consts::PI;
+
+    let part = |name: &str, parent, offset, rotation, cubes| EntityPart {
+        name: name.into(),
+        offset,
+        default_rotation: rotation,
+        cubes,
+        parent,
+    };
+    let cube = |uv, origin, size, deformation| ModelCube {
+        deformation,
+        ..vbox(uv, origin, size)
+    };
+    let zero = Vec3::ZERO;
+    let standing = vec![
+        part(
+            "body",
+            None,
+            Vec3::new(0.0, -5.0, 0.0),
+            zero,
+            vec![vbox((0, 15), (-4.0, -6.0, -3.0), (8.0, 6.0, 6.0))],
+        ),
+        part(
+            "head",
+            Some(0),
+            Vec3::new(0.0, -6.0, 0.0),
+            zero,
+            vec![
+                cube((0, 0), (-4.0, -5.0, -5.0), (8.0, 5.0, 10.0), 0.015),
+                vbox((56, 0), (-1.0, -2.0, -6.0), (2.0, 3.0, 2.0)),
+                cube((37, 8), (-1.0, -9.0, -1.0), (2.0, 4.0, 2.0), -0.015),
+                cube((37, 0), (-2.0, -13.0, -2.0), (4.0, 4.0, 4.0), -0.015),
+            ],
+        ),
+        part(
+            "right_arm",
+            Some(0),
+            Vec3::new(-4.0, -6.0, 0.0),
+            zero,
+            vec![vbox((36, 16), (-3.0, -1.0, -2.0), (3.0, 10.0, 4.0))],
+        ),
+        part(
+            "left_arm",
+            Some(0),
+            Vec3::new(4.0, -6.0, 0.0),
+            zero,
+            vec![vbox((50, 16), (0.0, -1.0, -2.0), (3.0, 10.0, 4.0))],
+        ),
+        part(
+            "right_leg",
+            None,
+            Vec3::new(0.0, -5.0, 0.0),
+            zero,
+            vec![vbox((0, 27), (-4.0, 0.0, -2.0), (4.0, 5.0, 4.0))],
+        ),
+        part(
+            "left_leg",
+            None,
+            Vec3::new(0.0, -5.0, 0.0),
+            zero,
+            vec![vbox((16, 27), (0.0, 0.0, -2.0), (4.0, 5.0, 4.0))],
+        ),
+    ];
+
+    let running = vec![
+        part("body", None, Vec3::new(-1.064, -5.0, 0.0), zero, vec![]),
+        part(
+            "body_r1",
+            Some(0),
+            Vec3::new(1.1, 0.1, 0.7),
+            Vec3::new(0.1204, -0.0064, -0.0779),
+            vec![vbox((0, 15), (-4.02, -6.116, -3.5), (8.0, 6.0, 6.0))],
+        ),
+        part(
+            "head",
+            Some(0),
+            Vec3::new(0.7, -5.6, -1.8),
+            zero,
+            vec![
+                vbox((0, 0), (-4.0, -5.1, -5.0), (8.0, 5.0, 10.0)),
+                vbox((56, 0), (-1.02, -2.1, -6.0), (2.0, 3.0, 2.0)),
+                cube((37, 8), (-1.02, -9.1, -1.0), (2.0, 4.0, 2.0), -0.015),
+                cube((37, 0), (-2.0, -13.1, -2.0), (4.0, 4.0, 4.0), -0.015),
+            ],
+        ),
+        part(
+            "right_arm",
+            Some(0),
+            Vec3::new(-4.0, -6.0, 0.0),
+            zero,
+            vec![],
+        ),
+        part(
+            "right_arm_r1",
+            Some(3),
+            Vec3::new(0.7, -0.248, -1.62),
+            Vec3::new(1.0036, 0.0, 0.0),
+            vec![vbox((36, 16), (-3.052, -1.11, -2.036), (3.0, 10.0, 4.0))],
+        ),
+        part("left_arm", Some(0), Vec3::new(4.0, -6.0, 0.0), zero, vec![]),
+        part(
+            "left_arm_r1",
+            Some(5),
+            Vec3::new(0.732, 0.0, 0.0),
+            Vec3::new(-0.8715, -0.0535, -0.0449),
+            vec![vbox((50, 16), (0.032, -1.1, -2.0), (3.0, 10.0, 4.0))],
+        ),
+        part(
+            "right_leg",
+            None,
+            Vec3::new(-3.064, -5.0, 0.0),
+            zero,
+            vec![],
+        ),
+        part(
+            "right_leg_r1",
+            Some(7),
+            Vec3::new(1.048, 0.0, -0.9),
+            Vec3::new(-0.8727, 0.0, 0.0),
+            vec![vbox((0, 27), (-1.856, -0.1, -1.09), (4.0, 5.0, 4.0))],
+        ),
+        part("left_leg", None, Vec3::new(0.936, -5.0, 0.0), zero, vec![]),
+        part(
+            "left_leg_r1",
+            Some(9),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.7854, 0.0, 0.0),
+            vec![vbox((16, 27), (-2.088, -0.1, -2.0), (4.0, 5.0, 4.0))],
+        ),
+    ];
+
+    let sitting = vec![
+        part(
+            "body",
+            None,
+            Vec3::new(0.0, -3.0, 2.325),
+            zero,
+            vec![
+                vbox((3, 19), (-3.0, -4.0, -4.525), (6.0, 1.0, 6.0)),
+                vbox((0, 15), (-4.0, -3.0, -3.525), (8.0, 6.0, 6.0)),
+            ],
+        ),
+        part(
+            "body_r1",
+            Some(0),
+            Vec3::new(0.0, -1.0, -4.325),
+            Vec3::new(0.0, 0.0, -PI),
+            vec![vbox((3, 18), (-4.0, -3.0, -2.2), (8.0, 6.0, 3.0))],
+        ),
+        part(
+            "head",
+            Some(0),
+            Vec3::new(0.0, -6.0, -0.2),
+            zero,
+            vec![
+                cube((37, 8), (-1.0, -7.0, -3.3), (2.0, 4.0, 2.0), -0.015),
+                cube((37, 0), (-2.0, -11.0, -4.3), (4.0, 4.0, 4.0), -0.015),
+                vbox((0, 0), (-4.0, -3.0, -7.325), (8.0, 5.0, 10.0)),
+                vbox((56, 0), (-1.0, 0.0, -8.325), (2.0, 3.0, 2.0)),
+            ],
+        ),
+        part(
+            "right_arm",
+            Some(0),
+            Vec3::new(-4.0, -5.6, -1.8),
+            Vec3::new(0.4363, 0.0, 0.0),
+            vec![],
+        ),
+        part(
+            "right_arm_r1",
+            Some(3),
+            Vec3::new(0.0, 0.0893, 0.1198),
+            Vec3::new(-1.0472, 0.0, 0.0),
+            vec![vbox((36, 16), (-3.075, -0.9733, -1.9966), (3.0, 10.0, 4.0))],
+        ),
+        part(
+            "left_arm",
+            Some(0),
+            Vec3::new(4.0, -5.6, -1.7),
+            Vec3::new(0.4363, 0.0, 0.0),
+            vec![],
+        ),
+        part(
+            "left_arm_r1",
+            Some(5),
+            Vec3::new(0.0, -0.0015, -0.0808),
+            Vec3::new(-1.0472, 0.0, 0.0),
+            vec![vbox((50, 16), (0.075, -1.0443, -1.8997), (3.0, 10.0, 4.0))],
+        ),
+        part(
+            "right_leg",
+            None,
+            Vec3::new(-2.1, -2.1, -2.075),
+            zero,
+            vec![],
+        ),
+        part(
+            "right_leg_r1",
+            Some(7),
+            Vec3::new(0.05, -1.9, 1.075),
+            Vec3::new(-PI / 2.0, 0.0, 0.0),
+            vec![vbox((0, 27), (-2.0, 0.975, 0.0), (4.0, 5.0, 4.0))],
+        ),
+        part("left_leg", None, Vec3::new(2.0, -2.0, -2.075), zero, vec![]),
+        part(
+            "left_leg_r1",
+            Some(9),
+            Vec3::new(0.05, -2.0, 1.075),
+            Vec3::new(-PI / 2.0, 0.0, 0.0),
+            vec![vbox((16, 27), (-2.0, 0.975, 0.0), (4.0, 5.0, 4.0))],
+        ),
+    ];
+
+    let star = vec![
+        part(
+            "body",
+            None,
+            Vec3::new(0.0, -5.0, 0.0),
+            zero,
+            vec![vbox((0, 15), (-4.0, -6.0, -3.0), (8.0, 6.0, 6.0))],
+        ),
+        part(
+            "head",
+            Some(0),
+            Vec3::new(0.0, -6.0, 0.0),
+            zero,
+            vec![
+                vbox((0, 0), (-4.0, -5.0, -5.0), (8.0, 5.0, 10.0)),
+                vbox((56, 0), (-1.0, -2.0, -6.0), (2.0, 3.0, 2.0)),
+                cube((37, 8), (-1.0, -9.0, -1.0), (2.0, 4.0, 2.0), -0.015),
+                cube((37, 0), (-2.0, -13.0, -2.0), (4.0, 4.0, 4.0), -0.015),
+            ],
+        ),
+        part(
+            "right_arm",
+            Some(0),
+            Vec3::new(-4.0, -6.0, 0.0),
+            zero,
+            vec![],
+        ),
+        part(
+            "right_arm_r1",
+            Some(2),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.9199),
+            vec![vbox((36, 16), (-1.5, -5.0, -2.0), (3.0, 10.0, 4.0))],
+        ),
+        part("left_arm", Some(0), Vec3::new(4.0, -6.0, 0.0), zero, vec![]),
+        part(
+            "left_arm_r1",
+            Some(4),
+            Vec3::new(-1.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, -1.9199),
+            vec![vbox((50, 16), (-1.5, -5.0, -2.0), (3.0, 10.0, 4.0))],
+        ),
+        part("right_leg", None, Vec3::new(-3.0, -5.0, 0.0), zero, vec![]),
+        part(
+            "right_leg_r1",
+            Some(6),
+            Vec3::new(0.35, 2.0, 0.01),
+            Vec3::new(0.0, 0.0, 0.2618),
+            vec![vbox((0, 27), (-2.0, -2.5, -2.0), (4.0, 5.0, 4.0))],
+        ),
+        part("left_leg", None, Vec3::new(1.0, -5.0, 0.0), zero, vec![]),
+        part(
+            "left_leg_r1",
+            Some(8),
+            Vec3::new(1.65, 2.0, 0.0),
+            Vec3::new(0.0, 0.0, -0.2618),
+            vec![vbox((16, 27), (-2.0, -2.5, -2.0), (4.0, 5.0, 4.0))],
+        ),
+    ];
+    [standing, running, sitting, star]
+        .into_iter()
+        .map(|parts| {
+            let mut model = bake_model(parts, 64, 64);
+            // Statue models are raw block-entity ModelParts: no entity's
+            // y=24 root offset or entity-scale flip is applied by vanilla.
+            for vertex in &mut model.vertices {
+                vertex.position[1] = -vertex.position[1];
+            }
+            model.convention = ModelConvention::BlockYUp;
+            model
+        })
+        .collect()
 }
 
 /// Skeleton: humanoid layout with thin 2×12×2 limbs, 64×32 sheet

@@ -15,11 +15,24 @@ use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim}
 use crate::renderer::pipelines::entity_renderer::{
     BlendMode, ModelInput, WHITE_TINT, create_pipeline, fallback_texture,
 };
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, block_entity_model, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, block_entity_model, shader, util};
+use crate::ui::font::{GLYPH_ATLAS_SIZE, GlyphMap};
+
+const MAX_SIGN_VERTICES: usize = 65536;
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SignVertex {
+    position: [f32; 3],
+    uv_layer: [f32; 3],
+    color: [f32; 4],
+    colored: f32,
+}
 
 pub struct BlockEntityRenderInfo {
     pub pos: BlockPos,
     pub kind: BlockEntityKind,
+    /// Copper golem statue body-layer index (standing, running, sitting, star).
+    pub statue_pose: Option<u8>,
     pub yaw: f32,
     /// Texture-variant index; the model index is `variant % models.len()`, so
     /// chest variants (material-major, [single, left, right] per material)
@@ -36,6 +49,8 @@ pub struct BlockEntityRenderInfo {
     pub sign_back_color: [f32; 3],
     pub sign_back_glowing: bool,
     pub sign_wall: bool,
+    /// Approximate local lightmap brightness; glowing text bypasses it.
+    pub sign_light: f32,
 }
 
 struct TextureSlot {
@@ -82,26 +97,10 @@ const DYE_COLOR_NAMES: [&str; 16] = [
     "black",
 ];
 
-/// Wood/material variants for sign textures, in the order they appear in
-/// `SIGN_TEXTURES`.
+/// Sign wood order used by the block-entity variant mapping.
 const SIGN_WOOD_NAMES: [&str; 12] = [
     "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak",
     "bamboo", "crimson", "warped",
-];
-
-const SIGN_TEXTURES: &[&[&str]] = &[
-    &["minecraft/textures/block/oak_sign.png"],
-    &["minecraft/textures/block/spruce_sign.png"],
-    &["minecraft/textures/block/birch_sign.png"],
-    &["minecraft/textures/block/jungle_sign.png"],
-    &["minecraft/textures/block/acacia_sign.png"],
-    &["minecraft/textures/block/dark_oak_sign.png"],
-    &["minecraft/textures/block/mangrove_sign.png"],
-    &["minecraft/textures/block/cherry_sign.png"],
-    &["minecraft/textures/block/pale_oak_sign.png"],
-    &["minecraft/textures/block/bamboo_sign.png"],
-    &["minecraft/textures/block/crimson_sign.png"],
-    &["minecraft/textures/block/warped_sign.png"],
 ];
 
 /// Chest textures mirroring vanilla `Sheets.chooseSprite`: material-major with
@@ -130,6 +129,13 @@ const CHEST_XMAS_TEXTURES: &[&[&str]] = chest_textures!("christmas", copper);
 const TRAPPED_CHEST_TEXTURES: &[&[&str]] = chest_textures!("trapped");
 
 const ENDER_CHEST_TEXTURES: &[&[&str]] = &[&["minecraft/textures/entity/chest/ender.png"]];
+
+const COPPER_GOLEM_STATUE_TEXTURES: &[&[&str]] = &[
+    &["minecraft/textures/entity/copper_golem/copper_golem.png"],
+    &["minecraft/textures/entity/copper_golem/copper_golem_exposed.png"],
+    &["minecraft/textures/entity/copper_golem/copper_golem_weathered.png"],
+    &["minecraft/textures/entity/copper_golem/copper_golem_oxidized.png"],
+];
 
 const SHULKER_TEXTURES: &[&[&str]] = &[
     &["minecraft/textures/entity/shulker/shulker_white.png"],
@@ -243,7 +249,8 @@ pub fn yaw_for_block(kind: BlockEntityKind, props: &crate::world::block::PropMap
         BlockEntityKind::Chest
         | BlockEntityKind::TrappedChest
         | BlockEntityKind::EnderChest
-        | BlockEntityKind::ShulkerBox => match props.get("facing") {
+        | BlockEntityKind::ShulkerBox
+        | BlockEntityKind::CopperGolemStatue => match props.get("facing") {
             Some("south") => 0.0,
             Some("west") => 90.0,
             Some("north") => 180.0,
@@ -282,6 +289,8 @@ fn kind_definitions() -> Vec<KindDef> {
     let chest_models = block_entity_model::bake_chest_models();
     // Ender chests have no double form; only the single model applies.
     let ender_models = vec![chest_models[0].clone()];
+    // In 26.2, standing and hanging sign boards are blockstate models; the
+    // vanilla sign renderers submit text only.
     vec![
         KindDef {
             kind: BlockEntityKind::Chest,
@@ -315,12 +324,6 @@ fn kind_definitions() -> Vec<KindDef> {
             tex_variants: SHULKER_TEXTURES,
             tex_size: 64,
         },
-        KindDef {
-            kind: BlockEntityKind::Sign,
-            models: vec![block_entity_model::bake_sign_model()],
-            tex_variants: SIGN_TEXTURES,
-            tex_size: 32,
-        },
     ]
 }
 
@@ -335,6 +338,14 @@ pub struct BlockEntityPipeline {
     camera_allocations: Vec<Allocation>,
     texture_sampler: vk::Sampler,
     entries: HashMap<BlockEntityKind, KindEntry>,
+    copper_golem_statue: KindEntry,
+    text_pipeline: vk::Pipeline,
+    text_layout: vk::PipelineLayout,
+    text_set_layout: vk::DescriptorSetLayout,
+    text_pool: vk::DescriptorPool,
+    text_sets: Vec<vk::DescriptorSet>,
+    text_buffers: Vec<vk::Buffer>,
+    text_allocations: Vec<Allocation>,
 }
 
 impl BlockEntityPipeline {
@@ -388,7 +399,8 @@ impl BlockEntityPipeline {
         let tex_count = defs
             .iter()
             .map(|d| d.tex_variants.len() as u32)
-            .sum::<u32>();
+            .sum::<u32>()
+            + COPPER_GOLEM_STATUE_TEXTURES.len() as u32;
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -472,6 +484,21 @@ impl BlockEntityPipeline {
             entries.insert(def.kind, entry);
         }
 
+        let copper_golem_statue = build_entry(
+            device,
+            allocator,
+            descriptor_pool,
+            texture_layout,
+            texture_sampler,
+            jar_assets_dir,
+            asset_index,
+            crate::renderer::entity_model::bake_copper_golem_statue_models(),
+            COPPER_GOLEM_STATUE_TEXTURES,
+            64,
+            &mut pending_uploads,
+            &mut staging_to_free,
+        );
+
         util::upload_images_batched(device, queue, command_pool, &pending_uploads);
 
         {
@@ -482,7 +509,84 @@ impl BlockEntityPipeline {
             }
         }
 
+        let bindings = [0, 1].map(|binding| vk::DescriptorSetLayoutBinding {
+            binding,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::Fragment,
+            ..Default::default()
+        });
+        let text_set_layout = device
+            .create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo {
+                    binding_count: 2,
+                    bindings: bindings.as_ptr(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("sign atlas layout");
+        let text_layouts = [camera_layout, text_set_layout];
+        let text_layout = device
+            .create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo {
+                    set_layout_count: 2,
+                    set_layouts: text_layouts.as_ptr(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("sign text layout");
+        let text_pipeline = create_sign_pipeline(device, render_pass, text_layout);
+        let text_pool = device
+            .create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo {
+                    max_sets: MAX_FRAMES_IN_FLIGHT as u32,
+                    pool_size_count: 1,
+                    pool_sizes: &vk::DescriptorPoolSize {
+                        ty: vk::DescriptorType::CombinedImageSampler,
+                        descriptor_count: (2 * MAX_FRAMES_IN_FLIGHT) as u32,
+                    },
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("sign atlas descriptor pool");
+        let text_layouts = vec![text_set_layout; MAX_FRAMES_IN_FLIGHT];
+        let mut text_sets = vec![vk::DescriptorSet::null(); MAX_FRAMES_IN_FLIGHT];
+        device
+            .allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo {
+                    descriptor_pool: text_pool,
+                    descriptor_set_count: MAX_FRAMES_IN_FLIGHT as u32,
+                    set_layouts: text_layouts.as_ptr(),
+                    ..Default::default()
+                },
+                &mut text_sets,
+            )
+            .expect("sign atlas sets");
+        let mut text_buffers = Vec::new();
+        let mut text_allocations = Vec::new();
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let (buffer, alloc) = util::create_mapped_buffer(
+                device,
+                allocator,
+                &vec![0u8; MAX_SIGN_VERTICES * size_of::<SignVertex>()],
+                vk::BufferUsageFlags::VertexBuffer,
+                "sign_text_vertices",
+            );
+            text_buffers.push(buffer);
+            text_allocations.push(alloc);
+        }
+
         Self {
+            text_pipeline,
+            text_layout,
+            text_set_layout,
+            text_pool,
+            text_sets,
+            text_buffers,
+            text_allocations,
             pipeline,
             pipeline_layout,
             camera_layout,
@@ -493,6 +597,7 @@ impl BlockEntityPipeline {
             camera_allocations,
             texture_sampler,
             entries,
+            copper_golem_statue,
         }
     }
 
@@ -503,11 +608,14 @@ impl BlockEntityPipeline {
     }
 
     pub fn draw(
-        &self,
+        &mut self,
+        device: &vk::Device,
         cmd: vk::CommandBuffer,
         frame: usize,
         anchor: glam::DVec3,
+        eye: glam::DVec3,
         items: &[BlockEntityRenderInfo],
+        font: Option<(&GlyphMap, [vk::DescriptorImageInfo; 2])>,
     ) {
         if items.is_empty() {
             return;
@@ -519,7 +627,12 @@ impl BlockEntityPipeline {
         let mut bound_set: vk::DescriptorSet = vk::DescriptorSet::null();
 
         for info in items {
-            let Some(entry) = self.entries.get(&info.kind) else {
+            let is_statue = info.kind == BlockEntityKind::CopperGolemStatue;
+            let entry = if is_statue {
+                &self.copper_golem_statue
+            } else if let Some(entry) = self.entries.get(&info.kind) {
+                entry
+            } else {
                 continue;
             };
             let variant_idx = (info.variant as usize).min(entry.textures.len().saturating_sub(1));
@@ -542,7 +655,12 @@ impl BlockEntityPipeline {
                 bound_set = slot.set;
             }
 
-            let model = &entry.models[info.variant as usize % entry.models.len()];
+            let model = if is_statue {
+                let pose = info.statue_pose.unwrap_or(0);
+                &entry.models[(pose as usize).min(entry.models.len() - 1)]
+            } else {
+                &entry.models[info.variant as usize % entry.models.len()]
+            };
 
             let block_center = (glam::DVec3::new(
                 info.pos.x as f64 + 0.5,
@@ -559,6 +677,12 @@ impl BlockEntityPipeline {
                 }
                 // Vanilla `ChestRenderer`: rotate by -facing.toYRot() about the
                 // block center; coords are relative to the block's min corner.
+                ModelConvention::BlockYUp if is_statue => {
+                    // CopperGolemStatueBlockRenderer translates to block
+                    // center and rotates by -opposite(facing).toYRot().
+                    glam::Mat4::from_translation(block_center)
+                        * glam::Mat4::from_rotation_y((-info.yaw - 180.0).to_radians())
+                }
                 ModelConvention::BlockYUp => {
                     glam::Mat4::from_translation(block_center)
                         * glam::Mat4::from_rotation_y((-info.yaw).to_radians())
@@ -566,7 +690,16 @@ impl BlockEntityPipeline {
                 }
             };
 
-            let anim = lid_anim(info.kind, info.lid_open);
+            let mut model_mat = model_mat;
+            if is_statue {
+                // CopperGolemStatueModel.setupAnim sets root.zRot = PI.
+                model_mat *= glam::Mat4::from_rotation_z(std::f32::consts::PI);
+            }
+            let anim = if is_statue {
+                PartAnim::default()
+            } else {
+                lid_anim(info.kind, info.lid_open)
+            };
             let part_transforms = model.compute_part_transforms(&anim);
             for (i, (start, count)) in model.part_ranges.iter().enumerate() {
                 if *count == 0 {
@@ -592,10 +725,154 @@ impl BlockEntityPipeline {
                 cmd.draw(*count, 1, *start, 0);
             }
         }
+        if let Some((glyphs, textures)) = font {
+            self.draw_sign_text(device, cmd, frame, anchor, eye, items, glyphs, textures);
+        }
+    }
+
+    fn draw_sign_text(
+        &mut self,
+        device: &vk::Device,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        anchor: glam::DVec3,
+        eye: glam::DVec3,
+        items: &[BlockEntityRenderInfo],
+        glyphs: &GlyphMap,
+        textures: [vk::DescriptorImageInfo; 2],
+    ) {
+        let mut vertices = Vec::new();
+        for info in items.iter().filter(|i| i.kind == BlockEntityKind::Sign) {
+            for (front, lines, dye, glowing) in [
+                (
+                    true,
+                    &info.sign_front,
+                    info.sign_front_color,
+                    info.sign_front_glowing,
+                ),
+                (
+                    false,
+                    &info.sign_back,
+                    info.sign_back_color,
+                    info.sign_back_glowing,
+                ),
+            ] {
+                let Some(lines) = lines else {
+                    continue;
+                };
+                let base =
+                    (glam::DVec3::new(info.pos.x as f64, info.pos.y as f64, info.pos.z as f64)
+                        - anchor)
+                        .as_vec3();
+                // StandingSignRenderer.textTransformation, including wall offset,
+                // back-face rotation and the inverted Y of Font coordinates.
+                let matrix = glam::Mat4::from_translation(base + glam::Vec3::splat(0.5))
+                    * glam::Mat4::from_rotation_y((-info.yaw).to_radians())
+                    * glam::Mat4::from_translation(if info.sign_wall {
+                        glam::Vec3::new(0.0, -0.3125, -0.4375)
+                    } else {
+                        glam::Vec3::ZERO
+                    })
+                    * glam::Mat4::from_rotation_y(if front { 0.0 } else { std::f32::consts::PI })
+                    * glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.0 / 3.0, 0.046666667))
+                    * glam::Mat4::from_scale(glam::Vec3::new(1.0 / 96.0, -1.0 / 96.0, 1.0 / 96.0));
+                let black = dye == [29.0 / 255.0, 29.0 / 255.0, 33.0 / 255.0];
+                let dark = if black && glowing {
+                    [0.941, 0.922, 0.922]
+                } else {
+                    dye.map(|c| c * 0.4)
+                };
+                let color = if glowing {
+                    dye
+                } else {
+                    dark.map(|c| c * info.sign_light)
+                };
+                let near = (glam::DVec3::new(
+                    info.pos.x as f64 + 0.5,
+                    info.pos.y as f64 + 0.5,
+                    info.pos.z as f64 + 0.5,
+                ) - eye)
+                    .length_squared()
+                    < 256.0;
+                let outline = glowing && (black || near);
+                for (row, line) in lines.iter().enumerate() {
+                    // Vanilla SignBlockEntity: 90 px line width, 10 px height.
+                    let chars: Vec<_> = line
+                        .chars()
+                        .take(256)
+                        .scan(0.0f32, |width, ch| {
+                            let gi = glyphs.glyph(ch, None);
+                            if *width + gi.advance > 90.0 {
+                                return None;
+                            }
+                            let x = *width;
+                            *width += gi.advance;
+                            Some((x, gi))
+                        })
+                        .collect();
+                    let width: f32 = chars.last().map_or(0.0, |(x, gi)| x + gi.advance);
+                    let y = row as f32 * 10.0 - 20.0;
+                    if outline {
+                        for (x, gi) in &chars {
+                            for dy in -1..=1 {
+                                for dx in -1..=1 {
+                                    if dx != 0 || dy != 0 {
+                                        push_sign_glyph(
+                                            &mut vertices,
+                                            matrix,
+                                            gi,
+                                            *x - width / 2.0 + dx as f32 * 0.5,
+                                            y + dy as f32 * 0.5,
+                                            dark,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for (x, gi) in &chars {
+                        push_sign_glyph(&mut vertices, matrix, gi, *x - width / 2.0, y, color);
+                    }
+                }
+            }
+        }
+        if vertices.is_empty() {
+            return;
+        }
+        let len = vertices.len().min(MAX_SIGN_VERTICES);
+        let len = len - len % 6;
+        let bytes = bytemuck::cast_slice(&vertices[..len]);
+        self.text_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
+            .copy_from_slice(bytes);
+        let writes: Vec<_> = textures
+            .iter()
+            .enumerate()
+            .map(|(binding, image)| vk::WriteDescriptorSet {
+                dst_set: self.text_sets[frame],
+                dst_binding: binding as u32,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                descriptor_count: 1,
+                image_info: image,
+                ..Default::default()
+            })
+            .collect();
+        device.update_descriptor_sets(&writes, &[]);
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.text_pipeline);
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.text_layout,
+            0,
+            &[self.camera_sets[frame], self.text_sets[frame]],
+            &[],
+        );
+        cmd.bind_vertex_buffers(0, &[self.text_buffers[frame]], &[0]);
+        cmd.draw(len as u32, 1, 0, 0);
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.text_pipeline, None);
+        self.text_pipeline = create_sign_pipeline(device, render_pass, self.text_layout);
         self.pipeline = create_pipeline(
             device,
             render_pass,
@@ -608,6 +885,12 @@ impl BlockEntityPipeline {
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
         for i in 0..MAX_FRAMES_IN_FLIGHT {
+            device.destroy_buffer(self.text_buffers[i], None);
+            alloc
+                .free(std::mem::replace(&mut self.text_allocations[i], unsafe {
+                    std::mem::zeroed()
+                }))
+                .ok();
             device.destroy_buffer(self.camera_buffers[i], None);
             alloc
                 .free(std::mem::replace(&mut self.camera_allocations[i], unsafe {
@@ -616,7 +899,11 @@ impl BlockEntityPipeline {
                 .ok();
         }
         device.destroy_sampler(self.texture_sampler, None);
-        for entry in self.entries.values_mut() {
+        for entry in self
+            .entries
+            .values_mut()
+            .chain(std::iter::once(&mut self.copper_golem_statue))
+        {
             device.destroy_buffer(entry.vertex_buffer, None);
             alloc
                 .free(std::mem::replace(&mut entry.vertex_allocation, unsafe {
@@ -636,6 +923,10 @@ impl BlockEntityPipeline {
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.text_pipeline, None);
+        device.destroy_pipeline_layout(self.text_layout, None);
+        device.destroy_descriptor_pool(self.text_pool, None);
+        device.destroy_descriptor_set_layout(self.text_set_layout, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);
@@ -772,5 +1063,223 @@ fn build_texture_slot(
         view,
         allocation,
         set,
+    }
+}
+
+fn push_sign_glyph(
+    vertices: &mut Vec<SignVertex>,
+    matrix: glam::Mat4,
+    gi: &crate::ui::font::GlyphInfo,
+    x: f32,
+    y: f32,
+    color: [f32; 3],
+) {
+    if gi.pixel_w == 0 || gi.pixel_h == 0 || vertices.len() + 6 > MAX_SIGN_VERTICES {
+        return;
+    }
+    let x0 = x + gi.left;
+    let y0 = y + gi.top;
+    let u0 = gi.atlas_x as f32 / GLYPH_ATLAS_SIZE as f32;
+    let v0 = gi.atlas_y as f32 / GLYPH_ATLAS_SIZE as f32;
+    let u1 = (gi.atlas_x + gi.pixel_w) as f32 / GLYPH_ATLAS_SIZE as f32;
+    let v1 = (gi.atlas_y + gi.pixel_h) as f32 / GLYPH_ATLAS_SIZE as f32;
+    let corners = [
+        (x0, y0, u0, v0),
+        (x0, y0 + gi.draw_h, u0, v1),
+        (x0 + gi.draw_w, y0 + gi.draw_h, u1, v1),
+        (x0 + gi.draw_w, y0, u1, v0),
+    ];
+    for index in [0, 1, 2, 0, 2, 3] {
+        let (px, py, u, v) = corners[index];
+        vertices.push(SignVertex {
+            position: matrix
+                .transform_point3(glam::Vec3::new(px, py, 0.0))
+                .to_array(),
+            uv_layer: [u, v, gi.atlas_layer as f32],
+            color: [color[0], color[1], color[2], 1.0],
+            colored: if gi.colored { 1.0 } else { 0.0 },
+        });
+    }
+}
+
+fn create_sign_pipeline(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+) -> vk::Pipeline {
+    let vs = shader::create_shader_module(device, shader::include_spirv!("sign_text.vert.spv"));
+    let fs = shader::create_shader_module(device, shader::include_spirv!("sign_text.frag.spv"));
+    let stages = [
+        vk::PipelineShaderStageCreateInfo {
+            stage: vk::ShaderStageFlags::Vertex,
+            module: vs,
+            name: c"main".as_ptr(),
+            ..Default::default()
+        },
+        vk::PipelineShaderStageCreateInfo {
+            stage: vk::ShaderStageFlags::Fragment,
+            module: fs,
+            name: c"main".as_ptr(),
+            ..Default::default()
+        },
+    ];
+    let binding = [vk::VertexInputBindingDescription {
+        binding: 0,
+        stride: size_of::<SignVertex>() as u32,
+        input_rate: vk::VertexInputRate::Vertex,
+    }];
+    let attributes = [
+        vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: vk::Format::R32G32B32Sfloat,
+            offset: 0,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 1,
+            binding: 0,
+            format: vk::Format::R32G32B32Sfloat,
+            offset: 12,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 2,
+            binding: 0,
+            format: vk::Format::R32G32B32A32Sfloat,
+            offset: 24,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 3,
+            binding: 0,
+            format: vk::Format::R32Sfloat,
+            offset: 40,
+        },
+    ];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo {
+        vertex_binding_description_count: 1,
+        vertex_binding_descriptions: binding.as_ptr(),
+        vertex_attribute_description_count: attributes.len() as u32,
+        vertex_attribute_descriptions: attributes.as_ptr(),
+        ..Default::default()
+    };
+    let assembly = vk::PipelineInputAssemblyStateCreateInfo {
+        topology: vk::PrimitiveTopology::TriangleList,
+        ..Default::default()
+    };
+    let viewport = vk::PipelineViewportStateCreateInfo {
+        viewport_count: 1,
+        scissor_count: 1,
+        ..Default::default()
+    };
+    let raster = vk::PipelineRasterizationStateCreateInfo {
+        polygon_mode: vk::PolygonMode::Fill,
+        cull_mode: vk::CullModeFlags::None,
+        front_face: vk::FrontFace::CounterClockwise,
+        line_width: 1.0,
+        ..Default::default()
+    };
+    let samples = vk::PipelineMultisampleStateCreateInfo {
+        rasterization_samples: vk::SampleCountFlags::Type1,
+        ..Default::default()
+    };
+    let depth = vk::PipelineDepthStencilStateCreateInfo {
+        depth_test_enable: vk::TRUE,
+        depth_write_enable: vk::TRUE,
+        depth_compare_op: vk::CompareOp::LessOrEqual,
+        ..Default::default()
+    };
+    let attachment = [vk::PipelineColorBlendAttachmentState {
+        blend_enable: vk::TRUE,
+        src_color_blend_factor: vk::BlendFactor::One,
+        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        color_blend_op: vk::BlendOp::Add,
+        src_alpha_blend_factor: vk::BlendFactor::One,
+        dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        alpha_blend_op: vk::BlendOp::Add,
+        color_write_mask: vk::ColorComponentFlags::RGBA,
+    }];
+    let blending = vk::PipelineColorBlendStateCreateInfo {
+        attachment_count: 1,
+        attachments: attachment.as_ptr(),
+        ..Default::default()
+    };
+    let dynamic = [vk::DynamicState::Viewport, vk::DynamicState::Scissor];
+    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
+        dynamic_state_count: 2,
+        dynamic_states: dynamic.as_ptr(),
+        ..Default::default()
+    };
+    let infos = [vk::GraphicsPipelineCreateInfo {
+        stage_count: 2,
+        stages: stages.as_ptr(),
+        vertex_input_state: &vertex_input,
+        input_assembly_state: &assembly,
+        viewport_state: &viewport,
+        rasterization_state: &raster,
+        multisample_state: &samples,
+        depth_stencil_state: &depth,
+        color_blend_state: &blending,
+        dynamic_state: &dynamic_state,
+        layout,
+        render_pass,
+        subpass: 0,
+        ..Default::default()
+    }];
+    let mut result = vk::Pipeline::null();
+    device
+        .create_graphics_pipelines(
+            vk::PipelineCache::null(),
+            &infos,
+            None,
+            slice::from_mut(&mut result),
+        )
+        .expect("sign text pipeline");
+    device.destroy_shader_module(vs, None);
+    device.destroy_shader_module(fs, None);
+    result
+}
+
+#[cfg(test)]
+mod sign_text_tests {
+    use super::*;
+
+    #[test]
+    fn sign_board_geometry_is_not_drawn_as_block_entity_geometry() {
+        assert!(
+            kind_definitions()
+                .iter()
+                .all(|definition| definition.kind != BlockEntityKind::Sign)
+        );
+    }
+
+    #[test]
+    fn glyph_quad_uses_atlas_layer_and_world_matrix() {
+        let glyph = crate::ui::font::GlyphInfo {
+            atlas_layer: 2,
+            colored: false,
+            atlas_x: 8,
+            atlas_y: 16,
+            pixel_w: 4,
+            pixel_h: 7,
+            draw_w: 4.0,
+            draw_h: 7.0,
+            left: 1.0,
+            top: 2.0,
+            advance: 5.0,
+            bold_offset: 1.0,
+            shadow_offset: 1.0,
+        };
+        let mut vertices = Vec::new();
+        push_sign_glyph(
+            &mut vertices,
+            glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0)),
+            &glyph,
+            10.0,
+            20.0,
+            [1.0, 0.5, 0.0],
+        );
+        assert_eq!(vertices.len(), 6);
+        assert_eq!(vertices[0].position, [13.0, 25.0, 4.0]);
+        assert_eq!(vertices[0].uv_layer, [8.0 / 2048.0, 16.0 / 2048.0, 2.0]);
+        assert_eq!(vertices[2].position, [17.0, 32.0, 4.0]);
     }
 }

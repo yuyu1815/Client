@@ -4,6 +4,7 @@ pub mod chunk;
 mod context;
 pub mod entity_model;
 pub(crate) mod item_activation_math;
+pub mod map_texture;
 pub(crate) mod packing;
 pub mod pipelines;
 mod screenshot;
@@ -27,7 +28,7 @@ use chunk::atlas::TextureAtlas;
 use chunk::buffer::ChunkBufferStore;
 use chunk::mesher::{ChunkMeshData, MeshDispatcher, MeshTraceConfig, MeshTraceState, TraceTarget};
 use context::VulkanContext;
-use glam::dvec3;
+use glam::{Quat, Vec3, dvec3};
 use pipelines::block_entity::BlockEntityPipeline;
 pub use pipelines::block_entity::BlockEntityRenderInfo;
 use pipelines::block_overlay::BlockOverlayPipeline;
@@ -37,6 +38,7 @@ use pipelines::chunk::ChunkPipeline;
 use pipelines::clouds::CloudPipeline;
 use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
 use pipelines::hand::HandPipeline;
+use pipelines::map_quad::MapQuadPipeline;
 use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
 use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
@@ -90,6 +92,17 @@ pub struct BookPreview {
     pub flip: f32,
 }
 
+/// One framed map to draw in the world. `position` is its center in
+/// camera-anchor-relative world coordinates; `rotation` maps the map plane's
+/// local +Z normal to the frame orientation.
+#[derive(Clone)]
+pub struct MapQuadDraw {
+    pub map_id: u32,
+    pub map_data: crate::world::maps::MapData,
+    pub position: Vec3,
+    pub rotation: Quat,
+}
+
 /// A GUI preview box's `[x, y, w, h]` clamped to the swapchain, as the scissor
 /// rect its 3D content draws within; None when fully off screen.
 fn preview_box_rect(rect: [f32; 4], extent: vk::Extent2D) -> Option<vk::Rect2D> {
@@ -114,7 +127,10 @@ enum RenderMode<'a> {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
-        held_item: Option<pipelines::held_item::HeldItemInfo>,
+        held_item: (
+            Option<pipelines::held_item::HeldItemInfo>,
+            Option<pipelines::held_item::HeldItemInfo>,
+        ),
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         dimension: &'a str,
@@ -130,6 +146,7 @@ enum RenderMode<'a> {
         chunks: &'a crate::world::chunk::ChunkStore,
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
+        map_quads: &'a [MapQuadDraw],
         eyes_in_water: bool,
     },
     MainMenu {
@@ -174,6 +191,9 @@ pub struct Renderer {
     world_border_pipeline: WorldBorderPipeline,
     world_border_state: Option<(WorldBorder, f32)>,
     item_entity_pipeline: ItemEntityPipeline,
+    map_texture_store: map_texture::MapTextureStore,
+    map_texture_colors: HashMap<u32, Vec<u8>>,
+    map_quad_pipeline: MapQuadPipeline,
     held_item_pipeline: pipelines::held_item::HeldItemPipeline,
     activation_targets: Option<pipelines::item_activation::ActivationTargets>,
     activation_pipeline: Option<pipelines::held_item::HeldItemPipeline>,
@@ -290,6 +310,8 @@ impl Renderer {
             .chain([
                 crate::particle::CRIT_SPRITE,
                 crate::particle::ENCHANTED_HIT_SPRITE,
+                "water_flow",
+                "lava_flow",
             ])
             .collect();
         let atlas = TextureAtlas::build(
@@ -496,6 +518,10 @@ impl Renderer {
             shadow_texture,
         );
 
+        let map_texture_store = map_texture::MapTextureStore::new(&ctx.device);
+        let map_quad_pipeline =
+            MapQuadPipeline::new(&ctx.device, &ctx.allocator, swapchain_state.render_pass);
+
         let held_item_pipeline = pipelines::held_item::HeldItemPipeline::new(
             &ctx.device,
             swapchain_state.render_pass,
@@ -564,6 +590,9 @@ impl Renderer {
             world_border_pipeline,
             world_border_state: None,
             item_entity_pipeline,
+            map_texture_store,
+            map_texture_colors: HashMap::new(),
+            map_quad_pipeline,
             held_item_pipeline,
             activation_targets: None,
             activation_pipeline: None,
@@ -682,6 +711,7 @@ impl Renderer {
         ];
 
         ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
+        menu.begin_frame(0, &ctx.device, &ctx.allocator);
 
         let image_index = match ctx.device.acquire_next_image(
             swapchain.handle,
@@ -747,7 +777,16 @@ impl Renderer {
         cmd.set_scissor(0, &[scissor]);
 
         let empty_uvs: HashMap<String, [f32; 4]> = HashMap::new();
-        menu.draw(cmd, sw, sh, &elements, &empty_uvs);
+        menu.draw(
+            &ctx.device,
+            &ctx.allocator,
+            cmd,
+            sw,
+            sh,
+            &elements,
+            &empty_uvs,
+            0,
+        );
 
         cmd.end_render_pass();
         cmd.end()?;
@@ -892,6 +931,8 @@ impl Renderer {
         self.block_entity_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.item_entity_pipeline
+            .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
+        self.map_quad_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
         self.held_item_pipeline
             .recreate_pipeline(&self.ctx.device, self.swapchain.render_pass);
@@ -1075,6 +1116,16 @@ impl Renderer {
     }
 
     pub fn project_world_to_screen(&self, position: glam::DVec3) -> Option<(f32, f32)> {
+        self.project_world_to_screen_with_depth(position)
+            .map(|(x, y, _)| (x, y))
+    }
+
+    /// Project a world point and return its positive camera-space depth
+    /// (`clip.w`) for perspective-sized screen-space overlays.
+    pub fn project_world_to_screen_with_depth(
+        &self,
+        position: glam::DVec3,
+    ) -> Option<(f32, f32, f32)> {
         let clip = self.camera.view_rotation_projection()
             * (position - self.camera_render_position())
                 .as_vec3()
@@ -1086,6 +1137,29 @@ impl Renderer {
         (ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && ndc.z.abs() <= 1.0).then_some((
             (ndc.x + 1.0) * self.width as f32 * 0.5,
             (1.0 - ndc.y) * self.height as f32 * 0.5,
+            clip.w,
+        ))
+    }
+
+    /// Project a world point for a screen-space overlay, additionally returning
+    /// the Vulkan depth-buffer value corresponding to the OpenGL-range NDC z.
+    pub fn project_world_to_screen_with_vulkan_depth(
+        &self,
+        position: glam::DVec3,
+    ) -> Option<(f32, f32, f32, f32)> {
+        let clip = self.camera.view_rotation_projection()
+            * (position - self.camera_render_position())
+                .as_vec3()
+                .extend(1.0);
+        if clip.w <= 0.0 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        (ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && ndc.z.abs() <= 1.0).then_some((
+            (ndc.x + 1.0) * self.width as f32 * 0.5,
+            (1.0 - ndc.y) * self.height as f32 * 0.5,
+            clip.w,
+            ndc.z * 0.5 + 0.5,
         ))
     }
 
@@ -1373,7 +1447,7 @@ impl Renderer {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
-        held_item: Option<(String, f32)>,
+        held_item: (Option<(String, f32)>, Option<(String, f32)>),
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         dimension: &str,
@@ -1388,6 +1462,7 @@ impl Renderer {
         chunks: &crate::world::chunk::ChunkStore,
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
+        map_quads: &[MapQuadDraw],
         eyes_in_water: bool,
         item_activation: Option<ItemActivationDraw<'_>>,
     ) -> Result<(), RendererError> {
@@ -1396,11 +1471,11 @@ impl Renderer {
             "showHand": show_hand,
             "firstPerson": self.camera.mode == camera::CameraMode::FirstPerson,
             "topDown": self.camera.top_down().is_some(),
-            "hasHeldItem": held_item.is_some(),
-            "actualDrawCount": if show_hand && self.camera.mode == camera::CameraMode::FirstPerson && self.camera.top_down().is_none() && held_item.is_some() { 1 } else { 0 },
+            "hasHeldItem": held_item.0.is_some() || held_item.1.is_some(),
+            "actualDrawCount": if show_hand && self.camera.mode == camera::CameraMode::FirstPerson && self.camera.top_down().is_none() { usize::from(held_item.0.is_some()) + usize::from(held_item.1.is_some()) } else { 0 },
             "actualRenderFrameIndex": self.ctx.frame_index,
             "actualDrawAt": chrono::Utc::now().to_rfc3339(),
-            "skipReason": if !show_hand { Some("show_hand_false") } else if self.camera.mode != camera::CameraMode::FirstPerson { Some("camera_not_first_person") } else if self.camera.top_down().is_some() { Some("top_down_camera") } else if held_item.is_none() { Some("empty_selected_slot") } else { None::<&str> },
+            "skipReason": if !show_hand { Some("show_hand_false") } else if self.camera.mode != camera::CameraMode::FirstPerson { Some("camera_not_first_person") } else if self.camera.top_down().is_some() { Some("top_down_camera") } else if held_item.0.is_none() && held_item.1.is_none() { Some("empty_hands") } else { None::<&str> },
             "provenance": "actual Renderer::render_world inputs and camera state before submission"
         }));
         // Clear prior trace so it cannot be mistaken for this frame's draw.
@@ -1414,15 +1489,46 @@ impl Renderer {
             let item_name = crate::player::inventory::item_resource_name(stack.kind);
             self.ensure_item_mesh(&item_name);
         }
-        let held_item = held_item.map(|(name, light)| {
-            let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
-            pipelines::held_item::HeldItemInfo {
-                name,
-                light,
-                has_3d_model,
-                nether_lighting: dimension == "minecraft:the_nether",
+        for map_quad in map_quads {
+            if self
+                .map_texture_colors
+                .get(&map_quad.map_id)
+                .map(Vec::as_slice)
+                != Some(map_quad.map_data.colors.as_slice())
+            {
+                self.map_texture_store.update(
+                    map_quad.map_id,
+                    &map_quad.map_data,
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    self.ctx.graphics_queue,
+                    self.ctx.command_pool,
+                );
+                self.map_texture_colors
+                    .insert(map_quad.map_id, map_quad.map_data.colors.clone());
             }
-        });
+        }
+
+        let held_item = (
+            held_item.0.map(|(name, light)| {
+                let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
+                pipelines::held_item::HeldItemInfo {
+                    name,
+                    light,
+                    has_3d_model,
+                    nether_lighting: dimension == "minecraft:the_nether",
+                }
+            }),
+            held_item.1.map(|(name, light)| {
+                let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
+                pipelines::held_item::HeldItemInfo {
+                    name,
+                    light,
+                    has_3d_model,
+                    nether_lighting: dimension == "minecraft:the_nether",
+                }
+            }),
+        );
         // Clear to the sky color: the strip between the sky disc's edge and the
         // terrain shows the clear color, so it must match the sky/terrain or it
         // reads as a horizon band (visible at night). Underwater, clear to the
@@ -1457,6 +1563,7 @@ impl Renderer {
                 chunks,
                 player_preview,
                 book_preview,
+                map_quads,
                 eyes_in_water,
             },
             item_activation,
@@ -1533,6 +1640,8 @@ impl Renderer {
             .chain([
                 crate::particle::CRIT_SPRITE,
                 crate::particle::ENCHANTED_HIT_SPRITE,
+                "water_flow",
+                "lava_flow",
             ])
             .collect();
         self.atlas = TextureAtlas::build(
@@ -1776,9 +1885,11 @@ impl Renderer {
         self.ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
         let fence_ms = t_fence.elapsed().as_secs_f32() * 1000.0;
 
-        // Fence signalled: reclaim chunk slices the GPU is now provably done with,
-        // and read back any screenshot copy recorded for this frame index.
+        // Fence signalled: reclaim resources the GPU is now provably done with.
+        self.menu_pipeline
+            .begin_frame(frame, &self.ctx.device, &self.ctx.allocator);
         self.chunk_buffers.begin_frame();
+        self.map_quad_pipeline.begin_frame(&self.ctx.device, frame);
         self.screenshot
             .collect_ready(frame, &self.ctx.device, &self.ctx.allocator);
 
@@ -1819,6 +1930,7 @@ impl Renderer {
             self.chunk_border_pipeline.update_camera(frame, &uniform);
             self.world_border_pipeline.update_camera(frame, &uniform);
             self.item_entity_pipeline.update_camera(frame, &uniform);
+            self.map_quad_pipeline.update_camera(frame, &uniform);
             self.weather_pipeline.update_camera(frame, &uniform);
             self.particle_pipeline.update_camera(frame, &uniform);
             self.cloud_pipeline.update_camera(frame, &uniform);
@@ -1836,6 +1948,10 @@ impl Renderer {
             ..Default::default()
         };
         cmd.begin(&begin_info)?;
+        if matches!(&mode, RenderMode::World { .. }) {
+            self.atlas
+                .update_animations(&cmd, frame, &self.ctx.device, &self.ctx.allocator);
+        }
 
         let extent = self.swapchain.extent;
         let viewport = vk::Viewport {
@@ -2003,6 +2119,7 @@ impl Renderer {
         let sh = self.swapchain.extent.height as f32;
 
         let frame_start = std::time::Instant::now();
+        let mut world_menu_vertex_base = 0;
 
         match &mode {
             RenderMode::World {
@@ -2026,6 +2143,7 @@ impl Renderer {
                 chunks,
                 player_preview,
                 book_preview,
+                map_quads,
                 eyes_in_water,
             } => {
                 // Vanilla water fog hides the sky dome and clouds; the framebuffer
@@ -2088,10 +2206,30 @@ impl Renderer {
                     ent_cull_dist,
                 );
 
-                self.block_entity_pipeline
-                    .draw(cmd, frame, anchor, block_entities);
+                self.block_entity_pipeline.draw(
+                    &self.ctx.device,
+                    cmd,
+                    frame,
+                    anchor,
+                    eye,
+                    block_entities,
+                    self.menu_pipeline.world_font(),
+                );
 
                 self.item_entity_pipeline.draw(cmd, frame, item_entities);
+                for map_quad in *map_quads {
+                    if let Some(texture) = self.map_texture_store.get(map_quad.map_id) {
+                        self.map_quad_pipeline.draw(
+                            &self.ctx.device,
+                            cmd,
+                            frame,
+                            texture.view,
+                            texture.sampler,
+                            map_quad.position,
+                            map_quad.rotation,
+                        );
+                    }
+                }
 
                 // Break particles draw after entities but before translucent
                 // water: they write depth, and pomme's water doesn't, so this
@@ -2159,6 +2297,18 @@ impl Renderer {
                     self.chunk_border_pipeline.draw(cmd, frame);
                 }
 
+                // Draw world-occluded TextDisplays while scene depth is intact.
+                world_menu_vertex_base = self.menu_pipeline.draw_occluded_text_displays(
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    cmd,
+                    sw,
+                    sh,
+                    overlay,
+                    &item_atlas_uvs,
+                    frame,
+                );
+
                 let clear_attachment = vk::ClearAttachment {
                     aspect_mask: vk::ImageAspectFlags::Depth,
                     color_attachment: 0,
@@ -2185,28 +2335,43 @@ impl Renderer {
                     // Vanilla applies bobHurt (death + hurt) and bobView to the
                     // first-person arm/item pose stack as well as the world.
                     let view_effect = self.camera.view_effect_matrix();
-                    // Vanilla renderArmWithItem draws the arm only for an empty
-                    // hand; a held item renders alone.
-                    match held_item {
-                        Some(item) => self.held_item_pipeline.update_and_draw(
+                    if let Some(item) = &held_item.0 {
+                        self.held_item_pipeline.update_and_draw(
                             cmd,
                             frame,
                             aspect,
                             hud_fov,
                             *swing_progress,
                             *use_anim,
+                            false,
                             item,
                             &self.item_entity_pipeline,
                             view_effect,
-                        ),
-                        None => self.hand_pipeline.update_and_draw(
+                        );
+                    }
+                    if let Some(item) = &held_item.1 {
+                        self.held_item_pipeline.update_and_draw(
+                            cmd,
+                            frame,
+                            aspect,
+                            hud_fov,
+                            *swing_progress,
+                            *use_anim,
+                            true,
+                            item,
+                            &self.item_entity_pipeline,
+                            view_effect,
+                        );
+                    }
+                    if held_item.0.is_none() && held_item.1.is_none() {
+                        self.hand_pipeline.update_and_draw(
                             cmd,
                             frame,
                             aspect,
                             hud_fov,
                             *swing_progress,
                             view_effect,
-                        ),
+                        );
                     }
                 }
 
@@ -2224,7 +2389,17 @@ impl Renderer {
                 });
                 if activation_draw.is_none() {
                     self.menu_pipeline
-                        .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
+                        .draw_from_excluding_occluded_text_displays(
+                            &self.ctx.device,
+                            &self.ctx.allocator,
+                            cmd,
+                            sw,
+                            sh,
+                            overlay,
+                            &item_atlas_uvs,
+                            world_menu_vertex_base,
+                            frame,
+                        );
                 }
                 let vignette_brightness: Vec<f32> = overlay
                     .iter()
@@ -2360,7 +2535,17 @@ impl Renderer {
                     }
                     // MenuOverlay follows the mesh in this pass; common end_render_pass closes it.
                     self.menu_pipeline
-                        .draw(cmd, sw, sh, overlay, &item_atlas_uvs);
+                        .draw_from_excluding_occluded_text_displays(
+                            &self.ctx.device,
+                            &self.ctx.allocator,
+                            cmd,
+                            sw,
+                            sh,
+                            overlay,
+                            &item_atlas_uvs,
+                            world_menu_vertex_base,
+                            frame,
+                        );
                 }
 
                 self.last_timings.cull_ms = cull_ms;
@@ -2386,12 +2571,15 @@ impl Renderer {
                 let mut vbase = 0u32;
                 if let Some(i) = split {
                     vbase = self.menu_pipeline.draw_from(
+                        &self.ctx.device,
+                        &self.ctx.allocator,
                         cmd,
                         sw,
                         sh,
                         &elements[..i],
                         &item_atlas_uvs,
                         0,
+                        frame,
                     );
                 }
 
@@ -2443,8 +2631,17 @@ impl Renderer {
                     Some(i) => &elements[i + 1..],
                     None => &elements[..],
                 };
-                self.menu_pipeline
-                    .draw_from(cmd, sw, sh, fg, &item_atlas_uvs, vbase);
+                self.menu_pipeline.draw_from(
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    cmd,
+                    sw,
+                    sh,
+                    fg,
+                    &item_atlas_uvs,
+                    vbase,
+                    frame,
+                );
             }
         }
 
@@ -2848,6 +3045,10 @@ impl Drop for Renderer {
         self.world_border_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.item_entity_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.map_quad_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.map_texture_store
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.held_item_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);

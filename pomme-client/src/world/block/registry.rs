@@ -80,6 +80,7 @@ pub struct BlockRegistry {
     item_models: HashMap<String, BakedModel>,
     flat_item_textures: std::collections::HashSet<String>,
     flat_item_texture_keys: HashMap<String, String>,
+    item_particle_icons: HashMap<String, String>,
     flat_item_tints: HashMap<String, model::ItemTint>,
     item_ground_transforms: HashMap<String, glam::Mat4>,
     /// Block name -> its single `BlockState`, for one-state blocks (see
@@ -130,6 +131,7 @@ impl BlockRegistry {
         let item_models = baked_items.models;
         let flat_item_textures = baked_items.generated_textures;
         let flat_item_texture_keys = baked_items.flat_texture_keys;
+        let item_particle_icons = baked_items.particle_icons;
         let flat_item_tints = baked_items.flat_tints;
         let item_ground_transforms = baked_items.ground_transforms;
 
@@ -140,6 +142,7 @@ impl BlockRegistry {
             item_models,
             flat_item_textures,
             flat_item_texture_keys,
+            item_particle_icons,
             flat_item_tints,
             item_ground_transforms,
             placeable_blocks: build_placeable_blocks(),
@@ -171,6 +174,24 @@ impl BlockRegistry {
 
     pub fn get_flat_item_texture_key(&self, name: &str) -> Option<&str> {
         self.flat_item_texture_keys.get(name).map(String::as_str)
+    }
+
+    /// Particle material of the selected item definition, never its first quad.
+    /// Only a static model/composite definition can supply an icon: dynamic
+    /// selectors (including CustomModelData) are not yet resolved by the item
+    /// renderer, so returning its representative leaf would be a guess.
+    pub fn get_item_particle_icon(&self, stack: &azalea_inventory::ItemStack) -> Option<&str> {
+        let item = stack.as_present().filter(|item| !item.is_empty())?;
+        let selected = item
+            .component_patch
+            .get::<azalea_inventory::components::ItemModel>()
+            .map(|model| model.resource_location.to_string());
+        let base = crate::player::inventory::item_resource_name(item.kind);
+        let name = selected
+            .as_deref()
+            .map(|key| key.strip_prefix("minecraft:").unwrap_or(key))
+            .unwrap_or(&base);
+        self.item_particle_icons.get(name).map(String::as_str)
     }
 
     pub fn get_flat_item_tint(&self, name: &str) -> model::ItemTint {
@@ -395,6 +416,7 @@ impl BlockRegistry {
             .chain(baked_textures)
             .chain(multipart_textures)
             .chain(item_model_textures)
+            .chain(self.item_particle_icons.values().map(String::as_str))
     }
 }
 
@@ -428,6 +450,51 @@ fn constraints_match<'a>(
 fn load_cache(path: &Path) -> Option<HashMap<String, FaceTextures>> {
     let data = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&data).ok()
+}
+
+#[cfg(test)]
+mod item_particle_tests {
+    use azalea_inventory::ItemStack;
+    use azalea_inventory::components::ItemModel;
+    use azalea_registry::builtin::ItemKind;
+    use azalea_registry::identifier::Identifier;
+
+    use super::*;
+
+    #[test]
+    fn item_model_component_selects_mapped_icon_without_guessing_missing_overrides() {
+        let registry = BlockRegistry {
+            textures: HashMap::new(),
+            baked: HashMap::new(),
+            multipart: HashMap::new(),
+            item_models: HashMap::new(),
+            flat_item_textures: Default::default(),
+            flat_item_texture_keys: HashMap::new(),
+            flat_item_tints: HashMap::new(),
+            item_ground_transforms: HashMap::new(),
+            placeable_blocks: HashMap::new(),
+            item_particle_icons: HashMap::from([
+                ("stone".into(), "base_particle".into()),
+                ("alternate".into(), "override_particle".into()),
+            ]),
+        };
+        let base = ItemStack::new(ItemKind::Stone, 1);
+        assert_eq!(
+            registry.get_item_particle_icon(&base),
+            Some("base_particle")
+        );
+        let mapped = base.clone().with_component(ItemModel {
+            resource_location: Identifier::new("minecraft:alternate"),
+        });
+        assert_eq!(
+            registry.get_item_particle_icon(&mapped),
+            Some("override_particle")
+        );
+        let missing = base.with_component(ItemModel {
+            resource_location: Identifier::new("minecraft:unknown"),
+        });
+        assert_eq!(registry.get_item_particle_icon(&missing), None);
+    }
 }
 
 fn save_cache(path: &Path, textures: &HashMap<String, FaceTextures>) {

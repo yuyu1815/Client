@@ -155,6 +155,36 @@ impl RegistryTable {
     }
 }
 
+/// Configuration-phase dynamic registries. Unlike `RegistryTable`, these ids
+/// belong to the server's ordered registry-data entries, not a game version.
+/// A duplicate name is deliberately unresolvable (never guess an id).
+#[derive(Default, Clone, Debug)]
+pub struct DynamicRegistries {
+    entries: HashMap<String, Vec<String>>,
+}
+
+impl DynamicRegistries {
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn replace(&mut self, registry: &str, names: Vec<String>) {
+        self.entries.insert(registry.to_owned(), names);
+    }
+
+    pub fn id_of(&self, registry: &str, name: &str) -> Option<u32> {
+        let names = self.entries.get(registry)?;
+        let name = if name.contains(':') {
+            name.to_owned()
+        } else {
+            format!("minecraft:{name}")
+        };
+        let mut ids = names.iter().enumerate().filter(|(_, n)| *n == &name);
+        let (id, _) = ids.next()?;
+        ids.next().is_none().then_some(id as u32)
+    }
+}
+
 /// Directed id remaps between two versions' registries, matched by entry
 /// name. `None` marks ids without an equivalent in the target version
 /// (entries added/removed since, or out of range).
@@ -256,6 +286,36 @@ impl RegistryRemaps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_registry_order_replace_and_ambiguity() {
+        let mut registries = DynamicRegistries::default();
+        registries.replace(
+            "minecraft:enchantment",
+            vec!["minecraft:sharpness".into(), "minecraft:efficiency".into()],
+        );
+        assert_eq!(
+            registries.id_of("minecraft:enchantment", "efficiency"),
+            Some(1)
+        );
+        assert_eq!(registries.id_of("minecraft:enchantment", "unknown"), None);
+        registries.replace("minecraft:mob_effect", vec!["minecraft:speed".into()]);
+        registries.replace(
+            "minecraft:enchantment",
+            vec!["minecraft:efficiency".into(), "minecraft:efficiency".into()],
+        );
+        assert_eq!(
+            registries.id_of("minecraft:enchantment", "efficiency"),
+            None
+        );
+        assert_eq!(registries.id_of("minecraft:mob_effect", "speed"), Some(0));
+        registries.clear();
+        assert_eq!(
+            registries.id_of("minecraft:enchantment", "efficiency"),
+            None
+        );
+        assert_eq!(registries.id_of("minecraft:mob_effect", "speed"), None);
+    }
 
     /// The remap under test plus its endpoint tables.
     fn setup(

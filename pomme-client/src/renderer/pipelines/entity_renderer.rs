@@ -56,6 +56,10 @@ pub struct EntityRenderInfo {
     pub body_y_rot_deg: f32,
     pub is_baby: bool,
     pub is_crouching: bool,
+    pub is_sleeping: bool,
+    /// Vanilla `sleepDirectionToRotation` result; absent when bed facing is
+    /// unavailable.
+    pub sleeping_yaw_deg: Option<f32>,
     pub walk_anim_pos: f32,
     pub walk_anim_speed: f32,
     pub entity_kind: EntityKind,
@@ -143,6 +147,8 @@ impl Default for EntityRenderInfo {
             body_y_rot_deg: 0.0,
             is_baby: false,
             is_crouching: false,
+            is_sleeping: false,
+            sleeping_yaw_deg: None,
             walk_anim_pos: 0.0,
             walk_anim_speed: 0.0,
             entity_kind: EntityKind::Player,
@@ -1076,7 +1082,6 @@ fn mob_definitions() -> Vec<MobDef> {
             adult_overlays: vec![],
             baby_overlays: vec![],
         },
-        // TODO: saddle and horse-armor equipment layers.
         MobDef {
             kind: EntityKind::Horse,
             anim: AnimationType::Equine,
@@ -1088,12 +1093,22 @@ fn mob_definitions() -> Vec<MobDef> {
             )),
             // Slot 0: markings (vanilla `entityTranslucent`), gated on
             // markings != NONE.
-            adult_overlays: vec![VariantDef {
-                model: entity_model::bake_horse_model(),
-                tex_variants: HORSE_MARKINGS_TEX,
-                tex_size: 64,
-                overlay_kind: OverlayKind::BodyTranslucent,
-            }],
+            adult_overlays: vec![
+                VariantDef {
+                    model: entity_model::bake_horse_model(),
+                    tex_variants: HORSE_MARKINGS_TEX,
+                    tex_size: 64,
+                    overlay_kind: OverlayKind::BodyTranslucent,
+                },
+                VariantDef {
+                    model: entity_model::bake_horse_saddle_model(),
+                    tex_variants: &[&[
+                        "minecraft/textures/entity/equipment/horse_saddle/saddle.png",
+                    ]],
+                    tex_size: 64,
+                    overlay_kind: OverlayKind::Opaque,
+                },
+            ],
             baby_overlays: vec![VariantDef {
                 model: entity_model::bake_baby_horse_model(),
                 tex_variants: HORSE_MARKINGS_BABY_TEX,
@@ -1780,7 +1795,15 @@ impl EntityRenderer {
             body_y_rot_deg += (info.age_in_ticks.floor() * 3.25).cos() * std::f32::consts::PI * 0.4;
         }
         let mut base = glam::Mat4::from_translation((*info.position - anchor).as_vec3())
-            * glam::Mat4::from_rotation_y((180.0 - body_y_rot_deg).to_radians());
+            * glam::Mat4::from_rotation_y(if info.is_sleeping {
+                info.sleeping_yaw_deg.unwrap_or(body_y_rot_deg).to_radians()
+            } else {
+                (180.0 - body_y_rot_deg).to_radians()
+            });
+        if info.is_sleeping {
+            base *= glam::Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2)
+                * glam::Mat4::from_rotation_y(270.0_f32.to_radians());
+        }
         if info.death_time > 0.0 {
             base *= glam::Mat4::from_rotation_z(
                 death_fall_degrees(info.death_time, info.entity_kind).to_radians(),

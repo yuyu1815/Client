@@ -76,6 +76,19 @@ pub fn build_crafting_table(
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
 
+    let grid = slots
+        .get(SLOT_GRID_BASE as usize..SLOT_MAIN_BASE as usize)
+        .unwrap_or(&[]);
+    let recipe_items: Vec<_> = grid
+        .iter()
+        .chain(
+            slots
+                .get(SLOT_MAIN_BASE as usize..SLOT_HOTBAR_BASE as usize + 9)
+                .unwrap_or(&[])
+                .iter(),
+        )
+        .cloned()
+        .collect();
     let recipe_id = crate::ui::container::push_recipe_entries(
         elements,
         &panel,
@@ -85,8 +98,11 @@ pub fn build_crafting_table(
         native_recipes,
         None,
         input.shift,
-        1,
         3,
+        3,
+        &recipe_items,
+        grid,
+        result,
         5.0,
         34.0,
     );

@@ -135,7 +135,8 @@ struct BlockData {
     is_air: bool,
     /// Vanilla `hasCollision` (`BlockBehaviour.Properties.noCollision()`).
     collides: bool,
-    /// Derived `blocksMotion` flag used by FlowingFluid's open-side test.
+    /// Approximate `BlockStateBase.blocksMotion`: legacy solidity, except
+    /// cobweb and bamboo sapling (dynamic powder snow is not solid).
     blocks_motion: bool,
     fluid: Fluid,
     light: LightProps,
@@ -425,6 +426,27 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
                 use_shape_for_light_occlusion: state_entry.u.get(offset as usize) != 0,
                 face_occlusion: face_indices[offset as usize].map(&mut tuple),
             };
+            // Vanilla's default legacySolid uses cached collision bounds;
+            // forceSolidOn/Off require additional registry data.
+            let blocks_motion = collides
+                && !matches!(name, "cobweb" | "bamboo_sapling" | "powder_snow")
+                && match shape.as_deref() {
+                    Some(boxes) if boxes.is_empty() => false,
+                    Some(boxes) => {
+                        let min = [0, 1, 2].map(|axis| {
+                            boxes.iter().map(|b| b[axis]).fold(f64::INFINITY, f64::min)
+                        });
+                        let max = [3, 4, 5].map(|axis| {
+                            boxes
+                                .iter()
+                                .map(|b| b[axis])
+                                .fold(f64::NEG_INFINITY, f64::max)
+                        });
+                        let (x, y, z) = (max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+                        (x + y + z) / 3.0 >= 0.729_166_666_666_666_6 || y >= 1.0
+                    }
+                    None => true,
+                };
             table.push(BlockData {
                 id: name,
                 properties,
@@ -433,9 +455,7 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
                 outline,
                 is_air,
                 collides,
-                // The collision shape is the source of truth for motion here;
-                // non-solid collision blocks (webs/plants) do not block fluid.
-                blocks_motion: collides && name != "cobweb",
+                blocks_motion,
                 fluid,
                 light,
             });

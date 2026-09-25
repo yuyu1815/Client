@@ -27,12 +27,14 @@ pub struct UseAnim {
     /// Vanilla `useItemRemaining - partialTick + 1`.
     pub curr_usage_time: f32,
     pub duration: f32,
+    pub left_hand: bool,
 }
 
 pub struct HeldItemPipeline {
     pipeline: vk::Pipeline,
     shared: ItemPipelineShared,
     display: DisplayResolver,
+    left_display: DisplayResolver,
     activation: bool,
     last_draw_trace: Option<serde_json::Value>,
 }
@@ -52,6 +54,7 @@ impl HeldItemPipeline {
             pipeline,
             shared,
             display: DisplayResolver::new(jar_assets_dir, "firstperson_righthand"),
+            left_display: DisplayResolver::new(jar_assets_dir, "firstperson_lefthand"),
             activation: false,
             last_draw_trace: None,
         }
@@ -72,6 +75,7 @@ impl HeldItemPipeline {
             pipeline,
             shared,
             display: DisplayResolver::new(jar_assets_dir, "fixed"),
+            left_display: DisplayResolver::new(jar_assets_dir, "fixed"),
             activation: true,
             last_draw_trace: None,
         }
@@ -102,6 +106,7 @@ impl HeldItemPipeline {
         hud_fov: f32,
         swing_progress: f32,
         use_anim: Option<UseAnim>,
+        left_hand: bool,
         item: &HeldItemInfo,
         meshes: &ItemEntityPipeline,
         bob: Mat4,
@@ -119,10 +124,14 @@ impl HeldItemPipeline {
         let uniform = CameraUniform::with_view_proj(view_projection);
         self.shared.update_camera(frame, &uniform);
 
-        let display = self
-            .display
-            .resolve(&item.name, default_first_person(item.has_3d_model));
-        let arm = match use_anim {
+        let display = if left_hand {
+            self.left_display
+                .resolve(&item.name, default_first_person(item.has_3d_model, true))
+        } else {
+            self.display
+                .resolve(&item.name, default_first_person(item.has_3d_model, false))
+        };
+        let arm = match use_anim.filter(|anim| anim.left_hand == left_hand) {
             Some(anim) => eat_item_matrix(anim),
             None => first_person_item_matrix(swing_progress),
         };
@@ -264,6 +273,7 @@ fn first_person_item_matrix(swing_progress: f32) -> Mat4 {
 // (EAT/DRINK skip the usual pre-transform; right hand, inverseArmHeight = 0).
 fn eat_item_matrix(anim: UseAnim) -> Mat4 {
     let scaled = anim.curr_usage_time / anim.duration;
+    let invert = if anim.left_hand { -1.0 } else { 1.0 };
     // The chew bob runs after the first 20% of the eat, oscillating every 4
     // ticks; the jiggle shoves the item into the mouth over the last bite.
     let bob = if scaled < 0.8 {
@@ -273,26 +283,27 @@ fn eat_item_matrix(anim: UseAnim) -> Mat4 {
     };
     let jiggle = 1.0 - (scaled as f64).powf(27.0) as f32;
 
-    Mat4::from_translation(Vec3::new(jiggle * 0.6, bob + jiggle * -0.5, 0.0))
-        * Mat4::from_rotation_y((jiggle * 90.0).to_radians())
+    Mat4::from_translation(Vec3::new(invert * jiggle * 0.6, bob + jiggle * -0.5, 0.0))
+        * Mat4::from_rotation_y((invert * jiggle * 90.0).to_radians())
         * Mat4::from_rotation_x((jiggle * 10.0).to_radians())
-        * Mat4::from_rotation_z((jiggle * 30.0).to_radians())
-        * Mat4::from_translation(Vec3::new(0.56, -0.52, -0.72))
+        * Mat4::from_rotation_z((invert * jiggle * 30.0).to_radians())
+        * Mat4::from_translation(Vec3::new(invert * 0.56, -0.52, -0.72))
 }
 
-fn default_first_person(has_3d_model: bool) -> DisplayTransform {
+fn default_first_person(has_3d_model: bool, left_hand: bool) -> DisplayTransform {
+    let invert = if left_hand { -1.0 } else { 1.0 };
     if has_3d_model {
-        // block/block.json firstperson_righthand
+        // block/block.json first-person transform, mirrored for the left hand.
         DisplayTransform {
-            rotation: Vec3::new(0.0, 45.0, 0.0),
+            rotation: Vec3::new(0.0, invert * 45.0, 0.0),
             translation: Vec3::ZERO,
             scale: Vec3::splat(0.40),
         }
     } else {
-        // item/generated.json firstperson_righthand
+        // item/generated.json first-person transform, mirrored for the left hand.
         DisplayTransform {
-            rotation: Vec3::new(0.0, -90.0, 25.0),
-            translation: Vec3::new(1.13, 3.2, 1.13) / 16.0,
+            rotation: Vec3::new(0.0, invert * -90.0, invert * 25.0),
+            translation: Vec3::new(invert * 1.13, 3.2, 1.13) / 16.0,
             scale: Vec3::splat(0.68),
         }
     }
@@ -305,7 +316,7 @@ mod tests {
     #[test]
     fn held_display_transform_pivots_around_model_center() {
         let arm = first_person_item_matrix(0.0);
-        let model = arm * default_first_person(true).to_matrix();
+        let model = arm * default_first_person(true, false).to_matrix();
         let center = model.transform_point3(Vec3::ZERO);
         let arm_origin = arm.transform_point3(Vec3::ZERO);
         assert!(center.abs_diff_eq(arm_origin, 1e-6));

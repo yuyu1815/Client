@@ -953,6 +953,17 @@ mod tab_score_tests {
     fn width_unknown(_: &str, _: f32) -> f32 {
         8.0
     }
+
+    #[test]
+    fn world_scaled_name_tag_projects_to_screen_pixels() {
+        let at_10_blocks = name_tag_screen_scale(10.0, 1000, 90.0);
+        let at_20_blocks = name_tag_screen_scale(20.0, 1000, 90.0);
+        assert!((at_10_blocks - 11.25).abs() < 0.001);
+        assert!((at_20_blocks - 5.625).abs() < 0.001);
+        assert!((name_tag_screen_scale(10.0, 2000, 90.0) - 22.5).abs() < 0.001);
+        assert!(name_tag_in_range(63.999_f64.powi(2)));
+        assert!(!name_tag_in_range(64.0_f64.powi(2)));
+    }
 }
 
 pub struct PlayerNameplates<'a> {
@@ -961,15 +972,98 @@ pub struct PlayerNameplates<'a> {
     pub scoreboard: &'a Scoreboard,
     pub local_uuid: uuid::Uuid,
     pub partial_tick: f32,
-    pub gs: f32,
+    pub screen_height: u32,
+    pub fov_degrees: f32,
     pub camera_pos: glam::DVec3,
-    pub project: &'a dyn Fn(glam::DVec3) -> Option<(f32, f32)>,
+    pub project: &'a dyn Fn(glam::DVec3) -> Option<(f32, f32, f32)>,
 }
 
-// TODO: vanilla renders name tags as world-space billboards (0.025 scale,
-// shrinking with distance, 25% black backdrop, a see-through pass behind
-// walls, sneak dimming, no shadow); this screen-space projection is an
-// approximation until a world-space text path exists.
+// Vanilla 26.2 Font.lineHeight * EntityRenderer.NAMETAG_SCALE.
+const NAME_TAG_LINE_HEIGHT: f32 = 9.0;
+const NAME_TAG_WORLD_SCALE: f32 = 0.025;
+const NAME_TAG_DISTANCE: f64 = 64.0;
+
+fn name_tag_in_range(distance_squared: f64) -> bool {
+    distance_squared < NAME_TAG_DISTANCE * NAME_TAG_DISTANCE
+}
+
+// Project the official 9 * 0.025 world-unit text height through the same
+// vertical perspective projection used for its anchor. `depth` is clip.w.
+fn name_tag_screen_scale(depth: f32, screen_height: u32, fov_degrees: f32) -> f32 {
+    let half_fov = fov_degrees.to_radians() * 0.5;
+    (NAME_TAG_LINE_HEIGHT * NAME_TAG_WORLD_SCALE * screen_height as f32 * 0.5)
+        / (depth * half_fov.tan())
+}
+
+pub fn build_text_display_overlays(
+    elements: &mut Vec<MenuElement>,
+    entity_store: &EntityStore,
+    screen_height: u32,
+    fov_degrees: f32,
+    camera_pos: glam::DVec3,
+    project: &dyn Fn(glam::DVec3) -> Option<(f32, f32, f32, f32)>,
+) {
+    for entity in entity_store.vehicles.values() {
+        if entity.kind != Some(azalea_registry::builtin::EntityKind::TextDisplay) {
+            continue;
+        }
+        let Some(spans) = &entity.text_display_text else {
+            continue;
+        };
+        if !name_tag_in_range((glam::DVec3::from(entity.position) - camera_pos).length_squared()) {
+            continue;
+        }
+        let Some((x, y, depth, draw_depth)) = project(glam::DVec3::from(entity.position)) else {
+            continue;
+        };
+        let scale = name_tag_screen_scale(depth, screen_height, fov_degrees);
+        let yaw: f64 = entity.look_dir.map_or(0.0, |look| look.y_rot_deg()).into();
+        let yaw = yaw.to_radians();
+        let right = glam::DVec3::new(yaw.cos(), 0.0, yaw.sin()) * 0.25;
+        let radians = project(glam::DVec3::from(entity.position) + right)
+            .map_or(0.0, |(right_x, right_y, _, _)| {
+                (right_y - y).atan2(right_x - x)
+            });
+        let flags = entity.text_display_flags;
+        let alignment = if flags & 0x08 != 0 {
+            1 // Vanilla getAlign gives LEFT precedence when both bits are set.
+        } else if flags & 0x10 != 0 {
+            2
+        } else {
+            0
+        };
+        let mut display_spans = spans.clone();
+        let opacity = f32::from(entity.text_display_opacity) / 255.0;
+        for span in &mut display_spans {
+            span.color[3] *= opacity;
+        }
+        let bg = if flags & 0x04 != 0 {
+            0x4000_0000
+        } else {
+            entity.text_display_background
+        };
+        let background = [
+            ((bg >> 16) & 0xff) as f32 / 255.0,
+            ((bg >> 8) & 0xff) as f32 / 255.0,
+            (bg & 0xff) as f32 / 255.0,
+            ((bg >> 24) & 0xff) as f32 / 255.0,
+        ];
+        elements.push(MenuElement::RotatedTextDisplay {
+            x,
+            y: y - scale * 0.5,
+            spans: display_spans,
+            scale,
+            radians,
+            line_width: entity.text_display_line_width,
+            alignment,
+            shadow: flags & 0x01 != 0,
+            see_through: flags & 0x02 != 0,
+            depth: draw_depth,
+            background,
+        });
+    }
+}
+
 pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: PlayerNameplates<'_>) {
     let viewer_name = nameplates
         .tab_list
@@ -1004,20 +1098,23 @@ pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: Play
             .lerp(entity.position, nameplates.partial_tick as f64)
             // Vanilla anchors at the pose bounding-box height + 0.5.
             + glam::DVec3::Y * if entity.is_crouching { 2.0 } else { 2.3 };
-        let max_distance = if entity.is_crouching { 32.0 } else { 64.0 };
-        if (*pos - nameplates.camera_pos).length_squared() > max_distance * max_distance {
+        // LivingEntityRenderer reads the name_tag_distance attribute (default
+        // 64) and EntityRenderDispatcher measures from the entity position.
+        if !name_tag_in_range((*entity.position - nameplates.camera_pos).length_squared()) {
             continue;
         }
-        let Some((x, y)) = (nameplates.project)(*pos) else {
+        let Some((x, y, depth)) = (nameplates.project)(*pos) else {
             continue;
         };
+        let scale = name_tag_screen_scale(depth, nameplates.screen_height, nameplates.fov_degrees);
         elements.push(MenuElement::TextSpans {
             x,
-            y: y - 4.0 * nameplates.gs,
+            y: y - scale * 0.5,
             // The tab-list display name is tab-only in vanilla; name tags
             // always use the team-formatted profile name.
             spans: name,
-            scale: FONT_SIZE * nameplates.gs,
+            // `scale` is the physical-pixel line height after perspective.
+            scale,
             centered: true,
         });
     }

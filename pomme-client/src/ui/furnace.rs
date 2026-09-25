@@ -105,6 +105,13 @@ pub fn build_furnace(
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
 
+    let recipe_items: Vec<_> = slots
+        .get(SLOT_MAIN_BASE as usize..SLOT_HOTBAR_BASE as usize + 9)
+        .unwrap_or(&[])
+        .iter()
+        .chain(std::iter::once(item(SLOT_INGREDIENT)))
+        .cloned()
+        .collect();
     let recipe_id = crate::ui::container::push_recipe_entries(
         elements,
         &panel,
@@ -114,8 +121,13 @@ pub fn build_furnace(
         native_recipes,
         Some(variant),
         input.shift,
-        6,
         1,
+        1,
+        &recipe_items,
+        slots
+            .get(SLOT_INGREDIENT as usize..SLOT_INGREDIENT as usize + 1)
+            .unwrap_or(&[]),
+        item(SLOT_RESULT),
         20.0,
         34.0,
     );

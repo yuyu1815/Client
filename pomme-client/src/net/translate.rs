@@ -243,15 +243,16 @@
 //! - items are `bool + id + byte count + NBT`; inbound stacks translate the
 //!   legacy root into `custom_data` (retaining unknown NBT) and convert exact
 //!   `Damage`, `RepairCost`, `Unbreakable`, `CustomModelData`,
-//!   `CustomPotionColor`, `display.color`, `display.Name` and `display.Lore`
-//!   fields to native components when each key is unique and correctly typed.
-//!   Other/invalid/duplicate fields remain in `custom_data`. Enchantments,
-//!   potion/effect registry names, adventure block predicates, and UUID-backed
-//!   attribute modifiers are not guessed: the dynamic source
-//!   registries/modifier identifiers needed by their 26.2 codecs are
-//!   unavailable to this item walker. Merchant costs have no component patch
-//!   and outbound `container_click`/`set_creative_mode_slot` still use bare
-//!   stacks
+//!   `CustomPotionColor`, `Potion` (known builtin potion IDs), `BlockStateTag`
+//!   (string properties), `display.color`, `display.Name`, `display.Lore` and
+//!   `display.LocName` fields to native components when uniquely typed.
+//!   Other/invalid/duplicate fields remain in `custom_data`. Complete
+//!   Enchantments/StoredEnchantments lists use the server's configuration
+//!   enchantment registry ids. Custom potion effects (numeric pre-datafix
+//!   effect IDs), adventure block predicates (block holder-set codec), trim and
+//!   UUID-backed attribute modifiers remain in custom_data. Merchant costs have
+//!   no component patch and outbound `container_click`/`set_creative_mode_slot`
+//!   still use bare stacks
 //! - the configuration phase diverges for the first time: ids remap, and the
 //!   single whole-holder NBT `registry_data` packet fans out into the
 //!   per-registry form (entries reordered by their explicit ids, which the
@@ -361,10 +362,13 @@ use azalea_registry::{Holder, Registry};
 use glam::DVec3;
 use pomme_protocol::version::NATIVE;
 use pomme_protocol::{
-    ClientRegistry, Direction, PacketTable, Phase, RegistryRemaps, RegistryTable, wire,
+    ClientRegistry, Direction, DynamicRegistries, PacketTable, Phase, RegistryRemaps,
+    RegistryTable, wire,
 };
 
 pub struct Translation {
+    /// Server-provided dynamic ids, replaced per registry on reconfiguration.
+    dynamic_registries: Mutex<DynamicRegistries>,
     creative_slot_delimited: bool,
     to_native: &'static RegistryRemaps,
     from_native: &'static RegistryRemaps,
@@ -858,6 +862,19 @@ pub fn prewarm(protocol: i32) {
 }
 
 impl Translation {
+    /// Record the exact packet order, including data-less known-pack entries;
+    /// never derive dynamic ids from the embedded static registry table.
+    pub fn replace_dynamic_registry(&self, registry: &str, names: Vec<String>) {
+        self.dynamic_registries
+            .lock()
+            .unwrap()
+            .replace(registry, names);
+    }
+
+    pub fn clear_dynamic_registries(&self) {
+        self.dynamic_registries.lock().unwrap().clear();
+    }
+
     /// The translation for one protocol number, or `None` outside
     /// `TRANSLATED`: the frame rewrites below are version-specific, so
     /// embedded data alone isn't enough (and the native version needs none).
@@ -869,6 +886,7 @@ impl Translation {
         let native = PacketTable::native();
         let id = |phase, name| required_id(native, phase, Direction::Clientbound, name);
         Some(Translation {
+            dynamic_registries: Mutex::new(DynamicRegistries::default()),
             // 1.21.5 (770) changed serverbound creative-slot component values
             // to length-prefixed entries; Azalea's typed writer still emits the
             // older bare-value layout.
@@ -1819,6 +1837,15 @@ fn split_registry_data(id: u32, payload: &[u8]) -> Option<Vec<Box<[u8]>>> {
             })
             .collect::<Option<_>>()?;
         ordered.sort_unstable_by_key(|&(entry_id, ..)| entry_id);
+        // The split packet has no explicit ids: gaps/duplicates would shift
+        // the name-to-id mapping and silently select another enchantment.
+        if ordered
+            .iter()
+            .enumerate()
+            .any(|(index, (entry_id, _, _))| *entry_id != index as i32)
+        {
+            return None;
+        }
 
         if registry.ends_with("dimension_type") {
             *DIMENSION_TYPES.lock().unwrap() =
@@ -2398,6 +2425,60 @@ fn unique_nbt_field<'a>(
     matches.next().is_none().then_some(value)
 }
 
+/// 1.20.5 datafix `fixEnchantments` reads `{id: string, lvl: short}`;
+/// 26.2 `ItemEnchantments.STREAM_CODEC` is a varint-counted map of registry
+/// holder ids and varint levels. Only convert an unambiguous complete list:
+/// partial conversion would hide unknown enchants when the NBT is removed.
+fn encode_legacy_enchantments(
+    nbt: &simdnbt::owned::Nbt,
+    key: &str,
+    registries: Option<&DynamicRegistries>,
+) -> Option<Vec<u8>> {
+    let registries = registries?;
+    let list = unique_nbt_field(nbt, key)?.list()?;
+    let entries = list.compounds()?;
+    // HideFlags also affects the resulting component's tooltip; without a
+    // matching native tooltip flag, leaving the old tag is safer.
+    if nbt
+        .iter()
+        .filter(|(name, _)| name.to_str() == "HideFlags")
+        .count()
+        > 1
+    {
+        return None;
+    }
+    if (unique_nbt_field(nbt, "HideFlags")
+        .and_then(|t| t.int())
+        .unwrap_or(0)
+        & if key == "Enchantments" { 1 } else { 0x20 })
+        != 0
+    {
+        return None;
+    }
+    if entries.is_empty() {
+        return None; // DFU gives an empty legacy list a glint override.
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    wire::write_varint(&mut out, entries.len() as u32);
+    for entry in entries {
+        // A legacy entry with extra fields has no lossless component equivalent.
+        // Keep the whole list in custom_data instead of discarding those fields.
+        if entry.iter().count() != 2 {
+            return None;
+        }
+        let name = unique_nbt_field(entry, "id")?.string()?.to_str();
+        let id = registries.id_of("minecraft:enchantment", &name)?;
+        let level = unique_nbt_field(entry, "lvl")?.short()?;
+        if !(1..=255).contains(&level) || !seen.insert(id) {
+            return None;
+        }
+        wire::write_varint(&mut out, id);
+        wire::write_varint(&mut out, level as u32);
+    }
+    Some(out)
+}
+
 /// Converts exact legacy fields and retains every unconverted field in
 /// `custom_data`; recognized legacy keys are removed there to avoid applying
 /// both the old NBT behavior and the equivalent data component.
@@ -2427,9 +2508,77 @@ fn translate_item_765(
         .and_then(|tag| tag.int())
         .filter(|value| (*value as f32) as i64 == i64::from(*value))
         .map(|value| value as f32);
-    // PotionContents can represent this custom color without a potion/effect
-    // registry lookup. Those registry-backed legacy fields stay in custom_data.
-    let potion_color = unique_nbt_field(&nbt, "CustomPotionColor").and_then(|tag| tag.int());
+    // Potion IDs are builtin in the native codec; resolve the legacy resource
+    // name against the pinned native registry instead of inventing a wire id.
+    // Unknown/modded potions remain intact in custom_data.
+    let dynamic = (unique_nbt_field(&nbt, "Enchantments").is_some()
+        || unique_nbt_field(&nbt, "StoredEnchantments").is_some())
+    .then(|| active().map(|t| t.dynamic_registries.lock().unwrap().clone()))
+    .flatten();
+    let enchantments = encode_legacy_enchantments(&nbt, "Enchantments", dynamic.as_ref());
+    // Vanilla's 1.20.5 ItemStackComponentizationFix only moves this tag on
+    // enchanted books. On other items it must remain in the legacy root.
+    let stored_enchantments = registry
+        .and_then(|table| table.name_of(ClientRegistry::Item, item))
+        .filter(|name| *name == "minecraft:enchanted_book" || *name == "enchanted_book")
+        .and_then(|_| encode_legacy_enchantments(&nbt, "StoredEnchantments", dynamic.as_ref()));
+    // ItemStackComponentizationFix only migrates potion fields for potion
+    // holder items; non-potion stacks may carry unrelated custom NBT.
+    let is_potion_holder = registry
+        .and_then(|table| table.name_of(ClientRegistry::Item, item))
+        .is_some_and(|name| {
+            matches!(
+                name,
+                "minecraft:potion"
+                    | "minecraft:splash_potion"
+                    | "minecraft:lingering_potion"
+                    | "minecraft:tipped_arrow"
+                    | "potion"
+                    | "splash_potion"
+                    | "lingering_potion"
+                    | "tipped_arrow"
+            )
+        });
+    let potion_color = is_potion_holder
+        .then(|| unique_nbt_field(&nbt, "CustomPotionColor").and_then(|tag| tag.int()))
+        .flatten();
+    let potion = is_potion_holder
+        .then(|| {
+            unique_nbt_field(&nbt, "Potion")
+                .and_then(|tag| tag.string())
+                .and_then(|name| {
+                    name.to_str()
+                        .parse::<azalea_registry::builtin::Potion>()
+                        .ok()
+                })
+        })
+        .flatten();
+    // The native BlockState component is a counted string-to-string map.
+    // Numeric/boolean legacy properties need the block-specific DFU rules;
+    // keep those fields unmodified rather than change their semantics.
+    let block_state = unique_nbt_field(&nbt, "BlockStateTag")
+        .and_then(|tag| tag.compound())
+        .and_then(|compound| {
+            let mut seen = std::collections::HashSet::new();
+            let fields: Option<Vec<(String, String)>> = compound
+                .iter()
+                .map(|(key, value)| {
+                    let key = key.to_str().into_owned();
+                    if !seen.insert(key.clone()) {
+                        return None;
+                    }
+                    Some((key, value.string()?.to_str().into_owned()))
+                })
+                .collect();
+            let fields = fields?;
+            let mut encoded = Vec::new();
+            wire::write_varint(&mut encoded, fields.len() as u32);
+            for (key, value) in fields {
+                key.azalea_write(&mut encoded).ok()?;
+                value.azalea_write(&mut encoded).ok()?;
+            }
+            Some(encoded)
+        });
     let is_filled_map = registry
         .and_then(|table| table.name_of(ClientRegistry::Item, item))
         .is_some_and(|name| name == "minecraft:filled_map" || name == "filled_map");
@@ -2460,6 +2609,17 @@ fn translate_item_765(
             Some(encoded)
         })
         .flatten();
+    let display_loc_name = unique_nbt_field(&nbt, "display")
+        .and_then(|tag| tag.compound())
+        .and_then(|display| unique_nbt_field(display, "LocName"))
+        .and_then(|tag| tag.string())
+        .and_then(|name| {
+            let mut encoded = Vec::new();
+            json_to_nbt(&serde_json::json!({"translate": name.to_str()}))
+                .azalea_write(&mut encoded)
+                .ok()?;
+            Some(encoded)
+        });
     let display_lore = unique_nbt_field(&nbt, "display")
         .and_then(|tag| tag.compound())
         .and_then(|display| unique_nbt_field(display, "Lore"))
@@ -2483,26 +2643,34 @@ fn translate_item_765(
 
     let has_custom_data = nbt.is_some();
     let added = usize::from(has_custom_data)
+        + usize::from(enchantments.is_some())
+        + usize::from(stored_enchantments.is_some())
         + usize::from(damage.is_some())
         + usize::from(repair_cost.is_some())
         + usize::from(unbreakable.is_some())
         + usize::from(custom_model_data.is_some())
-        + usize::from(potion_color.is_some())
+        + usize::from(potion_color.is_some() || potion.is_some())
+        + usize::from(block_state.is_some())
         + usize::from(map_id.is_some())
         + usize::from(map_color.is_some())
         + usize::from(dyed_color.is_some())
         + usize::from(display_name.is_some())
+        + usize::from(display_loc_name.is_some())
         + usize::from(display_lore.is_some());
     let mut components = Vec::new();
     if has_custom_data {
         let mut custom = NbtCompound::new();
         for (key, mut value) in nbt.into_iter() {
             let key_str = key.to_str();
-            if (key_str == "Damage" && damage.is_some())
+            if (key_str == "Enchantments" && enchantments.is_some())
+                || (key_str == "StoredEnchantments" && stored_enchantments.is_some())
+                || (key_str == "Damage" && damage.is_some())
                 || (key_str == "RepairCost" && repair_cost.is_some())
                 || (key_str == "Unbreakable" && unbreakable.is_some())
                 || (key_str == "CustomModelData" && custom_model_data.is_some())
                 || (key_str == "CustomPotionColor" && potion_color.is_some())
+                || (key_str == "Potion" && potion.is_some())
+                || (key_str == "BlockStateTag" && block_state.is_some())
                 || (key_str == "map" && map_id.is_some())
             {
                 continue;
@@ -2514,6 +2682,9 @@ fn translate_item_765(
                     }
                     if display_lore.is_some() {
                         display.remove("Lore");
+                    }
+                    if display_loc_name.is_some() {
+                        display.remove("LocName");
                     }
                     if dyed_color.is_some() {
                         display.remove("color");
@@ -2529,6 +2700,15 @@ fn translate_item_765(
         let custom_data = Nbt::new("".into(), custom);
         wire::write_varint(&mut components, DataComponentKind::CustomData.to_u32());
         custom_data.azalea_write(&mut components).ok()?;
+    }
+    for (kind, encoded) in [
+        (DataComponentKind::Enchantments, enchantments),
+        (DataComponentKind::StoredEnchantments, stored_enchantments),
+    ] {
+        if let Some(encoded) = encoded {
+            wire::write_varint(&mut components, kind.to_u32());
+            components.extend_from_slice(&encoded);
+        }
     }
     if let Some(damage) = damage {
         wire::write_varint(&mut components, DataComponentKind::Damage.to_u32());
@@ -2557,12 +2737,22 @@ fn translate_item_765(
         wire::write_varint(&mut components, DataComponentKind::MapColor.to_u32());
         components.extend_from_slice(&color.to_be_bytes());
     }
-    if let Some(color) = potion_color {
+    if potion_color.is_some() || potion.is_some() {
         wire::write_varint(&mut components, DataComponentKind::PotionContents.to_u32());
-        components.extend_from_slice(&[0, 1]); // no potion; custom color present
-        components.extend_from_slice(&color.to_be_bytes());
+        components.push(u8::from(potion.is_some()));
+        if let Some(potion) = potion {
+            wire::write_varint(&mut components, potion.to_u32());
+        }
+        components.push(u8::from(potion_color.is_some()));
+        if let Some(color) = potion_color {
+            components.extend_from_slice(&color.to_be_bytes());
+        }
         wire::write_varint(&mut components, 0); // no custom effects
         components.push(0); // no custom name
+    }
+    if let Some(state) = block_state {
+        wire::write_varint(&mut components, DataComponentKind::BlockState.to_u32());
+        components.extend_from_slice(&state);
     }
     if let Some(color) = dyed_color {
         wire::write_varint(&mut components, DataComponentKind::DyedColor.to_u32());
@@ -2570,6 +2760,10 @@ fn translate_item_765(
     }
     if let Some(name) = display_name {
         wire::write_varint(&mut components, DataComponentKind::CustomName.to_u32());
+        components.extend_from_slice(&name);
+    }
+    if let Some(name) = display_loc_name {
+        wire::write_varint(&mut components, DataComponentKind::ItemName.to_u32());
         components.extend_from_slice(&name);
     }
     if let Some(lore) = display_lore {
@@ -5422,6 +5616,112 @@ fn skip_nbt_payload(cur: &mut Cursor<&[u8]>, tag: u8, depth: u32) -> Option<()> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn legacy_enchantments_use_server_order_and_keep_ambiguous_data() {
+        use simdnbt::owned::{Nbt, NbtCompound, NbtList, NbtTag};
+        let mut regs = DynamicRegistries::default();
+        regs.replace(
+            "minecraft:enchantment",
+            vec!["minecraft:sharpness".into(), "minecraft:efficiency".into()],
+        );
+        let mut entry = NbtCompound::new();
+        entry.insert("id", NbtTag::String("minecraft:efficiency".into()));
+        entry.insert("lvl", NbtTag::Short(4));
+        let mut root = NbtCompound::new();
+        root.insert(
+            "Enchantments",
+            NbtTag::List(NbtList::Compound(vec![entry.clone()])),
+        );
+        let nbt = Nbt::new("".into(), root);
+        assert_eq!(
+            encode_legacy_enchantments(&nbt, "Enchantments", Some(&regs)),
+            Some(vec![1, 1, 4])
+        );
+        assert_eq!(encode_legacy_enchantments(&nbt, "Enchantments", None), None);
+        regs.replace(
+            "minecraft:enchantment",
+            vec!["minecraft:efficiency".into(), "minecraft:efficiency".into()],
+        );
+        assert_eq!(
+            encode_legacy_enchantments(&nbt, "Enchantments", Some(&regs)),
+            None
+        );
+        regs.replace(
+            "minecraft:enchantment",
+            vec!["minecraft:sharpness".into(), "minecraft:efficiency".into()],
+        );
+        let mut duplicate = NbtCompound::new();
+        duplicate.insert(
+            "Enchantments",
+            NbtTag::List(NbtList::Compound(vec![entry.clone(), entry])),
+        );
+        assert_eq!(
+            encode_legacy_enchantments(
+                &Nbt::new("".into(), duplicate),
+                "Enchantments",
+                Some(&regs)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_enchantment_schema_and_stored_book_guard() {
+        use simdnbt::owned::{Nbt, NbtCompound, NbtList, NbtTag};
+        let mut registries = DynamicRegistries::default();
+        registries.replace("minecraft:enchantment", vec!["minecraft:sharpness".into()]);
+        let mut entry = NbtCompound::new();
+        entry.insert("id", NbtTag::String("minecraft:sharpness".into()));
+        entry.insert("lvl", NbtTag::Short(3));
+        let mut root = NbtCompound::new();
+        root.insert(
+            "StoredEnchantments",
+            NbtTag::List(NbtList::Compound(vec![entry.clone()])),
+        );
+        let registry = RegistryTable::for_protocol(765).unwrap();
+        for (item_name, should_convert) in [("enchanted_book", true), ("stone", false)] {
+            let item = registry
+                .id_of(ClientRegistry::Item, &format!("minecraft:{item_name}"))
+                .or_else(|| registry.id_of(ClientRegistry::Item, item_name))
+                .unwrap();
+            let mut fixture = vec![1];
+            wire::write_varint(&mut fixture, item);
+            fixture.push(1);
+            Nbt::new("".into(), root.clone())
+                .azalea_write(&mut fixture)
+                .unwrap();
+            // Exercise the same conversion gate as translate_item_765 without
+            // installing a global active translation shared by other tests.
+            let converted = registry
+                .name_of(ClientRegistry::Item, item)
+                .filter(|name| *name == "minecraft:enchanted_book" || *name == "enchanted_book")
+                .and_then(|_| {
+                    encode_legacy_enchantments(
+                        &Nbt::new("".into(), root.clone()),
+                        "StoredEnchantments",
+                        Some(&registries),
+                    )
+                });
+            assert_eq!(converted, should_convert.then_some(vec![1, 0, 3]));
+            let mut input = Cursor::new(fixture.as_slice());
+            assert!(read_old_item_nbt(&mut input, false).unwrap().is_some());
+            assert_eq!(input.position() as usize, fixture.len());
+        }
+        entry.insert("unknown", NbtTag::Byte(1));
+        root.insert(
+            "StoredEnchantments",
+            NbtTag::List(NbtList::Compound(vec![entry])),
+        );
+        assert_eq!(
+            encode_legacy_enchantments(
+                &Nbt::new("".into(), root),
+                "StoredEnchantments",
+                Some(&registries)
+            ),
+            None
+        );
+    }
+
     /// Legacy (pre-770) sections carry a packed-data long-count VarInt the
     /// native reader doesn't expect; it must be consumed here and left out of
     /// the copied buffer. A stray byte between the palette and the longs (or
@@ -5521,22 +5821,26 @@ mod tests {
 
     #[test]
     fn legacy_custom_potion_color_uses_potion_contents_codec() {
-        // 1.20.4 stack with only CustomPotionColor=0x123456.
-        let fixture = [
-            1, 1, 1, 10, 3, 0, 17, b'C', b'u', b's', b't', b'o', b'm', b'P', b'o', b't', b'i',
-            b'o', b'n', b'C', b'o', b'l', b'o', b'r', 0, 0x12, 0x34, 0x56, 0,
-        ];
+        // 1.20.4 potion stack with only CustomPotionColor=0x123456.
+        let registry = RegistryTable::for_protocol(765).unwrap();
+        let item = registry
+            .id_of(ClientRegistry::Item, "minecraft:potion")
+            .or_else(|| registry.id_of(ClientRegistry::Item, "potion"))
+            .unwrap();
+        let mut fixture = vec![1];
+        wire::write_varint(&mut fixture, item);
+        fixture.extend_from_slice(&[
+            1, 10, 3, 0, 17, b'C', b'u', b's', b't', b'o', b'm', b'P', b'o', b't', b'i', b'o',
+            b'n', b'C', b'o', b'l', b'o', b'r', 0, 0x12, 0x34, 0x56, 0,
+        ]);
         let mut input = Cursor::new(fixture.as_slice());
         let mut actual = Vec::new();
-        translate_item_765(
-            &mut input,
-            &mut actual,
-            false,
-            Some(RegistryTable::for_protocol(765).unwrap()),
-        )
-        .expect("valid legacy slot");
+        translate_item_765(&mut input, &mut actual, false, Some(registry))
+            .expect("valid legacy slot");
 
-        let mut expected = vec![1, 1, 2, 0]; // count, item, additions, removals
+        let mut expected = vec![1]; // count
+        wire::write_varint(&mut expected, item);
+        expected.extend_from_slice(&[2, 0]); // additions, removals
         let mut custom_data = Vec::new();
         simdnbt::owned::Nbt::new("".into(), simdnbt::owned::NbtCompound::new())
             .azalea_write(&mut custom_data)
@@ -5545,6 +5849,89 @@ mod tests {
         expected.extend_from_slice(&custom_data);
         wire::write_varint(&mut expected, DataComponentKind::PotionContents.to_u32());
         expected.extend_from_slice(&[0, 1, 0x00, 0x12, 0x34, 0x56, 0, 0]);
+        assert_eq!(actual, expected);
+        assert_eq!(input.position() as usize, fixture.len());
+    }
+
+    #[test]
+    fn non_potion_item_retains_custom_potion_color_in_custom_data() {
+        use simdnbt::owned::{Nbt, NbtCompound, NbtTag};
+        let registry = RegistryTable::for_protocol(765).unwrap();
+        let item = registry
+            .id_of(ClientRegistry::Item, "minecraft:stone")
+            .or_else(|| registry.id_of(ClientRegistry::Item, "stone"))
+            .unwrap();
+        let mut root = NbtCompound::new();
+        root.insert("CustomPotionColor", NbtTag::Int(0x123456));
+        let mut fixture = vec![1];
+        wire::write_varint(&mut fixture, item);
+        fixture.push(1);
+        Nbt::new("".into(), root.clone())
+            .azalea_write(&mut fixture)
+            .unwrap();
+        let mut input = Cursor::new(fixture.as_slice());
+        let mut actual = Vec::new();
+        translate_item_765(&mut input, &mut actual, false, Some(registry)).unwrap();
+        let mut expected = vec![1];
+        wire::write_varint(&mut expected, item);
+        expected.extend_from_slice(&[1, 0]);
+        wire::write_varint(&mut expected, DataComponentKind::CustomData.to_u32());
+        Nbt::new("".into(), root)
+            .azalea_write(&mut expected)
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn legacy_potion_and_block_state_use_native_codecs_without_guessing_unknown_ids() {
+        use simdnbt::owned::{Nbt, NbtCompound, NbtTag};
+
+        let registry = RegistryTable::for_protocol(765).unwrap();
+        let potion_item = registry
+            .id_of(ClientRegistry::Item, "minecraft:potion")
+            .or_else(|| registry.id_of(ClientRegistry::Item, "potion"))
+            .unwrap();
+        let mut state = NbtCompound::new();
+        state.insert("facing", NbtTag::String("north".into()));
+        let mut fields = NbtCompound::new();
+        fields.insert(
+            "Potion",
+            NbtTag::String("minecraft:long_night_vision".into()),
+        );
+        fields.insert("BlockStateTag", NbtTag::Compound(state));
+        // Unknown enchantments must survive in custom_data, not be assigned
+        // a native dynamic-registry id based on their source string.
+        fields.insert("Enchantments", NbtTag::List(simdnbt::owned::NbtList::Empty));
+        let mut fixture = vec![1];
+        wire::write_varint(&mut fixture, potion_item);
+        fixture.push(1);
+        Nbt::new("".into(), fields)
+            .azalea_write(&mut fixture)
+            .unwrap();
+        let mut actual = Vec::new();
+        let mut input = Cursor::new(fixture.as_slice());
+        translate_item_765(&mut input, &mut actual, false, Some(registry)).unwrap();
+
+        let mut expected = vec![1];
+        wire::write_varint(&mut expected, potion_item);
+        expected.extend_from_slice(&[3, 0]);
+        let mut custom = NbtCompound::new();
+        custom.insert("Enchantments", NbtTag::List(simdnbt::owned::NbtList::Empty));
+        wire::write_varint(&mut expected, DataComponentKind::CustomData.to_u32());
+        Nbt::new("".into(), custom)
+            .azalea_write(&mut expected)
+            .unwrap();
+        wire::write_varint(&mut expected, DataComponentKind::PotionContents.to_u32());
+        expected.push(1); // potion present
+        wire::write_varint(
+            &mut expected,
+            azalea_registry::builtin::Potion::LongNightVision.to_u32(),
+        );
+        expected.extend_from_slice(&[0, 0, 0]); // no color, effects, or custom name
+        wire::write_varint(&mut expected, DataComponentKind::BlockState.to_u32());
+        expected.push(1); // one string property
+        "facing".to_string().azalea_write(&mut expected).unwrap();
+        "north".to_string().azalea_write(&mut expected).unwrap();
         assert_eq!(actual, expected);
         assert_eq!(input.position() as usize, fixture.len());
     }

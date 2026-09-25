@@ -188,7 +188,8 @@ impl WorldBorder {
         ]
     }
 
-    /// Tests a point against the default (partial-tick zero) half-open XZ bounds.
+    /// Tests a point against the default (partial-tick zero) half-open XZ
+    /// bounds.
     pub fn contains(&self, x: f64, z: f64) -> bool {
         let [min_x, max_x, min_z, max_z] = self.bounds_at(0.0);
         x >= min_x && x < max_x && z >= min_z && z < max_z

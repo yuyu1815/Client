@@ -280,9 +280,14 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
     };
 
     let mut registry_holder = RegistryHolder::default();
+    translation.clear_dynamic_registries();
     for frame in frames {
         match deserialize_packet::<ClientboundConfigPacket>(&mut std::io::Cursor::new(&frame)) {
             Ok(ClientboundConfigPacket::RegistryData(p)) => {
+                translation.replace_dynamic_registry(
+                    &p.registry_id.to_string(),
+                    p.entries.iter().map(|(name, _)| name.to_string()).collect(),
+                );
                 registry_holder.append(p.registry_id, p.entries);
             }
             Ok(_) => {}
@@ -500,6 +505,11 @@ async fn config_sequence(
     use azalea_protocol::packets::config::*;
 
     let mut registry_holder = RegistryHolder::default();
+    if previous.is_none() {
+        if let Some(translation) = super::translate::active() {
+            translation.clear_dynamic_registries();
+        }
+    }
     let mut received_registry_data = false;
     let mut selected_known_packs = false;
     let mut received_dialog_tags = None;
@@ -638,6 +648,13 @@ async fn config_sequence(
         };
         match packet {
             ClientboundConfigPacket::RegistryData(p) => {
+                if !received_registry_data && previous.is_some() {
+                    // A replacement holder is built from this config's data;
+                    // don't keep ids from registries the new holder omits.
+                    if let Some(translation) = super::translate::active() {
+                        translation.clear_dynamic_registries();
+                    }
+                }
                 received_registry_data = true;
                 // The server omits the data of every entry the pack we claimed
                 // carries, so fill those in before azalea drops them.
@@ -647,6 +664,12 @@ async fn config_sequence(
                 } else {
                     p.entries
                 };
+                if let Some(translation) = super::translate::active() {
+                    translation.replace_dynamic_registry(
+                        &p.registry_id.to_string(),
+                        entries.iter().map(|(name, _)| name.to_string()).collect(),
+                    );
+                }
                 registry_holder.append(p.registry_id, entries);
             }
             ClientboundConfigPacket::UpdateTags(p) => {

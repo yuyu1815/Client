@@ -319,6 +319,7 @@ pub enum NetworkEvent {
     RecipeBookRemove(Vec<u32>),
     RecipeBookSettings(azalea_protocol::packets::game::c_recipe_book_settings::RecipeBookSettings),
     UpdateRecipes(azalea_protocol::packets::game::c_update_recipes::ClientboundUpdateRecipes),
+    RecipeItemTags(azalea_protocol::common::tags::TagMap),
     TitleText {
         spans: Vec<crate::ui::text::TextSpan>,
     },
@@ -565,6 +566,27 @@ pub enum NetworkEvent {
         item_id: u32,
         damage: i32,
         count: i32,
+    },
+    /// ItemFrame metadata index 8: the direction the frame faces.
+    ItemFrameDirection {
+        id: i32,
+        direction: azalea_core::direction::Direction,
+    },
+    /// ItemFrame metadata index 9. Keep the complete stack so item components
+    /// (including map ids and custom model data) survive the network handoff.
+    ItemFrameItem {
+        id: i32,
+        item: ItemStack,
+    },
+    /// ItemFrame metadata index 10: one of eight 45-degree rotations.
+    ItemFrameRotation {
+        id: i32,
+        rotation: i32,
+    },
+    /// TextDisplay metadata index 23: the component shown by a text display.
+    TextDisplayText {
+        id: i32,
+        text: Vec<crate::ui::text::TextSpan>,
     },
     EntityHeadRotation {
         id: i32,

@@ -9,6 +9,16 @@ use crate::world::chunk::ChunkStore;
 const COLLISION_EPSILON: f64 = 1.0e-7;
 
 pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb> {
+    collect_block_aabbs_for_player(chunk_store, region, None)
+}
+
+// EntityCollisionContext: feet height, shift-descending, equipment and fall
+// distance are needed for the two blocks whose shapes depend on the mover.
+fn collect_block_aabbs_for_player(
+    chunk_store: &ChunkStore,
+    region: &Aabb,
+    player: Option<(f64, bool, bool, f32)>,
+) -> Vec<Aabb> {
     let mut aabbs = Vec::new();
 
     let min_x = region.min.x.floor() as i32;
@@ -36,6 +46,51 @@ pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb>
                                 aabbs.extend(boxes.iter().map(|b| Aabb::from_local(*b, origin)))
                             }
                             None => aabbs.push(Aabb::block(bx, by, bz).offset(progress_offset)),
+                        }
+                    }
+                    continue;
+                }
+                let id = crate::world::block::block_id(state);
+                if id == "powder_snow" {
+                    if let Some((feet, descending, leather_boots, fall_distance)) = player {
+                        if fall_distance > 2.5 {
+                            aabbs.push(Aabb::from_local(
+                                [0.0, 0.0, 0.0, 1.0, 0.9_f32 as f64, 1.0],
+                                dvec3(bx as f64, by as f64, bz as f64),
+                            ));
+                        } else if leather_boots
+                            && feet > by as f64 + 1.0 - 1.0e-5_f32 as f64
+                            && !descending
+                        {
+                            aabbs.push(Aabb::block(bx, by, bz));
+                        }
+                    }
+                    continue;
+                }
+                if id == "scaffolding" {
+                    if let Some((feet, descending, _, _)) = player {
+                        if !descending && feet > by as f64 + 1.0 - 1.0e-5_f32 as f64 {
+                            // Stable frame: upper deck and four corner posts.
+                            let origin = dvec3(bx as f64, by as f64, bz as f64);
+                            aabbs.push(Aabb::from_local([0.0, 0.875, 0.0, 1.0, 1.0, 1.0], origin));
+                            for x in [0.0, 0.875] {
+                                for z in [0.0, 0.875] {
+                                    aabbs.push(Aabb::from_local(
+                                        [x, 0.0, z, x + 0.125, 1.0, z + 0.125],
+                                        origin,
+                                    ));
+                                }
+                            }
+                        } else if feet > by as f64 - 1.0 - 1.0e-5_f32 as f64 {
+                            let props = crate::world::block::block_properties(state);
+                            if props.get("bottom") == Some("true")
+                                && props.get("distance") != Some("0")
+                            {
+                                aabbs.push(Aabb::from_local(
+                                    [0.0, 0.0, 0.0, 1.0, 0.125, 1.0],
+                                    dvec3(bx as f64, by as f64, bz as f64),
+                                ));
+                            }
                         }
                     }
                     continue;
@@ -160,6 +215,7 @@ pub fn resolve_collision_with_grounded(
 fn append_context_aabbs(
     aabbs: &mut Vec<Aabb>,
     region: &Aabb,
+    source: &Aabb,
     entities: &[Aabb],
     border: Option<[f64; 4]>,
 ) {
@@ -169,7 +225,27 @@ fn append_context_aabbs(
             .copied()
             .filter(|aabb| aabb.intersects(region)),
     );
-    if let Some([min_x, max_x, min_z, max_z]) = border {
+    if let Some([min_x, max_x, min_z, max_z]) = border.filter(|bounds| {
+        // Entity.collectCollidersIgnoringWorldBorder only includes the border
+        // when its source is still inside and near it; an entity already
+        // outside must be able to re-enter, not be trapped by a wall.
+        let [min_x, max_x, min_z, max_z] = *bounds;
+        let x = (source.min.x + source.max.x) * 0.5;
+        let z = (source.min.z + source.max.z) * 0.5;
+        let margin = (region.max.x - region.min.x)
+            .max(region.max.z - region.min.z)
+            .max(1.0);
+        let distance = (x - min_x).min(max_x - x).min(z - min_z).min(max_z - z);
+        // The actual voxel shape fills the exterior. Our thin AABB walls
+        // cannot represent starting inside that exterior; skip walls there
+        // so crossing back into the playable area stays possible.
+        distance >= 0.0
+            && distance < margin * 2.0
+            && x >= min_x
+            && x < max_x
+            && z >= min_z
+            && z < max_z
+    }) {
         let y = 30_000_000.0;
         for wall in [
             Aabb::new(
@@ -205,9 +281,39 @@ pub fn resolve_collision_with_context(
     entity_aabbs: &[Aabb],
     border_bounds: Option<[f64; 4]>,
 ) -> (DVec3, bool) {
+    resolve_collision_for_player(
+        chunk_store,
+        player_aabb,
+        velocity,
+        step_height,
+        was_grounded,
+        entity_aabbs,
+        border_bounds,
+        None,
+    )
+}
+
+pub fn resolve_collision_for_player(
+    chunk_store: &ChunkStore,
+    player_aabb: Aabb,
+    velocity: Velocity,
+    step_height: f64,
+    was_grounded: bool,
+    entity_aabbs: &[Aabb],
+    border_bounds: Option<[f64; 4]>,
+    context: Option<(bool, bool, f32)>,
+) -> (DVec3, bool) {
+    let player =
+        context.map(|(descending, boots, fall)| (player_aabb.min.y, descending, boots, fall));
     let expanded = player_aabb.expand(*velocity);
-    let mut block_aabbs = collect_block_aabbs(chunk_store, &expanded);
-    append_context_aabbs(&mut block_aabbs, &expanded, entity_aabbs, border_bounds);
+    let mut block_aabbs = collect_block_aabbs_for_player(chunk_store, &expanded, player);
+    append_context_aabbs(
+        &mut block_aabbs,
+        &expanded,
+        &player_aabb,
+        entity_aabbs,
+        border_bounds,
+    );
 
     let (resolved, on_ground) = collide_along_axes(&block_aabbs, player_aabb, velocity);
 
@@ -225,8 +331,14 @@ pub fn resolve_collision_with_context(
                 if on_ground { 0.0 } else { -COLLISION_EPSILON },
                 0.0,
             ));
-        let mut step_aabbs = collect_block_aabbs(chunk_store, &step_region);
-        append_context_aabbs(&mut step_aabbs, &step_region, entity_aabbs, border_bounds);
+        let mut step_aabbs = collect_block_aabbs_for_player(chunk_store, &step_region, player);
+        append_context_aabbs(
+            &mut step_aabbs,
+            &step_region,
+            &player_aabb,
+            entity_aabbs,
+            border_bounds,
+        );
         let skip_height = if on_ground { resolved.y as f32 } else { 0.0 };
         let mut candidates = Vec::new();
         for block in &step_aabbs {
@@ -297,5 +409,21 @@ mod tests {
             Some([-5.0, 5.0, -5.0, 5.0]),
         );
         assert!((resolved.x - 0.2).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn border_does_not_trap_entity_already_outside() {
+        let chunks = ChunkStore::new(1);
+        let outside = Aabb::from_center(dvec3(5.5, 0.0, 0.0), 0.3, 0.9);
+        let (resolved, _) = resolve_collision_with_context(
+            &chunks,
+            outside,
+            Velocity::new(-1.0, 0.0, 0.0),
+            0.0,
+            false,
+            &[],
+            Some([-5.0, 5.0, -5.0, 5.0]),
+        );
+        assert_eq!(resolved.x, -1.0);
     }
 }

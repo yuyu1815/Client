@@ -178,8 +178,11 @@ pub fn push_recipe_entries(
     native: bool,
     furnace_variant: Option<crate::ui::furnace::FurnaceVariant>,
     use_max_items: bool,
-    _columns: usize,
-    _rows: usize,
+    columns: usize,
+    rows: usize,
+    available: &[ItemStack],
+    grid: &[ItemStack],
+    result_slot: &ItemStack,
     x: f32,
     y: f32,
 ) -> Option<(u32, bool)> {
@@ -333,7 +336,13 @@ pub fn push_recipe_entries(
     if book.category.is_some_and(|c| !categories.contains(&c)) {
         book.category = None;
     }
-    for (i, category) in categories.iter().take(5).enumerate() {
+    // Vanilla has a search/all tab in addition to the craft category tabs.
+    // Without it a click on a category cannot be undone without closing UI.
+    for (i, category) in std::iter::once(None)
+        .chain(categories.iter().copied().map(Some))
+        .take(5)
+        .enumerate()
+    {
         let tab = [
             r[0] - 30.0 * panel.scale,
             r[1] + (3.0 + 27.0 * i as f32) * panel.scale,
@@ -346,28 +355,29 @@ pub fn push_recipe_entries(
             w: tab[2],
             h: tab[3],
             corner_radius: 0.0,
-            color: if book.category == Some(*category) {
+            color: if book.category == category {
                 [0.56, 0.42, 0.22, 1.0]
             } else {
                 [0.2, 0.2, 0.2, 1.0]
             },
         });
         let label = match category {
-            azalea_registry::builtin::RecipeBookCategory::CraftingEquipment => "Gear",
-            azalea_registry::builtin::RecipeBookCategory::CraftingBuildingBlocks => "Build",
-            azalea_registry::builtin::RecipeBookCategory::CraftingMisc => "Misc",
-            azalea_registry::builtin::RecipeBookCategory::CraftingRedstone => "Red",
-            azalea_registry::builtin::RecipeBookCategory::FurnaceFood
-            | azalea_registry::builtin::RecipeBookCategory::BlastFurnaceBlocks
-            | azalea_registry::builtin::RecipeBookCategory::SmokerFood => "Food",
-            azalea_registry::builtin::RecipeBookCategory::FurnaceBlocks
-            | azalea_registry::builtin::RecipeBookCategory::BlastFurnaceMisc => "Blocks",
+            None => "All",
+            Some(azalea_registry::builtin::RecipeBookCategory::CraftingEquipment) => "Gear",
+            Some(azalea_registry::builtin::RecipeBookCategory::CraftingBuildingBlocks) => "Build",
+            Some(azalea_registry::builtin::RecipeBookCategory::CraftingMisc) => "Misc",
+            Some(azalea_registry::builtin::RecipeBookCategory::CraftingRedstone) => "Red",
+            Some(azalea_registry::builtin::RecipeBookCategory::FurnaceFood)
+            | Some(azalea_registry::builtin::RecipeBookCategory::BlastFurnaceBlocks)
+            | Some(azalea_registry::builtin::RecipeBookCategory::SmokerFood) => "Food",
+            Some(azalea_registry::builtin::RecipeBookCategory::FurnaceBlocks)
+            | Some(azalea_registry::builtin::RecipeBookCategory::BlastFurnaceMisc) => "Blocks",
             _ => "Misc",
         };
         panel.label(elements, bx - 28.0, by + 11.0 + 27.0 * i as f32, label);
         if crate::ui::common::hit_test(cursor, tab) && clicked {
             book.clicked_ui = true;
-            book.category = Some(*category);
+            book.category = category;
             book.page = 0;
         }
     }
@@ -392,7 +402,12 @@ pub fn push_recipe_entries(
         if !book.search.is_empty() && !haystack.contains(&book.search.to_ascii_lowercase()) {
             continue;
         }
-        recipes.push((*id, name, count));
+        let craftable = book.can_craft(*id, available) == Some(true);
+        // Only server-provided crafting requirements and synced item tags
+        // may produce a positive local craftability result.
+        if !book.craftable_only || craftable {
+            recipes.push((*id, name, count, craftable));
+        }
     }
     let pages = recipes.len().div_ceil(20).max(1);
     book.page = book.page.min(pages - 1);
@@ -445,7 +460,9 @@ pub fn push_recipe_entries(
         );
     }
     let mut selected = None;
-    for (index, (id, name, count)) in recipes.iter().skip(book.page * 20).take(20).enumerate() {
+    for (index, (id, name, count, craftable)) in
+        recipes.iter().skip(book.page * 20).take(20).enumerate()
+    {
         let gx = bx + 11.0 + (index % 5) as f32 * 25.0;
         let gy = by + 31.0 + (index / 5) as f32 * 25.0;
         let px = panel.ox + gx * panel.scale;
@@ -474,7 +491,14 @@ pub fn push_recipe_entries(
             });
             if clicked {
                 book.clicked_ui = true;
+                // Always send the server-issued display ID, even when local
+                // requirements are unknown or unavailable.
                 selected = Some((*id, use_max_items));
+                book.ghost_recipe = if *craftable || furnace_variant.is_some() {
+                    None
+                } else {
+                    Some(*id)
+                };
                 if let Some(flags) = book.flags.get_mut(id) {
                     *flags &= !2;
                 }
@@ -486,7 +510,11 @@ pub fn push_recipe_entries(
             w: size,
             h: size,
             item_name: name.clone(),
-            tint: [1.0; 4],
+            tint: if *craftable {
+                [1.0; 4]
+            } else {
+                [0.6, 0.6, 0.6, 1.0]
+            },
         });
         if *count > 1 {
             elements.push(MenuElement::TextFlat {
@@ -495,6 +523,91 @@ pub fn push_recipe_entries(
                 text: count.to_string(),
                 scale: crate::ui::common::FONT_SIZE * panel.scale * 0.7,
                 color: [1.0; 4],
+            });
+        }
+    }
+    // Only crafting layouts have known ghost-slot coordinates. Never overlay
+    // a real input/result stack or infer slots for furnace/smithing displays.
+    if let Some(display) = book.ghost_recipe.and_then(|id| book.displays.get(&id)) {
+        use azalea_protocol::common::recipe::RecipeDisplayData as R;
+        let (ingredients, width, start_x, start_y, output): (
+            Vec<_>,
+            usize,
+            usize,
+            usize,
+            Option<_>,
+        ) = match display {
+            R::Shaped(d)
+                if d.width > 0
+                    && d.height > 0
+                    && d.width as usize <= columns
+                    && d.height as usize <= rows
+                    && d.ingredients.len() <= (d.width as usize) * (d.height as usize) =>
+            {
+                let w = d.width as usize;
+                let h = d.height as usize;
+                // PlaceRecipeHelper centers recipes smaller than the grid.
+                (
+                    d.ingredients.iter().collect(),
+                    w,
+                    (columns - w) / 2,
+                    (rows - h) / 2,
+                    Some(&d.result),
+                )
+            }
+            R::Shapeless(d) if d.ingredients.len() <= columns * rows => (
+                d.ingredients.iter().collect(),
+                columns,
+                0,
+                0,
+                Some(&d.result),
+            ),
+            _ => (Vec::new(), 1, 0, 0, None),
+        };
+        for (i, ingredient) in ingredients.into_iter().enumerate() {
+            let slot = (start_y + i / width) * columns + start_x + i % width;
+            if grid.get(slot).is_some_and(ItemStack::is_present) {
+                continue;
+            }
+            if let Some((name, _)) = recipe_ghost_icon(ingredient, book) {
+                let (gx, gy) = if columns == 2 {
+                    (
+                        98.0 + (slot % 2) as f32 * 18.0,
+                        18.0 + (slot / 2) as f32 * 18.0,
+                    )
+                } else {
+                    (
+                        30.0 + (slot % 3) as f32 * 18.0,
+                        17.0 + (slot / 3) as f32 * 18.0,
+                    )
+                };
+                elements.push(MenuElement::ItemIcon {
+                    x: panel.ox + gx * panel.scale,
+                    y: panel.oy + gy * panel.scale,
+                    w: 16.0 * panel.scale,
+                    h: 16.0 * panel.scale,
+                    item_name: name,
+                    tint: [1.0, 1.0, 1.0, 0.5],
+                });
+            }
+        }
+        // Vanilla GhostSlots includes the result slot as well as inputs.
+        if let Some((name, _)) = output
+            .filter(|_| !result_slot.is_present())
+            .and_then(recipe_output_icon)
+        {
+            let (gx, gy) = if columns == 2 {
+                (154.0, 28.0)
+            } else {
+                (124.0, 35.0)
+            };
+            elements.push(MenuElement::ItemIcon {
+                x: panel.ox + gx * panel.scale,
+                y: panel.oy + gy * panel.scale,
+                w: 16.0 * panel.scale,
+                h: 16.0 * panel.scale,
+                item_name: name,
+                tint: [1.0, 1.0, 1.0, 0.5],
             });
         }
     }
@@ -525,6 +638,26 @@ fn recipe_output_icon(
         D::SmithingTrim(item) => recipe_output_icon(&item.base),
         D::WithRemainder(item) => recipe_output_icon(&item.input),
         D::Composite(item) => item.contents.iter().find_map(recipe_output_icon),
+    }
+}
+
+fn recipe_ghost_icon(
+    display: &azalea_protocol::common::recipe::SlotDisplayData,
+    book: &crate::ui::recipe_book::RecipeBookState,
+) -> Option<(String, u8)> {
+    use azalea_protocol::common::recipe::SlotDisplayData as D;
+    match display {
+        D::Tag(d) => book
+            .item_tags
+            .get(&d.tag.to_string())?
+            .first()
+            .map(|item| (crate::player::inventory::item_resource_name(*item), 1)),
+        D::Composite(d) => d
+            .contents
+            .iter()
+            .find_map(|part| recipe_ghost_icon(part, book)),
+        D::WithRemainder(d) => recipe_ghost_icon(&d.input, book),
+        _ => recipe_output_icon(display),
     }
 }
 

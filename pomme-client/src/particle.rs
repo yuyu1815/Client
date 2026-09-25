@@ -526,7 +526,7 @@ impl Particle {
     }
 
     fn vibration(pos: DVec3, target: DVec3, arrival_ticks: i32, sprite: AtlasRegion) -> Self {
-        Self::special(
+        let mut particle = Self::special(
             Kind::Vibration,
             pos,
             DVec3::ZERO,
@@ -534,7 +534,21 @@ impl Particle {
             arrival_ticks.max(1),
             0.3,
             sprite,
-        )
+        );
+        particle.point_vibration_at(target, true);
+        particle
+    }
+
+    fn point_vibration_at(&mut self, target: DVec3, initial: bool) {
+        let delta = self.pos - target;
+        self.rot_o = self.rot;
+        self.pitch_o = self.pitch;
+        self.rot = delta.x.atan2(delta.z) as f32;
+        self.pitch = delta.y.atan2(delta.x.hypot(delta.z)) as f32;
+        if initial {
+            self.rot_o = self.rot;
+            self.pitch_o = self.pitch;
+        }
     }
 
     fn vibration_entity(
@@ -680,20 +694,15 @@ impl Particle {
                 }
                 if let Some(target) = self.target {
                     let remaining = self.lifetime - self.age;
+                    if self.kind == Kind::Vibration && self.age == 1 && self.entity_target.is_some()
+                    {
+                        // EntityPositionSource resolves on first lookup; vanilla's
+                        // constructor sets both previous and current orientation.
+                        self.point_vibration_at(target, true);
+                    }
                     self.pos = target_step(self.pos, target, remaining);
                     if self.kind == Kind::Vibration {
-                        let delta = self.pos - target;
-                        self.rot_o = self.rot;
-                        self.pitch_o = self.pitch;
-                        self.rot = delta.x.atan2(delta.z) as f32;
-                        self.pitch = delta
-                            .y
-                            .atan2((delta.x * delta.x + delta.z * delta.z).sqrt())
-                            as f32;
-                        if self.age == 1 {
-                            self.rot_o = self.rot;
-                            self.pitch_o = self.pitch;
-                        }
+                        self.point_vibration_at(target, false);
                     }
                 }
             }
@@ -953,17 +962,6 @@ pub enum ServerParticleOptions {
         y_offset: f32,
         arrival_ticks: i32,
     },
-}
-
-/// Resolve the particle sprite from the baked item cache. Prefer the model's
-/// own baked texture (which honors model-definition overrides), then the
-/// generated flat icon key; deliberately do not guess `item/{name}`.
-fn item_particle_texture<'a>(registry: &'a BlockRegistry, name: &str) -> Option<&'a str> {
-    registry
-        .get_item_model(name)
-        .and_then(|model| model.quads.first())
-        .map(|quad| quad.texture.as_str())
-        .or_else(|| registry.get_flat_item_texture_key(name))
 }
 
 impl ServerParticleKind {
@@ -1678,7 +1676,7 @@ impl ParticleStore {
             ServerParticleKind::Item => {
                 let ServerParticleOptions::Item {
                     item_id,
-                    count: _,
+                    count,
                     components,
                 } = options
                 else {
@@ -1691,12 +1689,15 @@ impl ParticleStore {
                 else {
                     return;
                 };
-                let name = crate::player::inventory::item_resource_name(kind);
-                // Keep the decoded component patch alive through icon resolution. The
-                // current baked item cache is name-keyed and cannot resolve component
-                // selected item models; never substitute an invented item/name path.
-                let _stack_components = components;
-                let Some(texture) = item_particle_texture(registry, &name) else {
+                if count <= 0 {
+                    return;
+                }
+                let stack = azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData {
+                    kind,
+                    count,
+                    component_patch: components,
+                });
+                let Some(texture) = registry.get_item_particle_icon(&stack) else {
                     return;
                 };
                 if !self.uv_map.has_region(texture) {
@@ -1889,12 +1890,9 @@ impl ParticleStore {
                 let rot = p.rot_o + (p.rot - p.rot_o) * partial_tick;
                 let pitch = p.pitch_o + (p.pitch - p.pitch_o) * partial_tick;
                 let primary = if p.kind == Kind::Vibration {
-                    Quat::from_euler(
-                        EulerRot::YXZ,
-                        rot,
-                        -pitch - std::f32::consts::FRAC_PI_2,
-                        sway,
-                    )
+                    Quat::from_rotation_y(rot)
+                        * Quat::from_rotation_x(-pitch - std::f32::consts::FRAC_PI_2)
+                        * Quat::from_rotation_y(sway)
                 } else {
                     p.rotation
                 };
@@ -1916,12 +1914,9 @@ impl ParticleStore {
                 };
                 let second = p.second_rotation.or_else(|| {
                     (p.kind == Kind::Vibration).then(|| {
-                        Quat::from_euler(
-                            EulerRot::YXZ,
-                            -std::f32::consts::PI + rot,
-                            pitch + std::f32::consts::FRAC_PI_2,
-                            sway,
-                        )
+                        Quat::from_rotation_y(-std::f32::consts::PI + rot)
+                            * Quat::from_rotation_x(pitch + std::f32::consts::FRAC_PI_2)
+                            * Quat::from_rotation_y(sway)
                     })
                 });
                 let mut quads = vec![quad(primary)];
@@ -1995,6 +1990,15 @@ mod tests {
             super::target_step(dvec3(5.0, 0.0, 0.0), dvec3(10.0, 0.0, 0.0), 1),
             dvec3(10.0, 0.0, 0.0)
         );
+    }
+
+    #[test]
+    fn block_vibration_starts_facing_its_source_without_first_frame_spin() {
+        let sprite = AtlasUVMap::test_empty().missing_region();
+        let particle = Particle::vibration(dvec3(0.0, 0.0, 0.0), dvec3(4.0, 3.0, 0.0), 4, sprite);
+        assert_eq!(particle.rot, particle.rot_o);
+        assert_eq!(particle.pitch, particle.pitch_o);
+        assert!((particle.rot + std::f32::consts::FRAC_PI_2).abs() < 1.0e-6);
     }
 
     #[test]

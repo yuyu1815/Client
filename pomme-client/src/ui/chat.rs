@@ -2698,8 +2698,17 @@ pub(crate) fn item_tooltip_lines(
                 })
                 .unwrap_or_default(),
         };
+        let parent = ResolvedStyle {
+            color: Some(0xaa00aa),
+            italic: true,
+            ..ResolvedStyle::default()
+        };
         for line in &lore {
-            lines.extend(component_tooltip_lines(line));
+            lines.extend(span_tooltip_lines(format_component_spans_with_parent(
+                line,
+                &parent,
+                common::WHITE,
+            )));
         }
     }
 
@@ -4785,6 +4794,22 @@ mod tests {
             }
         });
         assert!(item_tooltip_lines(&value, None, false).is_empty());
+    }
+
+    #[test]
+    fn show_item_lore_uses_vanilla_default_style() {
+        let value = serde_json::json!({
+            "id": "minecraft:stone",
+            "components": {"minecraft:lore": [{"text": "Server lore"}]}
+        });
+        let lines = item_tooltip_lines(&value, None, false);
+        let lore = lines
+            .iter()
+            .find(|line| line.spans.iter().any(|span| span.text == "Server lore"))
+            .expect("lore should appear in the tooltip");
+
+        assert_eq!(lore.spans[0].color, common::rgb(0xaa00aa));
+        assert!(lore.spans[0].italic);
     }
 
     #[test]

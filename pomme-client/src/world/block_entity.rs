@@ -78,6 +78,7 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
         // Copper chests share vanilla's `chest` block entity type; the
         // weathering stage only picks the texture.
         s if s.ends_with("copper_chest") => Some(BlockEntityKind::Chest),
+        s if s.ends_with("copper_golem_statue") => Some(BlockEntityKind::CopperGolemStatue),
         s if s == "shulker_box" || s.ends_with("_shulker_box") => Some(BlockEntityKind::ShulkerBox),
         s if (s.ends_with("_sign") || s.ends_with("_wall_sign"))
             && !s.ends_with("_hanging_sign") =>
@@ -86,6 +87,29 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
         }
         _ => None,
     }
+}
+
+/// CopperGolemStatueBlockRenderer pose index and oxidation texture index.
+pub fn copper_golem_statue_render_state(
+    name: &str,
+    props: &crate::world::block::PropMap,
+) -> Option<(u8, u32)> {
+    let pose = match props.get("copper_golem_pose")? {
+        "standing" => 0,
+        "running" => 1,
+        "sitting" => 2,
+        "star" => 3,
+        _ => return None,
+    };
+    let material = name.strip_prefix("waxed_").unwrap_or(name);
+    let oxidation = match material {
+        "copper_golem_statue" => 0,
+        "exposed_copper_golem_statue" => 1,
+        "weathered_copper_golem_statue" => 2,
+        "oxidized_copper_golem_statue" => 3,
+        _ => return None,
+    };
+    Some((pose, oxidation))
 }
 
 /// Kinds [`rendered_kind`] synthesizes entries for; used to detect entries
@@ -98,6 +122,7 @@ fn is_rendered(kind: BlockEntityKind) -> bool {
             | BlockEntityKind::EnderChest
             | BlockEntityKind::ShulkerBox
             | BlockEntityKind::Sign
+            | BlockEntityKind::CopperGolemStatue
     )
 }
 
@@ -174,6 +199,12 @@ pub fn is_block_entity_block(name: &str) -> bool {
         | "creeper_head" | "creeper_wall_head"
         | "dragon_head" | "dragon_wall_head"
         | "piglin_head" | "piglin_wall_head"
+        // Vanilla renders these special block entities; their particle-only
+        // block models must not fall back to a cube.
+        | "copper_golem_statue" | "exposed_copper_golem_statue" | "weathered_copper_golem_statue"
+        | "oxidized_copper_golem_statue" | "waxed_copper_golem_statue"
+        | "waxed_exposed_copper_golem_statue" | "waxed_weathered_copper_golem_statue"
+        | "waxed_oxidized_copper_golem_statue"
         // Misc block entities
         | "conduit" | "decorated_pot" | "end_portal" | "end_gateway"
         | "beacon" | "spawner" | "trial_spawner" | "vault"
@@ -304,6 +335,52 @@ mod tests {
         );
         assert_eq!(rendered_kind("oak_hanging_sign"), None);
         assert!(is_block_entity_block("oak_sign"));
+    }
+
+    #[test]
+    fn copper_golem_statues_use_their_own_render_kind() {
+        assert_eq!(
+            rendered_kind("copper_golem_statue"),
+            Some(BlockEntityKind::CopperGolemStatue)
+        );
+        assert_eq!(
+            rendered_kind("waxed_oxidized_copper_golem_statue"),
+            Some(BlockEntityKind::CopperGolemStatue)
+        );
+    }
+
+    #[test]
+    fn copper_golem_statue_pose_and_oxidation_follow_block_state() {
+        crate::world::block::init("26.2");
+        for (name, pose, expected) in [
+            ("copper_golem_statue", "running", (1u8, 0u32)),
+            ("waxed_oxidized_copper_golem_statue", "star", (3u8, 3u32)),
+        ] {
+            let state = crate::world::block::find_state(name, &[("copper_golem_pose", pose)]);
+            assert_eq!(
+                copper_golem_statue_render_state(
+                    name,
+                    crate::world::block::block_properties(state),
+                ),
+                Some(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn copper_golem_statues_are_not_fallback_cubes() {
+        for name in [
+            "copper_golem_statue",
+            "exposed_copper_golem_statue",
+            "weathered_copper_golem_statue",
+            "oxidized_copper_golem_statue",
+            "waxed_copper_golem_statue",
+            "waxed_exposed_copper_golem_statue",
+            "waxed_weathered_copper_golem_statue",
+            "waxed_oxidized_copper_golem_statue",
+        ] {
+            assert!(is_block_entity_block(name), "{name}");
+        }
     }
 
     #[test]

@@ -38,16 +38,26 @@ struct Vertex {
     mode: f32,
     rect_size: [f32; 2],
     corner_radius: f32,
+    depth: f32,
 }
 
-const MAX_VERTICES: usize = 16384;
+const INITIAL_VERTEX_CAPACITY: usize = 16384;
 const VERTEX_SIZE: usize = size_of::<Vertex>();
+
+fn grown_vertex_capacity(current: usize, required: usize) -> usize {
+    let mut capacity = current.max(1);
+    while capacity < required {
+        capacity = capacity.checked_mul(2).unwrap_or(required);
+    }
+    capacity
+}
 
 struct DrawOp {
     start: u32,
     count: u32,
     scissor: Option<[f32; 4]>,
     invert: bool,
+    depth_test: bool,
 }
 
 /// Ends the current batch (if non-empty) as a `DrawOp` and starts the next
@@ -58,6 +68,7 @@ fn flush_draw_op(
     end: u32,
     scissor: Option<[f32; 4]>,
     invert: bool,
+    depth_test: bool,
 ) {
     if end > *cmd_start {
         draw_ops.push(DrawOp {
@@ -65,6 +76,7 @@ fn flush_draw_op(
             count: end - *cmd_start,
             scissor,
             invert,
+            depth_test,
         });
     }
     *cmd_start = end;
@@ -205,6 +217,7 @@ pub(crate) fn extract_face_8x8_with_hat(
 
 pub struct MenuOverlayPipeline {
     pipeline: vk::Pipeline,
+    depth_pipeline: vk::Pipeline,
     /// Vanilla `RenderPipelines.CROSSHAIR`: same shaders, INVERT blend.
     invert_pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
@@ -235,8 +248,12 @@ pub struct MenuOverlayPipeline {
     font_layer_limit: u32,
     mc_glyph_map: Option<GlyphMap>,
     obfuscation_rng: ObfuscationRng,
-    vertex_buffer: vk::Buffer,
-    vertex_allocation: Option<Allocation>,
+    vertex_buffers: Vec<vk::Buffer>,
+    vertex_allocations: Vec<Option<Allocation>>,
+    vertex_capacities: Vec<usize>,
+    /// Replaced buffers remain alive until the fence for their frame slot
+    /// signals.
+    retired_vertex_buffers: Vec<(usize, vk::Buffer, Allocation)>,
     atlas: FontAtlas,
     favicon_image: vk::Image,
     favicon_view: vk::ImageView,
@@ -305,8 +322,9 @@ impl MenuOverlayPipeline {
             .create_pipeline_layout(&layout_info, None)
             .expect("failed to create menu overlay pipeline layout");
 
-        let pipeline = create_pipeline(device, render_pass, pipeline_layout, false);
-        let invert_pipeline = create_pipeline(device, render_pass, pipeline_layout, true);
+        let pipeline = create_pipeline(device, render_pass, pipeline_layout, false, false);
+        let depth_pipeline = create_pipeline(device, render_pass, pipeline_layout, false, true);
+        let invert_pipeline = create_pipeline(device, render_pass, pipeline_layout, true, false);
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -567,13 +585,19 @@ impl MenuOverlayPipeline {
             .collect();
         device.update_descriptor_sets(&writes, &[]);
 
-        let (vertex_buffer, vertex_allocation) = util::create_host_buffer(
-            device,
-            allocator,
-            (MAX_VERTICES * VERTEX_SIZE) as u64,
-            vk::BufferUsageFlags::VertexBuffer,
-            "menu_vertices",
-        );
+        let (vertex_buffers, vertex_allocations): (Vec<_>, Vec<_>) = (0
+            ..crate::renderer::MAX_FRAMES_IN_FLIGHT)
+            .map(|frame| {
+                let (buffer, allocation) = util::create_host_buffer(
+                    device,
+                    allocator,
+                    (INITIAL_VERTEX_CAPACITY * VERTEX_SIZE) as u64,
+                    vk::BufferUsageFlags::VertexBuffer,
+                    &format!("menu_vertices_{frame}"),
+                );
+                (buffer, Some(allocation))
+            })
+            .unzip();
 
         let obfuscation_seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -582,6 +606,7 @@ impl MenuOverlayPipeline {
 
         Ok(Self {
             pipeline,
+            depth_pipeline,
             invert_pipeline,
             pipeline_layout,
             globals_layout,
@@ -610,8 +635,10 @@ impl MenuOverlayPipeline {
             font_layer_limit,
             mc_glyph_map,
             obfuscation_rng: ObfuscationRng::new(obfuscation_seed),
-            vertex_buffer,
-            vertex_allocation: Some(vertex_allocation),
+            vertex_buffers,
+            vertex_allocations,
+            vertex_capacities: vec![INITIAL_VERTEX_CAPACITY; crate::renderer::MAX_FRAMES_IN_FLIGHT],
+            retired_vertex_buffers: Vec::new(),
             atlas,
             favicon_image,
             favicon_view,
@@ -676,27 +703,121 @@ impl MenuOverlayPipeline {
 
     pub fn draw(
         &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
         cmd: vk::CommandBuffer,
         screen_w: f32,
         screen_h: f32,
         elements: &[MenuElement],
         item_atlas_uvs: &HashMap<String, [f32; 4]>,
+        frame_index: usize,
     ) {
-        self.draw_from(cmd, screen_w, screen_h, elements, item_atlas_uvs, 0);
+        self.draw_from(
+            device,
+            allocator,
+            cmd,
+            screen_w,
+            screen_h,
+            elements,
+            item_atlas_uvs,
+            0,
+            frame_index,
+        );
     }
 
     /// Like [`draw`], but writes vertices starting at `vertex_base` in the
-    /// shared vertex buffer and returns the next free index, so it can be
-    /// called more than once per frame (e.g. a backdrop before the blur and
-    /// a dialog after).
+    /// selected frame's vertex buffer and returns the next free index, so it
+    /// can be called more than once per frame (e.g. a backdrop before the blur
+    /// and a dialog after). The caller must wait for that frame's fence first.
     pub fn draw_from(
         &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
         cmd: vk::CommandBuffer,
         screen_w: f32,
         screen_h: f32,
         elements: &[MenuElement],
         item_atlas_uvs: &HashMap<String, [f32; 4]>,
         vertex_base: u32,
+        frame_index: usize,
+    ) -> u32 {
+        self.draw_from_mode(
+            device,
+            allocator,
+            cmd,
+            screen_w,
+            screen_h,
+            elements,
+            item_atlas_uvs,
+            vertex_base,
+            None,
+            frame_index,
+        )
+    }
+
+    pub fn draw_occluded_text_displays(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        cmd: vk::CommandBuffer,
+        screen_w: f32,
+        screen_h: f32,
+        elements: &[MenuElement],
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
+        frame_index: usize,
+    ) -> u32 {
+        self.draw_from_mode(
+            device,
+            allocator,
+            cmd,
+            screen_w,
+            screen_h,
+            elements,
+            item_atlas_uvs,
+            0,
+            Some(true),
+            frame_index,
+        )
+    }
+
+    pub fn draw_from_excluding_occluded_text_displays(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        cmd: vk::CommandBuffer,
+        screen_w: f32,
+        screen_h: f32,
+        elements: &[MenuElement],
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
+        vertex_base: u32,
+        frame_index: usize,
+    ) -> u32 {
+        self.draw_from_mode(
+            device,
+            allocator,
+            cmd,
+            screen_w,
+            screen_h,
+            elements,
+            item_atlas_uvs,
+            vertex_base,
+            Some(false),
+            frame_index,
+        )
+    }
+
+    fn draw_from_mode(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        cmd: vk::CommandBuffer,
+        screen_w: f32,
+        screen_h: f32,
+        elements: &[MenuElement],
+        item_atlas_uvs: &HashMap<String, [f32; 4]>,
+        vertex_base: u32,
+        occluded_only: Option<bool>,
+        frame_index: usize,
     ) -> u32 {
         let globals: [f32; 2] = [screen_w, screen_h];
         self.globals_allocation
@@ -715,9 +836,20 @@ impl MenuOverlayPipeline {
         let mut scissor_stack: Vec<[f32; 4]> = Vec::new();
         let mut cmd_start: u32 = 0;
         let mut cur_invert = false;
+        let depth_test = occluded_only == Some(true);
         let mut obfuscation_rng = self.obfuscation_rng;
 
         for elem in elements {
+            let is_occluded_display = matches!(
+                elem,
+                MenuElement::RotatedTextDisplay {
+                    see_through: false,
+                    ..
+                }
+            );
+            if occluded_only.is_some_and(|only| only != is_occluded_display) {
+                continue;
+            }
             if matches!(
                 elem,
                 MenuElement::Tooltip { .. } | MenuElement::TooltipLines { .. }
@@ -735,6 +867,7 @@ impl MenuOverlayPipeline {
                     vertices.len() as u32,
                     scissor_stack.last().copied(),
                     cur_invert,
+                    depth_test,
                 );
                 if let MenuElement::ScissorPush { x, y, w, h } = elem {
                     // Nested regions clip to the intersection with the enclosing one.
@@ -764,6 +897,7 @@ impl MenuOverlayPipeline {
                     vertices.len() as u32,
                     scissor_stack.last().copied(),
                     cur_invert,
+                    depth_test,
                 );
                 cur_invert = invert;
             }
@@ -858,6 +992,93 @@ impl MenuOverlayPipeline {
                         },
                         &mut obfuscation_rng,
                     );
+                }
+                MenuElement::RotatedTextDisplay {
+                    x,
+                    y,
+                    spans,
+                    scale,
+                    radians,
+                    line_width,
+                    alignment,
+                    shadow,
+                    see_through: _,
+                    depth,
+                    background,
+                } => {
+                    // TextDisplay line width and line spacing are in Minecraft
+                    // font pixels; `scale` projects the font's 9-pixel cell.
+                    let pixel_scale = *scale / 9.0;
+                    let lines = self.mc_glyph_map.as_ref().map_or_else(
+                        || vec![spans.clone()],
+                        |gm| split_text_display_lines(spans, *line_width as f32, gm),
+                    );
+                    let line_widths: Vec<f32> = lines
+                        .iter()
+                        .map(|line| self.spans_width(line, *scale))
+                        .collect();
+                    let content_width = line_widths.iter().copied().fold(0.0f32, f32::max);
+                    let line_step = 10.0 * pixel_scale;
+                    let background_height = lines.len() as f32 * line_step;
+                    let rotation_center = (*x, *y + background_height * 0.5 - pixel_scale);
+                    if background[3] > 0.0 {
+                        let start = vertices.len();
+                        push_rotated_rect(
+                            &mut vertices,
+                            *x,
+                            rotation_center.1,
+                            content_width + 2.0 * pixel_scale,
+                            background_height,
+                            *radians,
+                            *background,
+                        );
+                        set_vertex_depth(&mut vertices[start..], *depth);
+                    }
+                    for (index, (line, line_width)) in lines.iter().zip(&line_widths).enumerate() {
+                        let left = match *alignment {
+                            1 => *x - line_width * 0.5,
+                            2 => *x + content_width * 0.5 - line_width,
+                            _ => *x - content_width * 0.5,
+                        };
+                        let start = vertices.len();
+                        self.push_text_into(
+                            &mut drawn_objects,
+                            &mut vertices,
+                            line,
+                            McTextDraw {
+                                x: left,
+                                y: *y + index as f32 * line_step,
+                                scale: *scale,
+                                drop_shadow: *shadow,
+                            },
+                            &mut obfuscation_rng,
+                        );
+                        rotate_verts(&mut vertices[start..], rotation_center, *radians);
+                        set_vertex_depth(&mut vertices[start..], *depth);
+                    }
+                }
+                MenuElement::RotatedTextSpans {
+                    x,
+                    y,
+                    spans,
+                    scale,
+                    radians,
+                } => {
+                    let start = vertices.len();
+                    let text_width = self.spans_width(spans, *scale);
+                    self.push_text_into(
+                        &mut drawn_objects,
+                        &mut vertices,
+                        spans,
+                        McTextDraw {
+                            x: *x - text_width * 0.5,
+                            y: *y,
+                            scale: *scale,
+                            drop_shadow: true,
+                        },
+                        &mut obfuscation_rng,
+                    );
+                    rotate_verts(&mut vertices[start..], (*x, *y + *scale * 0.5), *radians);
                 }
                 MenuElement::Icon {
                     x,
@@ -1195,6 +1416,7 @@ impl MenuOverlayPipeline {
                 vertices.len() as u32,
                 scissor_stack.last().copied(),
                 true,
+                false,
             );
             cur_invert = false;
         }
@@ -1384,26 +1606,48 @@ impl MenuOverlayPipeline {
             vertices.len() as u32,
             scissor_stack.last().copied(),
             cur_invert,
+            depth_test,
         );
 
         if draw_ops.is_empty() {
             return vertex_base;
         }
 
+        let required_vertices = (vertex_base as usize)
+            .checked_add(vertices.len())
+            .expect("menu overlay vertex count overflow");
+        if required_vertices > self.vertex_capacities[frame_index] {
+            let capacity =
+                grown_vertex_capacity(self.vertex_capacities[frame_index], required_vertices);
+            let (buffer, allocation) = util::create_host_buffer(
+                device,
+                allocator,
+                (capacity * VERTEX_SIZE) as u64,
+                vk::BufferUsageFlags::VertexBuffer,
+                &format!("menu_vertices_{frame_index}_{capacity}"),
+            );
+            self.retired_vertex_buffers.push((
+                frame_index,
+                self.vertex_buffers[frame_index],
+                self.vertex_allocations[frame_index].take().unwrap(),
+            ));
+            self.vertex_buffers[frame_index] = buffer;
+            self.vertex_allocations[frame_index] = Some(allocation);
+            self.vertex_capacities[frame_index] = capacity;
+        }
+
         let written = if vertices.is_empty() {
             0
         } else {
-            let avail = MAX_VERTICES.saturating_sub(vertex_base as usize);
-            let count = vertices.len().min(avail);
-            let byte_data = bytemuck::cast_slice(&vertices[..count]);
+            let byte_data = bytemuck::cast_slice(&vertices);
             let byte_off = vertex_base as usize * VERTEX_SIZE;
-            self.vertex_allocation
+            self.vertex_allocations[frame_index]
                 .as_mut()
                 .unwrap()
                 .mapped_slice_mut()
                 .unwrap()[byte_off..byte_off + byte_data.len()]
                 .copy_from_slice(byte_data);
-            count
+            vertices.len()
         };
 
         let default_scissor = vk::Rect2D {
@@ -1424,14 +1668,16 @@ impl MenuOverlayPipeline {
                 &[self.globals_set, self.tex_set],
                 &[],
             );
-            cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+            cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame_index]], &[0]);
         }
         let mut bound_invert: Option<bool> = None;
         for op in &draw_ops {
             if bound_invert != Some(op.invert) {
                 cmd.bind_pipeline(
                     vk::PipelineBindPoint::Graphics,
-                    if op.invert {
+                    if op.depth_test {
+                        self.depth_pipeline
+                    } else if op.invert {
                         self.invert_pipeline
                     } else {
                         self.pipeline
@@ -1454,9 +1700,15 @@ impl MenuOverlayPipeline {
                 default_scissor
             };
             cmd.set_scissor(0, &[rect]);
-            // TODO: clamp to `written`; past MAX_VERTICES this draws vertices
-            // that were never uploaded.
-            cmd.draw(op.count, 1, vertex_base + op.start, 0);
+            let start = op.start as usize;
+            if start >= written {
+                continue;
+            }
+            let count = (op.count as usize).min(written - start);
+            if count == 0 {
+                continue;
+            }
+            cmd.draw(count as u32, 1, vertex_base + op.start, 0);
         }
         cmd.set_scissor(0, &[default_scissor]);
         vertex_base + written as u32
@@ -1677,11 +1929,47 @@ impl MenuOverlayPipeline {
         }
     }
 
+    /// Borrow the loaded Minecraft font atlas for world-space text. Re-fetch
+    /// each frame because resource-pack reload replaces both atlas images
+    /// and map.
+    pub(crate) fn world_font(&self) -> Option<(&GlyphMap, [vk::DescriptorImageInfo; 2])> {
+        Some((
+            self.mc_glyph_map.as_ref()?,
+            [self.mc_font.image_info(), self.mc_font_color.image_info()],
+        ))
+    }
+
+    /// Reclaim replaced buffers only after this frame slot's fence has
+    /// signalled. Called once before recording a frame, never between its
+    /// draw passes.
+    pub fn begin_frame(
+        &mut self,
+        frame: usize,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+    ) {
+        let mut alloc = allocator.lock().unwrap();
+        let mut pending = Vec::new();
+        for (retired_frame, buffer, allocation) in self.retired_vertex_buffers.drain(..) {
+            if retired_frame == frame {
+                device.destroy_buffer(buffer, None);
+                alloc.free(allocation).ok();
+            } else {
+                pending.push((retired_frame, buffer, allocation));
+            }
+        }
+        self.retired_vertex_buffers = pending;
+    }
+
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.depth_pipeline, None);
         device.destroy_pipeline(self.invert_pipeline, None);
-        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout, false);
-        self.invert_pipeline = create_pipeline(device, render_pass, self.pipeline_layout, true);
+        self.pipeline = create_pipeline(device, render_pass, self.pipeline_layout, false, false);
+        self.depth_pipeline =
+            create_pipeline(device, render_pass, self.pipeline_layout, false, true);
+        self.invert_pipeline =
+            create_pipeline(device, render_pass, self.pipeline_layout, true, false);
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -1692,9 +1980,20 @@ impl MenuOverlayPipeline {
             alloc.free(a).ok();
         }
 
-        device.destroy_buffer(self.vertex_buffer, None);
-        if let Some(a) = self.vertex_allocation.take() {
-            alloc.free(a).ok();
+        for (buffer, allocation) in self
+            .vertex_buffers
+            .iter()
+            .copied()
+            .zip(self.vertex_allocations.iter_mut())
+        {
+            device.destroy_buffer(buffer, None);
+            if let Some(a) = allocation.take() {
+                alloc.free(a).ok();
+            }
+        }
+        for (_, buffer, allocation) in self.retired_vertex_buffers.drain(..) {
+            device.destroy_buffer(buffer, None);
+            alloc.free(allocation).ok();
         }
 
         destroy_texture_resources(
@@ -1752,6 +2051,7 @@ impl MenuOverlayPipeline {
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.depth_pipeline, None);
         device.destroy_pipeline(self.invert_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
@@ -1823,6 +2123,26 @@ pub enum MenuElement {
         spans: Vec<crate::ui::text::TextSpan>,
         scale: f32,
         centered: bool,
+    },
+    RotatedTextSpans {
+        x: f32,
+        y: f32,
+        spans: Vec<crate::ui::text::TextSpan>,
+        scale: f32,
+        radians: f32,
+    },
+    RotatedTextDisplay {
+        x: f32,
+        y: f32,
+        spans: Vec<crate::ui::text::TextSpan>,
+        scale: f32,
+        radians: f32,
+        line_width: i32,
+        alignment: u8,
+        shadow: bool,
+        see_through: bool,
+        depth: f32,
+        background: [f32; 4],
     },
     TextFlat {
         x: f32,
@@ -2278,6 +2598,12 @@ const MAX_SPRITE_ATLAS_SIZE: u32 = 4096;
 /// Spins already-built vertices about a screen-space pivot. Every quad the
 /// pipeline emits is axis-aligned, so rotation is applied after the fact
 /// rather than threaded through each push helper.
+fn set_vertex_depth(verts: &mut [Vertex], depth: f32) {
+    for vertex in verts {
+        vertex.depth = depth;
+    }
+}
+
 fn rotate_verts(verts: &mut [Vertex], pivot: (f32, f32), rotation: f32) {
     let (sin, cos) = rotation.sin_cos();
     for v in verts {
@@ -3989,6 +4315,7 @@ fn push_quad(
             mode,
             rect_size,
             corner_radius,
+            depth: 0.0,
         });
     }
 }
@@ -4044,6 +4371,7 @@ fn push_rotated_rect(
             mode: 0.0,
             rect_size: [w, h],
             corner_radius: 0.0,
+            depth: 0.0,
         });
     }
 }
@@ -4117,6 +4445,7 @@ fn push_gradient_rect(
             mode: 0.0,
             rect_size: [w, h],
             corner_radius: radius,
+            depth: 0.0,
         });
     }
 }
@@ -4318,6 +4647,59 @@ struct McTextDraw {
 /// `PlainTextRenderable` is 8 wide).
 fn inline_object_advance(bold: bool) -> f32 {
     8.0 + if bold { 1.0 } else { 0.0 }
+}
+
+/// Split styled TextDisplay spans using the same word/mid-word break rules as
+/// Minecraft's `StringSplitter.splitLines`, retaining each character's style.
+fn split_text_display_lines(
+    spans: &[TextSpan],
+    max_width: f32,
+    gm: &GlyphMap,
+) -> Vec<Vec<TextSpan>> {
+    let mut chars = Vec::new();
+    for (span_index, span) in spans.iter().enumerate() {
+        for ch in span.text.chars() {
+            let width = if ch == '\u{fffc}' && span.inline_object.is_some() {
+                inline_object_advance(span.bold)
+            } else {
+                let glyph = gm.glyph(ch, span.font.as_deref());
+                glyph.advance + if span.bold { glyph.bold_offset } else { 0.0 }
+            };
+            chars.push((span_index, ch, width));
+        }
+    }
+    if chars.is_empty() {
+        return Vec::new();
+    }
+
+    let max_width = max_width.max(1.0);
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let (end, next) = crate::ui::text::find_line_break(
+            chars
+                .iter()
+                .enumerate()
+                .skip(start)
+                .map(|(index, &(_, ch, width))| (index, ch, width)),
+            max_width,
+        )
+        .unwrap_or((chars.len(), chars.len()));
+        let mut line: Vec<TextSpan> = Vec::new();
+        for &(span_index, ch, _) in &chars[start..end] {
+            let source = &spans[span_index];
+            if let Some(last) = line.last_mut()
+                && last.with_text(String::new()) == source.with_text(String::new())
+            {
+                last.text.push(ch);
+            } else {
+                line.push(source.with_text(ch.to_string()));
+            }
+        }
+        lines.push(line);
+        start = next;
+    }
+    lines
 }
 
 /// Summed advance of `text` in font pixels.
@@ -4639,6 +5021,7 @@ fn push_mc_glyph(verts: &mut Vec<Vertex>, quad: &GlyphQuad, x: f32, y: f32, colo
             mode: if colored { 4.25 } else { 4.0 },
             rect_size: [layer as f32, 0.0],
             corner_radius: 0.0,
+            depth: 0.0,
         });
     }
 }
@@ -4648,6 +5031,7 @@ fn create_pipeline(
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
     invert: bool,
+    depth_test: bool,
 ) -> vk::Pipeline {
     let vert_spv = shader::include_spirv!("menu_overlay.vert.spv");
     let frag_spv = shader::include_spirv!("menu_overlay.frag.spv");
@@ -4713,6 +5097,12 @@ fn create_pipeline(
             format: vk::Format::R32Sfloat,
             offset: 44,
         },
+        vk::VertexInputAttributeDescription {
+            location: 6,
+            binding: 0,
+            format: vk::Format::R32Sfloat,
+            offset: 48,
+        },
     ];
 
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {
@@ -4747,8 +5137,9 @@ fn create_pipeline(
     };
 
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
-        depth_test_enable: vk::FALSE,
+        depth_test_enable: if depth_test { vk::TRUE } else { vk::FALSE },
         depth_write_enable: vk::FALSE,
+        depth_compare_op: vk::CompareOp::LessOrEqual,
         ..Default::default()
     };
 
@@ -4828,6 +5219,13 @@ fn create_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vertex_capacity_grows_geometrically_to_cover_required_range() {
+        assert_eq!(grown_vertex_capacity(16384, 16384), 16384);
+        assert_eq!(grown_vertex_capacity(16384, 16385), 32768);
+        assert_eq!(grown_vertex_capacity(16384, 50000), 65536);
+    }
 
     #[test]
     fn abutting_effects_merge_into_one_quad() {

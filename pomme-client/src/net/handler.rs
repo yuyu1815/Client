@@ -634,6 +634,9 @@ pub fn handle_game_packet(
         ClientboundGamePacket::UpdateRecipes(p) => {
             let _ = event_tx.try_send(NetworkEvent::UpdateRecipes(p.clone()));
         }
+        ClientboundGamePacket::UpdateTags(p) => {
+            let _ = event_tx.try_send(NetworkEvent::RecipeItemTags(p.tags.clone()));
+        }
         ClientboundGamePacket::SetTitleText(p) => {
             let _ = event_tx.try_send(NetworkEvent::TitleText {
                 spans: format_text_spans(&p.text, [1.0; 4]),
@@ -986,6 +989,33 @@ pub fn handle_game_packet(
                 (17, 18)
             };
             for item in p.packed_items.iter() {
+                // ItemFrame metadata index 8 is ItemFrameDirection in 26.2.
+                if item.index == 8
+                    && let azalea_entity::EntityDataValue::Direction(direction) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::ItemFrameDirection {
+                        id: p.id.0,
+                        direction: *direction,
+                    });
+                }
+                // Pinned azalea 26.2 metadata: ItemFrame index 9 is an
+                // ItemStack and index 10 is an Int rotation.
+                if item.index == 9
+                    && let azalea_entity::EntityDataValue::ItemStack(stack) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::ItemFrameItem {
+                        id: p.id.0,
+                        item: stack.clone(),
+                    });
+                }
+                if item.index == 10
+                    && let azalea_entity::EntityDataValue::Int(rotation) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::ItemFrameRotation {
+                        id: p.id.0,
+                        rotation: *rotation,
+                    });
+                }
                 // index 8 = item stack data for item entities
                 if item.index == 8
                     && let azalea_entity::EntityDataValue::ItemStack(
@@ -1021,6 +1051,16 @@ pub fn handle_game_packet(
                     let _ = event_tx.try_send(NetworkEvent::EntitySleepingPos {
                         id: p.id.0,
                         pos: *pos,
+                    });
+                }
+                // 26.2 Display.TextDisplay.DATA_TEXT_ID follows the 15
+                // Display metadata fields and Entity's 8 shared fields (index 23).
+                if item.index == 23
+                    && let azalea_entity::EntityDataValue::FormattedText(text) = &item.value
+                {
+                    let _ = event_tx.try_send(NetworkEvent::TextDisplayText {
+                        id: p.id.0,
+                        text: format_text_spans(text, [1.0; 4]),
                     });
                 }
                 // Scalar values are forwarded raw; the store resolves their

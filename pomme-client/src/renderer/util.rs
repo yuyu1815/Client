@@ -443,6 +443,62 @@ pub fn upload_image_array(
     })
 }
 
+pub fn record_image_regions(
+    cmd: &vk::CommandBuffer,
+    staging_buffer: vk::Buffer,
+    image: vk::Image,
+    mip_levels: u32,
+    regions: &[vk::BufferImageCopy],
+) {
+    let range = vk::ImageSubresourceRange {
+        aspect_mask: vk::ImageAspectFlags::Color,
+        base_mip_level: 0,
+        level_count: mip_levels,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+    let to_transfer = vk::ImageMemoryBarrier {
+        image,
+        old_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        new_layout: vk::ImageLayout::TransferDstOptimal,
+        src_access_mask: vk::AccessFlags::ShaderRead,
+        dst_access_mask: vk::AccessFlags::TransferWrite,
+        subresource_range: range,
+        ..Default::default()
+    };
+    cmd.pipeline_barrier(
+        vk::PipelineStageFlags::FragmentShader,
+        vk::PipelineStageFlags::Transfer,
+        vk::DependencyFlags::empty(),
+        &[],
+        &[],
+        &[to_transfer],
+    );
+    cmd.copy_buffer_to_image(
+        staging_buffer,
+        image,
+        vk::ImageLayout::TransferDstOptimal,
+        regions,
+    );
+    let to_shader = vk::ImageMemoryBarrier {
+        image,
+        old_layout: vk::ImageLayout::TransferDstOptimal,
+        new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        src_access_mask: vk::AccessFlags::TransferWrite,
+        dst_access_mask: vk::AccessFlags::ShaderRead,
+        subresource_range: range,
+        ..Default::default()
+    };
+    cmd.pipeline_barrier(
+        vk::PipelineStageFlags::Transfer,
+        vk::PipelineStageFlags::FragmentShader,
+        vk::DependencyFlags::empty(),
+        &[],
+        &[],
+        &[to_shader],
+    );
+}
+
 pub fn submit_one_time<F: FnOnce(&vk::CommandBuffer)>(
     device: &vk::Device,
     queue: vk::Queue,

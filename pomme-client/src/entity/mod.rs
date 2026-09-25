@@ -3,7 +3,7 @@ pub mod villager;
 
 use std::collections::HashMap;
 
-use azalea_core::position::ChunkPos;
+use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
 
@@ -222,6 +222,7 @@ pub struct LivingEntity {
     pub is_baby: bool,
     pub is_crouching: bool,
     pub pose: EntityPose,
+    pub sleeping_pos: Option<BlockPos>,
     pub flags: EntityFlags,
     /// LivingEntity DATA_LIVING_ENTITY_FLAGS: using-item hand bits / riptide
     /// bit.
@@ -387,6 +388,7 @@ impl LivingEntity {
             is_baby: false,
             is_crouching: false,
             pose: EntityPose::Standing,
+            sleeping_pos: None,
             flags: EntityFlags::default(),
             using_item: false,
             using_offhand: false,
@@ -1154,7 +1156,20 @@ pub struct VehicleState {
     /// None until a real spawn transform arrives; SetPassengers may create
     /// placeholders.
     pub look_dir: Option<LookDirection>,
+    /// ItemFrame metadata index 8; independent from spawn/entity yaw.
+    pub item_frame_direction: Option<azalea_core::direction::Direction>,
+    /// Full metadata index 9 stack, retained for component-backed item render.
+    pub item_frame_item: azalea_inventory::ItemStack,
+    /// Metadata index 10, in 45-degree increments.
+    pub item_frame_rotation: i32,
     pub passengers: Vec<i32>,
+    /// TextDisplay metadata: component 23, line width 24, background 25,
+    /// opacity 26, and style flags 27.
+    pub text_display_text: Option<Vec<crate::ui::text::TextSpan>>,
+    pub text_display_line_width: i32,
+    pub text_display_background: u32,
+    pub text_display_opacity: u8,
+    pub text_display_flags: u8,
 }
 
 pub struct EntityStore {
@@ -1174,33 +1189,23 @@ impl EntityStore {
         }
     }
 
-    /// Nearby living collision boxes. The local entity is excluded and health
-    /// is the only available authoritative alive signal; team/spectator rules
-    /// are intentionally not inferred from incomplete client relationships.
+    /// EntityGetter.getEntityCollisions uses source.canCollideWith(target),
+    /// which requires target.canBeCollidedWith(source). Ordinary living mobs
+    /// (including players) return false: they push, not block movement.
+    /// Shulker overrides that predicate for living shulkers.
     pub fn collision_aabbs(&self, local_id: i32, region: &Aabb) -> Vec<Aabb> {
         self.living
             .iter()
             .filter_map(|(&id, entity)| {
-                if id == local_id || entity.health <= 0.0 {
+                if id == local_id
+                    || entity.health <= 0.0
+                    || entity.entity_type != EntityKind::Shulker
+                {
                     return None;
                 }
                 let dimensions =
                     azalea_entity::dimensions::EntityDimensions::from(entity.entity_type);
-                let (width, height) = if entity.is_baby {
-                    if matches!(
-                        entity.entity_type,
-                        EntityKind::Squid | EntityKind::GlowSquid
-                    ) {
-                        (0.5, 0.5)
-                    } else {
-                        (
-                            f64::from(dimensions.width) * 0.5,
-                            f64::from(dimensions.height) * 0.5,
-                        )
-                    }
-                } else {
-                    (f64::from(dimensions.width), f64::from(dimensions.height))
-                };
+                let (width, height) = (f64::from(dimensions.width), f64::from(dimensions.height));
                 let box_ = Aabb::from_center(entity.position.into(), width * 0.5, height * 0.5);
                 (box_.intersects(region)).then_some(box_)
             })
@@ -1231,7 +1236,15 @@ impl EntityStore {
             kind: None,
             velocity: DVec3::ZERO,
             look_dir: None,
+            item_frame_direction: None,
+            item_frame_item: azalea_inventory::ItemStack::Empty,
+            item_frame_rotation: 0,
             passengers: Vec::new(),
+            text_display_text: None,
+            text_display_line_width: 200,
+            text_display_background: 0x4000_0000,
+            text_display_opacity: 0xff,
+            text_display_flags: 0,
         });
         vehicle.passengers.clear();
         vehicle.passengers.extend_from_slice(passengers);
@@ -1246,7 +1259,15 @@ impl EntityStore {
             kind: None,
             velocity,
             look_dir: None,
+            item_frame_direction: None,
+            item_frame_item: azalea_inventory::ItemStack::Empty,
+            item_frame_rotation: 0,
             passengers: Vec::new(),
+            text_display_text: None,
+            text_display_line_width: 200,
+            text_display_background: 0x4000_0000,
+            text_display_opacity: 0xff,
+            text_display_flags: 0,
         });
         state.position = position;
         state.velocity = velocity;
@@ -1255,6 +1276,67 @@ impl EntityStore {
     pub fn set_vehicle_kind(&mut self, id: i32, kind: EntityKind) {
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.kind = Some(kind);
+        }
+    }
+
+    pub fn set_item_frame_direction(
+        &mut self,
+        id: i32,
+        direction: azalea_core::direction::Direction,
+    ) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id)
+            && matches!(
+                vehicle.kind,
+                Some(EntityKind::ItemFrame | EntityKind::GlowItemFrame)
+            )
+        {
+            vehicle.item_frame_direction = Some(direction);
+        }
+    }
+
+    pub fn set_item_frame_item(&mut self, id: i32, item: azalea_inventory::ItemStack) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id)
+            && matches!(
+                vehicle.kind,
+                Some(EntityKind::ItemFrame | EntityKind::GlowItemFrame)
+            )
+        {
+            vehicle.item_frame_item = item;
+        }
+    }
+
+    pub fn set_item_frame_rotation(&mut self, id: i32, rotation: i32) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id)
+            && matches!(
+                vehicle.kind,
+                Some(EntityKind::ItemFrame | EntityKind::GlowItemFrame)
+            )
+        {
+            vehicle.item_frame_rotation = rotation;
+        }
+    }
+
+    pub fn set_text_display_text(&mut self, id: i32, text: Vec<crate::ui::text::TextSpan>) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id)
+            && vehicle.kind == Some(EntityKind::TextDisplay)
+        {
+            vehicle.text_display_text = Some(text);
+        }
+    }
+
+    pub fn set_text_display_metadata(&mut self, id: i32, index: u8, value: MetaValue) {
+        let Some(vehicle) = self.vehicles.get_mut(&id) else {
+            return;
+        };
+        if vehicle.kind != Some(EntityKind::TextDisplay) {
+            return;
+        }
+        match (index, value) {
+            (24, MetaValue::Int(width)) => vehicle.text_display_line_width = width,
+            (25, MetaValue::Int(color)) => vehicle.text_display_background = color as u32,
+            (26, MetaValue::Byte(opacity)) => vehicle.text_display_opacity = opacity,
+            (27, MetaValue::Byte(flags)) => vehicle.text_display_flags = flags,
+            _ => {}
         }
     }
 
@@ -1488,6 +1570,12 @@ impl EntityStore {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.pose = pose;
             entity.is_crouching = pose == EntityPose::Crouching;
+        }
+    }
+
+    pub fn set_sleeping_pos(&mut self, id: i32, pos: Option<BlockPos>) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.sleeping_pos = pos;
         }
     }
 

@@ -1852,17 +1852,24 @@ fn mesh_chunk_snapshot(
             let section = ((block_pos.y - min_y) / 16) as usize;
             let sink = &mut sinks[section];
             let world_base = glam::IVec3::new(block_pos.x, block_pos.y, block_pos.z);
-            let moved_pos = world_base
-                - glam::IVec3::new(
-                    render.direction.x as i32,
-                    render.direction.y as i32,
-                    render.direction.z as i32,
-                );
-            let render_at = |state, pos: glam::IVec3, sink: &mut MeshSink| {
+            // PistonHeadRenderer uses the position opposite the *movement*
+            // direction as its model origin. Retraction reverses that direction.
+            let facing = glam::IVec3::new(
+                render.direction.x as i32,
+                render.direction.y as i32,
+                render.direction.z as i32,
+            );
+            let moved_pos = world_base + if render.extending { -facing } else { facing };
+            let render_at = |state, pos: glam::IVec3, moving: bool, sink: &mut MeshSink| {
+                let offset = if moving {
+                    render.offset.as_vec3()
+                } else {
+                    glam::Vec3::ZERO
+                };
                 let local = [
-                    (pos.x - world_x) as f32 + render.offset.x as f32,
-                    (pos.y - (min_y + section as i32 * 16)) as f32 + render.offset.y as f32,
-                    (pos.z - world_z) as f32 + render.offset.z as f32,
+                    (pos.x - world_x) as f32 + offset.x,
+                    (pos.y - (min_y + section as i32 * 16)) as f32 + offset.y,
+                    (pos.z - world_z) as f32 + offset.z,
                 ];
                 emit_moving_state(
                     sink, local, state, snapshot, registry, uv_map, pos.x, pos.y, pos.z,
@@ -1875,7 +1882,7 @@ fn mesh_chunk_snapshot(
                     render.state,
                     &[("short", if short { "true" } else { "false" })],
                 ) {
-                    render_at(state, moved_pos, sink);
+                    render_at(state, moved_pos, true, sink);
                 }
             } else if render.source && !render.extending {
                 let moved_id = crate::world::block::block_id(render.state);
@@ -1920,10 +1927,10 @@ fn mesh_chunk_snapshot(
                 else {
                     continue;
                 };
-                render_at(head, moved_pos, sink);
-                render_at(base, world_base, sink);
+                render_at(head, moved_pos, true, sink);
+                render_at(base, world_base, false, sink);
             } else {
-                render_at(render.state, world_base, sink);
+                render_at(render.state, moved_pos, true, sink);
             }
         }
     }

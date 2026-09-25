@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 
-use azalea_protocol::common::recipe::RecipeDisplayData;
+use azalea_inventory::ItemStack;
+use azalea_protocol::common::recipe::{Ingredient, RecipeDisplayData};
 use azalea_protocol::packets::game::c_recipe_book_add::ClientboundRecipeBookAdd;
 use azalea_protocol::packets::game::c_recipe_book_settings::RecipeBookSettings;
 use azalea_protocol::packets::game::c_update_recipes::ClientboundUpdateRecipes;
+use azalea_registry::builtin::ItemKind;
+use azalea_registry::{HolderSet, Registry};
 
 /// Native 26.2 recipe-book state. Recipe IDs here are server-issued display
 /// IDs, not legacy recipe identifiers.
@@ -15,6 +18,10 @@ pub struct RecipeBookState {
     pub categories: BTreeMap<u32, azalea_registry::builtin::RecipeBookCategory>,
     /// ClientboundRecipeBookAdd entry flags (notification/highlight bits).
     pub flags: BTreeMap<u32, u8>,
+    pub requirements: BTreeMap<u32, Option<Vec<Ingredient>>>,
+    /// Only tags actually received from the server may satisfy named
+    /// ingredients.
+    pub item_tags: BTreeMap<String, Vec<ItemKind>>,
     pub settings: Option<RecipeBookSettings>,
     pub updates: Option<ClientboundUpdateRecipes>,
     pub open: bool,
@@ -23,6 +30,8 @@ pub struct RecipeBookState {
     pub search_focused: bool,
     pub category: Option<azalea_registry::builtin::RecipeBookCategory>,
     pub page: usize,
+    /// Uncraftable recipe selected for a translucent ingredient preview.
+    pub ghost_recipe: Option<u32>,
     pub clicked_ui: bool,
     pub settings_loaded: bool,
     pub settings_type: Option<u32>,
@@ -143,14 +152,79 @@ impl RecipeBookState {
             self.groups.clear();
             self.categories.clear();
             self.flags.clear();
+            self.requirements.clear();
+            self.ghost_recipe = None;
         }
         for entry in packet.entries {
             let id = entry.contents.id;
             self.displays.insert(id, entry.contents.display);
+            self.requirements
+                .insert(id, entry.contents.crafting_requirements);
             self.groups.insert(id, entry.contents.group);
             self.categories.insert(id, entry.contents.category);
             self.flags.insert(id, entry.flags);
         }
+    }
+
+    pub fn update_item_tags(&mut self, tags: &azalea_protocol::common::tags::TagMap) {
+        let Some(items) = tags
+            .0
+            .iter()
+            .find(|(key, _)| key.to_string() == "minecraft:item")
+        else {
+            return;
+        };
+        self.item_tags = items
+            .1
+            .iter()
+            .map(|tag| {
+                (
+                    tag.name.to_string(),
+                    tag.elements
+                        .iter()
+                        .filter_map(|&id| u32::try_from(id).ok().and_then(ItemKind::from_u32))
+                        .collect(),
+                )
+            })
+            .collect();
+    }
+
+    /// None means the server did not supply requirements or a named tag is
+    /// unknown.
+    pub fn can_craft(&self, id: u32, available: &[ItemStack]) -> Option<bool> {
+        let requirements = self.requirements.get(&id)?.as_ref()?;
+        let mut choices = Vec::with_capacity(requirements.len());
+        for ingredient in requirements {
+            let items = match &ingredient.allowed {
+                HolderSet::Direct { contents } => contents.clone(),
+                HolderSet::Named { key, .. } => self.item_tags.get(&key.to_string())?.clone(),
+            };
+            choices.push(items);
+        }
+        let mut counts = BTreeMap::<ItemKind, i32>::new();
+        for stack in available {
+            if let Some(item) = stack.as_present() {
+                *counts.entry(item.kind).or_default() += item.count.max(0);
+            }
+        }
+        fn assign(choices: &[Vec<ItemKind>], counts: &mut BTreeMap<ItemKind, i32>) -> bool {
+            let Some((first, rest)) = choices.split_first() else {
+                return true;
+            };
+            for item in first {
+                if let Some(count) = counts.get_mut(item) {
+                    if *count > 0 {
+                        *count -= 1;
+                        if assign(rest, counts) {
+                            return true;
+                        }
+                        *counts.get_mut(item).unwrap() += 1;
+                    }
+                }
+            }
+            false
+        }
+        Some(assign(&choices, &mut counts))
     }
 
     pub fn remove(&mut self, ids: &[u32]) {
@@ -159,6 +233,38 @@ impl RecipeBookState {
             self.groups.remove(id);
             self.categories.remove(id);
             self.flags.remove(id);
+            self.requirements.remove(id);
+            if self.ghost_recipe == Some(*id) {
+                self.ghost_recipe = None;
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requirements_consume_distinct_units_and_unknown_is_not_craftable() {
+        let mut book = RecipeBookState::default();
+        let stone = Ingredient {
+            allowed: vec![ItemKind::Stone].into(),
+        };
+        book.requirements
+            .insert(1, Some(vec![stone.clone(), stone]));
+        assert_eq!(
+            book.can_craft(1, &[ItemStack::new(ItemKind::Stone, 1)]),
+            Some(false)
+        );
+        assert_eq!(
+            book.can_craft(1, &[ItemStack::new(ItemKind::Stone, 2)]),
+            Some(true)
+        );
+        book.requirements.insert(2, None);
+        assert_eq!(
+            book.can_craft(2, &[ItemStack::new(ItemKind::Stone, 2)]),
+            None
+        );
     }
 }

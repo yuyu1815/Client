@@ -227,6 +227,87 @@ impl BookEditState {
     }
 }
 
+/// Read-only book opened by the server's OpenBook packet.
+pub struct BookViewState {
+    pub pages: Vec<String>,
+    pub page: usize,
+    field: MultilineField,
+}
+
+impl BookViewState {
+    pub fn new(pages: Vec<String>) -> Self {
+        let pages = if pages.is_empty() {
+            vec![String::new()]
+        } else {
+            pages
+        };
+        let wf = |s: &str| s.chars().count() as f32 * 6.0;
+        let mut field = MultilineField::new(1024, None);
+        field.set_width(250.0, &wf);
+        field.set_value(&pages[0], &wf);
+        Self {
+            pages,
+            page: 0,
+            field,
+        }
+    }
+
+    pub fn navigate(&mut self, action: usize) {
+        let page = match action {
+            0 => self.page.saturating_sub(1),
+            1 => (self.page + 1).min(self.pages.len() - 1),
+            _ => return,
+        };
+        self.page = page;
+        let wf = |s: &str| s.chars().count() as f32 * 6.0;
+        self.field.set_value(&self.pages[page], &wf);
+    }
+
+    pub fn draw(&self, elements: &mut Vec<MenuElement>, sw: f32, sh: f32, gs: f32) {
+        let w = 300.0 * gs;
+        let h = 220.0 * gs;
+        let x = (sw - w) / 2.0;
+        let y = (sh - h) / 2.0;
+        elements.push(MenuElement::Rect {
+            x,
+            y,
+            w,
+            h,
+            corner_radius: 4.0,
+            color: [0.90, 0.84, 0.68, 1.0],
+        });
+        let scale = common::FONT_SIZE * gs;
+        elements.push(MenuElement::Text {
+            x: x + w / 2.0,
+            y: y + 10.0 * gs,
+            text: format!("{}/{}", self.page + 1, self.pages.len()),
+            scale,
+            color: [0.12, 0.10, 0.08, 1.0],
+            centered: true,
+        });
+        for (line, (start, end)) in self.field.lines().iter().copied().take(9).enumerate() {
+            elements.push(MenuElement::Text {
+                x: x + 12.0 * gs,
+                y: y + (34.0 + line as f32 * 16.0) * gs,
+                text: self.pages[self.page][start..end].to_owned(),
+                scale,
+                color: [0.12, 0.10, 0.08, 1.0],
+                centered: false,
+            });
+        }
+        for (label, bx) in [("Prev", x + 12.0 * gs), ("Next", x + 74.0 * gs)] {
+            elements.push(MenuElement::Text {
+                x: bx + 24.0 * gs,
+                y: y + h - 26.0 * gs,
+                text: label.into(),
+                scale,
+                color: [0.12, 0.10, 0.08, 1.0],
+                centered: true,
+            });
+        }
+    }
+}
+
 pub fn clicked_action(cursor: (f32, f32), sw: f32, sh: f32, gs: f32) -> Option<usize> {
     let w = 300.0 * gs;
     let h = 220.0 * gs;
@@ -240,4 +321,21 @@ pub fn clicked_action(cursor: (f32, f32), sw: f32, sh: f32, gs: f32) -> Option<u
     ]
     .iter()
     .position(|bx| common::hit_test(cursor, [*bx, y + h - 30.0 * gs, 48.0 * gs, 20.0 * gs]))
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::BookViewState;
+
+    #[test]
+    fn book_view_page_navigation_stays_within_pages() {
+        let mut book = BookViewState::new(vec!["one".into(), "two".into()]);
+        book.navigate(0);
+        assert_eq!(book.page, 0);
+        book.navigate(1);
+        book.navigate(1);
+        assert_eq!(book.page, 1);
+        book.navigate(0);
+        assert_eq!(book.page, 0);
+    }
 }
