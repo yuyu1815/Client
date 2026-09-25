@@ -553,6 +553,13 @@ pub(crate) fn first_state_of(name: &str) -> Option<BlockState> {
     all_states().find(|(_, d)| d.id == name).map(|(s, _)| s)
 }
 
+/// Exact registered state lookup for NBT forms that omit `Properties`.
+pub(crate) fn state_without_properties(name: &str) -> Option<BlockState> {
+    all_states()
+        .find(|(_, data)| data.id == name && data.properties.entries().next().is_none())
+        .map(|(state, _)| state)
+}
+
 pub(crate) fn water_source_state() -> BlockState {
     all_states()
         .find(|(_, d)| d.id == "water" && d.properties.get("level") == Some("0"))

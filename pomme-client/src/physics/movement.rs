@@ -5,7 +5,7 @@ use glam::{DVec3, dvec3};
 use winit::keyboard::KeyCode;
 
 use super::aabb::Aabb;
-use super::collision::{no_collision, resolve_collision};
+use super::collision::{no_collision, resolve_collision_with_grounded};
 use crate::app::input::{self, InputState};
 use crate::player::{CROUCH_HEIGHT, LocalPlayer, PLAYER_HALF_WIDTH, STANDING_HEIGHT};
 use crate::world::chunk::ChunkStore;
@@ -308,6 +308,9 @@ fn tick_land(
     let speed = movement_speed(player);
     let friction = block_friction(chunk_store, player.position);
     let climbing = is_on_climbable(chunk_store, &player.bounding_box());
+    if climbing {
+        player.fall_distance = 0.0;
+    }
     let accel = friction_influenced_speed(speed, player, friction);
     let (move_x, move_z) = movement_delta(forward, strafe, accel, sin_y_rot, cos_y_rot);
     player.velocity.x += move_x;
@@ -540,26 +543,35 @@ fn apply_collision(
     }
 
     let aabb = player.bounding_box();
+    let mut delta = *player.velocity;
     if intersects_block_id(chunk_store, &aabb, "cobweb") {
-        // Vanilla Entity.move applies Entity.makeStuckInBlock's per-axis
-        // 0.25 multiplier to both requested movement and stored velocity.
-        *player.velocity *= 0.25;
+        // WebBlock sets a one-move multiplier and clears delta movement.
+        let multiplier = if has_effect_named(player, "weaving") {
+            dvec3(0.5, 0.25, 0.5)
+        } else {
+            dvec3(0.25, 0.05, 0.25)
+        };
+        delta *= multiplier;
+        *player.velocity = dvec3(0.0, 0.0, 0.0);
         player.fall_distance = 0.0;
     }
-    let delta = back_off_from_edge(
+    delta = back_off_from_edge(
         chunk_store,
         &aabb,
-        *player.velocity,
+        delta,
         input.performing_action(input::Action::Sneak),
         player.on_ground,
         player.flying,
     );
-    let step_height = if player.on_ground {
-        player.attribute_value("minecraft:generic.step_height", f64::from(STEP_HEIGHT))
-    } else {
-        0.0
-    };
-    let (resolved, on_ground) = resolve_collision(chunk_store, aabb, delta.into(), step_height);
+    let step_height =
+        player.attribute_value("minecraft:generic.step_height", f64::from(STEP_HEIGHT));
+    let (resolved, on_ground) = resolve_collision_with_grounded(
+        chunk_store,
+        aabb,
+        delta.into(),
+        step_height,
+        player.on_ground,
+    );
 
     // Vanilla horizontal collision flags use Mth.equal(double, double), whose
     // epsilon is the widened float constant 1.0E-5f.
@@ -629,13 +641,20 @@ fn update_fall_distance(fall_distance: &mut f32, resolved_y: f64, on_ground: boo
 fn reset_fall_distance_for_tick(player: &mut LocalPlayer) {
     if player.in_water || player.flying || has_fall_distance_reset_effect(player) {
         player.fall_distance = 0.0;
+    } else if player.in_lava {
+        // Entity.tick halves fall distance in lava; damage remains
+        // server-authoritative.
+        player.fall_distance *= 0.5;
     }
 }
 
 fn has_fall_distance_reset_effect(player: &LocalPlayer) -> bool {
+    has_effect_named(player, "slow_falling") || has_effect_named(player, "levitation")
+}
+
+fn has_effect_named(player: &LocalPlayer, name: &str) -> bool {
     player.effects.sorted_desc().iter().any(|effect| {
-        crate::mob_effect::info(effect.effect_id)
-            .is_some_and(|info| matches!(info.name, "slow_falling" | "levitation"))
+        crate::mob_effect::info(effect.effect_id).is_some_and(|info| info.name == name)
     })
 }
 
@@ -766,9 +785,8 @@ fn is_on_climbable(chunks: &ChunkStore, aabb: &Aabb) -> bool {
     .any(|id| intersects_block_id(chunks, aabb, id))
 }
 
-/// Vanilla fluid pushing from horizontal fluid-height gradients. Empty
-/// neighbors use the same-fluid block below as the lower height, as the fluid
-/// mesher does.
+/// Fluid pushing from same-level horizontal gradients. Lower-neighbor and
+/// falling-fluid flow require block motion/solid-face data not exposed here.
 fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
     use crate::world::block::{FluidKind, fluid};
 
@@ -780,7 +798,8 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
         if !touching {
             continue;
         }
-        let mut flow = dvec3(0.0, 0.0, 0.0);
+        let mut accumulated = dvec3(0.0, 0.0, 0.0);
+        let mut sample_count = 0u32;
         let (x0, x1) = (bb.min.x.floor() as i32, bb.max.x.ceil() as i32 - 1);
         let (y0, y1) = (bb.min.y.floor() as i32, bb.max.y.ceil() as i32 - 1);
         let (z0, z1) = (bb.min.z.floor() as i32, bb.max.z.ceil() as i32 - 1);
@@ -796,33 +815,38 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
                     } else {
                         current.height()
                     };
+                    let mut cell_flow = dvec3(0.0, 0.0, 0.0);
                     for (dx, dz) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
                         let neighbor = fluid(chunks.get_block_state(x + dx, y, z + dz));
-                        let neighbor = if neighbor.kind == kind {
-                            Some(neighbor)
-                        } else if neighbor.kind == FluidKind::Empty {
-                            let below = fluid(chunks.get_block_state(x + dx, y - 1, z + dz));
-                            (below.kind == kind).then_some(below)
-                        } else {
-                            None
-                        };
-                        if let Some(neighbor) = neighbor {
+                        if neighbor.kind == kind {
                             let neighbor_height = if neighbor.falling {
                                 1.0
                             } else {
                                 neighbor.height()
                             };
                             let difference = f64::from(height - neighbor_height);
-                            flow.x += dx as f64 * difference;
-                            flow.z += dz as f64 * difference;
+                            cell_flow.x += dx as f64 * difference;
+                            cell_flow.z += dz as f64 * difference;
                         }
                     }
+                    let cell_length = cell_flow.length();
+                    if cell_length > 0.0 {
+                        accumulated += cell_flow / cell_length;
+                    }
+                    sample_count += 1;
                 }
             }
         }
-        let length = flow.length();
-        if length > 1.0e-6 {
-            player.velocity = (*player.velocity + flow / length * strength).into();
+        let accumulated_length_sqr = accumulated.length_squared();
+        if sample_count > 0 && accumulated_length_sqr >= 1.0e-5 {
+            let mut impulse = accumulated / f64::from(sample_count) * strength;
+            if player.velocity.x.abs() < 0.003
+                && player.velocity.z.abs() < 0.003
+                && impulse.length() < 0.0045
+            {
+                impulse = impulse.normalize() * 0.0045;
+            }
+            player.velocity = (*player.velocity + impulse).into();
         }
     }
 }

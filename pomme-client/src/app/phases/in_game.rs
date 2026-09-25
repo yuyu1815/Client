@@ -229,6 +229,7 @@ pub struct GameState {
     pub open_container: Option<OpenContainer>,
     /// Writable-book editor opened by the server's OpenBook packet.
     pub book_edit: Option<crate::ui::book::BookEditState>,
+    pub sign_edit: Option<crate::ui::sign::SignEditState>,
     /// Which container menu was open last frame (0 = player inventory,
     /// including the creative inventory), to detect close transitions.
     pub container_was_open: Option<i32>,
@@ -566,6 +567,7 @@ impl GameState {
             cursor_item: azalea_inventory::ItemStack::Empty,
             open_container: None,
             book_edit: None,
+            sign_edit: None,
             container_was_open: None,
             inv_drag: None,
             inv_last_click: None,
@@ -688,6 +690,7 @@ impl GameState {
             || self.creative_inventory_open
             || self.open_container.is_some()
             || self.book_edit.is_some()
+            || self.sign_edit.is_some()
             || self.dialog_open()
             || self.game_mode_switcher.is_some()
     }
@@ -802,7 +805,7 @@ impl GameState {
         {
             return true;
         }
-        if self.book_edit.is_some() {
+        if self.book_edit.is_some() || self.sign_edit.is_some() {
             return true;
         }
         if self.creative_inventory_open {
@@ -1798,6 +1801,34 @@ pub(crate) fn build_server_screens(
     tick: Option<u64>,
     text_events: &[crate::ui::text_edit::TextInputEvent],
 ) {
+    if game.sign_edit.is_some() {
+        let cursor = core.input.cursor_pos();
+        let done = core.input.left_just_pressed()
+            && crate::ui::common::hit_test(
+                cursor,
+                [
+                    (sw - 220.0 * gs) / 2.0,
+                    (sh - 150.0 * gs) / 2.0 + 120.0 * gs,
+                    220.0 * gs,
+                    30.0 * gs,
+                ],
+            );
+        let close = done || core.input.escape_pressed();
+        if let Some(sign) = &mut game.sign_edit {
+            sign.input(text_events, &|s| {
+                gfx.renderer.menu_text_width(s, common::FONT_SIZE)
+            });
+            sign.draw(elements, sw, sh, gs);
+            if close {
+                connection
+                    .packet_tx
+                    .sign_update(sign.pos, sign.is_front_text, sign.lines());
+                game.sign_edit = None;
+                core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
+            }
+        }
+        return;
+    }
     if game.book_edit.is_some() {
         use azalea_protocol::packets::game::ServerboundGamePacket;
         use azalea_protocol::packets::game::s_edit_book::ServerboundEditBook;
@@ -2973,11 +3004,12 @@ pub fn update_game(
                         for marker in &map.decorations {
                             let mx = x + 64.0 + marker.x as f32 / 2.0;
                             let my = y + 64.0 + marker.y as f32 / 2.0;
-                            let color = if marker.kind.contains("Player") {
-                                [1.0, 0.25, 0.2, 1.0]
-                            } else {
-                                [0.25, 0.5, 1.0, 1.0]
-                            };
+                            let color =
+                                if marker.asset == crate::world::maps::MapDecorationAsset::Player {
+                                    [1.0, 0.25, 0.2, 1.0]
+                                } else {
+                                    [0.25, 0.5, 1.0, 1.0]
+                                };
                             elements.push(MenuElement::Rect {
                                 x: mx - 2.0,
                                 y: my - 2.0,
@@ -3564,7 +3596,7 @@ pub fn update_game(
             };
             place_recipe = result
                 .recipe_id
-                .map(|display_id| (container.id, display_id));
+                .map(|(display_id, use_max_items)| (container.id, display_id, use_max_items));
             if let Some(button_id) = result.button {
                 use azalea_protocol::packets::game::s_container_button_click::ServerboundContainerButtonClick;
                 connection
@@ -3592,7 +3624,9 @@ pub fn update_game(
                 &game.recipe_book,
                 native_recipes,
             );
-            place_recipe = result.recipe_id.map(|display_id| (0, display_id));
+            place_recipe = result
+                .recipe_id
+                .map(|(display_id, use_max_items)| (0, display_id, use_max_items));
             player_preview = Some(result.player_preview);
             (result.clicked_outside, result.ops)
         };
@@ -3603,8 +3637,10 @@ pub fn update_game(
         if let Some((primary, secondary)) = beacon_effect_selection {
             connection.packet_tx.set_beacon(primary, secondary);
         }
-        if let Some((container_id, display_id)) = place_recipe {
-            connection.packet_tx.place_recipe(container_id, display_id);
+        if let Some((container_id, display_id, use_max_items)) = place_recipe {
+            connection
+                .packet_tx
+                .place_recipe(container_id, display_id, use_max_items);
         }
         send_container_clicks(game, connection, ops);
         core.input.clear_just_pressed_actions();

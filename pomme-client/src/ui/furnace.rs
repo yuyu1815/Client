@@ -112,6 +112,8 @@ pub fn build_furnace(
         cursor,
         input.left_pressed,
         native_recipes,
+        Some(variant),
+        input.shift,
         6,
         1,
         20.0,

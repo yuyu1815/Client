@@ -13,7 +13,58 @@ pub struct StoredBlockEntity {
     pub nbt: NbtCompound,
 }
 
-// TODO: Render sign text once the block-entity text pipeline is implemented.
+/// Extract the four vanilla-rendered text lines for one sign face. The NBT
+/// stores each line as a JSON component string; malformed components fall back
+/// to their raw text rather than preventing editing.
+pub fn sign_lines(nbt: &NbtCompound, is_front_text: bool) -> [String; 4] {
+    let face = if is_front_text {
+        "front_text"
+    } else {
+        "back_text"
+    };
+    let Some(messages) = nbt
+        .get(face)
+        .and_then(|tag| tag.compound())
+        .and_then(|face| face.list("messages"))
+    else {
+        return std::array::from_fn(|_| String::new());
+    };
+    let simdnbt::owned::NbtList::String(messages) = messages else {
+        return std::array::from_fn(|_| String::new());
+    };
+    std::array::from_fn(|i| {
+        messages.get(i).map_or_else(String::new, |json| {
+            let json = json.to_str();
+            serde_json::from_str::<serde_json::Value>(&json)
+                .map(|component| component_plain_text(&component))
+                .unwrap_or_else(|_| json.into_owned())
+        })
+    })
+}
+
+fn component_plain_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Object(object) => {
+            let mut text = object
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if let Some(extra) = object.get("extra").and_then(serde_json::Value::as_array) {
+                for child in extra {
+                    text.push_str(&component_plain_text(child));
+                }
+            }
+            text
+        }
+        serde_json::Value::Array(items) => items.iter().map(component_plain_text).collect(),
+        _ => String::new(),
+    }
+}
+
+// TODO: Feed `sign_lines` into the block-entity world renderer; this change
+// only uses sign text for the editor and does not draw text in the world.
 /// Blocks the block-entity pipeline draws in place of chunk geometry. The
 /// chunk mesher skips these (their block models are particle-texture-only,
 /// which would otherwise fall back to a full cube of that texture); other
@@ -129,6 +180,64 @@ pub fn is_block_entity_block(name: &str) -> bool {
         | "beehive" | "bee_nest" | "bell" | "suspicious_sand" | "suspicious_gravel"
         | "crafter"
     )
+}
+
+/// Resolve only unambiguous moving-piston payloads whose moved block state has
+/// no properties. Unsupported/malformed payloads intentionally remain inert.
+pub fn moving_block_collision(nbt: &NbtCompound) -> Option<(BlockState, glam::DVec3)> {
+    use simdnbt::owned::NbtTag;
+
+    let number = |key: &str| -> Option<f32> {
+        match nbt.get(key)? {
+            NbtTag::Float(value) => Some(*value),
+            _ => None,
+        }
+    };
+    let boolean = |key: &str| -> Option<bool> {
+        match nbt.get(key)? {
+            NbtTag::Byte(value) => Some(*value != 0),
+            _ => None,
+        }
+    };
+    let progress = number("progress")?;
+    if !(0.0..=1.0).contains(&progress) || boolean("source")? {
+        return None;
+    }
+    let extending = boolean("extending")?;
+    let direction = match nbt.get("facing")? {
+        NbtTag::String(value) => match value.to_str().as_ref() {
+            "down" => glam::DVec3::NEG_Y,
+            "up" => glam::DVec3::Y,
+            "north" => glam::DVec3::NEG_Z,
+            "south" => glam::DVec3::Z,
+            "west" => glam::DVec3::NEG_X,
+            "east" => glam::DVec3::X,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let moved = nbt.get("blockState")?.compound()?;
+    let name = match moved.get("Name")? {
+        NbtTag::String(value) => {
+            let value = value.to_str();
+            value
+                .strip_prefix("minecraft:")
+                .unwrap_or(value.as_ref())
+                .to_owned()
+        }
+        _ => return None,
+    };
+    if moved.get("Properties").is_some() {
+        return None;
+    }
+    let state = crate::world::block::state_without_properties(&name)?;
+    let offset = direction
+        * f64::from(if extending {
+            progress - 1.0
+        } else {
+            1.0 - progress
+        });
+    Some((state, offset))
 }
 
 pub fn is_invisible_block(name: &str) -> bool {

@@ -33,7 +33,7 @@ pub struct InventoryResult {
     /// release emits a start/add.../end sequence).
     pub ops: Vec<ClickOperation>,
     pub player_preview: PlayerPreview,
-    pub recipe_id: Option<u32>,
+    pub recipe_id: Option<(u32, bool)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -123,6 +123,8 @@ pub fn build_inventory(
         cursor,
         input.left_pressed,
         native_recipes,
+        None,
+        input.shift,
         3,
         1,
         104.0,

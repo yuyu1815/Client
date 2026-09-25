@@ -10,6 +10,11 @@ use azalea_protocol::packets::game::c_update_recipes::ClientboundUpdateRecipes;
 #[derive(Default)]
 pub struct RecipeBookState {
     pub displays: BTreeMap<u32, RecipeDisplayData>,
+    /// RecipeDisplayEntry metadata retained alongside each display.
+    pub groups: BTreeMap<u32, u32>,
+    pub categories: BTreeMap<u32, azalea_registry::builtin::RecipeBookCategory>,
+    /// ClientboundRecipeBookAdd entry flags (notification/highlight bits).
+    pub flags: BTreeMap<u32, u8>,
     pub settings: Option<RecipeBookSettings>,
     pub updates: Option<ClientboundUpdateRecipes>,
 }
@@ -18,16 +23,25 @@ impl RecipeBookState {
     pub fn add(&mut self, packet: ClientboundRecipeBookAdd) {
         if packet.replace {
             self.displays.clear();
+            self.groups.clear();
+            self.categories.clear();
+            self.flags.clear();
         }
         for entry in packet.entries {
-            self.displays
-                .insert(entry.contents.id, entry.contents.display);
+            let id = entry.contents.id;
+            self.displays.insert(id, entry.contents.display);
+            self.groups.insert(id, entry.contents.group);
+            self.categories.insert(id, entry.contents.category);
+            self.flags.insert(id, entry.flags);
         }
     }
 
     pub fn remove(&mut self, ids: &[u32]) {
         for id in ids {
             self.displays.remove(id);
+            self.groups.remove(id);
+            self.categories.remove(id);
+            self.flags.remove(id);
         }
     }
 }

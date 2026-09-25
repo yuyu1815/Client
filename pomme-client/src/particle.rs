@@ -276,21 +276,33 @@ impl Particle {
         p
     }
 
-    fn dust(pos: DVec3, velocity: DVec3, color: [f32; 3], scale: f32, sprite: AtlasRegion) -> Self {
-        let size = 0.1 * scale.clamp(0.01, 4.0);
+    fn dust(
+        pos: DVec3,
+        velocity: DVec3,
+        color: [f32; 3],
+        scale: f32,
+        sprite: AtlasRegion,
+        rng: &mut fastrand::Rng,
+    ) -> Self {
+        let scale = scale.clamp(0.01, 4.0);
+        let base_size = 0.1 * (0.75 * scale);
+        let base_lifetime = (8.0 / (rng.f64() * 0.8 + 0.2)) as i32;
+        let lifetime = ((base_lifetime as f32 * scale).max(1.0)) as i32;
+        let base_factor = rng.f32() * 0.4 + 0.6;
+        let color = color.map(|channel| (rng.f32() * 0.2 + 0.8) * channel * base_factor);
         let mut particle = Self {
             kind: Kind::Dust,
             pos,
             prev_pos: pos,
-            vel: velocity,
+            vel: velocity * 0.1,
             age: 0,
-            lifetime: 8,
+            lifetime,
             on_ground: false,
             stopped_by_collision: false,
             gravity: 0.0,
             friction: 0.96,
-            size,
-            base_size: size,
+            size: base_size,
+            base_size,
             u0: sprite.u_min,
             u1: sprite.u_max,
             v0: sprite.v_min,
@@ -553,6 +565,10 @@ fn explosion_frame_index(age: i32, lifetime: i32) -> usize {
 
 fn animated_frame_index(age: i32, lifetime: i32, frames: usize) -> usize {
     ((age.max(0) as usize * (frames - 1)) / lifetime.max(1) as usize).min(frames - 1)
+}
+
+fn dust_quad_size(base_size: f32, age: i32, lifetime: i32, partial_tick: f32) -> f32 {
+    base_size * (((age as f32 + partial_tick) / lifetime as f32) * 32.0).clamp(0.0, 1.0)
 }
 
 /// `crit.json` and `enchanted_hit.json` each register one provider-specific
@@ -1222,12 +1238,14 @@ impl ParticleStore {
                         ((packed >> 8) & 0xff) as f32 / 255.0,
                         (packed & 0xff) as f32 / 255.0,
                     ];
+                    let mut rng = fastrand::Rng::new();
                     self.push(Particle::dust(
                         pos,
                         vel,
                         color,
                         scale,
                         self.uv_map.get_region(DUST_SPRITE),
+                        &mut rng,
                     ));
                 }
             }
@@ -1359,7 +1377,11 @@ impl ParticleStore {
                 let channel = |c: f32| (c * p.light * 255.0).round() as u8;
                 ParticleQuad {
                     pos: pos.into(),
-                    size: p.size,
+                    size: if p.kind == Kind::Dust {
+                        dust_quad_size(p.base_size, p.age, p.lifetime, partial_tick)
+                    } else {
+                        p.size
+                    },
                     u0: p.u0,
                     u1: p.u1,
                     v0: p.v0,
@@ -1386,10 +1408,55 @@ pub(crate) fn packet_particle_count(count: i32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExplosionParticleInfo, ParticleOptions, TrackedExplosion, Weighted, animated_frame_index,
-        dvec3, explosion_emitter_child, explosion_frame_index, packet_particle_count,
-        plan_explosion_particles, supports_explosion_particle,
+        AtlasUVMap, ExplosionParticleInfo, Particle, ParticleOptions, TrackedExplosion, Weighted,
+        animated_frame_index, dust_quad_size, dvec3, explosion_emitter_child,
+        explosion_frame_index, packet_particle_count, plan_explosion_particles,
+        supports_explosion_particle,
     };
+
+    #[test]
+    fn dust_constructor_matches_vanilla_scaling_and_seeded_randomness() {
+        let sprite = AtlasUVMap::test_empty().missing_region();
+        let mut first_rng = fastrand::Rng::with_seed(262);
+        let mut second_rng = fastrand::Rng::with_seed(262);
+        let mut expected_rng = fastrand::Rng::with_seed(262);
+        let expected_lifetime = (8.0 / (expected_rng.f64() * 0.8 + 0.2)) as i32;
+        let base_factor = expected_rng.f32() * 0.4 + 0.6;
+        let expected_color = [
+            (expected_rng.f32() * 0.2 + 0.8) * base_factor,
+            (expected_rng.f32() * 0.2 + 0.8) * base_factor,
+            (expected_rng.f32() * 0.2 + 0.8) * base_factor,
+        ];
+        let first = Particle::dust(
+            dvec3(1.0, 2.0, 3.0),
+            dvec3(2.0, -4.0, 6.0),
+            [1.0; 3],
+            1.0,
+            sprite,
+            &mut first_rng,
+        );
+        let second = Particle::dust(
+            dvec3(1.0, 2.0, 3.0),
+            dvec3(2.0, -4.0, 6.0),
+            [1.0; 3],
+            1.0,
+            sprite,
+            &mut second_rng,
+        );
+        assert_eq!(first.vel, dvec3(2.0, -4.0, 6.0) * 0.1);
+        assert_eq!(first.base_size, 0.075);
+        assert_eq!(first.lifetime, expected_lifetime);
+        assert_eq!(first.lifetime, second.lifetime);
+        assert_eq!(first.color, expected_color);
+        assert_eq!(first.color, second.color);
+    }
+
+    #[test]
+    fn dust_size_grows_during_first_thirty_second_of_lifetime() {
+        assert_eq!(dust_quad_size(2.0, 0, 40, 0.0), 0.0);
+        assert_eq!(dust_quad_size(2.0, 1, 40, 0.0), 1.6);
+        assert_eq!(dust_quad_size(2.0, 40, 40, 0.0), 2.0);
+    }
 
     fn explosion_fixture(block_count: i32, weight: i32) -> TrackedExplosion {
         TrackedExplosion {

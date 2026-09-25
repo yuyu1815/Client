@@ -409,6 +409,10 @@ pub enum NetworkEvent {
         kind: BlockEntityKind,
         nbt: Option<NbtCompound>,
     },
+    OpenSignEditor {
+        pos: BlockPos,
+        is_front_text: bool,
+    },
     BlockEvent {
         pos: BlockPos,
         action_id: u8,

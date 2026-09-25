@@ -2308,6 +2308,20 @@ impl AppCore {
                         );
                     }
                 }
+                NetworkEvent::OpenSignEditor { pos, is_front_text } => {
+                    if let Some(entity) = game.chunk_store.block_entities.get(&pos)
+                        && entity.kind == azalea_registry::builtin::BlockEntityKind::Sign
+                    {
+                        let lines =
+                            crate::world::block_entity::sign_lines(&entity.nbt, is_front_text);
+                        game.paused = false;
+                        game.sign_edit = Some(crate::ui::sign::SignEditState::new(
+                            pos,
+                            is_front_text,
+                            lines,
+                        ));
+                    }
+                }
                 NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => {
                     let chunk_pos = azalea_core::position::ChunkPos::new(
                         pos.x.div_euclid(16),

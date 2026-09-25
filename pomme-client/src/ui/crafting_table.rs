@@ -83,6 +83,8 @@ pub fn build_crafting_table(
         cursor,
         input.left_pressed,
         native_recipes,
+        None,
+        input.shift,
         1,
         3,
         5.0,

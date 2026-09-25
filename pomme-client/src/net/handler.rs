@@ -1,6 +1,6 @@
 use azalea_buf::{AzBuf, AzBufVar};
 use azalea_core::bitset::FixedBitSet;
-use azalea_core::position::ChunkPos;
+use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_core::registry_holder::RegistryHolder;
 use azalea_core::sound::CustomSound;
 use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
@@ -448,22 +448,31 @@ pub fn handle_game_packet(
             let decorations = p.decorations.as_ref().map(|items| {
                 items
                     .iter()
-                    .map(|d| crate::world::maps::MapDecoration {
-                        kind: format!("{:?}", d.decoration_type),
-                        x: d.x,
-                        y: d.y,
-                        rotation: d.rot,
+                    .map(|d| {
+                        let asset = crate::world::maps::MapDecorationAsset::from_registry_id(
+                            d.decoration_type as u32,
+                        );
+                        crate::world::maps::MapDecoration {
+                            asset,
+                            x: d.x,
+                            y: d.y,
+                            rotation: d.rot,
+                            name: d.name.as_ref().map(ToString::to_string),
+                            show_on_item_frame: asset.show_on_item_frame(),
+                        }
                     })
                     .collect()
             });
-            let patch = p.color_patch.0.as_ref().map(|patch| {
-                (
-                    patch.width,
-                    patch.height,
-                    patch.start_x,
-                    patch.start_y,
-                    patch.map_colors.clone(),
-                )
+            let patch = p.color_patch.0.as_ref().and_then(|patch| {
+                (patch.width != 0).then(|| {
+                    (
+                        patch.width,
+                        patch.height,
+                        patch.start_x,
+                        patch.start_y,
+                        patch.map_colors.clone(),
+                    )
+                })
             });
             let _ = event_tx.try_send(NetworkEvent::MapItemData {
                 map_id: p.map_id,
@@ -1595,6 +1604,31 @@ pub fn handle_raw_game_packet(raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bo
     let Ok(packet_id) = u32::azalea_read_var(&mut cur) else {
         return false;
     };
+
+    if Some(packet_id)
+        == pomme_protocol::PacketTable::for_protocol(pomme_protocol::version::NATIVE.protocol)
+            .and_then(|table| {
+                table.id(
+                    pomme_protocol::Phase::Game,
+                    pomme_protocol::Direction::Clientbound,
+                    "open_sign_editor",
+                )
+            })
+    {
+        use azalea_buf::AzBuf;
+        let result = (|| {
+            let pos = BlockPos::azalea_read(&mut cur)?;
+            let is_front_text = bool::azalea_read(&mut cur)?;
+            Ok::<_, azalea_buf::BufReadError>((pos, is_front_text))
+        })();
+        match result {
+            Ok((pos, is_front_text)) => {
+                let _ = event_tx.try_send(NetworkEvent::OpenSignEditor { pos, is_front_text });
+            }
+            Err(error) => tracing::warn!("Skipping malformed OpenSignEditor packet: {error}"),
+        }
+        return true;
+    }
 
     if packet_id == cooldown_packet_id() {
         match super::cooldown::decode_payload(&raw[cur.position() as usize..]) {

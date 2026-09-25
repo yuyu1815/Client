@@ -31,7 +31,7 @@ pub struct ContainerResult {
     /// Menu button clicked this frame (`ServerboundContainerButtonClick`),
     /// e.g. an enchantment option.
     pub button: Option<u32>,
-    pub recipe_id: Option<u32>,
+    pub recipe_id: Option<(u32, bool)>,
 }
 
 /// Input for a container screen this frame.
@@ -176,11 +176,13 @@ pub fn push_recipe_entries(
     cursor: (f32, f32),
     clicked: bool,
     native: bool,
+    furnace_variant: Option<crate::ui::furnace::FurnaceVariant>,
+    use_max_items: bool,
     columns: usize,
     rows: usize,
     x: f32,
     y: f32,
-) -> Option<u32> {
+) -> Option<(u32, bool)> {
     if !native {
         panel.label(elements, x, y, "Recipe book unavailable");
         return None;
@@ -188,12 +190,18 @@ pub fn push_recipe_entries(
     let mut selected = None;
     let mut index = 0;
     for (id, display) in &book.displays {
-        let result = match display {
-            azalea_protocol::common::recipe::RecipeDisplayData::Shapeless(d) => &d.result,
-            azalea_protocol::common::recipe::RecipeDisplayData::Shaped(d) => &d.result,
-            azalea_protocol::common::recipe::RecipeDisplayData::Furnace(d) => &d.result,
-            azalea_protocol::common::recipe::RecipeDisplayData::Stonecutter(d) => &d.result,
-            azalea_protocol::common::recipe::RecipeDisplayData::Smithing(d) => &d.result,
+        let result = match (furnace_variant, display) {
+            (Some(variant), azalea_protocol::common::recipe::RecipeDisplayData::Furnace(d))
+                if book
+                    .categories
+                    .get(id)
+                    .is_some_and(|category| furnace_category_matches(variant, category)) =>
+            {
+                &d.result
+            }
+            (None, azalea_protocol::common::recipe::RecipeDisplayData::Shapeless(d)) => &d.result,
+            (None, azalea_protocol::common::recipe::RecipeDisplayData::Shaped(d)) => &d.result,
+            _ => continue,
         };
         let (name, count) = match result {
             azalea_protocol::common::recipe::SlotDisplayData::Item(d) => {
@@ -234,7 +242,7 @@ pub fn push_recipe_entries(
                 color: [0.35, 0.35, 0.35, 0.8],
             });
             if clicked {
-                selected = Some(*id);
+                selected = Some((*id, use_max_items));
             }
         }
         elements.push(MenuElement::ItemIcon {
@@ -256,6 +264,21 @@ pub fn push_recipe_entries(
         }
     }
     selected
+}
+
+fn furnace_category_matches(
+    variant: crate::ui::furnace::FurnaceVariant,
+    category: &azalea_registry::builtin::RecipeBookCategory,
+) -> bool {
+    use azalea_registry::builtin::RecipeBookCategory as C;
+
+    use crate::ui::furnace::FurnaceVariant as F;
+
+    match variant {
+        F::Furnace => matches!(category, C::FurnaceFood | C::FurnaceBlocks | C::FurnaceMisc),
+        F::BlastFurnace => matches!(category, C::BlastFurnaceBlocks | C::BlastFurnaceMisc),
+        F::Smoker => matches!(category, C::SmokerFood),
+    }
 }
 
 /// Per-frame slot drawing context: positions slots in GUI units, substitutes
@@ -433,6 +456,21 @@ fn resolve_key_ops(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn furnace_recipe_categories_match_the_screen_variant() {
+        use azalea_registry::builtin::RecipeBookCategory as C;
+
+        use crate::ui::furnace::FurnaceVariant as F;
+
+        assert!(furnace_category_matches(F::Furnace, &C::FurnaceMisc));
+        assert!(furnace_category_matches(
+            F::BlastFurnace,
+            &C::BlastFurnaceBlocks
+        ));
+        assert!(furnace_category_matches(F::Smoker, &C::SmokerFood));
+        assert!(!furnace_category_matches(F::Smoker, &C::FurnaceFood));
+    }
 
     #[test]
     fn empty_handed_outside_click_does_not_close_container() {

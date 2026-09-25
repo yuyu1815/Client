@@ -22,6 +22,24 @@ pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb>
         for bz in min_z..max_z {
             for bx in min_x..max_x {
                 let state = chunk_store.get_block_state(bx, by, bz);
+                if crate::world::block::block_id(state) == "moving_piston" {
+                    let pos = azalea_core::position::BlockPos::new(bx, by, bz);
+                    if let Some((moved, progress_offset)) =
+                        chunk_store.block_entities.get(&pos).and_then(|entity| {
+                            crate::world::block_entity::moving_block_collision(&entity.nbt)
+                        })
+                        && has_collision(moved)
+                    {
+                        let origin = dvec3(bx as f64, by as f64, bz as f64) + progress_offset;
+                        match block_shape::partial_shape(moved) {
+                            Some(boxes) => {
+                                aabbs.extend(boxes.iter().map(|b| Aabb::from_local(*b, origin)))
+                            }
+                            None => aabbs.push(Aabb::block(bx, by, bz).offset(progress_offset)),
+                        }
+                    }
+                    continue;
+                }
                 if !has_collision(state) {
                     continue;
                 }
@@ -110,71 +128,57 @@ pub fn resolve_collision(
     velocity: Velocity,
     step_height: f64,
 ) -> (DVec3, bool) {
+    resolve_collision_with_grounded(chunk_store, player_aabb, velocity, step_height, false)
+}
+
+pub fn resolve_collision_with_grounded(
+    chunk_store: &ChunkStore,
+    player_aabb: Aabb,
+    velocity: Velocity,
+    step_height: f64,
+    was_grounded: bool,
+) -> (DVec3, bool) {
     let expanded = player_aabb.expand(*velocity);
     let block_aabbs = collect_block_aabbs(chunk_store, &expanded);
 
     let (resolved, on_ground) = collide_along_axes(&block_aabbs, player_aabb, velocity);
 
     let horizontal_blocked = resolved.x != velocity.x || resolved.z != velocity.z;
-    if step_height > 0.0 && on_ground && horizontal_blocked {
-        let step_up = dvec3(velocity.x, step_height, velocity.z);
-        let step_expanded = player_aabb
-            .expand(step_up)
-            .expand(dvec3(0.0, -step_height, 0.0));
-        let step_aabbs = collect_block_aabbs(chunk_store, &step_expanded);
-
-        // Vanilla compares two step candidates: horizontal sweep before the
-        // ascent, and ascent against the horizontally expanded player box.
-        let horizontal = dvec3(velocity.x, 0.0, velocity.z);
-        let mut up_a = step_height;
-        for block in &step_aabbs {
-            if up_a.abs() < COLLISION_EPSILON {
-                up_a = 0.0;
-                break;
-            }
-            up_a = block.clip_y_collide(&player_aabb, up_a);
-        }
-        let raised_a = player_aabb.offset(dvec3(0.0, up_a, 0.0));
-        let (move_a, _) = collide_along_axes(&step_aabbs, raised_a, horizontal.into());
-
-        let swept = player_aabb.expand(dvec3(velocity.x, 0.0, velocity.z));
-        let mut up_b = step_height;
-        for block in &step_aabbs {
-            if up_b.abs() < COLLISION_EPSILON {
-                up_b = 0.0;
-                break;
-            }
-            up_b = block.clip_y_collide(&swept, up_b);
-        }
-        let raised_b = player_aabb.offset(dvec3(0.0, up_b, 0.0));
-        let (move_b, _) = collide_along_axes(&step_aabbs, raised_b, horizontal.into());
-        let (up, step_resolved) = if move_b.x * move_b.x + move_b.z * move_b.z
-            > move_a.x * move_a.x + move_a.z * move_a.z
-        {
-            (up_b, move_b)
+    if step_height > 0.0 && (on_ground || was_grounded) && horizontal_blocked {
+        let grounded_aabb = if on_ground {
+            player_aabb.offset(dvec3(0.0, resolved.y, 0.0))
         } else {
-            (up_a, move_a)
+            player_aabb
         };
-
-        let raised = player_aabb.offset(dvec3(0.0, up, 0.0));
-        let after_move = raised.offset(dvec3(step_resolved.x, 0.0, step_resolved.z));
-        let mut down_vel = -(up - velocity.y);
+        let step_region = grounded_aabb
+            .expand(dvec3(velocity.x, step_height, velocity.z))
+            .expand(dvec3(
+                0.0,
+                if on_ground { 0.0 } else { -COLLISION_EPSILON },
+                0.0,
+            ));
+        let step_aabbs = collect_block_aabbs(chunk_store, &step_region);
+        let skip_height = if on_ground { resolved.y as f32 } else { 0.0 };
+        let mut candidates = Vec::new();
         for block in &step_aabbs {
-            if down_vel.abs() < COLLISION_EPSILON {
-                down_vel = 0.0;
-                break;
+            for y in [block.min.y, block.max.y] {
+                let height = (y - grounded_aabb.min.y) as f32;
+                if height >= 0.0 && height <= step_height as f32 && height != skip_height {
+                    candidates.push(height);
+                }
             }
-            down_vel = block.clip_y_collide(&after_move, down_vel);
         }
-
-        let step_total = dvec3(step_resolved.x, up + down_vel, step_resolved.z);
-
-        let step_h_dist = step_total.x * step_total.x + step_total.z * step_total.z;
-        let orig_h_dist = resolved.x * resolved.x + resolved.z * resolved.z;
-
-        if step_h_dist > orig_h_dist {
-            let step_on_ground = down_vel != -(up - velocity.y);
-            return (step_total, step_on_ground || on_ground);
+        candidates.sort_by(f32::total_cmp);
+        candidates.dedup();
+        for height in candidates {
+            let step = dvec3(velocity.x, f64::from(height), velocity.z);
+            let (candidate, _) = collide_along_axes(&step_aabbs, grounded_aabb, step.into());
+            if candidate.x * candidate.x + candidate.z * candidate.z
+                > resolved.x * resolved.x + resolved.z * resolved.z
+            {
+                let result = candidate + dvec3(0.0, grounded_aabb.min.y - player_aabb.min.y, 0.0);
+                return (result, on_ground || was_grounded);
+            }
         }
     }
 
