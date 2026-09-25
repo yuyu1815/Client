@@ -4,13 +4,19 @@
 //!
 //! ```no_run
 //! use pomme_gpu_allocator::vulkan::*;
+//! use pyronyx::vk;
+//!
+//! // Create these Vulkan handles using your application's Vulkan setup.
+//! let instance: vk::Instance = todo!();
+//! let device: vk::Device = todo!();
+//! let physical_device: vk::PhysicalDevice = todo!();
 //!
 //! let mut allocator = Allocator::new(&AllocatorCreateDesc {
 //!     instance,
 //!     device,
 //!     physical_device,
 //!     debug_settings: Default::default(),
-//!     buffer_device_address: true,
+//!     buffer_device_address: false,
 //!     allocation_sizes: Default::default(),
 //! })
 //! .unwrap();
@@ -19,15 +25,30 @@
 //! # Simple allocation example
 //!
 //! ```no_run
-//! use pomme_gpu_allocator::MemoryLocation;
 //! use pomme_gpu_allocator::vulkan::*;
+//! use pomme_gpu_allocator::MemoryLocation;
 //! use pyronyx::vk;
+//!
+//! // Create these Vulkan handles using your application's Vulkan setup.
+//! let instance: vk::Instance = todo!();
+//! let device: vk::Device = todo!();
+//! let physical_device: vk::PhysicalDevice = todo!();
+//! let mut allocator = Allocator::new(&AllocatorCreateDesc {
+//!     instance,
+//!     device: device.clone(),
+//!     physical_device,
+//!     debug_settings: Default::default(),
+//!     buffer_device_address: false,
+//!     allocation_sizes: Default::default(),
+//! })
+//! .unwrap();
 //!
 //! let buffer = unsafe {
 //!     device.create_buffer(
 //!         &vk::BufferCreateInfo {
 //!             size: 512,
-//!             usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+//!             usage: vk::BufferUsageFlags::StorageBuffer,
+//!             sharing_mode: vk::SharingMode::Exclusive,
 //!             ..Default::default()
 //!         },
 //!         None,
