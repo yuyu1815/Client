@@ -1,6 +1,6 @@
 mod decoder;
 mod openal;
-mod sounds;
+pub(crate) mod sounds;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};

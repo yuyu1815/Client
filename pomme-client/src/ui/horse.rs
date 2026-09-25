@@ -123,6 +123,7 @@ pub fn build_horse(
         clicked_outside,
         ops,
         button: None,
+        recipe_id: None,
     }
 }
 

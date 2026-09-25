@@ -268,6 +268,7 @@ pub fn build_merchant(
             clicked_outside,
             ops,
             button: None,
+            recipe_id: None,
         },
         select_trade,
     }

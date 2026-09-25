@@ -242,9 +242,9 @@
 //! 1.20.6's plus):
 //! - items are `bool + id + byte count + NBT`; inbound stacks translate the
 //!   legacy root into `custom_data` (retaining unknown NBT) and convert exact
-//!   `Damage` and `Unbreakable` fields to their typed components. `Damage` bars
-//!   therefore work on 765 servers; custom names, lore and enchantments remain
-//!   unconverted. Merchant costs have no component patch and outbound
+//!   `Damage`, `RepairCost`, `Unbreakable`, `display.Name` and `display.Lore`
+//!   fields to their native components. Other legacy fields remain in
+//!   `custom_data`. Merchant costs have no component patch and outbound
 //!   `container_click`/`set_creative_mode_slot` still use bare stacks
 //! - the configuration phase diverges for the first time: ids remap, and the
 //!   single whole-holder NBT `registry_data` packet fans out into the
@@ -2375,40 +2375,130 @@ fn read_old_item_nbt(
     Some(Some((item, count, nbt)))
 }
 
-/// Converts exact legacy fields and retains the complete source compound in
-/// `custom_data`; unsupported legacy fields are therefore not silently lost.
+/// Returns a compound field only when its key occurs once; duplicate NBT keys
+/// have ambiguous semantics and must remain untouched in `custom_data`.
+fn unique_nbt_field<'a>(
+    compound: &'a simdnbt::owned::NbtCompound,
+    key: &str,
+) -> Option<&'a simdnbt::owned::NbtTag> {
+    let mut matches = compound
+        .iter()
+        .filter(|(name, _)| name.to_str() == key)
+        .map(|(_, tag)| tag);
+    let value = matches.next()?;
+    matches.next().is_none().then_some(value)
+}
+
+/// Converts exact legacy fields and retains every unconverted field in
+/// `custom_data`; recognized legacy keys are removed there to avoid applying
+/// both the old NBT behavior and the equivalent data component.
 fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: bool) -> Option<()> {
+    use simdnbt::owned::{Nbt, NbtCompound, NbtTag};
+
     let Some((item, count, nbt)) = read_old_item_nbt(cur, named_nbt)? else {
         wire::write_varint(out, 0);
         return Some(());
     };
     wire::write_varint(out, u32::from(count));
     wire::write_varint(out, item);
-    let legacy_component = |key: &str| {
-        nbt.iter()
-            .find(|(name, _)| name.to_str() == key)
-            .map(|(_, tag)| tag)
-    };
-    let damage = legacy_component("Damage").and_then(|tag| tag.int());
-    let unbreakable = legacy_component("Unbreakable")
+
+    let damage = unique_nbt_field(&nbt, "Damage").and_then(|tag| tag.int());
+    let repair_cost = unique_nbt_field(&nbt, "RepairCost").and_then(|tag| tag.int());
+    let unbreakable = unique_nbt_field(&nbt, "Unbreakable")
         .and_then(|tag| tag.byte())
-        .is_some_and(|value| value != 0);
-    let mut patch = Vec::new();
-    let added =
-        usize::from(nbt.is_some()) + usize::from(damage.is_some()) + usize::from(unbreakable);
-    wire::write_varint(&mut patch, added as u32);
-    wire::write_varint(&mut patch, 0);
-    if nbt.is_some() {
-        wire::write_varint(&mut patch, DataComponentKind::CustomData.to_u32());
-        nbt.azalea_write(&mut patch).ok()?;
+        .filter(|value| *value != 0);
+
+    let display_name = unique_nbt_field(&nbt, "display")
+        .and_then(|tag| tag.compound())
+        .and_then(|display| unique_nbt_field(display, "Name"))
+        .and_then(|tag| tag.string())
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json.to_str()).ok())
+        .map(|text| {
+            let mut encoded = Vec::new();
+            json_to_nbt(&text).azalea_write(&mut encoded).ok()?;
+            Some(encoded)
+        })
+        .flatten();
+    let display_lore = unique_nbt_field(&nbt, "display")
+        .and_then(|tag| tag.compound())
+        .and_then(|display| unique_nbt_field(display, "Lore"))
+        .and_then(|tag| tag.list())
+        .and_then(|list| list.strings())
+        .and_then(|lines| {
+            let values: Option<Vec<serde_json::Value>> = lines
+                .iter()
+                .map(|line| serde_json::from_str(&line.to_str()).ok())
+                .collect();
+            values
+        })
+        .and_then(|lines| {
+            let mut encoded = Vec::new();
+            wire::write_varint(&mut encoded, lines.len() as u32);
+            for line in lines {
+                json_to_nbt(&line).azalea_write(&mut encoded).ok()?;
+            }
+            Some(encoded)
+        });
+
+    let has_custom_data = nbt.is_some();
+    let added = usize::from(has_custom_data)
+        + usize::from(damage.is_some())
+        + usize::from(repair_cost.is_some())
+        + usize::from(unbreakable.is_some())
+        + usize::from(display_name.is_some())
+        + usize::from(display_lore.is_some());
+    let mut components = Vec::new();
+    if has_custom_data {
+        let mut custom = NbtCompound::new();
+        for (key, mut value) in nbt.into_iter() {
+            let key_str = key.to_str();
+            if (key_str == "Damage" && damage.is_some())
+                || (key_str == "RepairCost" && repair_cost.is_some())
+                || (key_str == "Unbreakable" && unbreakable.is_some())
+            {
+                continue;
+            }
+            if key_str == "display" {
+                if let NbtTag::Compound(mut display) = value {
+                    if display_name.is_some() {
+                        display.remove("Name");
+                    }
+                    if display_lore.is_some() {
+                        display.remove("Lore");
+                    }
+                    value = NbtTag::Compound(display);
+                }
+            }
+            custom.insert(key, value);
+        }
+        let custom_data = Nbt::new("".into(), custom);
+        wire::write_varint(&mut components, DataComponentKind::CustomData.to_u32());
+        custom_data.azalea_write(&mut components).ok()?;
     }
     if let Some(damage) = damage {
-        wire::write_varint(&mut patch, DataComponentKind::Damage.to_u32());
-        wire::write_varint(&mut patch, damage as u32);
+        wire::write_varint(&mut components, DataComponentKind::Damage.to_u32());
+        wire::write_varint(&mut components, damage as u32);
     }
-    if unbreakable {
-        wire::write_varint(&mut patch, DataComponentKind::Unbreakable.to_u32());
+    if let Some(repair_cost) = repair_cost {
+        wire::write_varint(&mut components, DataComponentKind::RepairCost.to_u32());
+        wire::write_varint(&mut components, repair_cost as u32);
     }
+    if unbreakable.is_some() {
+        wire::write_varint(&mut components, DataComponentKind::Unbreakable.to_u32());
+    }
+    if let Some(name) = display_name {
+        wire::write_varint(&mut components, DataComponentKind::CustomName.to_u32());
+        components.extend_from_slice(&name);
+    }
+    if let Some(lore) = display_lore {
+        wire::write_varint(&mut components, DataComponentKind::Lore.to_u32());
+        components.extend_from_slice(&lore);
+    }
+
+    let mut patch = Vec::new();
+    wire::write_varint(&mut patch, added as u32);
+    wire::write_varint(&mut patch, 0);
+    patch.extend_from_slice(&components);
     out.extend_from_slice(&patch);
     Some(())
 }

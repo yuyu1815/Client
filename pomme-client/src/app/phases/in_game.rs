@@ -254,6 +254,7 @@ pub struct GameState {
     pub server_enforces_secure_chat: bool,
     /// Locator bar waypoints tracked by the server.
     pub waypoints: crate::world::waypoints::WaypointMap,
+    pub maps: crate::world::maps::MapStore,
     /// Vanilla `Hud.toolHighlightTimer` / `lastToolHighlight` (see
     /// `tick_tool_highlight`).
     pub tool_highlight_timer: u32,
@@ -264,6 +265,7 @@ pub struct GameState {
     pub local_scoreboard_name: Option<String>,
     pub boss_bars: crate::ui::boss_bar::BossBarState,
     pub toasts: crate::ui::toast::ToastState,
+    pub recipe_book: crate::ui::recipe_book::RecipeBookState,
     pub subtitles: crate::ui::subtitles::SubtitleOverlayState,
     /// Client tick counter (vanilla `player.tickCount`).
     pub tick_count: u64,
@@ -585,6 +587,7 @@ impl GameState {
             tab_score_state: crate::ui::player_tab::TabScoreState::default(),
             server_enforces_secure_chat: false,
             waypoints: crate::world::waypoints::WaypointMap::default(),
+            maps: crate::world::maps::MapStore::default(),
             tool_highlight_timer: 0,
             last_tool_highlight: azalea_inventory::ItemStack::Empty,
             action_bar: None,
@@ -593,6 +596,7 @@ impl GameState {
             local_scoreboard_name: None,
             boss_bars: crate::ui::boss_bar::BossBarState::default(),
             toasts: crate::ui::toast::ToastState::default(),
+            recipe_book: crate::ui::recipe_book::RecipeBookState::default(),
             subtitles: crate::ui::subtitles::SubtitleOverlayState::default(),
             tick_count: 0,
             probe_actor_diag_tick: u64::MAX,
@@ -2939,6 +2943,54 @@ pub fn update_game(
             &attack,
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
+        if let Some(held) = game.player.inventory.held_stack(core.input.selected_slot()) {
+            if let Some(map_id) = held.get_component::<azalea_inventory::components::MapId>() {
+                if map_id.id >= 0 {
+                    if let Some(map) = game.maps.0.get(&(map_id.id as u32)) {
+                        let size = 128.0;
+                        let x = sw - size - 12.0;
+                        let y = 12.0;
+                        elements.push(MenuElement::Rect {
+                            x: x - 3.0,
+                            y: y - 3.0,
+                            w: size + 6.0,
+                            h: size + 6.0,
+                            corner_radius: 0.0,
+                            color: [0.12, 0.09, 0.06, 1.0],
+                        });
+                        for (i, color) in map.colors.iter().copied().enumerate() {
+                            if color != 0 {
+                                elements.push(MenuElement::Rect {
+                                    x: x + (i % 128) as f32,
+                                    y: y + (i / 128) as f32,
+                                    w: 1.0,
+                                    h: 1.0,
+                                    corner_radius: 0.0,
+                                    color: crate::world::maps::palette(color),
+                                });
+                            }
+                        }
+                        for marker in &map.decorations {
+                            let mx = x + 64.0 + marker.x as f32 / 2.0;
+                            let my = y + 64.0 + marker.y as f32 / 2.0;
+                            let color = if marker.kind.contains("Player") {
+                                [1.0, 0.25, 0.2, 1.0]
+                            } else {
+                                [0.25, 0.5, 1.0, 1.0]
+                            };
+                            elements.push(MenuElement::Rect {
+                                x: mx - 2.0,
+                                y: my - 2.0,
+                                w: 5.0,
+                                h: 5.0,
+                                corner_radius: 0.0,
+                                color,
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Vanilla Hud.extractSleepOverlay sits outside the isHidden gate: above
@@ -3341,6 +3393,9 @@ pub fn update_game(
         }
         let mut select_trade = None;
         let mut beacon_effect_selection = None;
+        let place_recipe;
+        let native_recipes =
+            crate::version::session_protocol() == pomme_protocol::version::NATIVE.protocol;
         let (clicked_outside, ops) = if let Some(container) = &mut game.open_container {
             let result = match container.screen {
                 ContainerScreen::Merchant => {
@@ -3393,6 +3448,8 @@ pub fn update_game(
                     &mut game.inv_drag,
                     &mut game.inv_last_click,
                     gs,
+                    &game.recipe_book,
+                    native_recipes,
                 ),
                 ContainerScreen::Furnace(variant) => crate::ui::furnace::build_furnace(
                     &mut elements,
@@ -3409,6 +3466,8 @@ pub fn update_game(
                     &mut game.inv_last_click,
                     gs,
                     &|t, s| gfx.renderer.menu_text_width(t, s),
+                    &game.recipe_book,
+                    native_recipes,
                 ),
                 ContainerScreen::Chest { rows } => crate::ui::chest::build_chest(
                     &mut elements,
@@ -3503,6 +3562,9 @@ pub fn update_game(
                     result.container
                 }
             };
+            place_recipe = result
+                .recipe_id
+                .map(|display_id| (container.id, display_id));
             if let Some(button_id) = result.button {
                 use azalea_protocol::packets::game::s_container_button_click::ServerboundContainerButtonClick;
                 connection
@@ -3527,7 +3589,10 @@ pub fn update_game(
                 &mut game.inv_drag,
                 &mut game.inv_last_click,
                 gs,
+                &game.recipe_book,
+                native_recipes,
             );
+            place_recipe = result.recipe_id.map(|display_id| (0, display_id));
             player_preview = Some(result.player_preview);
             (result.clicked_outside, result.ops)
         };
@@ -3537,6 +3602,9 @@ pub fn update_game(
         }
         if let Some((primary, secondary)) = beacon_effect_selection {
             connection.packet_tx.set_beacon(primary, secondary);
+        }
+        if let Some((container_id, display_id)) = place_recipe {
+            connection.packet_tx.place_recipe(container_id, display_id);
         }
         send_container_clicks(game, connection, ops);
         core.input.clear_just_pressed_actions();

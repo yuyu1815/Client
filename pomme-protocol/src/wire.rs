@@ -77,12 +77,18 @@ pub fn encode_pick_item_from_entity(entity_id: i32, include_data: bool) -> Vec<u
     buf
 }
 
-/// Reads one varint, advancing `pos`; `None` on truncation or overlong data.
+/// Reads one u32 VarInt, advancing `pos`; `None` on truncation or overflow.
 pub fn read_varint(bytes: &[u8], pos: &mut usize) -> Option<u32> {
     let mut v = 0u32;
     for shift in 0..5 {
         let byte = *bytes.get(*pos)?;
         *pos += 1;
+        // A u32 VarInt has only four payload bits in its fifth byte. Keep
+        // accepting non-canonical encodings, but reject overflow and a sixth
+        // byte rather than silently truncating high bits.
+        if shift == 4 && byte & 0xF0 != 0 {
+            return None;
+        }
         v |= u32::from(byte & 0x7F) << (shift * 7);
         if byte & 0x80 == 0 {
             return Some(v);
@@ -241,6 +247,22 @@ mod tests {
             let mut pos = 0;
             assert_eq!(read_varint(&buf, &mut pos), Some(v));
             assert_eq!(pos, buf.len());
+        }
+    }
+
+    #[test]
+    fn varint_accepts_overlong_and_rejects_u32_overflow() {
+        let mut pos = 0;
+        assert_eq!(read_varint(&[0x81, 0x00], &mut pos), Some(1));
+        assert_eq!(pos, 2);
+
+        for bytes in [
+            &[0x80, 0x80, 0x80, 0x80, 0x10][..],
+            &[0x80, 0x80, 0x80, 0x80, 0x80][..],
+        ] {
+            let mut pos = 0;
+            assert_eq!(read_varint(bytes, &mut pos), None);
+            assert_eq!(pos, 5);
         }
     }
 }

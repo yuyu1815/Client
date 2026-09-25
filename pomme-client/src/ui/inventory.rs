@@ -5,8 +5,7 @@ use azalea_inventory::operations::ClickOperation;
 
 use super::common::{SLOT_STRIDE, item_display_spans, push_tooltip_lines};
 use super::container::{
-    ContainerInput, DragState, SlotCtx, push_cursor_stack, push_panel,
-    push_recipe_book_unavailable, resolve_gesture,
+    ContainerInput, DragState, SlotCtx, push_cursor_stack, push_panel, resolve_gesture,
 };
 use crate::player::inventory::{self, Inventory};
 use crate::player::menu_click::ContainerKind;
@@ -34,6 +33,7 @@ pub struct InventoryResult {
     /// release emits a start/add.../end sequence).
     pub ops: Vec<ClickOperation>,
     pub player_preview: PlayerPreview,
+    pub recipe_id: Option<u32>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -48,6 +48,8 @@ pub fn build_inventory(
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
     gs: f32,
+    recipe_book: &crate::ui::recipe_book::RecipeBookState,
+    native_recipes: bool,
 ) -> InventoryResult {
     let panel = push_panel(
         elements,
@@ -114,7 +116,18 @@ pub fn build_inventory(
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
 
-    push_recipe_book_unavailable(elements, &panel, 104.0, 61.0);
+    let recipe_id = crate::ui::container::push_recipe_entries(
+        elements,
+        &panel,
+        recipe_book,
+        cursor,
+        input.left_pressed,
+        native_recipes,
+        3,
+        1,
+        104.0,
+        61.0,
+    );
     push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
     if !cursor_item.is_present()
         && let Some(item) = hovered.and_then(|slot| inventory.slot(slot as usize).as_present())
@@ -132,8 +145,12 @@ pub fn build_inventory(
         );
     }
 
+    let mut gesture_input = *input;
+    if recipe_id.is_some() {
+        gesture_input.left_pressed = false;
+    }
     let (ops, clicked_outside) = resolve_gesture(
-        input,
+        &gesture_input,
         hovered,
         &panel,
         cursor,
@@ -157,5 +174,6 @@ pub fn build_inventory(
             gui_scale: panel.scale,
             cursor,
         },
+        recipe_id,
     }
 }

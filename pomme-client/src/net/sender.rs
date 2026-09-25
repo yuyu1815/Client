@@ -35,6 +35,17 @@ pub struct PacketSender {
     tx: mpsc::UnboundedSender<Outbound>,
 }
 
+fn encode_place_recipe(packet_id: u32, container_id: i32, display_id: u32) -> Vec<u8> {
+    use pomme_protocol::wire;
+
+    let mut frame = Vec::with_capacity(13);
+    wire::write_varint(&mut frame, packet_id);
+    wire::write_varint(&mut frame, container_id as u32);
+    wire::write_varint(&mut frame, display_id);
+    frame.push(0); // use_max_items=false; the UI has no modifier variant yet.
+    frame
+}
+
 impl PacketSender {
     pub fn new(tx: mpsc::UnboundedSender<Outbound>) -> Self {
         Self { tx }
@@ -61,6 +72,23 @@ impl PacketSender {
                 secondary,
             },
         ));
+    }
+
+    /// Sends native 26.2 PlaceRecipe, whose recipe reference is a numeric
+    /// server-issued display ID (Azalea's typed packet uses the legacy
+    /// Identifier).
+    pub fn place_recipe(&self, container_id: i32, display_id: u32) {
+        if crate::version::session_protocol() != pomme_protocol::version::NATIVE.protocol {
+            return;
+        }
+        use pomme_protocol::{Direction, PacketTable, Phase};
+        let Some(packet_id) = PacketTable::for_protocol(crate::version::session_protocol())
+            .and_then(|table| table.id(Phase::Game, Direction::Serverbound, "place_recipe"))
+        else {
+            tracing::warn!("Native 26.2 PlaceRecipe packet ID is unavailable");
+            return;
+        };
+        self.send_raw(encode_place_recipe(packet_id, container_id, display_id));
     }
 
     pub fn send_raw(&self, bytes: Vec<u8>) {
@@ -100,6 +128,12 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{Outbound, PacketSender};
+
+    #[test]
+    fn place_recipe_wire_body_includes_display_id_and_use_max_items_flag() {
+        let frame = super::encode_place_recipe(0x2a, 3, 300);
+        assert_eq!(frame, [0x2a, 3, 0xac, 0x02, 0]);
+    }
 
     #[test]
     fn select_trade_queues_the_dedicated_trade_index_packet() {

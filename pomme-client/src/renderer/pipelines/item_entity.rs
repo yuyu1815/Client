@@ -1768,6 +1768,7 @@ mod tests {
     #[test]
     fn gui_translucent_quad_order_matches_vanilla_buckets() {
         let quad = |direction, cullface| crate::world::block::model::BakedQuad {
+            ambient_occlusion: true,
             positions: [[0.0; 3]; 4],
             uvs: [[0.0; 2]; 4],
             texture: String::new(),

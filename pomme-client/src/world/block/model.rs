@@ -101,6 +101,7 @@ fn validate_weight_values(weights: impl IntoIterator<Item = u64>) -> Result<u32,
 #[derive(Deserialize, Default, Clone)]
 struct ModelFile {
     parent: Option<String>,
+    ambientocclusion: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_texture_map")]
     textures: HashMap<String, String>,
     #[serde(default)]
@@ -394,6 +395,9 @@ impl ItemTint {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BakedQuad {
     pub positions: [[f32; 3]; 4],
+    /// Inherited model JSON `ambientocclusion`, retained for multipart quads.
+    #[serde(default = "default_ambient_occlusion")]
+    pub ambient_occlusion: bool,
     pub uvs: [[f32; 2]; 4],
     pub texture: String,
     pub cullface: Option<Direction>,
@@ -416,10 +420,16 @@ pub struct BakedQuad {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BakedModel {
     pub quads: Vec<BakedQuad>,
+    #[serde(default = "default_ambient_occlusion")]
+    pub ambient_occlusion: bool,
     pub is_full_cube: bool,
     /// Vanilla `canOcclude`: full cubes occlude, but cutout blocks like leaves
     /// don't, so neighbor faces against them still render.
     pub occludes: bool,
+}
+
+fn default_ambient_occlusion() -> bool {
+    true
 }
 
 #[derive(Clone)]
@@ -927,6 +937,7 @@ pub fn bake_chest_item_model() -> BakedModel {
     );
     BakedModel {
         quads,
+        ambient_occlusion: true,
         is_full_cube: false,
         occludes: false,
     }
@@ -1093,6 +1104,7 @@ fn add_chest_cube(
         };
         quads.push(BakedQuad {
             positions: spec.positions,
+            ambient_occlusion: true,
             uvs,
             texture: texture.to_string(),
             cullface: None,
@@ -1556,6 +1568,7 @@ fn extract_default_model_ref(blockstate: &BlockstateFile) -> Option<ModelRef> {
 struct ResolvedModel {
     textures: HashMap<String, String>,
     elements: Vec<ElementDef>,
+    ambient_occlusion: bool,
     ground_transform: Mat4,
 }
 
@@ -1568,6 +1581,7 @@ fn resolve_model(
 ) -> ResolvedModel {
     let mut texture_map: HashMap<String, String> = HashMap::new();
     let mut elements: Option<Vec<ElementDef>> = None;
+    let mut ambient_occlusion = None;
     let mut ground_transform: Option<Mat4> = None;
     let mut current_id = model_id.to_string();
 
@@ -1584,6 +1598,9 @@ fn resolve_model(
 
         if elements.is_none() && !model.elements.is_empty() {
             elements = Some(model.elements.clone());
+        }
+        if ambient_occlusion.is_none() {
+            ambient_occlusion = model.ambientocclusion;
         }
         if ground_transform.is_none()
             && let Some(transform) = model
@@ -1608,6 +1625,7 @@ fn resolve_model(
     ResolvedModel {
         textures: resolved_textures,
         elements: elements.unwrap_or_default(),
+        ambient_occlusion: ambient_occlusion.unwrap_or(true),
         ground_transform: ground_transform.unwrap_or(Mat4::IDENTITY),
     }
 }
@@ -1784,6 +1802,7 @@ fn bake_resolved_model_with_item_tints(
 
             quads.push(BakedQuad {
                 positions,
+                ambient_occlusion: resolved.ambient_occlusion,
                 uvs,
                 texture: texture_name,
                 cullface,
@@ -1803,6 +1822,7 @@ fn bake_resolved_model_with_item_tints(
     let is_full_cube = check_full_cube(&quads);
     Some(BakedModel {
         quads,
+        ambient_occlusion: resolved.ambient_occlusion,
         is_full_cube,
         occludes: is_full_cube,
     })
@@ -2221,6 +2241,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn model_ambient_occlusion_json_defaults_true_and_preserves_false() {
+        assert!(default_ambient_occlusion());
+        assert_eq!(
+            serde_json::from_str::<ModelFile>("{}")
+                .unwrap()
+                .ambientocclusion,
+            None
+        );
+        assert_eq!(
+            serde_json::from_str::<ModelFile>(r#"{"ambientocclusion":false}"#)
+                .unwrap()
+                .ambientocclusion,
+            Some(false)
+        );
+    }
+
+    #[test]
     fn gui_item_lighting_uses_vanilla_items_3d_pose_order() {
         let (light0, light1) = items_3d_lights();
         for (actual, expected) in [
@@ -2236,6 +2273,7 @@ mod tests {
     #[test]
     fn gui_item_lighting_replaces_terrain_cardinal_shade() {
         let mut quad = BakedQuad {
+            ambient_occlusion: true,
             positions: [
                 [0.0, 1.0, 0.0],
                 [1.0, 1.0, 0.0],
@@ -2389,6 +2427,7 @@ mod tests {
         };
         let resolved = ResolvedModel {
             textures: HashMap::from([("side".to_string(), "block/piston_side".to_string())]),
+            ambient_occlusion: true,
             elements: vec![ElementDef {
                 from: [6.0, 6.0, 4.0],
                 to: [10.0, 10.0, 20.0],
@@ -2815,6 +2854,7 @@ mod tests {
     fn weighted_selection_matches_legacy_random_anchor_seeds() {
         let a = BakedModel {
             quads: Vec::new(),
+            ambient_occlusion: true,
             is_full_cube: false,
             occludes: false,
         };
@@ -2846,6 +2886,7 @@ mod tests {
         );
         let a = BakedModel {
             quads: Vec::new(),
+            ambient_occlusion: true,
             is_full_cube: false,
             occludes: false,
         };

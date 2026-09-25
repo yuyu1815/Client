@@ -316,6 +316,7 @@ pub fn build_enchantment(
             clicked_outside,
             ops,
             button,
+            recipe_id: None,
         },
         book: BookPreview {
             rect: [

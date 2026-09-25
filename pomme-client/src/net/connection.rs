@@ -261,7 +261,9 @@ struct Configured {
 async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionError> {
     use azalea_core::registry_holder::RegistryHolder;
 
-    let login = conn.reader.read().await?;
+    let login = tokio::time::timeout(PHASE_READ_TIMEOUT, conn.reader.read())
+        .await
+        .map_err(|_| phase_read_timeout())??;
     let translation = super::translate::active().expect("translation for a config-less version");
     let Some(frames) = translation.split_login_registries(&login) else {
         // A server that turns the join away here does it with a play-phase

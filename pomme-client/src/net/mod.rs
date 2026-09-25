@@ -189,6 +189,13 @@ pub enum NetworkEvent {
         operation: azalea_protocol::packets::game::c_waypoint::WaypointOperation,
         waypoint: azalea_protocol::packets::game::c_waypoint::TrackedWaypoint,
     },
+    MapItemData {
+        map_id: u32,
+        scale: u8,
+        locked: bool,
+        patch: Option<(u8, u8, u8, u8, Vec<u8>)>,
+        decorations: Option<Vec<crate::world::maps::MapDecoration>>,
+    },
     EntityArmorUpdate {
         entity_id: i32,
         armor: u32,
@@ -308,6 +315,10 @@ pub enum NetworkEvent {
     RecipeToastAdd {
         entries: Vec<crate::ui::toast::RecipeToastEntry>,
     },
+    RecipeBookAdd(azalea_protocol::packets::game::c_recipe_book_add::ClientboundRecipeBookAdd),
+    RecipeBookRemove(Vec<u32>),
+    RecipeBookSettings(azalea_protocol::packets::game::c_recipe_book_settings::RecipeBookSettings),
+    UpdateRecipes(azalea_protocol::packets::game::c_update_recipes::ClientboundUpdateRecipes),
     TitleText {
         spans: Vec<crate::ui::text::TextSpan>,
     },

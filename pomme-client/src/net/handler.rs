@@ -444,6 +444,35 @@ pub fn handle_game_packet(
                 waypoint: p.waypoint.clone(),
             });
         }
+        ClientboundGamePacket::MapItemData(p) => {
+            let decorations = p.decorations.as_ref().map(|items| {
+                items
+                    .iter()
+                    .map(|d| crate::world::maps::MapDecoration {
+                        kind: format!("{:?}", d.decoration_type),
+                        x: d.x,
+                        y: d.y,
+                        rotation: d.rot,
+                    })
+                    .collect()
+            });
+            let patch = p.color_patch.0.as_ref().map(|patch| {
+                (
+                    patch.width,
+                    patch.height,
+                    patch.start_x,
+                    patch.start_y,
+                    patch.map_colors.clone(),
+                )
+            });
+            let _ = event_tx.try_send(NetworkEvent::MapItemData {
+                map_id: p.map_id,
+                scale: p.scale,
+                locked: p.locked,
+                patch,
+                decorations,
+            });
+        }
         ClientboundGamePacket::UpdateAttributes(p) => {
             use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
             use azalea_registry::builtin::Attribute;
@@ -585,6 +614,16 @@ pub fn handle_game_packet(
             if !entries.is_empty() {
                 let _ = event_tx.try_send(NetworkEvent::RecipeToastAdd { entries });
             }
+            let _ = event_tx.try_send(NetworkEvent::RecipeBookAdd(p.clone()));
+        }
+        ClientboundGamePacket::RecipeBookRemove(p) => {
+            let _ = event_tx.try_send(NetworkEvent::RecipeBookRemove(p.recipes.clone()));
+        }
+        ClientboundGamePacket::RecipeBookSettings(p) => {
+            let _ = event_tx.try_send(NetworkEvent::RecipeBookSettings(p.book_settings.clone()));
+        }
+        ClientboundGamePacket::UpdateRecipes(p) => {
+            let _ = event_tx.try_send(NetworkEvent::UpdateRecipes(p.clone()));
         }
         ClientboundGamePacket::SetTitleText(p) => {
             let _ = event_tx.try_send(NetworkEvent::TitleText {

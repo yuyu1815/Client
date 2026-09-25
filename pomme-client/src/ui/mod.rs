@@ -23,6 +23,7 @@ pub mod merchant;
 pub mod object_glyph;
 pub mod pause;
 pub mod player_tab;
+pub mod recipe_book;
 pub mod server_dialog;
 pub mod server_list;
 pub mod spectator_menu;

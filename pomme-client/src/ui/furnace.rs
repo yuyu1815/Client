@@ -10,7 +10,7 @@ use azalea_inventory::ItemStack;
 use super::common::FONT_SIZE;
 use super::container::{
     ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_clipped_sprite,
-    push_cursor_stack, push_panel, push_recipe_book_unavailable, resolve_gesture,
+    push_cursor_stack, push_panel, resolve_gesture,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -74,6 +74,8 @@ pub fn build_furnace(
     last_click: &mut Option<(u16, Instant)>,
     gs: f32,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
+    recipe_book: &crate::ui::recipe_book::RecipeBookState,
+    native_recipes: bool,
 ) -> ContainerResult {
     let (background, lit_sprite, burn_sprite) = variant.sprites();
     let panel = push_panel(elements, screen_w, screen_h, gs, 166.0, background);
@@ -103,11 +105,26 @@ pub fn build_furnace(
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
 
-    push_recipe_book_unavailable(elements, &panel, 20.0, 34.0);
+    let recipe_id = crate::ui::container::push_recipe_entries(
+        elements,
+        &panel,
+        recipe_book,
+        cursor,
+        input.left_pressed,
+        native_recipes,
+        6,
+        1,
+        20.0,
+        34.0,
+    );
     push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
 
+    let mut gesture_input = *input;
+    if recipe_id.is_some() {
+        gesture_input.left_pressed = false;
+    }
     let (ops, clicked_outside) = resolve_gesture(
-        input,
+        &gesture_input,
         hovered,
         &panel,
         cursor,
@@ -122,6 +139,7 @@ pub fn build_furnace(
         clicked_outside,
         ops,
         button: None,
+        recipe_id,
     }
 }
 

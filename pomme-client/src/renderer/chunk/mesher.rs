@@ -1932,7 +1932,18 @@ fn emit_baked_model(
         let cutout_start = sink.cutout.len();
         let lights = quad.shade_face.map_or_else(
             || [snapshot.get_light(bx, by, bz); 4],
-            |dir| compute_face_ao(snapshot, registry, bx, by, bz, dir, Some(dir)),
+            |dir| {
+                compute_face_ao(
+                    snapshot,
+                    registry,
+                    bx,
+                    by,
+                    bz,
+                    dir,
+                    Some(dir),
+                    model.ambient_occlusion,
+                )
+            },
         );
         emit_face(
             sink,
@@ -2013,7 +2024,7 @@ fn emit_cube_faces(
         };
         let region = uv_map.get_region(face_tex);
         let (positions, uvs) = cube_face_geometry(*dir);
-        let lights = compute_face_ao(snapshot, registry, bx, by, bz, *dir, Some(*dir));
+        let lights = compute_face_ao(snapshot, registry, bx, by, bz, *dir, Some(*dir), true);
 
         let is_side = i >= 2;
         if let Some(overlay) = textures.side_overlay.as_deref().filter(|_| is_side) {
@@ -2603,7 +2614,18 @@ fn emit_multipart(
             &quad.uvs,
             quad.shade_face.map_or_else(
                 || [snapshot.get_light(bx, by, bz); 4],
-                |dir| compute_face_ao(snapshot, registry, bx, by, bz, dir, Some(dir)),
+                |dir| {
+                    compute_face_ao(
+                        snapshot,
+                        registry,
+                        bx,
+                        by,
+                        bz,
+                        dir,
+                        Some(dir),
+                        quad.ambient_occlusion,
+                    )
+                },
             ),
             region,
             tint,
@@ -2850,6 +2872,7 @@ fn compute_face_ao(
     bz: i32,
     dir: Direction,
     shade_face: Option<Direction>,
+    ambient_occlusion: bool,
 ) -> [f32; 4] {
     let s = |[dx, dy, dz]: [i32; 3]| -> f32 {
         shade_brightness(
@@ -2905,7 +2928,11 @@ fn compute_face_ao(
     let n = dir.offset();
     let dir_shade = snapshot.shade(shade_face);
     rows.map(|[side1, side2, corner]| {
-        let ao = super::block_ao::vertex_brightness(s(side1), s(side2), s(corner), shade0);
+        let ao = if ambient_occlusion {
+            super::block_ao::vertex_brightness(s(side1), s(side2), s(corner), shade0)
+        } else {
+            1.0
+        };
         let light = avg4(l(n), l(side1), l(side2), l(corner));
         ao * light * dir_shade
     })

@@ -211,6 +211,7 @@ pub fn build_beacon(
             clicked_outside,
             ops,
             button: None,
+            recipe_id: None,
         },
         effects: effect_selection,
     }

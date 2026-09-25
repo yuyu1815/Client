@@ -3,6 +3,134 @@ use std::path::{Path, PathBuf};
 
 use crate::assets::{AssetIndex, resolve_asset_path};
 use crate::resource_pack::ResourcePackManager;
+
+/// Vanilla 26.2 death events confirmed for the explicitly supported mob
+/// subset. Keep this explicit: not every EntityKind is living or has a
+/// matching `entity.<kind>.death` event (and some use shared/special keys).
+pub(crate) fn entity_death_sound(
+    kind: azalea_registry::builtin::EntityKind,
+) -> Option<&'static str> {
+    use azalea_registry::builtin::EntityKind::*;
+
+    Some(match kind {
+        Allay => "entity.allay.death",
+        Armadillo => "entity.armadillo.death",
+        Bat => "entity.bat.death",
+        Bee => "entity.bee.death",
+        Blaze => "entity.blaze.death",
+        Bogged => "entity.bogged.death",
+        Breeze => "entity.breeze.death",
+        Camel => "entity.camel.death",
+        // Omit cat/chicken/cow/pig/wolf (baby/sound-variant keys), horse
+        // variants, aquatic mobs, and shared-key cave spider/mooshroom until
+        // their exact selectors are modeled.
+        Creaking => "entity.creaking.death",
+        Creeper => "entity.creeper.death",
+        Drowned => "entity.drowned.death",
+        ElderGuardian => "entity.elder_guardian.death",
+        Enderman => "entity.enderman.death",
+        Endermite => "entity.endermite.death",
+        EnderDragon => "entity.ender_dragon.death",
+        Evoker => "entity.evoker.death",
+        Fox => "entity.fox.death",
+        Frog => "entity.frog.death",
+        Ghast => "entity.ghast.death",
+        Goat => "entity.goat.death",
+        Guardian => "entity.guardian.death",
+        Hoglin => "entity.hoglin.death",
+        Husk => "entity.husk.death",
+        IronGolem => "entity.iron_golem.death",
+        Llama => "entity.llama.death",
+        MagmaCube => "entity.magma_cube.death",
+        Ocelot => "entity.ocelot.death",
+        Panda => "entity.panda.death",
+        Parched => "entity.parched.death",
+        Parrot => "entity.parrot.death",
+        Phantom => "entity.phantom.death",
+        Piglin => "entity.piglin.death",
+        PiglinBrute => "entity.piglin_brute.death",
+        Pillager => "entity.pillager.death",
+        PolarBear => "entity.polar_bear.death",
+        Rabbit => "entity.rabbit.death",
+        Ravager => "entity.ravager.death",
+        Sheep => "entity.sheep.death",
+        Shulker => "entity.shulker.death",
+        Silverfish => "entity.silverfish.death",
+        Skeleton => "entity.skeleton.death",
+        Slime => "entity.slime.death",
+        SnowGolem => "entity.snow_golem.death",
+        Spider => "entity.spider.death",
+        Stray => "entity.stray.death",
+        Strider => "entity.strider.death",
+        Turtle => "entity.turtle.death",
+        Vex => "entity.vex.death",
+        Villager => "entity.villager.death",
+        Vindicator => "entity.vindicator.death",
+        WanderingTrader => "entity.wandering_trader.death",
+        Warden => "entity.warden.death",
+        Witch => "entity.witch.death",
+        Wither => "entity.wither.death",
+        WitherSkeleton => "entity.wither_skeleton.death",
+        Zoglin => "entity.zoglin.death",
+        Zombie => "entity.zombie.death",
+        ZombieVillager => "entity.zombie_villager.death",
+        ZombifiedPiglin => "entity.zombified_piglin.death",
+        _ => return None,
+    })
+}
+
+/// Vanilla `Monster` sounds use the hostile channel; remaining supported
+/// living entities use neutral.
+pub(crate) fn entity_death_category(kind: azalea_registry::builtin::EntityKind) -> u8 {
+    use azalea_registry::builtin::EntityKind::*;
+
+    if matches!(
+        kind,
+        Blaze
+            | Bogged
+            | Breeze
+            | Creeper
+            | Creaking
+            | Drowned
+            | EnderDragon
+            | ElderGuardian
+            | Enderman
+            | Endermite
+            | Evoker
+            | Ghast
+            | Guardian
+            | Hoglin
+            | Husk
+            | MagmaCube
+            | Phantom
+            | Parched
+            | Piglin
+            | PiglinBrute
+            | Pillager
+            | Ravager
+            | Shulker
+            | Silverfish
+            | Skeleton
+            | Slime
+            | Spider
+            | Stray
+            | Vex
+            | Vindicator
+            | Warden
+            | Witch
+            | Wither
+            | WitherSkeleton
+            | Zoglin
+            | Zombie
+            | ZombieVillager
+            | ZombifiedPiglin
+    ) {
+        crate::audio::SoundCategory::Hostile as u8
+    } else {
+        crate::audio::SoundCategory::Neutral as u8
+    }
+}
+
 use crate::util::JavaRandom;
 
 /// Vanilla `SoundEventRegistrationSerializer`'s `attenuation_distance` default.

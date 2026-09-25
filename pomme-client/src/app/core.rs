@@ -1721,6 +1721,15 @@ impl AppCore {
                 } => {
                     game.waypoints.apply(operation, waypoint);
                 }
+                NetworkEvent::MapItemData {
+                    map_id,
+                    scale,
+                    locked,
+                    patch,
+                    decorations,
+                } => {
+                    game.maps.apply(map_id, scale, locked, patch, decorations);
+                }
                 NetworkEvent::EntityArmorUpdate { entity_id, armor } => {
                     if entity_id == game.player.entity_id {
                         game.player.armor = armor;
@@ -2165,6 +2174,14 @@ impl AppCore {
                 }
                 NetworkEvent::RecipeToastAdd { entries } => {
                     game.toasts.add_recipes(entries);
+                }
+                NetworkEvent::RecipeBookAdd(packet) => game.recipe_book.add(packet),
+                NetworkEvent::RecipeBookRemove(ids) => game.recipe_book.remove(&ids),
+                NetworkEvent::RecipeBookSettings(settings) => {
+                    game.recipe_book.settings = Some(settings);
+                }
+                NetworkEvent::UpdateRecipes(update) => {
+                    game.recipe_book.updates = Some(update);
                 }
                 NetworkEvent::TitleText { spans } => {
                     game.title.set_title(spans);
@@ -3126,15 +3143,25 @@ impl AppCore {
                 NetworkEvent::EntityDamaged { id } => hurt_entity(game, id, None),
                 NetworkEvent::HurtAnimation { id, yaw } => hurt_entity(game, id, Some(yaw)),
                 NetworkEvent::EntityDied { id } => {
-                    // TODO: vanilla's event 3 plays every living entity's
-                    // getDeathSound client-side; pomme has no per-kind death
-                    // sound table yet, so only the player's is played here.
                     if id == game.player.entity_id {
                         let pitch = (fastrand::f32() - fastrand::f32()) * 0.2 + 1.0;
                         self.audio.play_world_sound(
                             &crate::audio::SoundRef::event("entity.player.death"),
                             crate::audio::CATEGORY_PLAYERS,
                             game.player.position,
+                            1.0,
+                            pitch,
+                            fastrand::u64(..),
+                        );
+                    } else if let Some(entity) = game.entity_store.living.get(&id)
+                        && let Some(event) =
+                            crate::audio::sounds::entity_death_sound(entity.entity_type)
+                    {
+                        let pitch = (fastrand::f32() - fastrand::f32()) * 0.2 + 1.0;
+                        self.audio.play_world_sound(
+                            &crate::audio::SoundRef::event(event),
+                            crate::audio::sounds::entity_death_category(entity.entity_type),
+                            entity.position,
                             1.0,
                             pitch,
                             fastrand::u64(..),
@@ -3305,6 +3332,7 @@ impl AppCore {
                     game.silent_entities.clear();
                     game.action_bar = None;
                     game.waypoints = crate::world::waypoints::WaypointMap::default();
+                    game.maps = crate::world::maps::MapStore::default();
                     // `ServerReconfigScreen` replaces any dialog; the server
                     // links carry over.
                     game.server_dialog = None;

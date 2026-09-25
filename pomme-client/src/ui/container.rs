@@ -31,9 +31,11 @@ pub struct ContainerResult {
     /// Menu button clicked this frame (`ServerboundContainerButtonClick`),
     /// e.g. an enchantment option.
     pub button: Option<u32>,
+    pub recipe_id: Option<u32>,
 }
 
 /// Input for a container screen this frame.
+#[derive(Clone, Copy)]
 pub struct ContainerInput {
     pub left_pressed: bool,
     pub right_pressed: bool,
@@ -164,15 +166,96 @@ pub fn push_clipped_sprite(
     elements.push(MenuElement::ScissorPop);
 }
 
-/// Recipe book controls stay explicitly unavailable until recipe-book data
-/// and actions are implemented (the 26.2 recipe display protocol differs).
-pub fn push_recipe_book_unavailable(
+/// Draws supported recipe outputs and returns the server-issued display ID
+/// clicked this frame. Unsupported/tag/composite outputs are intentionally
+/// hidden.
+pub fn push_recipe_entries(
     elements: &mut Vec<MenuElement>,
     panel: &Panel,
+    book: &crate::ui::recipe_book::RecipeBookState,
+    cursor: (f32, f32),
+    clicked: bool,
+    native: bool,
+    columns: usize,
+    rows: usize,
     x: f32,
     y: f32,
-) {
-    panel.label(elements, x, y, "Recipe book unavailable");
+) -> Option<u32> {
+    if !native {
+        panel.label(elements, x, y, "Recipe book unavailable");
+        return None;
+    }
+    let mut selected = None;
+    let mut index = 0;
+    for (id, display) in &book.displays {
+        let result = match display {
+            azalea_protocol::common::recipe::RecipeDisplayData::Shapeless(d) => &d.result,
+            azalea_protocol::common::recipe::RecipeDisplayData::Shaped(d) => &d.result,
+            azalea_protocol::common::recipe::RecipeDisplayData::Furnace(d) => &d.result,
+            azalea_protocol::common::recipe::RecipeDisplayData::Stonecutter(d) => &d.result,
+            azalea_protocol::common::recipe::RecipeDisplayData::Smithing(d) => &d.result,
+        };
+        let (name, count) = match result {
+            azalea_protocol::common::recipe::SlotDisplayData::Item(d) => {
+                (crate::player::inventory::item_resource_name(d.item), 1)
+            }
+            azalea_protocol::common::recipe::SlotDisplayData::ItemStack(d) => match &d.stack {
+                azalea_inventory::ItemStack::Present(stack) => (
+                    crate::player::inventory::item_resource_name(stack.kind),
+                    stack.count,
+                ),
+                azalea_inventory::ItemStack::Empty => continue,
+            },
+            _ => continue,
+        };
+        if columns == 0 || rows == 0 || index >= columns * rows {
+            break;
+        }
+        let (x, y) = (
+            x + (index % columns) as f32 * 19.0,
+            y + (index / columns) as f32 * 19.0,
+        );
+        if x + 18.0 > 176.0 || y + 18.0 > 166.0 {
+            break;
+        }
+        index += 1;
+        let px = panel.ox + x * panel.scale;
+        let py = panel.oy + y * panel.scale;
+        let size = 18.0 * panel.scale;
+        let rect = [px, py, size, size];
+        let hovered = crate::ui::common::hit_test(cursor, rect);
+        if hovered {
+            elements.push(MenuElement::Rect {
+                x: px,
+                y: py,
+                w: size,
+                h: size,
+                corner_radius: 0.0,
+                color: [0.35, 0.35, 0.35, 0.8],
+            });
+            if clicked {
+                selected = Some(*id);
+            }
+        }
+        elements.push(MenuElement::ItemIcon {
+            x: px,
+            y: py,
+            w: size,
+            h: size,
+            item_name: name,
+            tint: [1.0; 4],
+        });
+        if count > 1 {
+            elements.push(MenuElement::TextFlat {
+                x: px + size * 0.52,
+                y: py + size * 0.58,
+                text: count.to_string(),
+                scale: crate::ui::common::FONT_SIZE * panel.scale * 0.7,
+                color: [1.0; 4],
+            });
+        }
+    }
+    selected
 }
 
 /// Per-frame slot drawing context: positions slots in GUI units, substitutes

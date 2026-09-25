@@ -1,6 +1,5 @@
-// TODO: fall damage - track fall distance, reset on water entry, apply damage
-// on ground impact; Player.causeFallDamage returns false when may_fly, and
-// fall distance resets every tick while flying
+// Fall distance is tracked locally for movement parity; health damage remains
+// server-authoritative and is intentionally not predicted here.
 
 use glam::{DVec3, dvec3};
 use winit::keyboard::KeyCode;
@@ -580,6 +579,14 @@ fn apply_collision(
         on_ground,
         player.in_water,
     );
+    if horizontal_collision
+        && delta.y < 0.0
+        && touches_block_id(chunk_store, &player.bounding_box(), "honey_block")
+    {
+        // Honey's side collision caps a fall at -0.05 and cancels fall distance.
+        player.velocity.y = player.velocity.y.max(-0.05);
+        player.fall_distance = 0.0;
+    }
 
     if collided_x {
         player.velocity.x = 0.0;
@@ -759,8 +766,9 @@ fn is_on_climbable(chunks: &ChunkStore, aabb: &Aabb) -> bool {
     .any(|id| intersects_block_id(chunks, aabb, id))
 }
 
-/// Vanilla fluid pushing, restricted to horizontal neighbor-height gradients;
-/// absent-fluid slope vectors need block-face/context checks unavailable here.
+/// Vanilla fluid pushing from horizontal fluid-height gradients. Empty
+/// neighbors use the same-fluid block below as the lower height, as the fluid
+/// mesher does.
 fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
     use crate::world::block::{FluidKind, fluid};
 
@@ -790,7 +798,15 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
                     };
                     for (dx, dz) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
                         let neighbor = fluid(chunks.get_block_state(x + dx, y, z + dz));
-                        if neighbor.kind == kind {
+                        let neighbor = if neighbor.kind == kind {
+                            Some(neighbor)
+                        } else if neighbor.kind == FluidKind::Empty {
+                            let below = fluid(chunks.get_block_state(x + dx, y - 1, z + dz));
+                            (below.kind == kind).then_some(below)
+                        } else {
+                            None
+                        };
+                        if let Some(neighbor) = neighbor {
                             let neighbor_height = if neighbor.falling {
                                 1.0
                             } else {
@@ -809,6 +825,18 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
             player.velocity = (*player.velocity + flow / length * strength).into();
         }
     }
+}
+
+fn touches_block_id(chunks: &ChunkStore, aabb: &Aabb, id: &str) -> bool {
+    const EPSILON: f64 = 1.0e-7;
+    intersects_block_id(
+        chunks,
+        &Aabb::new(
+            aabb.min - dvec3(EPSILON, EPSILON, EPSILON),
+            aabb.max + dvec3(EPSILON, EPSILON, EPSILON),
+        ),
+        id,
+    )
 }
 
 fn intersects_block_id(chunks: &ChunkStore, aabb: &Aabb, id: &str) -> bool {
@@ -881,7 +909,17 @@ fn movement_speed(player: &LocalPlayer) -> f32 {
 }
 
 fn effective_gravity(player: &LocalPlayer) -> f64 {
-    player.attribute_value("minecraft:generic.gravity", GRAVITY)
+    let gravity = player.attribute_value("minecraft:generic.gravity", GRAVITY);
+    if player.velocity.y < 0.0
+        && player.effects.sorted_desc().iter().any(|effect| {
+            crate::mob_effect::info(effect.effect_id)
+                .is_some_and(|info| info.name == "slow_falling")
+        })
+    {
+        gravity.min(0.01)
+    } else {
+        gravity
+    }
 }
 
 fn movement_delta(
