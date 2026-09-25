@@ -1864,9 +1864,10 @@ mod tests {
     fn border_test_world() -> (ChunkStore, crate::world::border::WorldBorder) {
         crate::world::block::init("26.2");
         let mut chunks = ChunkStore::new(1);
-        let _chunk = chunks.chunk_storage.upsert(
-            azalea_core::position::ChunkPos::new(0, 0),
-            azalea_world::chunk::Chunk::default(),
+        chunks.partial_storage.set(
+            &azalea_core::position::ChunkPos::new(0, 0),
+            Some(azalea_world::chunk::Chunk::default()),
+            &mut chunks.chunk_storage,
         );
         let mut border = crate::world::border::WorldBorder::default();
         border.set_size(10.0);
