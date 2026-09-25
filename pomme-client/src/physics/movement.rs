@@ -117,7 +117,7 @@ pub fn tick(
 
     // Climbable blocks use the jump input for upward movement, independently
     // of the grounded/fluid jump path below.
-    if jump_held && is_on_climbable(chunk_store, &player.bounding_box()) {
+    if jump_held && is_on_climbable(chunk_store, player.position.into()) {
         player.velocity.y = 0.2;
     }
 
@@ -307,10 +307,7 @@ fn tick_land(
     let saved_vy = player.velocity.y;
     let speed = movement_speed(player);
     let friction = block_friction(chunk_store, player.position);
-    let climbing = is_on_climbable(chunk_store, &player.bounding_box());
-    if climbing {
-        player.fall_distance = 0.0;
-    }
+    let climbing = is_on_climbable(chunk_store, player.position.into());
     let accel = friction_influenced_speed(speed, player, friction);
     let (move_x, move_z) = movement_delta(forward, strafe, accel, sin_y_rot, cos_y_rot);
     player.velocity.x += move_x;
@@ -555,6 +552,12 @@ fn apply_collision(
         *player.velocity = dvec3(0.0, 0.0, 0.0);
         player.fall_distance = 0.0;
     }
+    if is_on_climbable(chunk_store, player.position.into()) {
+        player.fall_distance = 0.0;
+        delta.x = delta.x.clamp(-0.15, 0.15);
+        delta.z = delta.z.clamp(-0.15, 0.15);
+        delta.y = delta.y.max(-0.15);
+    }
     delta = back_off_from_edge(
         chunk_store,
         &aabb,
@@ -595,8 +598,12 @@ fn apply_collision(
         && delta.y < 0.0
         && touches_block_id(chunk_store, &player.bounding_box(), "honey_block")
     {
-        // Honey's side collision caps a fall at -0.05 and cancels fall distance.
-        player.velocity.y = player.velocity.y.max(-0.05);
+        // HoneyBlock.doSlideMovement throttles the fall to
+        // ((-0.05 - 0.08) * 0.98), with extra horizontal damping at speed.
+        let (horizontal_scale, slide_y) = honey_slide_movement(delta.y);
+        player.velocity.x *= horizontal_scale;
+        player.velocity.z *= horizontal_scale;
+        player.velocity.y = slide_y;
         player.fall_distance = 0.0;
     }
 
@@ -621,6 +628,15 @@ fn apply_collision(
         player.velocity.y = if landed_on_slime { -delta.y } else { 0.0 };
     }
 
+    if (horizontal_collision || input.performing_action(input::Action::Jump))
+        && intersects_block_id(chunk_store, &aabb, "powder_snow")
+        && has_leather_boots(player)
+    {
+        // LivingEntity.handleRelativeFrictionAndCalculateMovement lets a
+        // powder-snow walker climb with the same 0.2 upward impulse.
+        player.velocity.y = 0.2;
+    }
+
     if player.sprinting
         && horizontal_collision
         && forward > 0.0
@@ -628,6 +644,12 @@ fn apply_collision(
     {
         player.sprinting = false;
     }
+}
+
+fn honey_slide_movement(delta_y: f64) -> (f64, f64) {
+    let old_y = delta_y / f64::from(VERTICAL_DRAG) + 0.08;
+    let horizontal_scale = if old_y < -0.13 { -0.05 / old_y } else { 1.0 };
+    (horizontal_scale, (-0.05 - 0.08) * f64::from(VERTICAL_DRAG))
 }
 
 fn update_fall_distance(fall_distance: &mut f32, resolved_y: f64, on_ground: bool, in_water: bool) {
@@ -650,6 +672,14 @@ fn reset_fall_distance_for_tick(player: &mut LocalPlayer) {
 
 fn has_fall_distance_reset_effect(player: &LocalPlayer) -> bool {
     has_effect_named(player, "slow_falling") || has_effect_named(player, "levitation")
+}
+
+fn has_leather_boots(player: &LocalPlayer) -> bool {
+    matches!(
+        player.inventory.slot(8),
+        azalea_inventory::ItemStack::Present(stack)
+            if stack.kind == azalea_registry::builtin::ItemKind::LeatherBoots
+    )
 }
 
 fn has_effect_named(player: &LocalPlayer, name: &str) -> bool {
@@ -771,22 +801,37 @@ fn back_off_from_edge(
     dvec3(dx, delta.y, dz)
 }
 
-fn is_on_climbable(chunks: &ChunkStore, aabb: &Aabb) -> bool {
-    [
-        "ladder",
-        "vine",
-        "scaffolding",
-        "weeping_vines",
-        "weeping_vines_plant",
-        "twisting_vines",
-        "twisting_vines_plant",
-    ]
-    .iter()
-    .any(|id| intersects_block_id(chunks, aabb, id))
+fn is_on_climbable(chunks: &ChunkStore, position: DVec3) -> bool {
+    let (x, y, z) = (
+        position.x.floor() as i32,
+        position.y.floor() as i32,
+        position.z.floor() as i32,
+    );
+    let state = chunks.get_block_state(x, y, z);
+    let id = crate::world::block::block_id(state);
+    if matches!(
+        id,
+        "ladder"
+            | "vine"
+            | "scaffolding"
+            | "weeping_vines"
+            | "weeping_vines_plant"
+            | "twisting_vines"
+            | "twisting_vines_plant"
+    ) {
+        return true;
+    }
+    let props = crate::world::block::block_properties(state);
+    if id.ends_with("_trapdoor") && props.get("open") == Some("true") {
+        let below = chunks.get_block_state(x, y - 1, z);
+        return crate::world::block::block_id(below) == "ladder"
+            && crate::world::block::block_properties(below).get("facing") == props.get("facing");
+    }
+    false
 }
 
-/// Fluid pushing from same-level horizontal gradients. Lower-neighbor and
-/// falling-fluid flow require block motion/solid-face data not exposed here.
+/// Fluid flow follows FlowingFluid.getFlow; collision/full-face distinctions
+/// are approximated with the available has_collision state data.
 fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
     use crate::world::block::{FluidKind, fluid};
 
@@ -818,6 +863,7 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
                     let mut cell_flow = dvec3(0.0, 0.0, 0.0);
                     for (dx, dz) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
                         let neighbor = fluid(chunks.get_block_state(x + dx, y, z + dz));
+                        let neighbor_state = chunks.get_block_state(x + dx, y, z + dz);
                         if neighbor.kind == kind {
                             let neighbor_height = if neighbor.falling {
                                 1.0
@@ -827,6 +873,32 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
                             let difference = f64::from(height - neighbor_height);
                             cell_flow.x += dx as f64 * difference;
                             cell_flow.z += dz as f64 * difference;
+                        } else if neighbor.kind == FluidKind::Empty
+                            && !crate::world::block::has_collision(neighbor_state)
+                        {
+                            let below = fluid(chunks.get_block_state(x + dx, y - 1, z + dz));
+                            if below.kind == kind {
+                                let difference = f64::from(height - (below.height() - 0.888_888_9));
+                                cell_flow.x += dx as f64 * difference;
+                                cell_flow.z += dz as f64 * difference;
+                            }
+                        }
+                    }
+                    if current.falling {
+                        let has_solid_side =
+                            [(0, -1), (0, 1), (-1, 0), (1, 0)]
+                                .into_iter()
+                                .any(|(dx, dz)| {
+                                    let side = chunks.get_block_state(x + dx, y, z + dz);
+                                    let above = chunks.get_block_state(x + dx, y + 1, z + dz);
+                                    crate::world::block::block_id(side) != "ice"
+                                        && crate::world::block::block_id(above) != "ice"
+                                        && (crate::world::block::has_collision(side)
+                                            || crate::world::block::has_collision(above))
+                                });
+                        if has_solid_side {
+                            let horizontal = cell_flow.normalize_or_zero();
+                            cell_flow = (horizontal + dvec3(0.0, -6.0, 0.0)).normalize_or_zero();
                         }
                     }
                     let cell_length = cell_flow.length();
@@ -1363,6 +1435,14 @@ mod tests {
         assert!(!player.on_ground);
         assert!(!player.horizontal_collision);
         assert_eq!(player.fall_distance, 4.0);
+    }
+
+    #[test]
+    fn honey_slide_matches_vanilla_speed_throttle() {
+        let (horizontal_scale, vertical) = honey_slide_movement(-0.2744);
+        assert!((horizontal_scale - 0.25).abs() < 1.0e-6);
+        assert!((vertical - (-0.1274)).abs() < 1.0e-6);
+        assert_eq!(honey_slide_movement(-0.1).0, 1.0);
     }
 
     #[test]

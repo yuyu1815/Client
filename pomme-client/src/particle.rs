@@ -636,6 +636,7 @@ pub enum ServerParticleKind {
     Smoke,
     Totem,
     Dust,
+    Block,
 }
 
 /// Wire options retained with a server particle. Only known exact codecs are
@@ -644,6 +645,7 @@ pub enum ServerParticleKind {
 pub enum ServerParticleOptions {
     Simple,
     Dust { packed_color: i32, scale: f32 },
+    Block(BlockState),
 }
 
 impl ServerParticleKind {
@@ -659,6 +661,7 @@ impl ServerParticleKind {
             69 => Some(Self::Smoke),
             75 => Some(Self::Totem),
             21 => Some(Self::Dust),
+            1 => Some(Self::Block),
             _ => None,
         }
     }
@@ -1156,6 +1159,9 @@ impl ParticleStore {
         max_speed: f64,
         count: i32,
         camera_pos: DVec3,
+        registry: &BlockRegistry,
+        chunks: &ChunkStore,
+        biome_climate: &HashMap<u32, BiomeClimate>,
     ) {
         let Some(count) = packet_particle_count(count) else {
             return;
@@ -1169,6 +1175,9 @@ impl ParticleStore {
                 pos,
                 dist * max_speed,
                 camera_pos,
+                registry,
+                chunks,
+                biome_climate,
             );
             return;
         }
@@ -1186,6 +1195,9 @@ impl ParticleStore {
                 pos + scatter,
                 vel,
                 camera_pos,
+                registry,
+                chunks,
+                biome_climate,
             );
         }
     }
@@ -1201,6 +1213,9 @@ impl ParticleStore {
         pos: DVec3,
         vel: DVec3,
         camera_pos: DVec3,
+        registry: &BlockRegistry,
+        chunks: &ChunkStore,
+        biome_climate: &HashMap<u32, BiomeClimate>,
     ) {
         if !(override_limiter || kind.override_limiter())
             && camera_pos.distance_squared(pos) > 1024.0
@@ -1225,6 +1240,53 @@ impl ParticleStore {
             }
             ServerParticleKind::Totem => {
                 self.push(Particle::totem(pos, vel, &self.end_rod_frames));
+            }
+            ServerParticleKind::Block => {
+                let ServerParticleOptions::Block(state) = options else {
+                    return;
+                };
+                let state_id = block_id(state);
+                if is_air(state)
+                    || matches!(state_id, "barrier" | "structure_void" | "moving_piston")
+                {
+                    return;
+                }
+                let Some(faces) = registry.get_textures(state) else {
+                    return;
+                };
+                let mut color = [0.6; 3];
+                if faces.tint != Tint::None && state_id != "grass_block" {
+                    let tint = match faces.tint {
+                        Tint::Redstone => crate::world::block::redstone_wire_rgb(state),
+                        Tint::Stem => crate::world::block::stem_rgb(state),
+                        tint => self.blend_tint(
+                            tint,
+                            BlockPos::new(
+                                pos.x.floor() as i32,
+                                pos.y.floor() as i32,
+                                pos.z.floor() as i32,
+                            ),
+                            chunks,
+                            biome_climate,
+                        ),
+                    };
+                    for (channel, tint) in color.iter_mut().zip(tint) {
+                        *channel *= tint;
+                    }
+                }
+                let block_pos = BlockPos::new(
+                    pos.x.floor() as i32,
+                    pos.y.floor() as i32,
+                    pos.z.floor() as i32,
+                );
+                self.push(Particle::terrain(
+                    pos,
+                    vel,
+                    self.uv_map
+                        .get_region(faces.particle.as_deref().unwrap_or(&faces.top)),
+                    color,
+                    world_brightness(chunks, block_pos.x, block_pos.y, block_pos.z),
+                ));
             }
             ServerParticleKind::Dust => {
                 if let ServerParticleOptions::Dust {
@@ -1408,11 +1470,21 @@ pub(crate) fn packet_particle_count(count: i32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtlasUVMap, ExplosionParticleInfo, Particle, ParticleOptions, TrackedExplosion, Weighted,
-        animated_frame_index, dust_quad_size, dvec3, explosion_emitter_child,
-        explosion_frame_index, packet_particle_count, plan_explosion_particles,
-        supports_explosion_particle,
+        AtlasUVMap, ExplosionParticleInfo, Particle, ParticleOptions, ServerParticleKind,
+        TrackedExplosion, Weighted, animated_frame_index, dust_quad_size, dvec3,
+        explosion_emitter_child, explosion_frame_index, packet_particle_count,
+        plan_explosion_particles, supports_explosion_particle,
     };
+
+    #[test]
+    fn block_particle_id_is_typed_and_unhandled_payload_kinds_stay_unknown() {
+        assert!(matches!(
+            ServerParticleKind::from_id(1),
+            Some(ServerParticleKind::Block)
+        ));
+        assert!(ServerParticleKind::from_id(43).is_none()); // item requires its own codec
+        assert!(ServerParticleKind::from_id(44).is_none()); // vibration requires target data
+    }
 
     #[test]
     fn dust_constructor_matches_vanilla_scaling_and_seeded_randomness() {
@@ -2234,7 +2306,7 @@ mod tests {
         assert!(matches!(Kind::from_id(69), Some(Kind::Smoke)));
         assert!(matches!(Kind::from_id(75), Some(Kind::Totem)));
         assert!(matches!(Kind::from_id(21), Some(Kind::Dust))); // RGB + scale decoded separately.
-        assert!(Kind::from_id(1).is_none()); // Block requires a block-state ID.
+        assert!(matches!(Kind::from_id(1), Some(Kind::Block))); // Block carries a block-state ID.
         assert!(Kind::from_id(54).is_none()); // Item requires an item stack.
         assert!(Kind::from_id(55).is_none()); // Vibration requires a destination.
     }

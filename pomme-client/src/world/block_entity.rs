@@ -63,8 +63,9 @@ fn component_plain_text(value: &serde_json::Value) -> String {
     }
 }
 
-// TODO: Feed `sign_lines` into the block-entity world renderer; this change
-// only uses sign text for the editor and does not draw text in the world.
+// TODO: Sign world text is still not rendered. `sign_lines` currently flattens
+// component JSON to plain text, so correct vanilla styling, wrapping, dye/glow
+// colors, and fullbright glow require the world-text renderer path.
 /// Blocks the block-entity pipeline draws in place of chunk geometry. The
 /// chunk mesher skips these (their block models are particle-texture-only,
 /// which would otherwise fall back to a full cube of that texture); other
@@ -184,6 +185,7 @@ pub fn is_block_entity_block(name: &str) -> bool {
 
 /// Resolve only unambiguous moving-piston payloads whose moved block state has
 /// no properties. Unsupported/malformed payloads intentionally remain inert.
+/// This is collision support only; moving pistons still have no render path.
 pub fn moving_block_collision(nbt: &NbtCompound) -> Option<(BlockState, glam::DVec3)> {
     use simdnbt::owned::NbtTag;
 

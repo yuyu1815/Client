@@ -1834,6 +1834,13 @@ fn parse_level_particles(
             packed_color: i32::azalea_read(cur)?,
             scale: f32::azalea_read(cur)?,
         },
+        crate::particle::ServerParticleKind::Block => {
+            let id = u32::azalea_read_var(cur)?;
+            let Some(state) = crate::world::block::try_state(id) else {
+                return Ok(None);
+            };
+            crate::particle::ServerParticleOptions::Block(state)
+        }
         _ => crate::particle::ServerParticleOptions::Simple,
     };
     Ok(Some(NetworkEvent::LevelParticles {

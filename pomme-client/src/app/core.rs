@@ -2914,6 +2914,9 @@ impl AppCore {
                         max_speed as f64,
                         count,
                         renderer.camera_render_position(),
+                        renderer.registry(),
+                        &game.chunk_store,
+                        &game.biome_climate,
                     );
                 }
                 NetworkEvent::TotemUsed { entity_id } => {
