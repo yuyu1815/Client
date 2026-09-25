@@ -109,7 +109,7 @@ pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> Conn
         if let Err(e) = connect_to_server(args, event_tx.clone(), game_packet_tx, packet_rx).await {
             tracing::error!("Network error: {e}");
             let reason = friendly_error_reason(&e);
-            let _ = event_tx.try_send(NetworkEvent::Disconnected { reason });
+            send_terminal_event(&event_tx, NetworkEvent::Disconnected { reason }).await;
         }
     });
     ConnectionHandle {
@@ -178,8 +178,13 @@ pub async fn connect_to_server(
         );
     }
 
-    let (profile_id, profile_name) =
-        login_sequence(&mut conn, &uuid, access_token.as_deref()).await?;
+    let (profile_id, profile_name) = login_sequence(
+        &mut conn,
+        &uuid,
+        access_token.as_deref(),
+        &mut server_cookies,
+    )
+    .await?;
 
     // 1.20.1 and older have no configuration phase: the server enters play as
     // soon as it has sent the profile, and the registries ride in the game
@@ -363,16 +368,24 @@ fn resolve_wire(probed: Option<i32>, selected: i32) -> Result<i32, i32> {
 }
 
 /// Returns the accepted game profile id and exact scoreboard name.
+const PHASE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 async fn login_sequence(
     conn: &mut Conn,
     uuid: &uuid::Uuid,
     access_token: Option<&str>,
+    server_cookies: &mut std::collections::HashMap<
+        azalea_registry::identifier::Identifier,
+        Vec<u8>,
+    >,
 ) -> Result<(uuid::Uuid, String), ConnectionError> {
     loop {
         // Read the raw frame ourselves so older-version layouts can be
         // rewritten before the typed decode (26.1's login_finished lacks the
         // trailing session id).
-        let raw = conn.reader.read().await?;
+        let raw = tokio::time::timeout(PHASE_READ_TIMEOUT, conn.reader.read())
+            .await
+            .map_err(|_| phase_read_timeout())??;
         let raw = match super::translate::active() {
             Some(t) => t.translate_login_frame(raw),
             None => raw,
@@ -404,14 +417,20 @@ async fn login_sequence(
             ClientboundLoginPacket::CookieRequest(p) => {
                 conn.write_packet(
                     azalea_protocol::packets::login::s_cookie_response::ServerboundCookieResponse {
+                        payload: server_cookies.get(&p.key).cloned(),
                         key: p.key,
-                        payload: None,
                     },
                 )
                 .await?;
             }
-            _ => {
-                tracing::debug!("Login packet: {:?}", std::mem::discriminant(&packet));
+            ClientboundLoginPacket::CustomQuery(p) => {
+                conn.write_packet(
+                    azalea_protocol::packets::login::s_custom_query_answer::ServerboundCustomQueryAnswer {
+                        transaction_id: p.transaction_id,
+                        data: None,
+                    },
+                )
+                .await?;
             }
         }
     }
@@ -518,10 +537,11 @@ async fn config_sequence(
             packet
         } else {
             tokio::select! {
-                raw = conn.reader.read() => {
+                raw = tokio::time::timeout(PHASE_READ_TIMEOUT, conn.reader.read()) => {
                     let raw = match raw {
-                        Ok(raw) => raw,
-                        Err(e) => {
+                        Err(_) => return Err(phase_read_timeout()),
+                        Ok(Ok(raw)) => raw,
+                        Ok(Err(e)) => {
                             skip_malformed_packet(e)?;
                             continue;
                         }
@@ -751,12 +771,18 @@ async fn config_sequence(
                     p.id,
                     p.required
                 );
-                let _ = event_tx.try_send(NetworkEvent::ResourcePackPush {
-                    id: p.id,
-                    url: p.url.clone(),
-                    hash: p.hash.clone(),
-                    required: p.required,
-                });
+                event_tx
+                    .try_send(NetworkEvent::ResourcePackPush {
+                        id: p.id,
+                        url: p.url.clone(),
+                        hash: p.hash.clone(),
+                        required: p.required,
+                    })
+                    .map_err(|e| {
+                        ConnectionError::Disconnected(format!(
+                            "Could not deliver resource-pack push to app: {e}"
+                        ))
+                    })?;
                 write_config_packet(
                     conn,
                     ServerboundConfigPacket::ResourcePack(
@@ -770,10 +796,35 @@ async fn config_sequence(
             }
             ClientboundConfigPacket::ResourcePackPop(p) => {
                 tracing::info!("Server popping resource pack {:?}", p.id);
-                let _ = event_tx.try_send(NetworkEvent::ResourcePackPop { id: p.id });
+                event_tx
+                    .try_send(NetworkEvent::ResourcePackPop { id: p.id })
+                    .map_err(|e| {
+                        ConnectionError::Disconnected(format!(
+                            "Could not deliver resource-pack pop to app: {e}"
+                        ))
+                    })?;
             }
             _ => {
                 tracing::debug!("Config packet: {:?}", std::mem::discriminant(&packet));
+            }
+        }
+    }
+}
+
+fn phase_read_timeout() -> ConnectionError {
+    ConnectionError::Disconnected(format!(
+        "server stopped responding during login/configuration for {} seconds",
+        PHASE_READ_TIMEOUT.as_secs()
+    ))
+}
+
+async fn send_terminal_event(event_tx: &Sender<NetworkEvent>, mut event: NetworkEvent) {
+    loop {
+        match event_tx.try_send(event) {
+            Ok(()) | Err(crossbeam_channel::TrySendError::Disconnected(_)) => return,
+            Err(crossbeam_channel::TrySendError::Full(returned)) => {
+                event = returned;
+                tokio::task::yield_now().await;
             }
         }
     }
@@ -790,6 +841,7 @@ fn extract_biome_climate(
         for (id, (_, nbt)) in registry.map.iter().enumerate() {
             let temp = nbt_float(nbt, "temperature").unwrap_or(0.8);
             let downfall = nbt_float(nbt, "downfall").unwrap_or(0.4);
+            let has_precipitation = nbt_bool(nbt, "has_precipitation").unwrap_or(true);
 
             let effects = nbt.get("effects").and_then(|v| match v {
                 simdnbt::owned::NbtTag::Compound(c) => Some(c),
@@ -826,6 +878,7 @@ fn extract_biome_climate(
                 BiomeClimate {
                     temperature: temp,
                     downfall,
+                    has_precipitation,
                     grass_color_override,
                     grass_color_modifier,
                     foliage_color_override,
@@ -837,6 +890,13 @@ fn extract_biome_climate(
     }
     tracing::info!("Extracted {} biome climate entries", result.len());
     result
+}
+
+fn nbt_bool(nbt: &simdnbt::owned::NbtCompound, key: &str) -> Option<bool> {
+    nbt.get(key).and_then(|v| match v {
+        simdnbt::owned::NbtTag::Byte(b) => Some(*b != 0),
+        _ => None,
+    })
 }
 
 fn nbt_float(nbt: &simdnbt::owned::NbtCompound, key: &str) -> Option<f32> {
@@ -1358,7 +1418,11 @@ mod tests {
             pomme_protocol::wire::read_varint(&expected_native, &mut expected_native_pos).unwrap();
         let wire_id = pomme_protocol::PacketTable::for_protocol(770)
             .unwrap()
-            .id(Phase::Game, Direction::Serverbound, "set_creative_mode_slot")
+            .id(
+                Phase::Game,
+                Direction::Serverbound,
+                "set_creative_mode_slot",
+            )
             .unwrap();
         let mut expected = Vec::new();
         pomme_protocol::wire::write_varint(&mut expected, wire_id);
@@ -1458,6 +1522,54 @@ mod tests {
             .await
             .expect("peer packet read timed out")
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn login_custom_query_is_answered_with_same_transaction_id_and_no_payload() {
+        use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
+        use azalea_protocol::packets::login::c_custom_query::ClientboundCustomQuery;
+        use azalea_protocol::packets::login::s_custom_query_answer::ServerboundCustomQueryAnswer;
+        use uuid::Uuid;
+
+        use crate::net::conn::memory_pipes;
+
+        let (client_end, server_end) = memory_pipes();
+        let mut peer = Conn::from_memory(server_end);
+        let (event_tx, _event_rx) = crossbeam_channel::bounded(64);
+        let (packet_tx, packet_rx) = mpsc::unbounded_channel();
+        let client = tokio::spawn(connect_to_server(
+            ConnectArgs {
+                transport: Transport::Memory(client_end),
+                username: "Steve".into(),
+                uuid: Uuid::nil(),
+                access_token: None,
+                view_distance: 8,
+                chat_options: crate::ui::chat::ChatOptions::default(),
+                server_cookies: Default::default(),
+            },
+            event_tx,
+            packet_tx,
+            packet_rx,
+        ));
+
+        let _: ServerboundHandshakePacket = read_test_packet(&mut peer).await;
+        let _: ServerboundLoginPacket = read_test_packet(&mut peer).await;
+        peer.write_packet(ClientboundCustomQuery {
+            transaction_id: 0x1234,
+            identifier: "example:unknown".into(),
+            data: azalea_buf::UnsizedByteArray(vec![]),
+        })
+        .await
+        .unwrap();
+        let response: ServerboundLoginPacket = read_test_packet(&mut peer).await;
+        assert!(matches!(
+            response,
+            ServerboundLoginPacket::CustomQueryAnswer(ServerboundCustomQueryAnswer {
+                transaction_id: 0x1234,
+                data: None
+            })
+        ));
+        client.abort();
     }
 
     async fn code_of_conduct_peer() -> (

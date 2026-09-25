@@ -70,14 +70,15 @@ pub fn info(effect_id: u32) -> Option<&'static MobEffectInfo> {
 /// Vanilla `MobEffectInstance.INFINITE_DURATION`.
 pub const INFINITE_DURATION: i32 = -1;
 
-// TODO: amplifier and show_particles once the inventory effect panel and
-// effect particles are ported.
 #[derive(Clone)]
 pub struct MobEffectInstance {
     pub effect_id: u32,
+    /// Effect strength level, zero-based (vanilla amplifier).
+    pub amplifier: u8,
     /// Remaining ticks; `-1` = infinite.
     pub duration: i32,
     pub ambient: bool,
+    pub show_particles: bool,
     pub show_icon: bool,
 }
 
@@ -160,8 +161,10 @@ mod tests {
     fn inst(effect_id: u32, duration: i32, ambient: bool) -> MobEffectInstance {
         MobEffectInstance {
             effect_id,
+            amplifier: 0,
             duration,
             ambient,
+            show_particles: true,
             show_icon: true,
         }
     }

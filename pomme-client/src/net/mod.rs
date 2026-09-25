@@ -88,6 +88,13 @@ pub enum CriticalHitKind {
     Enchanted,
 }
 
+#[derive(Clone, Copy)]
+pub enum CustomChatCompletionsAction {
+    Add,
+    Remove,
+    Set,
+}
+
 pub enum NetworkEvent {
     Connected {
         profile_name: String,
@@ -261,6 +268,9 @@ pub enum NetworkEvent {
         menu_type: azalea_registry::builtin::MenuKind,
         title: String,
     },
+    OpenBook {
+        hand: azalea_protocol::packets::game::s_interact::InteractionHand,
+    },
     ContainerClosed,
     CursorItem {
         item: ItemStack,
@@ -336,6 +346,10 @@ pub enum NetworkEvent {
     ScoreboardTeam {
         name: String,
         display_name: Vec<crate::ui::text::TextSpan>,
+        nametag_visibility: azalea_protocol::packets::game::c_set_player_team::NameTagVisibility,
+        collision_rule: azalea_protocol::packets::game::c_set_player_team::CollisionRule,
+        friendly_fire: bool,
+        see_friendly_invisibles: bool,
         prefix: Vec<crate::ui::text::TextSpan>,
         suffix: Vec<crate::ui::text::TextSpan>,
         color: [f32; 4],
@@ -353,6 +367,10 @@ pub enum NetworkEvent {
     },
     CommandTree {
         tree: Arc<crate::net::commands::CommandTree>,
+    },
+    CustomChatCompletions {
+        action: CustomChatCompletionsAction,
+        entries: Vec<String>,
     },
     CommandSuggestions {
         id: u32,
@@ -443,8 +461,10 @@ pub enum NetworkEvent {
         name: String,
     },
     PlayerAbilitiesChanged {
+        invulnerable: bool,
         flying: bool,
         can_fly: bool,
+        instant_break: bool,
         flying_speed: f32,
         walking_speed: f32,
     },
@@ -507,11 +527,11 @@ pub enum NetworkEvent {
         pos: BlockPos,
         data: u32,
     },
-    /// `ClientboundLevelParticles`. The handler drops unimplemented particle
-    /// kinds, but preserves the signed count and limiter flags for the
-    /// consumer.
+    /// Supported `ClientboundLevelParticles` kinds and their decoded options.
+    /// Unsupported payload types are dropped without guessing their framing.
     LevelParticles {
         kind: crate::particle::ServerParticleKind,
+        options: crate::particle::ServerParticleOptions,
         override_limiter: bool,
         always_show: bool,
         pos: DVec3,
@@ -545,7 +565,7 @@ pub enum NetworkEvent {
     },
     EntityPose {
         id: i32,
-        is_crouching: bool,
+        pose: crate::entity::EntityPose,
     },
     /// LivingEntity metadata index 14 (SLEEPING_POS): Some while in a bed.
     /// Vanilla `isSleeping()` is `getSleepingPos().isPresent()`.

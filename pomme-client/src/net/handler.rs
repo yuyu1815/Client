@@ -393,6 +393,9 @@ pub fn handle_game_packet(
                 title: p.title.to_string(),
             });
         }
+        ClientboundGamePacket::OpenBook(p) => {
+            let _ = event_tx.try_send(NetworkEvent::OpenBook { hand: p.hand });
+        }
         ClientboundGamePacket::ContainerClose(_) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerClosed);
         }
@@ -421,8 +424,10 @@ pub fn handle_game_packet(
                 entity_id: p.entity_id.0,
                 effect: crate::mob_effect::MobEffectInstance {
                     effect_id: p.mob_effect.to_u32(),
+                    amplifier: p.data.amplifier.clamp(0, u8::MAX as i32) as u8,
                     duration: p.data.duration,
                     ambient: p.data.flags.ambient,
+                    show_particles: p.data.flags.show_particles,
                     show_icon: p.data.flags.show_icon,
                 },
             });
@@ -473,10 +478,11 @@ pub fn handle_game_packet(
             }
         }
         ClientboundGamePacket::PlayerAbilities(p) => {
-            // TODO: invulnerable and instant_break flags
             let _ = event_tx.try_send(NetworkEvent::PlayerAbilitiesChanged {
+                invulnerable: p.flags.invulnerable,
                 flying: p.flags.flying,
                 can_fly: p.flags.can_fly,
+                instant_break: p.flags.instant_break,
                 flying_speed: p.flying_speed,
                 walking_speed: p.walking_speed,
             });
@@ -957,7 +963,7 @@ pub fn handle_game_packet(
                 {
                     let _ = event_tx.try_send(NetworkEvent::EntityPose {
                         id: p.id.0,
-                        is_crouching: matches!(pose, azalea_entity::Pose::Crouching),
+                        pose: crate::entity::EntityPose::from_vanilla_id(*pose as i32),
                     });
                 }
                 // Index 14 = LivingEntity SLEEPING_POS (OptionalBlockPos).
@@ -1329,11 +1335,21 @@ pub fn handle_game_packet(
             let _ = event_tx.try_send(NetworkEvent::ClearDialog);
         }
         ClientboundGamePacket::CustomChatCompletions(p) => {
-            tracing::debug!(
-                "Custom chat completions: {:?} ({} entries)",
-                p.action,
-                p.entries.len()
-            );
+            let action = match p.action {
+                azalea_protocol::packets::game::c_custom_chat_completions::Action::Add => {
+                    super::CustomChatCompletionsAction::Add
+                }
+                azalea_protocol::packets::game::c_custom_chat_completions::Action::Remove => {
+                    super::CustomChatCompletionsAction::Remove
+                }
+                azalea_protocol::packets::game::c_custom_chat_completions::Action::Set => {
+                    super::CustomChatCompletionsAction::Set
+                }
+            };
+            let _ = event_tx.try_send(NetworkEvent::CustomChatCompletions {
+                action,
+                entries: p.entries.clone(),
+            });
         }
         _other => {}
     }
@@ -1355,6 +1371,10 @@ fn send_scoreboard_team(
         color,
         fill_color: parameters.color.color().map(crate::ui::common::rgb),
         sidebar_slot,
+        nametag_visibility: parameters.nametag_visibility,
+        collision_rule: parameters.collision_rule,
+        friendly_fire: parameters.options & 0x01 != 0,
+        see_friendly_invisibles: parameters.options & 0x02 != 0,
         members,
     });
 }
@@ -1732,10 +1752,20 @@ fn parse_level_particles(
         None => type_id,
     };
     let Some(kind) = crate::particle::ServerParticleKind::from_id(type_id) else {
+        // The packet is already length-framed by the transport. Do not guess
+        // this type's payload size or reinterpret payload bytes as simple.
         return Ok(None);
+    };
+    let options = match kind {
+        crate::particle::ServerParticleKind::Dust => crate::particle::ServerParticleOptions::Dust {
+            packed_color: i32::azalea_read(cur)?,
+            scale: f32::azalea_read(cur)?,
+        },
+        _ => crate::particle::ServerParticleOptions::Simple,
     };
     Ok(Some(NetworkEvent::LevelParticles {
         kind,
+        options,
         override_limiter,
         always_show,
         pos,

@@ -123,24 +123,42 @@ pub fn resolve_collision(
             .expand(dvec3(0.0, -step_height, 0.0));
         let step_aabbs = collect_block_aabbs(chunk_store, &step_expanded);
 
-        let mut up_vel = step_height;
+        // Vanilla compares two step candidates: horizontal sweep before the
+        // ascent, and ascent against the horizontally expanded player box.
+        let horizontal = dvec3(velocity.x, 0.0, velocity.z);
+        let mut up_a = step_height;
         for block in &step_aabbs {
-            if up_vel.abs() < COLLISION_EPSILON {
-                up_vel = 0.0;
+            if up_a.abs() < COLLISION_EPSILON {
+                up_a = 0.0;
                 break;
             }
-            up_vel = block.clip_y_collide(&player_aabb, up_vel);
+            up_a = block.clip_y_collide(&player_aabb, up_a);
         }
-        let raised = player_aabb.offset(dvec3(0.0, up_vel, 0.0));
+        let raised_a = player_aabb.offset(dvec3(0.0, up_a, 0.0));
+        let (move_a, _) = collide_along_axes(&step_aabbs, raised_a, horizontal.into());
 
-        let (step_resolved, _) = collide_along_axes(
-            &step_aabbs,
-            raised,
-            Velocity::new(velocity.x, 0.0, velocity.z),
-        );
+        let swept = player_aabb.expand(dvec3(velocity.x, 0.0, velocity.z));
+        let mut up_b = step_height;
+        for block in &step_aabbs {
+            if up_b.abs() < COLLISION_EPSILON {
+                up_b = 0.0;
+                break;
+            }
+            up_b = block.clip_y_collide(&swept, up_b);
+        }
+        let raised_b = player_aabb.offset(dvec3(0.0, up_b, 0.0));
+        let (move_b, _) = collide_along_axes(&step_aabbs, raised_b, horizontal.into());
+        let (up, step_resolved) = if move_b.x * move_b.x + move_b.z * move_b.z
+            > move_a.x * move_a.x + move_a.z * move_a.z
+        {
+            (up_b, move_b)
+        } else {
+            (up_a, move_a)
+        };
 
+        let raised = player_aabb.offset(dvec3(0.0, up, 0.0));
         let after_move = raised.offset(dvec3(step_resolved.x, 0.0, step_resolved.z));
-        let mut down_vel = -(up_vel - velocity.y);
+        let mut down_vel = -(up - velocity.y);
         for block in &step_aabbs {
             if down_vel.abs() < COLLISION_EPSILON {
                 down_vel = 0.0;
@@ -149,13 +167,13 @@ pub fn resolve_collision(
             down_vel = block.clip_y_collide(&after_move, down_vel);
         }
 
-        let step_total = dvec3(step_resolved.x, up_vel + down_vel, step_resolved.z);
+        let step_total = dvec3(step_resolved.x, up + down_vel, step_resolved.z);
 
         let step_h_dist = step_total.x * step_total.x + step_total.z * step_total.z;
         let orig_h_dist = resolved.x * resolved.x + resolved.z * resolved.z;
 
         if step_h_dist > orig_h_dist {
-            let step_on_ground = down_vel != -(up_vel - velocity.y);
+            let step_on_ground = down_vel != -(up - velocity.y);
             return (step_total, step_on_ground || on_ground);
         }
     }

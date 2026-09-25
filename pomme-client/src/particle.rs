@@ -53,6 +53,7 @@ enum Kind {
     /// Standard explosion block effect `SMOKE`.
     Smoke,
     Crit,
+    Dust,
 }
 
 impl Kind {
@@ -275,6 +276,33 @@ impl Particle {
         p
     }
 
+    fn dust(pos: DVec3, velocity: DVec3, color: [f32; 3], scale: f32, sprite: AtlasRegion) -> Self {
+        let size = 0.1 * scale.clamp(0.01, 4.0);
+        let mut particle = Self {
+            kind: Kind::Dust,
+            pos,
+            prev_pos: pos,
+            vel: velocity,
+            age: 0,
+            lifetime: 8,
+            on_ground: false,
+            stopped_by_collision: false,
+            gravity: 0.0,
+            friction: 0.96,
+            size,
+            base_size: size,
+            u0: sprite.u_min,
+            u1: sprite.u_max,
+            v0: sprite.v_min,
+            v1: sprite.v_max,
+            color,
+            alpha: 1.0,
+            light: 0.0,
+        };
+        particle.set_sprite(&sprite);
+        particle
+    }
+
     /// `CritParticle` provider; constructor performs one synchronous particle
     /// tick.
     fn crit(
@@ -385,7 +413,9 @@ impl Particle {
         self.age += 1;
         self.vel.y -= 0.04 * self.gravity;
         match self.kind {
-            Kind::Terrain | Kind::Smoke | Kind::Poof => self.move_with_collision(chunks),
+            Kind::Terrain | Kind::Smoke | Kind::Poof | Kind::Dust => {
+                self.move_with_collision(chunks)
+            }
             Kind::EndRod | Kind::Crit => self.pos += self.vel,
             Kind::Totem => self.move_with_collision(chunks),
             // HugeExplosionParticle advances age/sprite but never moves.
@@ -401,7 +431,7 @@ impl Particle {
             self.vel.z *= 0.7;
         }
         match self.kind {
-            Kind::Terrain | Kind::Smoke | Kind::Poof => {
+            Kind::Terrain | Kind::Smoke | Kind::Poof | Kind::Dust => {
                 self.light = world_brightness(
                     chunks,
                     self.pos.x.floor() as i32,
@@ -530,8 +560,9 @@ fn animated_frame_index(age: i32, lifetime: i32, frames: usize) -> usize {
 pub const CRIT_SPRITE: &str = "particle/critical_hit";
 pub const ENCHANTED_HIT_SPRITE: &str = "particle/enchanted_hit";
 
-/// `POOF` and `SMOKE` both use the generic animated particle sheet.
-pub const GENERIC_PARTICLE_SPRITES: [&str; 8] = [
+/// `POOF` and `SMOKE` use the first eight entries. Dust is included last so
+/// the atlas builder also packs its static sprite.
+pub const GENERIC_PARTICLE_SPRITES: [&str; 9] = [
     "particle/generic_7",
     "particle/generic_6",
     "particle/generic_5",
@@ -540,7 +571,10 @@ pub const GENERIC_PARTICLE_SPRITES: [&str; 8] = [
     "particle/generic_2",
     "particle/generic_1",
     "particle/generic_0",
+    "particle/dust",
 ];
+
+const DUST_SPRITE: &str = "particle/dust";
 
 const EXPLOSION_EMITTER_TICKS: u8 = 8;
 const fn explosion_emitter_children(age: u8) -> u8 {
@@ -574,11 +608,26 @@ pub const END_ROD_SPRITES: [&str; 8] = [
     "particle/glitter_0",
 ];
 
-/// Server-sent particle types pomme implements. `from_id` returning `None`
-/// drops the packet in the network handler, before the event channel.
+/// Server-sent particle types with implemented vanilla-like effects. Payload
+/// codecs are decoded separately; unsupported types are dropped, never treated
+/// as simple options.
 #[derive(Clone, Copy, Debug)]
 pub enum ServerParticleKind {
     EndRod,
+    ExplosionEmitter,
+    Explosion,
+    Poof,
+    Smoke,
+    Totem,
+    Dust,
+}
+
+/// Wire options retained with a server particle. Only known exact codecs are
+/// represented; unknown payload layouts are never assumed to be empty.
+#[derive(Clone, Copy, Debug)]
+pub enum ServerParticleOptions {
+    Simple,
+    Dust { packed_color: i32, scale: f32 },
 }
 
 impl ServerParticleKind {
@@ -588,15 +637,19 @@ impl ServerParticleKind {
     pub fn from_id(id: u32) -> Option<Self> {
         match id {
             27 => Some(Self::EndRod),
+            29 => Some(Self::ExplosionEmitter),
+            30 => Some(Self::Explosion),
+            66 => Some(Self::Poof),
+            69 => Some(Self::Smoke),
+            75 => Some(Self::Totem),
+            21 => Some(Self::Dust),
             _ => None,
         }
     }
 
     /// Vanilla `ParticleType.getOverrideLimiter`.
     fn override_limiter(self) -> bool {
-        match self {
-            Self::EndRod => false,
-        }
+        matches!(self, Self::ExplosionEmitter | Self::Explosion | Self::Poof)
     }
 }
 
@@ -797,7 +850,8 @@ impl ParticleStore {
         dry_foliage_colormap: Arc<Colormap>,
     ) -> Self {
         let end_rod_frames = END_ROD_SPRITES.map(|k| uv_map.get_region(k));
-        let generic_frames = GENERIC_PARTICLE_SPRITES.map(|k| uv_map.get_region(k));
+        let generic_frames =
+            std::array::from_fn(|i| uv_map.get_region(GENERIC_PARTICLE_SPRITES[i]));
         let explosion_frames = EXPLOSION_SPRITES.map(|k| uv_map.get_region(k));
         let crit_sprite = uv_map.get_region(CRIT_SPRITE);
         let enchanted_hit_sprite = uv_map.get_region(ENCHANTED_HIT_SPRITE);
@@ -1078,6 +1132,7 @@ impl ParticleStore {
     pub fn add_particles_from_packet(
         &mut self,
         kind: ServerParticleKind,
+        options: ServerParticleOptions,
         override_limiter: bool,
         always_show: bool,
         pos: DVec3,
@@ -1093,6 +1148,7 @@ impl ParticleStore {
         if count == 0 {
             self.add_server_particle(
                 kind,
+                options,
                 bypass_distance_limit,
                 pos,
                 dist * max_speed,
@@ -1107,7 +1163,14 @@ impl ParticleStore {
                 next_gaussian() * dist.z,
             );
             let vel = dvec3(next_gaussian(), next_gaussian(), next_gaussian()) * max_speed;
-            self.add_server_particle(kind, bypass_distance_limit, pos + scatter, vel, camera_pos);
+            self.add_server_particle(
+                kind,
+                options,
+                bypass_distance_limit,
+                pos + scatter,
+                vel,
+                camera_pos,
+            );
         }
     }
 
@@ -1117,6 +1180,7 @@ impl ParticleStore {
     fn add_server_particle(
         &mut self,
         kind: ServerParticleKind,
+        options: ServerParticleOptions,
         override_limiter: bool,
         pos: DVec3,
         vel: DVec3,
@@ -1129,8 +1193,43 @@ impl ParticleStore {
         }
         match kind {
             ServerParticleKind::EndRod => {
-                let frames = self.end_rod_frames;
-                self.push(Particle::end_rod(pos, vel, &frames));
+                self.push(Particle::end_rod(pos, vel, &self.end_rod_frames));
+            }
+            ServerParticleKind::ExplosionEmitter => {
+                self.pending_emitters.push(ExplosionEmitter { pos, age: 0 });
+            }
+            ServerParticleKind::Explosion => {
+                self.push(Particle::huge_explosion(pos, vel, &self.explosion_frames));
+            }
+            ServerParticleKind::Poof => {
+                self.push(Particle::poof(pos, vel, &self.generic_frames));
+            }
+            ServerParticleKind::Smoke => {
+                self.push(Particle::smoke(pos, vel, &self.generic_frames));
+            }
+            ServerParticleKind::Totem => {
+                self.push(Particle::totem(pos, vel, &self.end_rod_frames));
+            }
+            ServerParticleKind::Dust => {
+                if let ServerParticleOptions::Dust {
+                    packed_color,
+                    scale,
+                } = options
+                {
+                    let packed = packed_color as u32;
+                    let color = [
+                        ((packed >> 16) & 0xff) as f32 / 255.0,
+                        ((packed >> 8) & 0xff) as f32 / 255.0,
+                        (packed & 0xff) as f32 / 255.0,
+                    ];
+                    self.push(Particle::dust(
+                        pos,
+                        vel,
+                        color,
+                        scale,
+                        self.uv_map.get_region(DUST_SPRITE),
+                    ));
+                }
             }
         }
     }
@@ -2055,6 +2154,22 @@ mod tests {
         assert_eq!(packet_particle_count(-1), None);
         assert_eq!(packet_particle_count(0), Some(0));
         assert_eq!(packet_particle_count(3), Some(3));
+    }
+
+    #[test]
+    fn server_particle_ids_match_26_2_registry_for_supported_simple_options() {
+        use super::ServerParticleKind as Kind;
+
+        assert!(matches!(Kind::from_id(27), Some(Kind::EndRod)));
+        assert!(matches!(Kind::from_id(29), Some(Kind::ExplosionEmitter)));
+        assert!(matches!(Kind::from_id(30), Some(Kind::Explosion)));
+        assert!(matches!(Kind::from_id(66), Some(Kind::Poof)));
+        assert!(matches!(Kind::from_id(69), Some(Kind::Smoke)));
+        assert!(matches!(Kind::from_id(75), Some(Kind::Totem)));
+        assert!(matches!(Kind::from_id(21), Some(Kind::Dust))); // RGB + scale decoded separately.
+        assert!(Kind::from_id(1).is_none()); // Block requires a block-state ID.
+        assert!(Kind::from_id(54).is_none()); // Item requires an item stack.
+        assert!(Kind::from_id(55).is_none()); // Vibration requires a destination.
     }
 }
 

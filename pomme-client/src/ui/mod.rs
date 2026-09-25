@@ -1,4 +1,6 @@
 pub mod anvil;
+pub mod beacon;
+pub mod book;
 pub mod boss_bar;
 pub mod chat;
 pub mod chest;

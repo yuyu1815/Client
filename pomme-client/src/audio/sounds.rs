@@ -349,18 +349,10 @@ impl SoundsIndex {
 
         let result = match selected {
             SoundEntry::File(variant) => Some(variant.clone()),
-            SoundEntry::Event {
-                name,
-                volume,
-                pitch,
-                stream,
-            } => {
-                let mut variant = self.choose_inner(name, random, stack)?;
-                variant.volume *= *volume;
-                variant.pitch *= *pitch;
-                variant.stream |= *stream;
-                Some(variant)
-            }
+            // Vanilla's event entry contributes its target event's weighted
+            // entries; only the redirect's weight affects selection. Its own
+            // volume, pitch, and stream values do not modify the target sound.
+            SoundEntry::Event { name, .. } => self.choose_inner(name, random, stack),
         };
         stack.pop();
         result
@@ -675,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn event_redirect_uses_nested_random_draw_and_multiplies_parameters() {
+    fn event_redirect_uses_nested_random_draw_and_ignores_redirect_parameters() {
         let index = SoundsIndex {
             events: HashMap::from([
                 (
@@ -704,9 +696,9 @@ mod tests {
         // selects the only redirect; the nested draw therefore selects `first`.
         let resolved = index.choose("parent", Some(1)).unwrap();
         assert_eq!(resolved.path, PathBuf::from("first"));
-        assert_eq!(resolved.volume, 0.5);
-        assert_eq!(resolved.pitch, 2.0);
-        assert!(resolved.stream);
+        assert_eq!(resolved.volume, 1.0);
+        assert_eq!(resolved.pitch, 1.0);
+        assert!(!resolved.stream);
         assert_eq!(resolved.attenuation_distance, 16.0);
     }
 

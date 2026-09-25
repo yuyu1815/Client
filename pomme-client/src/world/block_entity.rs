@@ -13,6 +13,7 @@ pub struct StoredBlockEntity {
     pub nbt: NbtCompound,
 }
 
+// TODO: Render sign text once the block-entity text pipeline is implemented.
 /// Blocks the block-entity pipeline draws in place of chunk geometry. The
 /// chunk mesher skips these (their block models are particle-texture-only,
 /// which would otherwise fall back to a full cube of that texture); other

@@ -240,12 +240,12 @@
 //!
 //! 1.20.4 -> 26.2 wire changes (the 1.20.5 item-component rework; all of
 //! 1.20.6's plus):
-//! - items are `bool + id + byte count + NBT`; they translate bare (type and
-//!   count survive, the NBT is dropped) in `container_set_content`,
-//!   `container_set_slot`, `set_equipment`, `merchant_offers` (whose costs
-//!   became `ItemCost`s), entity-data item values, and outbound
-//!   `container_click`/`set_creative_mode_slot` — enchant glints, custom names
-//!   and damage bars render plain on 765 servers
+//! - items are `bool + id + byte count + NBT`; inbound stacks translate the
+//!   legacy root into `custom_data` (retaining unknown NBT) and convert exact
+//!   `Damage` and `Unbreakable` fields to their typed components. `Damage` bars
+//!   therefore work on 765 servers; custom names, lore and enchantments remain
+//!   unconverted. Merchant costs have no component patch and outbound
+//!   `container_click`/`set_creative_mode_slot` still use bare stacks
 //! - the configuration phase diverges for the first time: ids remap, and the
 //!   single whole-holder NBT `registry_data` packet fans out into the
 //!   per-registry form (entries reordered by their explicit ids, which the
@@ -2330,10 +2330,8 @@ fn translate_player_input(old_id: u32, payload: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// Reads one 1.20.4 optional item stack (`bool present + item id +
-/// i8 count + NBT`), skipping the NBT per the bare-items decision; `None`
-/// is a malformed stack, `Some(None)` an absent one.
-/// TODO: translate the legacy NBT (enchantments, custom names, damage)
-/// into 26.2 data components instead of dropping it.
+/// i8 count + NBT`), skipping NBT for legacy item-cost codecs that carry no
+/// component patch.
 fn read_old_item(cur: &mut Cursor<&[u8]>, named_nbt: bool) -> Option<Option<(u32, u8)>> {
     if read_u8(cur)? == 0 {
         return Some(None);
@@ -2344,24 +2342,80 @@ fn read_old_item(cur: &mut Cursor<&[u8]>, named_nbt: bool) -> Option<Option<(u32
     Some(Some((item, count)))
 }
 
-/// Translates one 1.20.4 optional item stack into a bare 26.2 stack
-/// (count + item + empty patch). Item ids stay in the wire version's
-/// space for `remap_inbound`/`remap_stack`.
+/// Reads and normalizes the legacy root into the unnamed NBT representation
+/// used by the `custom_data` component. Pre-1.20.2 roots include an empty name.
+fn read_old_item_nbt(
+    cur: &mut Cursor<&[u8]>,
+    named_nbt: bool,
+) -> Option<Option<(u32, u8, simdnbt::owned::Nbt)>> {
+    if read_u8(cur)? == 0 {
+        return Some(None);
+    }
+    let item = u32::azalea_read_var(cur).ok()?;
+    let count = read_u8(cur)?;
+    let root_start = cur.position() as usize;
+    let tag = *cur.get_ref().get(root_start)?;
+    skip_nbt_root(cur, named_nbt)?;
+    if tag == 0 {
+        return Some(Some((item, count, simdnbt::owned::Nbt::None)));
+    }
+    let mut root = Vec::with_capacity(cur.position() as usize - root_start);
+    root.push(tag);
+    let name_len = if named_nbt {
+        let name = cur.get_ref().get(root_start + 1..root_start + 3)?;
+        2 + usize::from(u16::from_be_bytes([name[0], name[1]]))
+    } else {
+        0
+    };
+    root.extend_from_slice(
+        cur.get_ref()
+            .get(root_start + 1 + name_len..cur.position() as usize)?,
+    );
+    let nbt = simdnbt::owned::Nbt::azalea_read(&mut Cursor::new(root.as_slice())).ok()?;
+    Some(Some((item, count, nbt)))
+}
+
+/// Converts exact legacy fields and retains the complete source compound in
+/// `custom_data`; unsupported legacy fields are therefore not silently lost.
 fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: bool) -> Option<()> {
-    let Some((item, count)) = read_old_item(cur, named_nbt)? else {
+    let Some((item, count, nbt)) = read_old_item_nbt(cur, named_nbt)? else {
         wire::write_varint(out, 0);
         return Some(());
     };
     wire::write_varint(out, u32::from(count));
     wire::write_varint(out, item);
-    wire::write_varint(out, 0);
-    wire::write_varint(out, 0);
+    let legacy_component = |key: &str| {
+        nbt.iter()
+            .find(|(name, _)| name.to_str() == key)
+            .map(|(_, tag)| tag)
+    };
+    let damage = legacy_component("Damage").and_then(|tag| tag.int());
+    let unbreakable = legacy_component("Unbreakable")
+        .and_then(|tag| tag.byte())
+        .is_some_and(|value| value != 0);
+    let mut patch = Vec::new();
+    let added =
+        usize::from(nbt.is_some()) + usize::from(damage.is_some()) + usize::from(unbreakable);
+    wire::write_varint(&mut patch, added as u32);
+    wire::write_varint(&mut patch, 0);
+    if nbt.is_some() {
+        wire::write_varint(&mut patch, DataComponentKind::CustomData.to_u32());
+        nbt.azalea_write(&mut patch).ok()?;
+    }
+    if let Some(damage) = damage {
+        wire::write_varint(&mut patch, DataComponentKind::Damage.to_u32());
+        wire::write_varint(&mut patch, damage as u32);
+    }
+    if unbreakable {
+        wire::write_varint(&mut patch, DataComponentKind::Unbreakable.to_u32());
+    }
+    out.extend_from_slice(&patch);
     Some(())
 }
 
 /// Rewrites `container_set_content`: the head (byte container id == varint
-/// for vanilla's small ids, state id, count) copies; each item translates
-/// bare.
+/// for vanilla's small ids, state id, count) copies; each item translates its
+/// legacy NBT into a native component patch.
 fn translate_container_set_content_765(
     id: u32,
     payload: &[u8],
@@ -3654,8 +3708,6 @@ const PAYLOAD_PARTICLES: &[&str] = &[
 /// particle 26.2 dropped, or a payload the walker can't rewrite) fails the
 /// packet — a verbatim fallback would leave wire-space ids and, in entity
 /// data, any following entries' shifted serializer ids in place.
-/// TODO: rewrite the remaining `PAYLOAD_PARTICLES` payloads (block states,
-/// dust colors, items) so entities and explosions using them translate.
 fn translate_particles(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
@@ -3682,11 +3734,15 @@ fn translate_particles(
                 out.extend_from_slice(&cur.get_ref()[color_at..cur.position() as usize]);
             }
             n if PAYLOAD_PARTICLES.contains(&n) => {
-                if ids.v777.is_none() {
-                    tracing::debug!("Dropping a packet with an untranslatable {n} particle");
-                    return None;
-                }
-                copy_particle_payload(cur, out, n, remaps)?;
+                copy_particle_payload(
+                    cur,
+                    out,
+                    n,
+                    remaps,
+                    ids.v765.is_some(),
+                    ids.v763.is_some(),
+                    ids.color_particles,
+                )?;
             }
             _ => {}
         }
@@ -3694,24 +3750,28 @@ fn translate_particles(
     Some(())
 }
 
-/// Copies one 26.3 particle payload through (`net/minecraft/core/particles`
-/// option codecs, byte-identical to 26.2's): block states stay in wire space
-/// like every block id pomme reads, and an `item`'s ids are remapped. `None`
-/// for a payload that can't be sized (an item component the native version
-/// lacks).
+/// Copies a particle payload, translating item/component ids where possible.
+/// Legacy (pre-1.20.5) item particles use optional item + NBT; newer ones use
+/// the component-stack codec. Block-state ids remain in wire space like the
+/// other block ids pomme reads. `None` for an unknown/unrepresentable value.
 fn copy_particle_payload(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
     name: &str,
     remaps: &RegistryRemaps,
+    old_item: bool,
+    named_nbt: bool,
+    color_particles: bool,
 ) -> Option<()> {
     let at = cur.position() as usize;
     match name {
         "block" | "block_crumble" | "block_marker" | "dust_pillar" | "falling_dust" | "shriek" => {
             varint_span(cur)?;
         }
-        "dragon_breath" | "sculk_charge" | "entity_effect" | "tinted_leaves" | "flash"
-        | "geyser" | "geyser_plume" => advance(cur, 4)?,
+        "dragon_breath" | "sculk_charge" | "flash" | "geyser" | "geyser_plume" => {
+            advance(cur, 4)?;
+        }
+        "entity_effect" | "tinted_leaves" if color_particles => advance(cur, 4)?,
         "dust" | "effect" | "instant_effect" | "geyser_base" | "geyser_poof" => advance(cur, 8)?,
         "dust_color_transition" => advance(cur, 12)?,
         "trail" => {
@@ -3729,11 +3789,22 @@ fn copy_particle_payload(
             }
             varint_span(cur)?; // arrival ticks
         }
+        "item" if old_item => {
+            translate_item_765(cur, out, named_nbt)?;
+            return Some(());
+        }
         "item" => {
+            // ItemStack.STREAM_CODEC writes count before item id; zero is the
+            // empty-stack sentinel and carries neither an item nor a patch.
+            let count = varint_span(cur)?;
+            let count_value =
+                u32::azalea_read_var(&mut Cursor::new(&cur.get_ref()[count.clone()])).ok()?;
+            out.extend_from_slice(&cur.get_ref()[count]);
+            if count_value == 0 {
+                return Some(());
+            }
             let item = u32::azalea_read_var(cur).ok()?;
             wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
-            let count = varint_span(cur)?;
-            out.extend_from_slice(&cur.get_ref()[count]);
             return copy_component_patch(cur, out, remaps);
         }
         _ => return None,
@@ -3875,10 +3946,8 @@ fn translate_chunk(
         advance(&mut bcur, 2)?; // nonEmptyBlockCount
         buffer.extend_from_slice(&payload[section_at..bcur.position() as usize]);
         buffer.extend_from_slice(&[0, 0]); // fluidCount, new in 26.2
-        let rest_at = bcur.position() as usize;
-        skip_paletted_container(&mut bcur, 4096, 8)?;
-        skip_paletted_container(&mut bcur, 64, 3)?;
-        buffer.extend_from_slice(&payload[rest_at..bcur.position() as usize]);
+        skip_paletted_container(&mut bcur, &mut buffer, 4096, 8, nbt_heightmaps)?;
+        skip_paletted_container(&mut bcur, &mut buffer, 64, 3, nbt_heightmaps)?;
     }
 
     let mut out = Vec::with_capacity(head.len() + buffer.len() + payload.len() - buffer_end + 8);
@@ -4046,14 +4115,21 @@ fn convert_nbt_heightmaps(
     Some(())
 }
 
-/// Advances past one `PalettedContainer`: bits-per-entry byte, palette
-/// (single value: one id; indirect while `bits <= max_indirect_bits`:
-/// id list; global: nothing), then the unprefixed packed-long array.
+/// Skips one `PalettedContainer` (bits-per-entry byte, palette — single
+/// value: one id; indirect while `bits <= max_indirect_bits`: id list;
+/// global: nothing — then the packed-long array), copying it into `out`.
+/// The pre-1.21.5 wire (same 770 cutover as `nbt_heightmaps`) prefixes the
+/// array with its long count; since, the count is derived from `bits` and
+/// `entries`. That prefix is skipped AND left out of the copy: the native
+/// reader derives the length, so keeping it would shift every later field.
 fn skip_paletted_container(
     cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
     entries: usize,
     max_indirect_bits: u8,
+    data_len: bool,
 ) -> Option<()> {
+    let start = cur.position() as usize;
     let bits = read_u8(cur)?;
     match bits {
         0 => {
@@ -4068,10 +4144,19 @@ fn skip_paletted_container(
         _ => {}
     }
     if bits > 0 {
-        let values_per_long = 64 / bits as usize;
-        let longs = entries.div_ceil(values_per_long);
-        advance(cur, longs.checked_mul(8)?)?;
+        if data_len {
+            let varint_at = cur.position() as usize;
+            let longs = u32::azalea_read_var(cur).ok()? as usize;
+            let longs_at = cur.position() as usize;
+            advance(cur, longs.checked_mul(8)?)?;
+            let end = cur.position() as usize;
+            out.extend_from_slice(&cur.get_ref()[start..varint_at]);
+            out.extend_from_slice(&cur.get_ref()[longs_at..end]);
+            return Some(());
+        }
+        advance(cur, entries.div_ceil(64 / bits as usize).checked_mul(8)?)?;
     }
+    out.extend_from_slice(&cur.get_ref()[start..cur.position() as usize]);
     Some(())
 }
 
@@ -4577,8 +4662,21 @@ fn translate_level_particles_777(
     let name = v
         .wire_registries
         .name_of(ClientRegistry::ParticleType, particle)?;
+    let mut particle_data = Vec::new();
+    wire::write_varint(
+        &mut particle_data,
+        remaps.remap(ClientRegistry::ParticleType, particle)?,
+    );
     if PAYLOAD_PARTICLES.contains(&name) {
-        copy_particle_payload(&mut cur, &mut Vec::new(), name, remaps)?;
+        copy_particle_payload(
+            &mut cur,
+            &mut particle_data,
+            name,
+            remaps,
+            false,
+            false,
+            true,
+        )?;
     }
     let particle_end = cur.position() as usize;
     advance(&mut cur, 38)?; // flags, position, spread
@@ -4591,17 +4689,13 @@ fn translate_level_particles_777(
     wire::write_varint(&mut out, id);
     out.extend_from_slice(&payload[particle_end..speed_at + 4]);
     out.extend_from_slice(&(count as i32).to_be_bytes());
-    out.extend_from_slice(&payload[..particle_end]);
+    out.extend_from_slice(&particle_data);
     Some(out)
 }
 
 /// Rewrites `update_advancements`: 26.3 moved an advancement's screen
-/// position (two floats) out of `DisplayInfo` to a pair after each entry,
-/// sent even without a display. 26.2 reads the pair at the end of the
-/// display, so each entry is walked to put it back or drop it; the rest of
-/// the packet copies verbatim. Item ids stay in wire space like every
-/// version's.
-/// TODO: remap advancement icon items in `remap_inbound`.
+/// position out of `DisplayInfo`; icons are also remapped into native item
+/// and component registry space before the typed decoder sees them.
 fn translate_update_advancements_777(
     id: u32,
     payload: &[u8],
@@ -4617,12 +4711,13 @@ fn translate_update_advancements_777(
         let entry_at = cur.position() as usize;
         skip_utf(&mut cur)?; // id
         skip_optional(&mut cur, skip_utf)?; // parent
-        let display_end = if read_u8(&mut cur)? != 0 {
-            skip_display_info(&mut cur, remaps)?;
-            Some(cur.position() as usize)
-        } else {
-            None
-        };
+        let prefix_end = cur.position() as usize;
+        let has_display = read_u8(&mut cur)? != 0;
+        let mut display = Vec::new();
+        if has_display {
+            copy_display_info_777(&mut cur, &mut display, remaps)?;
+        }
+        let display_end = cur.position() as usize;
         for _ in 0..u32::azalea_read_var(&mut cur).ok()? {
             for _ in 0..u32::azalea_read_var(&mut cur).ok()? {
                 skip_utf(&mut cur)?; // requirement
@@ -4631,32 +4726,47 @@ fn translate_update_advancements_777(
         advance(&mut cur, 1)?; // sends telemetry
         let entry_end = cur.position() as usize;
         advance(&mut cur, 8)?; // x, y
-        match display_end {
-            Some(end) => {
-                out.extend_from_slice(&payload[entry_at..end]);
-                out.extend_from_slice(&payload[entry_end..entry_end + 8]);
-                out.extend_from_slice(&payload[end..entry_end]);
-            }
-            None => out.extend_from_slice(&payload[entry_at..entry_end]),
+        out.extend_from_slice(&payload[entry_at..prefix_end]);
+        out.push(u8::from(has_display));
+        out.extend_from_slice(&display);
+        if has_display {
+            out.extend_from_slice(&payload[entry_end..entry_end + 8]);
+            out.extend_from_slice(&payload[display_end..entry_end]);
+        } else {
+            out.extend_from_slice(&payload[display_end..entry_end]);
         }
     }
     out.extend_from_slice(&payload[cur.position() as usize..]);
     Some(out)
 }
 
-/// Advances past a `DisplayInfo` body: two NBT components, an
-/// `ItemStackTemplate` (item, count, component patch), a varint type, an
-/// i32 flag set and a background identifier when its bit 0 is set.
-fn skip_display_info(cur: &mut Cursor<&[u8]>, remaps: &RegistryRemaps) -> Option<()> {
-    skip_nbt(cur)?; // title
-    skip_nbt(cur)?; // description
-    varint_span(cur)?; // item
-    varint_span(cur)?; // count
-    copy_component_patch(cur, &mut Vec::new(), remaps)?;
+/// Copies `DisplayInfo`, remapping its `ItemStackTemplate` icon while
+/// preserving title/description, flags and optional background.
+fn copy_display_info_777(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    for _ in 0..2 {
+        let start = cur.position() as usize;
+        skip_nbt(cur)?;
+        out.extend_from_slice(&cur.get_ref()[start..cur.position() as usize]);
+    }
+    let item = u32::azalea_read_var(cur).ok()?;
+    wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+    let count_start = cur.position() as usize;
+    varint_span(cur)?;
+    out.extend_from_slice(&cur.get_ref()[count_start..cur.position() as usize]);
+    copy_component_patch(cur, out, remaps)?;
+    let type_start = cur.position() as usize;
     varint_span(cur)?; // type
+    out.extend_from_slice(&cur.get_ref()[type_start..cur.position() as usize]);
     let flags = read_i32(cur)?;
+    out.extend_from_slice(&flags.to_be_bytes());
     if flags & 1 != 0 {
+        let start = cur.position() as usize;
         skip_utf(cur)?; // background
+        out.extend_from_slice(&cur.get_ref()[start..cur.position() as usize]);
     }
     Some(())
 }
@@ -5114,5 +5224,115 @@ fn skip_nbt_payload(cur: &mut Cursor<&[u8]>, tag: u8, depth: u32) -> Option<()> 
             advance(cur, usize::try_from(n).ok()?.checked_mul(8)?)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Legacy (pre-770) sections carry a packed-data long-count VarInt the
+    /// native reader doesn't expect; it must be consumed here and left out of
+    /// the copied buffer. A stray byte between the palette and the longs (or
+    /// after a single-valued palette) shifts everything after the first
+    /// section, so section 2's marker doubles as the alignment assertion.
+    #[test]
+    fn legacy_chunk_strips_data_array_len() {
+        let long = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];
+        let payload: Vec<u8> = [
+            [7, 6, 5, 4, 3, 2, 1, 0].as_slice(), // chunk x/z
+            &[0x0A, 0x00],                       // heightmaps: empty NBT compound
+            &[0x16],                             // section buffer: 22 bytes
+            &[0x00, 0x00],                       // s1 nonEmptyBlockCount
+            &[0x00, 0x05],                       // s1 blocks: single value 5
+            &[0x01, 0x01, 0x07],                 // s1 biomes: bits 1, palette [7]
+            &[0x01],                             // s1 biomes data array: 1 long
+            long.as_slice(),
+            &[0x11, 0x11], // s2 nonEmptyBlockCount marker
+            &[0x00, 0x09], // s2 blocks: single value 9
+            &[0x00, 0x0A], // s2 biomes: single value 10
+        ]
+        .concat();
+        let out = translate_chunk(42, &payload, true, false).expect("parses");
+        let expected: [&[u8]; 10] = [
+            &[42],                     // packet id
+            &[7, 6, 5, 4, 3, 2, 1, 0], // head
+            &[0x00],                   // heightmaps: empty list
+            &[0x19],                   // buffer: 25 bytes
+            &[0x00, 0x00, 0x00, 0x00], // s1 count + fluidCount
+            &[0x00, 0x05],             // s1 blocks
+            &[0x01, 0x01, 0x07],       // s1 biomes palette, no dataLen
+            &long,
+            &[0x11, 0x11, 0x00, 0x00], // s2 marker + fluidCount
+            &[0x00, 0x09, 0x00, 0x0A],
+        ];
+        assert_eq!(out, expected.concat());
+    }
+
+    #[test]
+    fn item_particle_uses_count_then_item_and_accepts_empty_stack() {
+        let protocol = 777;
+        let remaps = RegistryRemaps::to_native(protocol).expect("embedded 26.3 registry");
+        let source = RegistryTable::for_protocol(protocol).expect("embedded registry");
+        let item = source
+            .names(ClientRegistry::Item)
+            .iter()
+            .position(|name| name == "stone")
+            .unwrap() as u32;
+        let native_item = remaps.remap(ClientRegistry::Item, item).unwrap();
+
+        let mut payload = vec![2]; // count first
+        wire::write_varint(&mut payload, item);
+        payload.extend_from_slice(&[0, 0]); // empty component patch
+        let mut input = Cursor::new(payload.as_slice());
+        let mut output = Vec::new();
+        copy_particle_payload(&mut input, &mut output, "item", remaps, false, false, true)
+            .expect("translates item particle");
+        let mut expected = vec![2];
+        wire::write_varint(&mut expected, native_item);
+        expected.extend_from_slice(&[0, 0]);
+        assert_eq!(output, expected);
+        assert_eq!(input.position() as usize, payload.len());
+
+        let mut empty = Cursor::new(&[0][..]);
+        let mut output = Vec::new();
+        copy_particle_payload(&mut empty, &mut output, "item", remaps, false, false, true)
+            .expect("translates empty particle stack");
+        assert_eq!(output, [0]);
+        assert_eq!(empty.position(), 1);
+    }
+
+    /// The 770+ section layout (no data-array length) must translate
+    /// unchanged apart from the inserted `fluidCount` shorts.
+    #[test]
+    fn chunk_770_sections_keep_unprefixed_data() {
+        let long = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];
+        let payload: Vec<u8> = [
+            [7, 6, 5, 4, 3, 2, 1, 0].as_slice(),
+            &[0x00],             // heightmaps: none
+            &[0x15],             // section buffer: 21 bytes
+            &[0x00, 0x00],       // s1 nonEmptyBlockCount
+            &[0x00, 0x05],       // s1 blocks: single value 5
+            &[0x01, 0x01, 0x07], // s1 biomes: bits 1, palette [7]
+            long.as_slice(),     // s1 biomes data array
+            &[0x11, 0x11],       // s2 nonEmptyBlockCount marker
+            &[0x00, 0x09],
+            &[0x00, 0x0A],
+        ]
+        .concat();
+        let out = translate_chunk(42, &payload, false, false).expect("parses");
+        let expected: [&[u8]; 10] = [
+            &[42],
+            &[7, 6, 5, 4, 3, 2, 1, 0],
+            &[0x00], // heightmaps: none
+            &[0x19], // buffer: 25 bytes
+            &[0x00, 0x00, 0x00, 0x00],
+            &[0x00, 0x05],
+            &[0x01, 0x01, 0x07],
+            &long,
+            &[0x11, 0x11, 0x00, 0x00],
+            &[0x00, 0x09, 0x00, 0x0A],
+        ];
+        assert_eq!(out, expected.concat());
     }
 }

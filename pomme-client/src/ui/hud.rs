@@ -99,6 +99,9 @@ pub(crate) struct ScoreboardTeam {
     /// None for RESET / non-color formatting (no icon fill in the spectator
     /// menu), like vanilla's `PlayerTeam.getColor()` Optional.
     pub(crate) fill_color: Option<[f32; 4]>,
+    pub(crate) nametag_visibility:
+        azalea_protocol::packets::game::c_set_player_team::NameTagVisibility,
+    pub(crate) see_friendly_invisibles: bool,
     sidebar_slot: Option<azalea_protocol::packets::game::c_set_display_objective::DisplaySlot>,
     pub(crate) members: HashSet<String>,
 }
@@ -222,14 +225,18 @@ impl Scoreboard {
         if !self.objectives.contains_key(&objective) {
             return;
         }
-        self.scores.insert(
-            (objective, owner),
-            ScoreEntry {
-                score,
-                display,
-                number_format,
-            },
-        );
+        let entry = self.scores.entry((objective, owner)).or_insert(ScoreEntry {
+            score,
+            display: None,
+            number_format: None,
+        });
+        entry.score = score;
+        if let Some(display) = display {
+            entry.display = Some(display);
+        }
+        if let Some(number_format) = number_format {
+            entry.number_format = Some(number_format);
+        }
     }
 
     pub fn reset_score(&mut self, owner: &str, objective: Option<&str>) {
@@ -248,6 +255,10 @@ impl Scoreboard {
         color: [f32; 4],
         fill_color: Option<[f32; 4]>,
         sidebar_slot: Option<azalea_protocol::packets::game::c_set_display_objective::DisplaySlot>,
+        nametag_visibility: azalea_protocol::packets::game::c_set_player_team::NameTagVisibility,
+        _collision_rule: azalea_protocol::packets::game::c_set_player_team::CollisionRule,
+        _friendly_fire: bool,
+        see_friendly_invisibles: bool,
         members: Option<Vec<String>>,
     ) {
         // Vanilla ignores a parameter change for a team it doesn't know;
@@ -264,6 +275,8 @@ impl Scoreboard {
             suffix: Vec::new(),
             color,
             fill_color: None,
+            nametag_visibility,
+            see_friendly_invisibles,
             sidebar_slot,
             members: HashSet::new(),
         });
@@ -272,6 +285,8 @@ impl Scoreboard {
         team.suffix = suffix;
         team.color = color;
         team.fill_color = fill_color;
+        team.nametag_visibility = nametag_visibility;
+        team.see_friendly_invisibles = see_friendly_invisibles;
         team.sidebar_slot = sidebar_slot;
         // ADD unions its player list onto an existing team, like vanilla's
         // addPlayerTeam + per-player addPlayerToTeam.
@@ -321,11 +336,47 @@ impl Scoreboard {
             .unwrap_or_else(|| self.line(name, None))
     }
 
+    pub(crate) fn player_name_for_viewer(
+        &self,
+        viewer: &str,
+        name: &str,
+        display: Option<&[TextSpan]>,
+    ) -> Option<Vec<TextSpan>> {
+        self.can_see_name_tag(viewer, name)
+            .then(|| self.player_name(name, display))
+    }
+
     pub fn team_name(&self, member: &str) -> &str {
         self.teams
             .iter()
             .find(|(_, team)| team.members.contains(member))
             .map_or("", |(name, _)| name)
+    }
+
+    pub(crate) fn team_settings(&self, member: &str) -> Option<&ScoreboardTeam> {
+        self.teams
+            .values()
+            .find(|team| team.members.contains(member))
+    }
+
+    /// Whether the target's team settings permit this viewer's name tag.
+    pub(crate) fn can_see_name_tag(&self, viewer: &str, target: &str) -> bool {
+        use azalea_protocol::packets::game::c_set_player_team::NameTagVisibility as Visibility;
+        let Some(team) = self.team_settings(target) else {
+            return true;
+        };
+        let same_team = self.team_name(viewer) == self.team_name(target);
+        match team.nametag_visibility {
+            Visibility::Always => true,
+            Visibility::Never => false,
+            Visibility::HideForOtherTeams => same_team,
+            Visibility::HideForOwnTeam => !same_team,
+        }
+    }
+
+    pub(crate) fn shows_friendly_invisibles(&self, member: &str) -> bool {
+        self.team_settings(member)
+            .is_some_and(|team| team.see_friendly_invisibles)
     }
 
     fn line(&self, owner: &str, display: Option<&[TextSpan]>) -> Vec<TextSpan> {
@@ -1046,6 +1097,16 @@ fn build_effect_icons(
             sprite: SpriteId::MobEffect(instance.effect_id as u8),
             tint: [1.0, 1.0, 1.0, alpha],
         });
+        if instance.amplifier > 0 {
+            elements.push(MenuElement::Text {
+                x: (screen_w + (x_gui + 19.0) * gs).round(),
+                y: ((y_gui + 19.0) * gs).round(),
+                text: (u16::from(instance.amplifier) + 1).to_string(),
+                scale: 6.0 * gs,
+                color: WHITE,
+                centered: true,
+            });
+        }
     }
 }
 
@@ -1818,6 +1879,10 @@ mod scoreboard_display_slot_tests {
             [1.0; 4],
             color.map(|_| [1.0; 4]),
             color,
+            azalea_protocol::packets::game::c_set_player_team::NameTagVisibility::Always,
+            azalea_protocol::packets::game::c_set_player_team::CollisionRule::Always,
+            true,
+            true,
             Some(members.into_iter().map(str::to_owned).collect()),
         );
     }
@@ -1866,6 +1931,10 @@ mod scoreboard_display_slot_tests {
             [1.0; 4],
             Some([1.0; 4]),
             Some(Slot::TeamWhite),
+            azalea_protocol::packets::game::c_set_player_team::NameTagVisibility::Always,
+            azalea_protocol::packets::game::c_set_player_team::CollisionRule::Always,
+            true,
+            true,
             None,
         );
         assert_eq!(sb.selected_sidebar(Some("LocalName")), Some("white"));
@@ -1877,6 +1946,10 @@ mod scoreboard_display_slot_tests {
             [1.0; 4],
             Some([1.0; 4]),
             Some(Slot::TeamRed),
+            azalea_protocol::packets::game::c_set_player_team::NameTagVisibility::Always,
+            azalea_protocol::packets::game::c_set_player_team::CollisionRule::Always,
+            true,
+            true,
             None,
         );
         sb.set_objective("red".into(), None, None);
@@ -2051,6 +2124,29 @@ mod scoreboard_list_score_tests {
             sidebar_default[0].color,
             super::super::common::rgb(0xff5555)
         );
+    }
+
+    #[test]
+    fn score_updates_without_optional_fields_preserve_existing_overrides() {
+        let mut sb = Scoreboard::default();
+        objective(&mut sb, "list", None);
+        sb.set_display(Slot::List, Some("list".into()));
+        let display = vec![TextSpan::new("custom owner".into(), [1.0; 4])];
+        let format = ScoreNumberFormat::Fixed(vec![TextSpan::new("fixed".into(), [1.0; 4])]);
+        sb.set_score(
+            "owner".into(),
+            "list".into(),
+            1,
+            Some(display.clone()),
+            Some(format),
+        );
+
+        sb.set_score("owner".into(), "list".into(), 2, None, None);
+
+        let entry = &sb.scores[&(String::from("list"), String::from("owner"))];
+        assert_eq!(entry.score, 2);
+        assert_eq!(entry.display.as_ref(), Some(&display));
+        assert_eq!(sb.list_score("owner").unwrap().formatted[0].text, "fixed");
     }
 
     #[test]

@@ -52,6 +52,17 @@ impl PacketSender {
         ));
     }
 
+    /// Select the primary/secondary beacon effects using the dedicated 26.2
+    /// `set_beacon` packet, not a container button click.
+    pub fn set_beacon(&self, primary: Option<u32>, secondary: Option<u32>) {
+        self.send(ServerboundGamePacket::SetBeacon(
+            azalea_protocol::packets::game::s_set_beacon::ServerboundSetBeacon {
+                primary,
+                secondary,
+            },
+        ));
+    }
+
     pub fn send_raw(&self, bytes: Vec<u8>) {
         self.queue(Outbound::Raw(bytes));
     }
@@ -101,5 +112,19 @@ mod tests {
             panic!("trade selection must not use ContainerButtonClick");
         };
         assert_eq!(packet.item, 6);
+    }
+
+    #[test]
+    fn set_beacon_queues_primary_and_secondary_effect_ids() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        PacketSender::new(tx).set_beacon(Some(1), Some(9));
+        let Outbound::Packet(packet) = rx.try_recv().unwrap() else {
+            panic!("beacon selection must be a game packet");
+        };
+        let ServerboundGamePacket::SetBeacon(packet) = *packet else {
+            panic!("beacon selection must not use ContainerButtonClick");
+        };
+        assert_eq!(packet.primary, Some(1));
+        assert_eq!(packet.secondary, Some(9));
     }
 }

@@ -968,10 +968,14 @@ pub struct PlayerNameplates<'a> {
 
 // TODO: vanilla renders name tags as world-space billboards (0.025 scale,
 // shrinking with distance, 25% black backdrop, a see-through pass behind
-// walls, sneak dimming, no shadow) and honors team nametagVisibility; this
-// screen-space projection is an approximation until a world-space text path
-// exists.
+// walls, sneak dimming, no shadow); this screen-space projection is an
+// approximation until a world-space text path exists.
 pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: PlayerNameplates<'_>) {
+    let viewer_name = nameplates
+        .tab_list
+        .players
+        .get(&nameplates.local_uuid)
+        .map(|player| player.name.as_str());
     for entity in nameplates.entity_store.living.values() {
         let Some(uuid) = entity.player_uuid else {
             continue;
@@ -980,6 +984,19 @@ pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: Play
             continue;
         }
         let Some(player) = nameplates.tab_list.players.get(&uuid) else {
+            continue;
+        };
+        let name = match viewer_name {
+            Some(viewer) => {
+                nameplates
+                    .scoreboard
+                    .player_name_for_viewer(viewer, &player.name, None)
+            }
+            // Without the local profile name, team membership cannot be
+            // resolved reliably; keep the existing visible-name fallback.
+            None => Some(nameplates.scoreboard.player_name(&player.name, None)),
+        };
+        let Some(name) = name else {
             continue;
         };
         let pos = entity
@@ -999,7 +1016,7 @@ pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: Play
             y: y - 4.0 * nameplates.gs,
             // The tab-list display name is tab-only in vanilla; name tags
             // always use the team-formatted profile name.
-            spans: nameplates.scoreboard.player_name(&player.name, None),
+            spans: name,
             scale: FONT_SIZE * nameplates.gs,
             centered: true,
         });

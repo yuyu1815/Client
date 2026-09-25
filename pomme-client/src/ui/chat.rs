@@ -560,6 +560,8 @@ pub struct ChatState {
     /// Drained once per frame by the game loop and sent as
     /// `ServerboundCommandSuggestion`.
     outgoing_request: Option<(u32, String)>,
+    /// Server-provided vanilla chat completions (distinct from Brigadier).
+    custom_completions: Vec<String>,
     /// Physical rectangles of styled chat spans as last drawn, for hover and
     /// click lookup (vanilla's active-text collector).
     hit_regions: Vec<StyleHitRegion>,
@@ -609,6 +611,7 @@ impl ChatState {
             command_usage: Vec::new(),
             command_usage_start: None,
             outgoing_request: None,
+            custom_completions: Vec::new(),
             hit_regions: Vec::new(),
             suggestion_regions: Vec::new(),
             queue_region: None,
@@ -1239,15 +1242,68 @@ impl ChatState {
                 self.update_usage_info(Some(tree));
             }
         } else if !java_is_blank(&value) {
-            // TODO: vanilla completes non-blank messages from the server's
-            // `ClientboundCustomChatCompletions` entries, which Pomme ignores.
-            self.pending_suggestions = None;
+            self.update_custom_suggestions();
             if !self.messages_allowed() {
                 self.command_usage
                     .push(restricted_line("chat_screen.messages_not_allowed"));
             }
         } else {
             self.pending_suggestions = None;
+        }
+    }
+
+    /// Apply vanilla custom-chat completion state. Candidate strings replace
+    /// the current token; matching is case-insensitive like chat name
+    /// completion.
+    pub fn update_custom_completions(
+        &mut self,
+        action: crate::net::CustomChatCompletionsAction,
+        entries: Vec<String>,
+    ) {
+        use crate::net::CustomChatCompletionsAction as Action;
+        match action {
+            Action::Add => {
+                for entry in entries {
+                    if !self.custom_completions.contains(&entry) {
+                        self.custom_completions.push(entry);
+                    }
+                }
+            }
+            Action::Remove => self
+                .custom_completions
+                .retain(|entry| !entries.contains(entry)),
+            Action::Set => self.custom_completions = entries,
+        }
+        if self.open && !self.input.value().starts_with('/') && !java_is_blank(self.input.value()) {
+            self.update_custom_suggestions();
+        }
+    }
+
+    fn update_custom_suggestions(&mut self) {
+        let value = self.input.value();
+        let cursor = self.input.cursor();
+        let prefix = &value[last_word_index(&value[..cursor])..cursor];
+        let start = cursor - prefix.len();
+        let list = self
+            .custom_completions
+            .iter()
+            .filter(|entry| {
+                entry
+                    .get(..prefix.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+            })
+            .cloned()
+            .map(ChatSuggestion::plain)
+            .collect();
+        self.pending_suggestions = Some(PendingSuggestions::Done(SuggestionSet {
+            range: start..value.len(),
+            list,
+        }));
+        self.command_usage.clear();
+        self.command_usage_start = None;
+        self.hide_suggestions();
+        if self.allow_suggestions && self.options.auto_suggestions {
+            self.show_suggestions();
         }
     }
 

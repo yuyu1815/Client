@@ -210,7 +210,11 @@ impl SkyState {
         if dimension != "minecraft:overworld" {
             return sky.map(srgb_to_linear);
         }
-        let fog = [192.0 / 255.0, 216.0 / 255.0, 1.0];
+        let fog = self.apply_weather(
+            [192.0 / 255.0, 216.0 / 255.0, 1.0],
+            |c| [c[0] * 0.5, c[1] * 0.5, c[2] * 0.6],
+            |c| [c[0] * 0.25, c[1] * 0.25, c[2] * 0.3],
+        );
         let sky_fog_end = (512.0_f32 / 16.0).min(render_distance_chunks as f32);
         let t = (sky_fog_end / 32.0).clamp(0.0, 1.0);
         let sky_color_mix = 1.0 - (0.25 + 0.75 * t).powf(0.25);
@@ -527,20 +531,31 @@ impl SkyPipeline {
         let moon_angle = sun_angle + PI;
         let star_angle = sun_angle;
 
-        // Stars fade out as rain ramps up (vanilla forces star brightness to 0).
+        // Vanilla applies rain then thunder layers to star brightness.
+        let rain = sky.rain();
+        let thunder = sky.thunder();
+        let rain_only = (rain - thunder).max(0.0);
+        let weather_visibility = (1.0 - rain_only) * (1.0 - thunder);
         let star_brightness =
             sample_float_keyframes(day_tick, STAR_BRIGHTNESS_KEYFRAMES, TICKS_PER_DAY)
-                * (1.0 - sky.rain());
+                * weather_visibility;
 
         let dome = sky.sky_color_linear();
         let sky_color = [dome[0], dome[1], dome[2], 1.0];
 
-        let sunrise_argb = sample_argb_keyframes(day_tick, SUNRISE_COLOR_KEYFRAMES, TICKS_PER_DAY);
+        let mut sunrise_argb =
+            sample_argb_keyframes(day_tick, SUNRISE_COLOR_KEYFRAMES, TICKS_PER_DAY);
+        let sunrise_weather = sky.apply_weather(
+            [sunrise_argb[0], sunrise_argb[1], sunrise_argb[2]],
+            |c| [c[0] * 0.5, c[1] * 0.5, c[2] * 0.6],
+            |c| [c[0] * 0.25, c[1] * 0.25, c[2] * 0.3],
+        );
+        sunrise_argb[..3].copy_from_slice(&sunrise_weather);
 
         let moon_phase_idx = moon_phase(sky.day_time);
         let moon_brightness = MOON_BRIGHTNESS_PER_PHASE[moon_phase_idx];
 
-        let celestial_alpha = 1.0 - sky.rain();
+        let celestial_alpha = 1.0 - rain;
 
         let view_proj = camera.sky_view_projection();
 

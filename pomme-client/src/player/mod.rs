@@ -92,7 +92,10 @@ pub struct LocalPlayer {
     pub inventory: Inventory,
     pub sprinting: bool,
     pub crouching: bool,
-    // TODO: remaining Abilities fields - invulnerable, instabuild, may_build
+    pub invulnerable: bool,
+    pub instabuild: bool,
+    pub instant_break: bool,
+    pub may_build: bool,
     pub flying: bool,
     pub may_fly: bool,
     pub fly_speed: f32,
@@ -172,6 +175,10 @@ impl LocalPlayer {
             inventory: Inventory::new(),
             sprinting: false,
             crouching: false,
+            invulnerable: false,
+            instabuild: false,
+            instant_break: false,
+            may_build: true,
             flying: false,
             may_fly: false,
             fly_speed: 0.05,
@@ -254,6 +261,10 @@ impl LocalPlayer {
         self.experience_level = 0;
         self.experience_progress = 0.0;
         self.total_experience = 0;
+        self.invulnerable = false;
+        self.instabuild = false;
+        self.instant_break = false;
+        self.may_build = true;
         self.flying = false;
         self.may_fly = false;
         self.fly_speed = 0.05;

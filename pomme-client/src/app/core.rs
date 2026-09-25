@@ -39,12 +39,50 @@ use crate::world::chunk::ChunkStore;
 
 pub struct PendingPackDownload {
     pub id: uuid::Uuid,
+    pub generation: u64,
     pub required: bool,
     pub hash: String,
     pub handle: std::thread::JoinHandle<PackDownloadResult>,
 }
 
 pub type PackDownloadResult = Result<std::path::PathBuf, crate::resource_pack::PackError>;
+
+fn take_finished_pack_downloads(
+    pending: &mut Vec<PendingPackDownload>,
+) -> Vec<(
+    uuid::Uuid,
+    bool,
+    String,
+    std::thread::Result<PackDownloadResult>,
+    u64,
+)> {
+    let mut finished = Vec::new();
+    while pending
+        .first()
+        .is_some_and(|pack| pack.handle.is_finished())
+    {
+        let PendingPackDownload {
+            id,
+            generation,
+            required,
+            hash,
+            handle,
+        } = pending.remove(0);
+        let result = handle.join();
+        finished.push((id, required, hash, result, generation));
+    }
+    finished
+}
+
+fn pack_download_action(
+    result: &std::thread::Result<PackDownloadResult>,
+) -> azalea_protocol::packets::game::s_resource_pack::Action {
+    use azalea_protocol::packets::game::s_resource_pack::Action;
+    match result {
+        Ok(Ok(_)) => Action::SuccessfullyLoaded,
+        Ok(Err(_)) | Err(_) => Action::FailedDownload,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PlayerSkinSource {
@@ -414,6 +452,23 @@ fn player_rotation_packet(look: LookDirection) -> ServerboundGamePacket {
     })
 }
 
+fn post_teleport_echo(
+    player: &LocalPlayer,
+    position: Position,
+    look: LookDirection,
+) -> ServerboundGamePacket {
+    ServerboundGamePacket::MovePlayerPosRot(
+        azalea_protocol::packets::game::ServerboundMovePlayerPosRot {
+            pos: position.into(),
+            look_direction: look.into(),
+            flags: azalea_protocol::common::movements::MoveFlags {
+                on_ground: player.on_ground,
+                horizontal_collision: player.horizontal_collision,
+            },
+        },
+    )
+}
+
 fn resolve_rotation(
     current_y: f32,
     current_x: f32,
@@ -579,7 +634,9 @@ pub struct AppCore {
     pub data_dirs: DataDirs,
     pub version: String,
     pub resource_packs: ResourcePackManager,
-    pub pending_pack_download: Option<PendingPackDownload>,
+    pub pending_pack_download: Vec<PendingPackDownload>,
+    server_pack_generations: HashMap<uuid::Uuid, u64>,
+    next_server_pack_generation: u64,
     pub asset_index: Option<AssetIndex>,
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
@@ -746,7 +803,9 @@ impl AppCore {
             data_dirs,
             version,
             resource_packs,
-            pending_pack_download: None,
+            pending_pack_download: Vec::new(),
+            server_pack_generations: HashMap::new(),
+            next_server_pack_generation: 0,
             asset_index,
             audio,
             tick_accumulator: 0.0,
@@ -1306,6 +1365,7 @@ impl AppCore {
     }
 
     pub fn clear_server_resource_packs(&mut self, renderer: &mut Renderer) {
+        self.server_pack_generations.clear();
         if self.resource_packs.clear_server_packs() {
             self.reload_pack_assets(renderer);
         }
@@ -1573,15 +1633,10 @@ impl AppCore {
                     connection.packet_tx.send(ServerboundGamePacket::AcceptTeleportation(
                         azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation { id },
                     ));
-                    connection.packet_tx.send(ServerboundGamePacket::MovePlayerPosRot(
-                        azalea_protocol::packets::game::s_move_player_pos_rot::ServerboundMovePlayerPosRot {
-                            pos: new_position.into(),
-                            look_direction: new_look_dir.into(),
-                            flags: azalea_protocol::common::movements::MoveFlags {
-                                on_ground: false,
-                                horizontal_collision: false,
-                            },
-                        },
+                    connection.packet_tx.send(post_teleport_echo(
+                        &game.player,
+                        new_position,
+                        new_look_dir,
                     ));
                 }
                 NetworkEvent::PlayerRotation {
@@ -1862,6 +1917,7 @@ impl AppCore {
                         screen,
                         slots: vec![ItemStack::Empty; screen.click_kind().slot_count()],
                         data: [0; 10],
+                        data_received: [false; 10],
                         anvil: None,
                         enchant: None,
                         merchant: None,
@@ -1881,6 +1937,48 @@ impl AppCore {
                         && let Some(d) = c.data.get_mut(id as usize)
                     {
                         *d = value as i16;
+                        c.data_received[id as usize] = true;
+                    }
+                }
+                NetworkEvent::OpenBook { hand } => {
+                    use azalea_inventory::ItemStack;
+                    use azalea_inventory::components::WritableBookContent;
+                    use azalea_protocol::packets::game::s_interact::InteractionHand;
+
+                    use crate::player::inventory::HOTBAR_START;
+                    let (slot, stack) = match hand {
+                        InteractionHand::MainHand => {
+                            let selected = self.input.selected_slot().min(8);
+                            (
+                                selected as u32,
+                                game.player.inventory.slot(HOTBAR_START + selected as usize),
+                            )
+                        }
+                        InteractionHand::OffHand => (40, game.player.inventory.slot(45)),
+                    };
+                    if let ItemStack::Present(data) = stack {
+                        if data.kind == azalea_registry::builtin::ItemKind::WritableBook {
+                            let component = data
+                                .component_patch
+                                .get::<WritableBookContent>()
+                                .cloned()
+                                .or_else(|| {
+                                    azalea_inventory::default_components::get_default_component::<
+                                        WritableBookContent,
+                                    >(data.kind)
+                                });
+                            if let Some(component) = component {
+                                let pages = component.pages.into_iter().map(|p| p.raw).collect();
+                                game.paused = false;
+                                game.book_edit = Some(crate::ui::book::BookEditState::new(
+                                    slot,
+                                    pages,
+                                    String::new(),
+                                    self.user.username.clone(),
+                                ));
+                                self.apply_cursor_grab(window, Some(game));
+                            }
+                        }
                     }
                 }
                 NetworkEvent::OpenScreen {
@@ -1912,6 +2010,7 @@ impl AppCore {
                         MenuKind::ShulkerBox => Some(ContainerScreen::ShulkerBox),
                         MenuKind::Anvil => Some(ContainerScreen::Anvil),
                         MenuKind::Enchantment => Some(ContainerScreen::Enchantment),
+                        MenuKind::Beacon => Some(ContainerScreen::Beacon),
                         _ => None,
                     };
                     if let Some(screen) = screen {
@@ -1928,6 +2027,7 @@ impl AppCore {
                             screen,
                             slots: vec![ItemStack::Empty; screen.click_kind().slot_count()],
                             data: [0; 10],
+                            data_received: [false; 10],
                             anvil: (screen == ContainerScreen::Anvil)
                                 .then(crate::ui::anvil::AnvilState::new),
                             enchant: (screen == ContainerScreen::Enchantment)
@@ -2126,6 +2226,10 @@ impl AppCore {
                     color,
                     fill_color,
                     sidebar_slot,
+                    nametag_visibility,
+                    collision_rule,
+                    friendly_fire,
+                    see_friendly_invisibles,
                     members,
                 } => {
                     game.scoreboard.set_team(
@@ -2136,6 +2240,10 @@ impl AppCore {
                         color,
                         fill_color,
                         sidebar_slot,
+                        nametag_visibility,
+                        collision_rule,
+                        friendly_fire,
+                        see_friendly_invisibles,
                         members,
                     );
                 }
@@ -2151,6 +2259,9 @@ impl AppCore {
                 }
                 NetworkEvent::CommandTree { tree } => {
                     game.command_tree = Some(tree);
+                }
+                NetworkEvent::CustomChatCompletions { action, entries } => {
+                    game.chat.update_custom_completions(action, entries);
                 }
                 NetworkEvent::CommandSuggestions { id, start, options } => {
                     game.chat.apply_server_suggestions(
@@ -2289,7 +2400,12 @@ impl AppCore {
                     game.player.game_mode = game_mode;
                     // Vanilla GameType.updatePlayerAbilities, applied locally on
                     // setLocalMode (no packet).
-                    // TODO: the instabuild/invulnerable/may_build halves
+                    // Vanilla GameType.updatePlayerAbilities; serverbound mode
+                    // changes may still be rejected, in which case this is
+                    // corrected by the next authoritative abilities packet.
+                    game.player.invulnerable = matches!(game_mode, 1 | 3);
+                    game.player.instabuild = game_mode == 1;
+                    game.player.may_build = !matches!(game_mode, 2 | 3);
                     match game_mode {
                         // Creative grants flight but leaves `flying` untouched.
                         1 => game.player.may_fly = true,
@@ -2321,13 +2437,17 @@ impl AppCore {
                     }
                 }
                 NetworkEvent::PlayerAbilitiesChanged {
+                    invulnerable,
                     flying,
                     can_fly,
+                    instant_break,
                     flying_speed,
                     walking_speed,
                 } => {
+                    game.player.invulnerable = invulnerable;
                     game.player.flying = flying;
                     game.player.may_fly = can_fly;
+                    game.player.instant_break = instant_break;
                     game.player.fly_speed = flying_speed;
                     game.player.walk_speed = walking_speed;
                 }
@@ -2743,6 +2863,7 @@ impl AppCore {
                 }
                 NetworkEvent::LevelParticles {
                     kind,
+                    options,
                     override_limiter,
                     always_show,
                     pos,
@@ -2754,6 +2875,7 @@ impl AppCore {
                 } => {
                     game.particle_store.add_particles_from_packet(
                         kind,
+                        options,
                         override_limiter,
                         always_show,
                         pos,
@@ -2893,6 +3015,22 @@ impl AppCore {
                 }
                 NetworkEvent::EntityData { id, index, value } => {
                     if id == game.player.entity_id
+                        && index == 0
+                        && let crate::entity::MetaValue::Byte(flags) = value
+                    {
+                        // Entity shared-flags bit 7 is fall-flying; this is
+                        // distinct from the pose metadata used for rendering.
+                        game.player.fall_flying = flags & 0x80 != 0;
+                    }
+                    // LivingEntity.DATA_AIR_SUPPLY is metadata index 1, an Int.
+                    // Server authority replaces local drowning/recovery prediction.
+                    if id == game.player.entity_id
+                        && index == 1
+                        && let crate::entity::MetaValue::Int(air) = value
+                    {
+                        game.player.air_supply = air;
+                    }
+                    if id == game.player.entity_id
                         && index == 8
                         && let crate::entity::MetaValue::Byte(flags) = value
                     {
@@ -2915,8 +3053,13 @@ impl AppCore {
                     }
                     game.entity_store.apply_entity_data(id, index, value);
                 }
-                NetworkEvent::EntityPose { id, is_crouching } => {
-                    game.entity_store.set_crouching(id, is_crouching);
+                NetworkEvent::EntityPose { id, pose } => {
+                    if id == game.player.entity_id {
+                        game.player.crouching = pose == crate::entity::EntityPose::Crouching;
+                        game.player.fall_flying = pose == crate::entity::EntityPose::FallFlying;
+                    } else {
+                        game.entity_store.set_pose(id, pose);
+                    }
                 }
                 // TODO: remote players' sleeping pose rendering.
                 NetworkEvent::EntitySleepingPos { id, pos } => {
@@ -3122,21 +3265,32 @@ impl AppCore {
                     required,
                 } => {
                     tracing::info!("Resource pack push: {id} url={url} required={required}");
+                    self.next_server_pack_generation =
+                        self.next_server_pack_generation.wrapping_add(1);
+                    let generation = self.next_server_pack_generation;
+                    self.server_pack_generations.insert(id, generation);
                     let cache_dir = self.resource_packs.server_cache_dir().to_path_buf();
-                    self.pending_pack_download = Some(PendingPackDownload {
+                    self.pending_pack_download.push(PendingPackDownload {
                         id,
+                        generation,
                         required,
                         hash: hash.clone(),
                         handle: std::thread::spawn(move || {
-                            ResourcePackManager::download_server_pack(&cache_dir, &url, &hash)
+                            ResourcePackManager::download_server_pack(&cache_dir, id, &url, &hash)
                         }),
                     });
                 }
                 NetworkEvent::ResourcePackPop { id } => {
                     // A server may pop an id it already popped, or never pushed.
                     let removed = match id {
-                        Some(id) => self.resource_packs.remove_server_pack(&id),
-                        None => self.resource_packs.clear_server_packs(),
+                        Some(id) => {
+                            self.server_pack_generations.remove(&id);
+                            self.resource_packs.remove_server_pack(&id)
+                        }
+                        None => {
+                            self.server_pack_generations.clear();
+                            self.resource_packs.clear_server_packs()
+                        }
                     };
                     if removed {
                         self.reload_live_resource_assets(game, renderer);
@@ -3200,50 +3354,44 @@ impl AppCore {
             }
         }
 
-        if let Some(pending) = &self.pending_pack_download
-            && pending.handle.is_finished()
+        for (id, required, hash, result, generation) in
+            take_finished_pack_downloads(&mut self.pending_pack_download)
         {
-            let pending = self.pending_pack_download.take().unwrap();
-            let result = pending.handle.join();
-
+            if self.server_pack_generations.get(&id) != Some(&generation) {
+                continue;
+            }
             use azalea_protocol::packets::game::s_resource_pack;
-            let action = match result {
+            let action = pack_download_action(&result);
+            match result {
                 Err(_) => {
-                    tracing::error!("Resource pack {} thread panicked", pending.id);
-                    if pending.required {
+                    tracing::error!("Resource pack {} thread panicked", id);
+                    if required {
                         disconnect_reason = Some(
                             "Required resource pack failed: thread panicked (internal error)"
                                 .into(),
                         );
                     }
-                    s_resource_pack::Action::FailedDownload
                 }
                 Ok(Err(e)) => {
-                    tracing::error!("Resource pack {} failed: {e}", pending.id);
-                    if pending.required {
+                    tracing::error!("Resource pack {} failed: {e}", id);
+                    if required {
                         disconnect_reason = Some(format!("Required resource pack failed: {e}"));
                     }
-                    s_resource_pack::Action::FailedDownload
                 }
                 Ok(Ok(_path)) => {
-                    self.resource_packs
-                        .apply_server_pack(pending.id, &pending.hash);
+                    self.resource_packs.apply_server_pack(id, &hash);
                     // Vanilla acknowledges SuccessfullyLoaded only after the
                     // resources have been applied. Rebuild the live renderer
                     // (including shared-atlas chunk geometry) before replying.
                     self.reload_live_resource_assets(game, renderer);
-                    tracing::info!("Resource pack {} loaded successfully", pending.id);
-                    s_resource_pack::Action::SuccessfullyLoaded
+                    tracing::info!("Resource pack {} loaded successfully", id);
                 }
-            };
+            }
 
             connection
                 .packet_tx
                 .send(ServerboundGamePacket::ResourcePack(
-                    s_resource_pack::ServerboundResourcePack {
-                        id: pending.id,
-                        action,
-                    },
+                    s_resource_pack::ServerboundResourcePack { id, action },
                 ));
             self.menu.active_packs = self.resource_packs.active_pack_info();
         }
@@ -3544,6 +3692,31 @@ impl AppCore {
 
         game.player.look_dir = renderer.camera_look_dir();
 
+        // Vanilla LocalPlayer.aiStep: jump while airborne to ask the server to
+        // start gliding. The server remains authoritative for the transition.
+        if input.action_just_pressed(Action::Jump)
+            && !game.player.on_ground
+            && !game.player.fall_flying
+            && game.riding_vehicle_id.is_none()
+            && !game.player.in_water
+            && !game.player.effects.sorted_desc().iter().any(|effect| {
+                crate::mob_effect::info(effect.effect_id)
+                    .is_some_and(|info| info.name == "levitation")
+            })
+            && matches!(
+                game.player.inventory.slot(7),
+                azalea_inventory::ItemStack::Present(stack)
+                    if stack.kind == azalea_registry::builtin::ItemKind::Elytra && stack.count > 0
+            )
+        {
+            use azalea_protocol::packets::game::s_player_command as cmd;
+            connection.packet_tx.send(player_command_packet(
+                game.player.entity_id,
+                cmd::Action::StartFallFlying,
+                0,
+            ));
+        }
+
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
         }
@@ -3588,6 +3761,10 @@ impl AppCore {
         let held_stack = game.player.inventory.held_stack(input.selected_slot());
         let hand_on_cooldown =
             held_stack_item.is_some_and(|stack| game.item_cooldowns.is_on_cooldown(stack));
+        let offhand_stack = match game.player.inventory.offhand() {
+            azalea_inventory::ItemStack::Present(stack) if stack.count > 0 => Some(stack),
+            _ => None,
+        };
         let place_block = held_stack.and_then(|data| {
             let name = crate::player::inventory::item_resource_name(data.kind);
             renderer.registry().placeable_block_for_item(&name)
@@ -3612,6 +3789,7 @@ impl AppCore {
             game.player.food,
             input.selected_slot(),
             held_stack,
+            offhand_stack,
             place_block,
             hands_empty,
             &mut crate::player::interaction::BreakEffects {
@@ -3880,19 +4058,168 @@ mod tests {
     use azalea_protocol::packets::game::ServerboundGamePacket;
 
     use super::{
-        CursorOp, DeathRoute, HeadProfile, Velocity, accepted_player_chat_tag,
+        CursorOp, DeathRoute, HeadProfile, PendingPackDownload, Velocity, accepted_player_chat_tag,
         add_explosion_knockback, apply_passengers, apply_vehicle_teleport, cursor_step,
         death_route, entity_look_direction, explosion_sound_pitch, local_player_motion,
-        player_command_packet, player_input_state, player_ride_state, player_rotation_packet,
-        register_nonliving_spawn, resolve_entity_teleport, resolve_head_profile, resolve_rotation,
+        pack_download_action, player_command_packet, player_input_state, player_ride_state,
+        player_rotation_packet, post_teleport_echo, register_nonliving_spawn,
+        resolve_entity_teleport, resolve_head_profile, resolve_rotation,
         server_view_distance_update, serverbound_player_input, set_first_disconnect_reason,
-        set_player_experience, set_player_inventory_slot, time_update_clock, update_block_entity,
+        set_player_experience, set_player_inventory_slot, take_finished_pack_downloads,
+        time_update_clock, update_block_entity,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
     use crate::net::chat_security::SignedChatBody;
     use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry, TabList};
     use crate::player::valid_player_name;
+    use crate::resource_pack::ResourcePackManager;
     use crate::ui::chat::ChatMessageTag;
+
+    #[test]
+    fn pushed_pack_downloads_keep_identity_when_they_finish_in_reverse_order() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let first_id = uuid::Uuid::from_u128(1);
+        let second_id = uuid::Uuid::from_u128(2);
+        let (first_tx, first_rx) = mpsc::channel();
+        let (second_tx, second_rx) = mpsc::channel();
+        let mut pending = vec![
+            PendingPackDownload {
+                id: first_id,
+                generation: 1,
+                required: false,
+                hash: "first".into(),
+                handle: std::thread::spawn(move || {
+                    first_rx.recv().unwrap();
+                    Ok("first-pack".into())
+                }),
+            },
+            PendingPackDownload {
+                id: second_id,
+                generation: 2,
+                required: false,
+                hash: "second".into(),
+                handle: std::thread::spawn(move || {
+                    second_rx.recv().unwrap();
+                    Err(crate::resource_pack::PackError::Download(
+                        "second failed".into(),
+                    ))
+                }),
+            },
+        ];
+
+        second_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pending[1].handle.is_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(take_finished_pack_downloads(&mut pending).is_empty());
+        assert_eq!(pending.len(), 2);
+
+        first_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pending[0].handle.is_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let finished = take_finished_pack_downloads(&mut pending);
+        assert_eq!(finished.len(), 2);
+        assert_eq!(finished[0].0, first_id);
+        assert!(matches!(
+            &finished[0].3,
+            Ok(Ok(path)) if path == &std::path::PathBuf::from("first-pack")
+        ));
+        assert_eq!(
+            pack_download_action(&finished[0].3),
+            azalea_protocol::packets::game::s_resource_pack::Action::SuccessfullyLoaded
+        );
+        assert_eq!(finished[1].0, second_id);
+        assert!(matches!(finished[1].3, Ok(Err(_))));
+        assert_eq!(
+            pack_download_action(&finished[1].3),
+            azalea_protocol::packets::game::s_resource_pack::Action::FailedDownload
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn reverse_download_completion_keeps_push_order_asset_precedence() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let root = std::env::temp_dir().join(format!(
+            "pomme-pack-order-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut packs = ResourcePackManager::new(&root);
+        let ids = [uuid::Uuid::from_u128(11), uuid::Uuid::from_u128(22)];
+        for (id, contents) in ids
+            .into_iter()
+            .zip([b"first".as_slice(), b"second".as_slice()])
+        {
+            let dir = packs
+                .server_cache_dir()
+                .join(format!("_empty_hash_{id}"))
+                .join("assets/test");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("shared.txt"), contents).unwrap();
+        }
+
+        let (first_tx, first_rx) = mpsc::channel();
+        let (second_tx, second_rx) = mpsc::channel();
+        let mut pending = vec![
+            PendingPackDownload {
+                id: ids[0],
+                generation: 1,
+                required: false,
+                hash: String::new(),
+                handle: std::thread::spawn(move || {
+                    first_rx.recv().unwrap();
+                    Ok("first".into())
+                }),
+            },
+            PendingPackDownload {
+                id: ids[1],
+                generation: 2,
+                required: false,
+                hash: String::new(),
+                handle: std::thread::spawn(move || {
+                    second_rx.recv().unwrap();
+                    Ok("second".into())
+                }),
+            },
+        ];
+
+        second_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pending[1].handle.is_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let finished = take_finished_pack_downloads(&mut pending);
+        assert!(
+            finished.is_empty(),
+            "later pack must wait for the earlier push"
+        );
+
+        first_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pending[0].handle.is_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        for (id, _, hash, result, _) in take_finished_pack_downloads(&mut pending) {
+            assert!(matches!(result, Ok(Ok(_))));
+            packs.apply_server_pack(id, &hash);
+        }
+
+        let resolved = packs.resolve_asset("test/shared.txt").unwrap();
+        assert_eq!(std::fs::read(resolved).unwrap(), b"second");
+        assert!(pending.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn explosion_sound_pitch_matches_vanilla_formula_and_knockback_is_additive() {
@@ -3952,6 +4279,28 @@ mod tests {
             echo.flags,
             azalea_protocol::common::movements::MoveFlags::default()
         );
+    }
+
+    #[test]
+    fn post_teleport_echo_carries_current_pose_and_movement_flags() {
+        use crate::entity::components::{LookDirection, Position};
+
+        let mut player = crate::player::LocalPlayer::new();
+        player.on_ground = true;
+        player.horizontal_collision = true;
+        let ServerboundGamePacket::MovePlayerPosRot(packet) = post_teleport_echo(
+            &player,
+            Position::new(4.0, 5.0, 6.0),
+            LookDirection::new(90.0, 30.0),
+        ) else {
+            panic!("teleport echo must send position and rotation");
+        };
+
+        assert_eq!((packet.pos.x, packet.pos.y, packet.pos.z), (4.0, 5.0, 6.0));
+        assert_eq!(packet.look_direction.y_rot(), 90.0);
+        assert_eq!(packet.look_direction.x_rot(), 30.0);
+        assert!(packet.flags.on_ground);
+        assert!(packet.flags.horizontal_collision);
     }
 
     #[test]

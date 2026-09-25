@@ -1055,8 +1055,12 @@ fn translate_attack_old_versions() {
 #[test]
 fn translate_interact_774() {
     let location = DVec3::new(0.5, 1.25, -0.25);
-    let frames = translation_for(774)
-        .translate_outbound_game_frame(wire::encode_interact(42, wire::InteractionHand::MainHand, location, true));
+    let frames = translation_for(774).translate_outbound_game_frame(wire::encode_interact(
+        42,
+        wire::InteractionHand::MainHand,
+        location,
+        true,
+    ));
     assert_eq!(frames.len(), 2);
 
     let interact = old_id(774, Direction::Serverbound, "interact") as u8;
@@ -2158,9 +2162,8 @@ fn translate_use_item_766() {
     );
 }
 
-/// A 1.20.4 optional item (`bool + item + i8 count + NBT`) translates bare
-/// through `container_set_content` (whose trailing carried stack survives);
-/// the NBT drops.
+/// A 1.20.4 optional item (`bool + item + i8 count + NBT`) retains its legacy
+/// root in the native `custom_data` component.
 #[test]
 fn translate_container_set_content_765() {
     let mut old = Vec::new();
@@ -2186,7 +2189,7 @@ fn translate_container_set_content_765() {
     };
     assert_eq!(data.kind, azalea_registry::builtin::ItemKind::Stone);
     assert_eq!(data.count, 3);
-    assert_eq!(data.component_patch.iter().count(), 0);
+    assert_eq!(data.component_patch.iter().count(), 1);
     assert!(matches!(p.carried_item, azalea_inventory::ItemStack::Empty));
 }
 
@@ -3953,11 +3956,13 @@ fn translate_animate_777() {
 
 /// 26.3's `level_particles` leads with the particle, splits `maxSpeed` per
 /// axis, sends `count` as a varint and appends a randomization type. The
-/// particle keeps its wire-space id and payload (sized per option codec:
-/// none, a block state, dust's color + scale, an item template with a
-/// component patch).
+/// particle ids and registry-bearing payloads are translated to the native
+/// protocol; each payload is sized by its option codec (none, block state,
+/// dust color + scale, item template with component patch).
 #[test]
 fn translate_level_particles_777() {
+    use std::io::Cursor;
+
     use pomme_protocol::{ClientRegistry, RegistryTable};
 
     let old_table = RegistryTable::for_protocol(777).unwrap();
@@ -3981,6 +3986,13 @@ fn translate_level_particles_777() {
         old
     };
     let expect = |particle: &[u8]| {
+        let mut input = Cursor::new(particle);
+        let old_particle = u32::azalea_read_var(&mut input).unwrap();
+        let name = old_table
+            .name_of(ClientRegistry::ParticleType, old_particle)
+            .unwrap();
+        let native_table = RegistryTable::for_protocol(776).unwrap();
+        let native_particle = registry_id(native_table, ClientRegistry::ParticleType, name);
         let mut expected = Vec::new();
         wire::write_varint(
             &mut expected,
@@ -3989,7 +4001,8 @@ fn translate_level_particles_777() {
         body(&mut expected);
         expected.extend_from_slice(&0.1f32.to_be_bytes());
         expected.extend_from_slice(&12i32.to_be_bytes());
-        expected.extend_from_slice(particle);
+        wire::write_varint(&mut expected, native_particle);
+        expected.extend_from_slice(&particle[input.position() as usize..]);
         expected
     };
 

@@ -3,8 +3,9 @@
 //! `StairBlock`, etc.). Boxes are block-local (0..1); the caller offsets them
 //! to the block position.
 //!
-//! TODO: walls, fences, fence gates, panes, trapdoors, doors, beds, chests,
-//! cake, etc. still fall back to a full cube.
+//! TODO: chests and many smaller shapes still fall back to a full cube.
+//! Fence gates are represented from their block state; neighbor-derived
+//! connections and entity-context shapes still need runtime context.
 //!
 //! TODO: blocks with no collision but a small outline (torches, flowers,
 //! buttons, plants, redstone dust) fall back to a full cube too, so the
@@ -59,6 +60,7 @@ pub(crate) fn compute_shape(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> 
         _ if id.ends_with("_trapdoor") => Some(trapdoor_shape(props)),
         _ if id.ends_with("_bed") => Some(bed_shape(props)),
         _ if id.ends_with("_fence") => Some(cross_collision_shape(props, 4.0 / 16.0, 24.0 / 16.0)),
+        _ if id.ends_with("_fence_gate") => Some(fence_gate_shape(props)),
         "iron_bars" => Some(cross_collision_shape(props, 2.0 / 16.0, 1.0)),
         _ if id.ends_with("_pane") => Some(cross_collision_shape(props, 2.0 / 16.0, 1.0)),
         _ if id.ends_with("_wall") => Some(wall_shape(props)),
@@ -105,6 +107,19 @@ pub(crate) fn compute_outline(id: &str, props: &PropMap) -> Option<Vec<LocalBox>
         // `Shapes.empty()`: the pick ray clips straight through them.
         "water" | "lava" | "bubble_column" => Some(Vec::new()),
         _ => None,
+    }
+}
+
+fn fence_gate_shape(props: &PropMap) -> Vec<LocalBox> {
+    if props.get("open") == Some("true") {
+        return Vec::new();
+    }
+    let bar: LocalBox = [0.0, 0.0, 6.0 / 16.0, 1.0, 1.5, 10.0 / 16.0];
+    let facing = props.get("facing").unwrap_or("north");
+    if matches!(facing, "east" | "west") {
+        vec![rot_y90(bar)]
+    } else {
+        vec![bar]
     }
 }
 
@@ -395,6 +410,15 @@ mod tests {
             &[[0.0, 0.8125, 0.0, 1.0, 1.0, 1.0]]
         );
         assert_eq!(shape("cake", &[("bites", "3")])[0][0], 7.0 / 16.0);
+        assert_eq!(
+            shape("oak_fence_gate", &[("facing", "north"), ("open", "false")]),
+            &[[0.0, 0.0, 6.0 / 16.0, 1.0, 1.5, 10.0 / 16.0]]
+        );
+        assert!(shape("oak_fence_gate", &[("open", "true")]).is_empty());
+        assert_eq!(
+            shape("oak_fence_gate", &[("facing", "east"), ("open", "false")]),
+            &[[6.0 / 16.0, 0.0, 0.0, 10.0 / 16.0, 1.5, 1.0]]
+        );
         assert_eq!(
             shape("white_bed", &[("part", "foot"), ("facing", "north")]).len(),
             3

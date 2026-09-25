@@ -370,6 +370,7 @@ impl InteractionState {
         food: u32,
         selected_slot: u8,
         held_stack: Option<&ItemStackData>,
+        offhand_stack: Option<&ItemStackData>,
         place_block: Option<BlockState>,
         hands_empty: bool,
         effects: &mut BreakEffects,
@@ -450,6 +451,7 @@ impl InteractionState {
                 spectator,
                 hand,
                 hand_on_cooldown,
+                offhand_stack,
                 sneaking,
                 suppress_block_use,
                 effects,
@@ -697,6 +699,7 @@ impl InteractionState {
         spectator: bool,
         hand: InteractionHand,
         hand_on_cooldown: bool,
+        offhand_stack: Option<&ItemStackData>,
         sneaking: bool,
         suppress_block_use: bool,
         effects: &mut BreakEffects,
@@ -781,7 +784,7 @@ impl InteractionState {
 
         // A non-block item passes the block interaction, so vanilla falls
         // through to `useItem` (this is how eating at the ground works).
-        self.use_item(
+        let used = self.use_item(
             sender,
             audio,
             chunks,
@@ -794,7 +797,25 @@ impl InteractionState {
             hand,
             hand_on_cooldown,
             effects,
-        ) || hit_block
+        );
+        if used {
+            return true;
+        }
+
+        // Vanilla can fall through to the offhand when the main hand is empty.
+        // Only do this for air use: a block/entity interaction may be consumed
+        // server-side, and this client cannot determine PASS from its response.
+        if self.target.is_none() && held_stack.is_none() && offhand_stack.is_some() {
+            self.seq += 1;
+            sender.send(ServerboundGamePacket::UseItem(ServerboundUseItem {
+                hand: InteractionHand::OffHand,
+                seq: self.seq,
+                y_rot: look.y_rot_deg(),
+                x_rot: look.x_rot_deg(),
+            }));
+            return true;
+        }
+        hit_block
     }
 
     /// Vanilla `MultiPlayerGameMode.useItem` + `Consumable.startConsuming`:
@@ -1667,7 +1688,8 @@ fn border_hit(
 
 /// Minecraft 26.2 `CollisionGetter.approximateNearestDirection`: choose the
 /// cardinal direction with the greatest positive dot product, preserving the
-/// vanilla tie order. The caller passes `hit.location - start` (not its inverse).
+/// vanilla tie order. The caller passes `hit.location - start` (not its
+/// inverse).
 fn approximate_nearest_direction(delta: DVec3) -> Direction {
     let (x, y, z) = (delta.x as f32, delta.y as f32, delta.z as f32);
     let mut result = Direction::North;

@@ -164,30 +164,15 @@ pub fn push_clipped_sprite(
     elements.push(MenuElement::ScissorPop);
 }
 
-/// The (inert) recipe book toggle at GUI-unit position.
-pub fn push_recipe_book_button(
+/// Recipe book controls stay explicitly unavailable until recipe-book data
+/// and actions are implemented (the 26.2 recipe display protocol differs).
+pub fn push_recipe_book_unavailable(
     elements: &mut Vec<MenuElement>,
     panel: &Panel,
-    cursor: (f32, f32),
     x: f32,
     y: f32,
 ) {
-    let bx = panel.ox + x * panel.scale;
-    let by = panel.oy + y * panel.scale;
-    let w = 20.0 * panel.scale;
-    let h = 18.0 * panel.scale;
-    elements.push(MenuElement::Image {
-        x: bx,
-        y: by,
-        w,
-        h,
-        sprite: if hit_test(cursor, [bx, by, w, h]) {
-            SpriteId::RecipeBookButtonHighlighted
-        } else {
-            SpriteId::RecipeBookButton
-        },
-        tint: WHITE,
-    });
+    panel.label(elements, x, y, "Recipe book unavailable");
 }
 
 /// Per-frame slot drawing context: positions slots in GUI units, substitutes

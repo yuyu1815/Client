@@ -965,9 +965,9 @@ impl AudioWorker {
     fn play(&mut self, play: PlayCommand) -> bool {
         // Frees the sources finished sounds still hold before the pool check.
         self.tick();
-        let base_gain = clamped_source_volume(play.volume);
-        let gain = category_gain(&self.volumes, play.category) * base_gain;
-        if gain == 0.0 && play.category != SoundCategory::Music {
+        let base_gain = play.volume;
+        let gain = clamped_source_volume(category_gain(&self.volumes, play.category) * base_gain);
+        if gain == 0.0 && !play.report_completion {
             return false;
         }
         let pitch = clamped_source_pitch(play.pitch);
@@ -1110,7 +1110,9 @@ impl AudioWorker {
 
     fn refresh_gains(&mut self) {
         for sound in self.active.values() {
-            let gain = category_gain(&self.volumes, sound.category) * sound.base_gain;
+            let gain = clamped_source_volume(
+                category_gain(&self.volumes, sound.category) * sound.base_gain,
+            );
             if let Err(e) = sound.source.set_gain(gain) {
                 tracing::warn!("failed to update OpenAL source gain: {e}");
             }
@@ -1282,6 +1284,15 @@ mod tests {
         volumes[SoundCategory::Music as usize] = 0.25;
         assert_eq!(category_gain(&volumes, SoundCategory::Master), 0.5);
         assert_eq!(category_gain(&volumes, SoundCategory::Music), 0.125);
+        // Vanilla clamps the complete instance × entry × category product.
+        assert_eq!(
+            clamped_source_volume(2.0 * category_gain(&volumes, SoundCategory::Music)),
+            0.25
+        );
+        assert_eq!(
+            clamped_source_volume(2.0 * category_gain(&volumes, SoundCategory::Master)),
+            1.0
+        );
     }
 
     #[test]

@@ -242,13 +242,19 @@ pub fn yaw_for_block(kind: BlockEntityKind, props: &crate::world::block::PropMap
             Some("east") => 270.0,
             _ => 0.0,
         },
-        // TODO: wall signs have no `rotation` (they use `facing`) and vanilla
-        // renders them with a postless model offset against the wall; they
-        // currently fall back to the standing model facing south.
+        // Standing signs use a 0..15 rotation; wall signs have no rotation
+        // property and face one of the four horizontal directions instead.
         BlockEntityKind::Sign => props
             .get("rotation")
             .and_then(|s| s.parse::<f32>().ok())
             .map(|r| r * 22.5)
+            .or_else(|| match props.get("facing") {
+                Some("south") => Some(0.0),
+                Some("west") => Some(90.0),
+                Some("north") => Some(180.0),
+                Some("east") => Some(270.0),
+                _ => None,
+            })
             .unwrap_or(0.0),
         _ => 0.0,
     }

@@ -97,16 +97,18 @@ impl ResourcePackManager {
         None
     }
 
-    fn server_pack_dir(&self, hash: &str) -> PathBuf {
-        self.server_cache_dir.join(hash)
+    fn server_pack_dir(&self, id: uuid::Uuid, hash: &str) -> PathBuf {
+        self.server_cache_dir.join(server_pack_cache_key(id, hash))
     }
 
     pub fn download_server_pack(
         server_cache_dir: &Path,
+        id: uuid::Uuid,
         url: &str,
         hash: &str,
     ) -> Result<PathBuf, PackError> {
-        let dir = server_cache_dir.join(hash);
+        validate_hash_format(hash)?;
+        let dir = server_cache_dir.join(server_pack_cache_key(id, hash));
         if !dir.is_dir() {
             let data = reqwest::blocking::get(url)
                 .map_err(|e| PackError::Download(e.to_string()))?
@@ -122,7 +124,7 @@ impl ResourcePackManager {
     pub fn apply_server_pack(&mut self, id: uuid::Uuid, hash: &str) {
         let pack_id = id.to_string();
         self.active_packs.retain(|p| p.id != pack_id);
-        let dir = self.server_pack_dir(hash);
+        let dir = self.server_pack_dir(id, hash);
         let info = parse_pack_meta_dir(&dir, hash);
         self.active_packs.push(ActivePack {
             id: pack_id,
@@ -263,6 +265,7 @@ impl ResourcePackManager {
 pub enum PackError {
     Download(String),
     HashMismatch,
+    InvalidHash,
     Extract(String),
 }
 
@@ -271,17 +274,42 @@ impl std::fmt::Display for PackError {
         match self {
             Self::Download(e) => write!(f, "download failed: {e}"),
             Self::HashMismatch => write!(f, "SHA-1 hash mismatch"),
+            Self::InvalidHash => {
+                write!(f, "invalid SHA-1 hash (expected 40 hexadecimal characters)")
+            }
             Self::Extract(e) => write!(f, "extraction failed: {e}"),
         }
     }
 }
 
+fn server_pack_cache_key(id: uuid::Uuid, hash: &str) -> String {
+    if hash.is_empty() {
+        format!("_empty_hash_{id}")
+    } else if hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        hash.to_ascii_lowercase()
+    } else {
+        // Keep even direct callers of apply_server_pack inside the cache.
+        format!("_invalid_hash_{id}")
+    }
+}
+
+fn validate_hash_format(expected: &str) -> Result<(), PackError> {
+    if expected.is_empty()
+        || (expected.len() == 40 && expected.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        Ok(())
+    } else {
+        Err(PackError::InvalidHash)
+    }
+}
+
 fn validate_hash(data: &[u8], expected: &str) -> Result<(), PackError> {
+    validate_hash_format(expected)?;
     if expected.is_empty() {
         return Ok(());
     }
     let actual = sha1_smol::Sha1::from(data).digest().to_string();
-    if actual != expected {
+    if !actual.eq_ignore_ascii_case(expected) {
         tracing::error!("Hash mismatch: expected {expected}, got {actual}");
         return Err(PackError::HashMismatch);
     }
@@ -446,4 +474,165 @@ fn extract_zip(data: &[u8], dest: &Path) -> Result<(), PackError> {
 
     tracing::info!("Extracted resource pack to {}", dest.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    use super::*;
+
+    #[test]
+    fn empty_hash_download_is_cached_and_retrievable() {
+        let instance_dir = std::env::temp_dir().join(format!(
+            "pomme-empty-pack-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut manager = ResourcePackManager::new(&instance_dir);
+        let cache_dir = manager.server_cache_dir().to_path_buf();
+        assert!(cache_dir.is_dir());
+
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        archive
+            .start_file(
+                "assets/test/retrievable.txt",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive.write_all(b"pack contents").unwrap();
+        let bytes = archive.finish().unwrap().into_inner();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            )
+            .unwrap();
+            stream.write_all(&bytes).unwrap();
+        });
+
+        let id = uuid::Uuid::new_v4();
+        let downloaded = ResourcePackManager::download_server_pack(
+            &cache_dir,
+            id,
+            &format!("http://{address}/"),
+            "",
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_ne!(downloaded, cache_dir);
+        assert_eq!(
+            std::fs::read(downloaded.join("assets/test/retrievable.txt")).unwrap(),
+            b"pack contents"
+        );
+
+        manager.apply_server_pack(id, "");
+        assert_eq!(
+            manager.active_pack_dirs().next(),
+            Some(downloaded.as_path())
+        );
+        let _ = std::fs::remove_dir_all(instance_dir);
+    }
+
+    #[test]
+    fn empty_hash_packs_with_distinct_ids_do_not_alias() {
+        let instance_dir = std::env::temp_dir().join(format!(
+            "pomme-empty-packs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut manager = ResourcePackManager::new(&instance_dir);
+        let cache_dir = manager.server_cache_dir().to_path_buf();
+        let ids = [uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)];
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                let n = stream.read(&mut request).unwrap();
+                let body = if request[..n].windows(5).any(|w| w == b"/one ") {
+                    b"first pack".as_slice()
+                } else {
+                    b"second pack".as_slice()
+                };
+                let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+                archive
+                    .start_file(
+                        "assets/test/payload.txt",
+                        zip::write::SimpleFileOptions::default(),
+                    )
+                    .unwrap();
+                archive.write_all(body).unwrap();
+                let bytes = archive.finish().unwrap().into_inner();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len()
+                )
+                .unwrap();
+                stream.write_all(&bytes).unwrap();
+            }
+        });
+        let first_cache = cache_dir.clone();
+        let first_url = format!("http://{address}/one");
+        let second_url = format!("http://{address}/two");
+        let first = std::thread::spawn(move || {
+            ResourcePackManager::download_server_pack(&first_cache, ids[0], &first_url, "").unwrap()
+        });
+        let second_cache = cache_dir.clone();
+        let second = std::thread::spawn(move || {
+            ResourcePackManager::download_server_pack(&second_cache, ids[1], &second_url, "")
+                .unwrap()
+        });
+        let first_dir = first.join().unwrap();
+        let second_dir = second.join().unwrap();
+        server.join().unwrap();
+
+        assert_ne!(first_dir, second_dir);
+        manager.apply_server_pack(ids[0], "");
+        manager.apply_server_pack(ids[1], "");
+        assert_eq!(
+            std::fs::read(first_dir.join("assets/test/payload.txt")).unwrap(),
+            b"first pack"
+        );
+        assert_eq!(
+            std::fs::read(second_dir.join("assets/test/payload.txt")).unwrap(),
+            b"second pack"
+        );
+        assert_eq!(manager.active_pack_dirs().count(), 2);
+        assert_eq!(
+            manager
+                .active_packs
+                .iter()
+                .find(|p| p.id == ids[0].to_string())
+                .unwrap()
+                .dir,
+            first_dir
+        );
+        assert_eq!(
+            manager
+                .active_packs
+                .iter()
+                .find(|p| p.id == ids[1].to_string())
+                .unwrap()
+                .dir,
+            second_dir
+        );
+        let _ = std::fs::remove_dir_all(instance_dir);
+    }
 }

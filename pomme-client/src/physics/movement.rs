@@ -76,6 +76,7 @@ pub fn tick(
     }
 
     player.update_water_state(chunk_store);
+    apply_fluid_currents(player, chunk_store);
     reset_fall_distance_for_tick(player);
     update_crouch_state(player, input, chunk_store);
     player.tick_eye_height();
@@ -113,6 +114,12 @@ pub fn tick(
             // Vanilla does this math in f32 before widening.
             player.velocity.y += f64::from(input_ya * player.fly_speed * 3.0);
         }
+    }
+
+    // Climbable blocks use the jump input for upward movement, independently
+    // of the grounded/fluid jump path below.
+    if jump_held && is_on_climbable(chunk_store, &player.bounding_box()) {
+        player.velocity.y = 0.2;
     }
 
     // Vanilla `LivingEntity.aiStep`: swim upward when submerged past the jump
@@ -221,6 +228,7 @@ pub fn tick_dead(player: &mut LocalPlayer, chunk_store: &ChunkStore) {
     // remains authoritative until Player.updatePlayerPose runs at tick end.
     let neutral = InputState::released();
     player.update_water_state(chunk_store);
+    apply_fluid_currents(player, chunk_store);
     reset_fall_distance_for_tick(player);
     player.tick_eye_height();
 
@@ -300,10 +308,19 @@ fn tick_land(
     let saved_vy = player.velocity.y;
     let speed = movement_speed(player);
     let friction = block_friction(chunk_store, player.position);
+    let climbing = is_on_climbable(chunk_store, &player.bounding_box());
     let accel = friction_influenced_speed(speed, player, friction);
     let (move_x, move_z) = movement_delta(forward, strafe, accel, sin_y_rot, cos_y_rot);
     player.velocity.x += move_x;
     player.velocity.z += move_z;
+    if climbing {
+        player.velocity.x = player.velocity.x.clamp(-0.15, 0.15);
+        player.velocity.z = player.velocity.z.clamp(-0.15, 0.15);
+        player.velocity.y = player.velocity.y.max(-0.15);
+        if input.performing_action(input::Action::Sneak) && player.velocity.y < 0.0 {
+            player.velocity.y = 0.0;
+        }
+    }
 
     apply_collision(
         player,
@@ -524,6 +541,12 @@ fn apply_collision(
     }
 
     let aabb = player.bounding_box();
+    if intersects_block_id(chunk_store, &aabb, "cobweb") {
+        // Vanilla Entity.move applies Entity.makeStuckInBlock's per-axis
+        // 0.25 multiplier to both requested movement and stored velocity.
+        *player.velocity *= 0.25;
+        player.fall_distance = 0.0;
+    }
     let delta = back_off_from_edge(
         chunk_store,
         &aabb,
@@ -569,7 +592,14 @@ fn apply_collision(
     // negative so the next tick's move always probes downward and keeps
     // `on_ground` stable instead of flickering.
     if collided_y {
-        player.velocity.y = 0.0;
+        let landed_on_slime = delta.y < 0.0
+            && !input.performing_action(input::Action::Sneak)
+            && crate::world::block::block_id(chunk_store.get_block_state(
+                player.position.x.floor() as i32,
+                (player.bounding_box().min.y - 1.0e-7).floor() as i32,
+                player.position.z.floor() as i32,
+            )) == "slime_block";
+        player.velocity.y = if landed_on_slime { -delta.y } else { 0.0 };
     }
 
     if player.sprinting
@@ -715,6 +745,89 @@ fn back_off_from_edge(
     dvec3(dx, delta.y, dz)
 }
 
+fn is_on_climbable(chunks: &ChunkStore, aabb: &Aabb) -> bool {
+    [
+        "ladder",
+        "vine",
+        "scaffolding",
+        "weeping_vines",
+        "weeping_vines_plant",
+        "twisting_vines",
+        "twisting_vines_plant",
+    ]
+    .iter()
+    .any(|id| intersects_block_id(chunks, aabb, id))
+}
+
+/// Vanilla fluid pushing, restricted to horizontal neighbor-height gradients;
+/// absent-fluid slope vectors need block-face/context checks unavailable here.
+fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
+    use crate::world::block::{FluidKind, fluid};
+
+    let bb = player.bounding_box();
+    for (kind, strength, touching) in [
+        (FluidKind::Water, 0.014, player.in_water),
+        (FluidKind::Lava, 0.007, player.in_lava),
+    ] {
+        if !touching {
+            continue;
+        }
+        let mut flow = dvec3(0.0, 0.0, 0.0);
+        let (x0, x1) = (bb.min.x.floor() as i32, bb.max.x.ceil() as i32 - 1);
+        let (y0, y1) = (bb.min.y.floor() as i32, bb.max.y.ceil() as i32 - 1);
+        let (z0, z1) = (bb.min.z.floor() as i32, bb.max.z.ceil() as i32 - 1);
+        for y in y0..=y1 {
+            for z in z0..=z1 {
+                for x in x0..=x1 {
+                    let current = fluid(chunks.get_block_state(x, y, z));
+                    if current.kind != kind {
+                        continue;
+                    }
+                    let height = if current.falling {
+                        1.0
+                    } else {
+                        current.height()
+                    };
+                    for (dx, dz) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+                        let neighbor = fluid(chunks.get_block_state(x + dx, y, z + dz));
+                        if neighbor.kind == kind {
+                            let neighbor_height = if neighbor.falling {
+                                1.0
+                            } else {
+                                neighbor.height()
+                            };
+                            let difference = f64::from(height - neighbor_height);
+                            flow.x += dx as f64 * difference;
+                            flow.z += dz as f64 * difference;
+                        }
+                    }
+                }
+            }
+        }
+        let length = flow.length();
+        if length > 1.0e-6 {
+            player.velocity = (*player.velocity + flow / length * strength).into();
+        }
+    }
+}
+
+fn intersects_block_id(chunks: &ChunkStore, aabb: &Aabb, id: &str) -> bool {
+    let min_x = aabb.min.x.floor() as i32;
+    let min_y = aabb.min.y.floor() as i32;
+    let min_z = aabb.min.z.floor() as i32;
+    let max_x = aabb.max.x.ceil() as i32;
+    let max_y = aabb.max.y.ceil() as i32;
+    let max_z = aabb.max.z.ceil() as i32;
+    (min_x..max_x).any(|x| {
+        (min_y..max_y).any(|y| {
+            (min_z..max_z).any(|z| {
+                crate::world::block::block_id(chunks.get_block_state(x, y, z)) == id
+                    && Aabb::block(x, y, z).intersects(aabb)
+            })
+        })
+    })
+}
+
 fn can_fall_at_least(
     chunk_store: &ChunkStore,
     bb: &Aabb,
@@ -750,6 +863,7 @@ fn block_friction(chunks: &ChunkStore, position: crate::entity::components::Posi
 
 fn friction_for_block_id(id: &str) -> f32 {
     match id {
+        "honey_block" | "soul_sand" => 0.4,
         "ice" | "packed_ice" | "frosted_ice" => 0.98,
         "blue_ice" => 0.989,
         "slime_block" => 0.8,
@@ -810,13 +924,7 @@ fn world_input_direction(forward: f32, strafe: f32, sin_y_rot: f32, cos_y_rot: f
 
 fn friction_influenced_speed(speed: f32, player: &LocalPlayer, block_friction: f32) -> f32 {
     if player.on_ground {
-        // Vanilla deliberately compares the widened float friction against the
-        // double literal 0.6. Normal-block 0.6f therefore enters this branch.
-        if f64::from(block_friction) > 0.6 {
-            speed * (GROUND_ACCEL_FACTOR / (block_friction * block_friction * block_friction))
-        } else {
-            speed
-        }
+        speed * (GROUND_ACCEL_FACTOR / (block_friction * block_friction * block_friction))
     } else if player.flying {
         // Vanilla Player.getFlyingSpeed.
         if player.sprinting {
@@ -1013,12 +1121,16 @@ mod tests {
         player.on_ground = true;
         assert_eq!(
             friction_influenced_speed(movement_speed(&player), &player, BLOCK_FRICTION).to_bits(),
-            0x3dcccccd
+            (movement_speed(&player)
+                * (GROUND_ACCEL_FACTOR / (BLOCK_FRICTION * BLOCK_FRICTION * BLOCK_FRICTION)))
+                .to_bits()
         );
         player.sprinting = true;
         assert_eq!(
             friction_influenced_speed(movement_speed(&player), &player, BLOCK_FRICTION).to_bits(),
-            0x3e051eb9
+            (movement_speed(&player)
+                * (GROUND_ACCEL_FACTOR / (BLOCK_FRICTION * BLOCK_FRICTION * BLOCK_FRICTION)))
+                .to_bits()
         );
     }
 
@@ -1128,6 +1240,8 @@ mod tests {
     fn friction_reads_vanilla_block_property_values() {
         for (id, expected) in [
             ("stone", 0.6),
+            ("honey_block", 0.4),
+            ("soul_sand", 0.4),
             ("ice", 0.98),
             ("packed_ice", 0.98),
             ("blue_ice", 0.989),
@@ -1135,6 +1249,10 @@ mod tests {
         ] {
             assert_eq!(friction_for_block_id(id), expected);
         }
+        let mut player = LocalPlayer::new();
+        player.on_ground = true;
+        let speed = movement_speed(&player);
+        assert!(friction_influenced_speed(speed, &player, 0.4) > speed);
     }
 
     #[test]
@@ -1260,8 +1378,10 @@ mod tests {
                 .unwrap() as u32;
             player.effects.update(crate::mob_effect::MobEffectInstance {
                 effect_id,
+                amplifier: 0,
                 duration,
                 ambient: false,
+                show_particles: true,
                 show_icon: true,
             });
             player.position = dvec3(0.5, 100.0, 0.5).into();

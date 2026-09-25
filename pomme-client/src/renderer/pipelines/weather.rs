@@ -28,10 +28,10 @@ pub enum Precip {
 }
 
 /// Classifies precipitation for a biome at a given Y, mirroring vanilla
-/// `Biome.getPrecipitationAt`: no precipitation when the biome has no downfall,
+/// `Biome.getPrecipitationAt`: no precipitation when the biome disables it,
 /// snow when the (height-adjusted) temperature is below 0.15, else rain.
 pub fn precipitation_for(climate: &BiomeClimate, y: i32) -> Precip {
-    if climate.downfall <= 0.0 {
+    if !climate.has_precipitation {
         return Precip::None;
     }
     let snow_line = SEA_LEVEL + 17;
@@ -721,4 +721,34 @@ fn create_pipeline(
     device.destroy_shader_module(frag_mod, None);
 
     pipeline[0]
+}
+
+#[cfg(test)]
+mod precipitation_tests {
+    use super::{Precip, precipitation_for};
+    use crate::renderer::chunk::mesher::BiomeClimate;
+
+    #[test]
+    fn classifies_warm_and_cold_biomes_and_honors_precipitation_flag() {
+        let warm = BiomeClimate {
+            temperature: 0.8,
+            downfall: 0.0,
+            ..Default::default()
+        };
+        let cold = BiomeClimate {
+            temperature: 0.0,
+            downfall: 0.5,
+            ..Default::default()
+        };
+        let dry = BiomeClimate {
+            temperature: 0.8,
+            downfall: 1.0,
+            has_precipitation: false,
+            ..Default::default()
+        };
+
+        assert!(matches!(precipitation_for(&warm, 63), Precip::Rain));
+        assert!(matches!(precipitation_for(&cold, 63), Precip::Snow));
+        assert!(matches!(precipitation_for(&dry, 63), Precip::None));
+    }
 }

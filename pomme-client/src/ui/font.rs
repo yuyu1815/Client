@@ -2054,29 +2054,44 @@ mod tests {
         fixture.write("jar_assets/minecraft/font/default.json", DEFAULT_SPACE);
         let cache = "instance/resourcepacks/.server_cache";
         fixture.write(
-            format!("{cache}/low/assets/minecraft/font/default.json"),
+            format!(
+                "{cache}/_invalid_hash_{}/assets/minecraft/font/default.json",
+                uuid::Uuid::from_u128(1)
+            ),
             r#"{"providers":[{"type":"space","advances":{"A":3.0}}]}"#,
         );
         fixture.write(
-            format!("{cache}/high/assets/minecraft/font/default.json"),
+            format!(
+                "{cache}/_invalid_hash_{}/assets/minecraft/font/default.json",
+                uuid::Uuid::from_u128(2)
+            ),
             r#"{"providers":[{"type":"space","advances":{"A":6.0}}]}"#,
         );
         fixture.write(
-            format!("{cache}/high/assets/example/font/fancy.json"),
+            format!(
+                "{cache}/_invalid_hash_{}/assets/example/font/fancy.json",
+                uuid::Uuid::from_u128(2)
+            ),
             r#"{"providers":[{"type":"space","advances":{"B":7.0}}]}"#,
         );
         fixture.write(
-            format!("{cache}/high/assets/example/font/wrapper.json"),
+            format!(
+                "{cache}/_invalid_hash_{}/assets/example/font/wrapper.json",
+                uuid::Uuid::from_u128(2)
+            ),
             r#"{"providers":[{"type":"reference","id":"example:fancy"}]}"#,
         );
         let mut image = image::RgbaImage::new(8, 8);
         image.put_pixel(0, 0, image::Rgba([10, 20, 30, 255]));
         fixture.write_png(
-            format!("{cache}/high/assets/example/textures/font/color.png"),
+            format!(
+                "{cache}/_invalid_hash_{}/assets/example/textures/font/color.png",
+                uuid::Uuid::from_u128(2)
+            ),
             &image,
         );
         fixture.write(
-            format!("{cache}/high/assets/example/font/color.json"),
+            format!("{cache}/_invalid_hash_{}/assets/example/font/color.json", uuid::Uuid::from_u128(2)),
             r#"{"providers":[{"type":"bitmap","file":"example:font/color.png","ascent":7,"chars":["X"]}]}"#,
         );
 

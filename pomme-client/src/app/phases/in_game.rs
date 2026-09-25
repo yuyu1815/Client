@@ -53,6 +53,7 @@ pub enum ContainerScreen {
     ShulkerBox,
     Anvil,
     Enchantment,
+    Beacon,
     Merchant,
     Horse { columns: u8, entity_id: i32 },
 }
@@ -67,6 +68,7 @@ impl ContainerScreen {
             Self::ShulkerBox => ContainerKind::ShulkerBox,
             Self::Anvil => ContainerKind::Anvil,
             Self::Enchantment => ContainerKind::Enchantment,
+            Self::Beacon => ContainerKind::Beacon,
             Self::Merchant => ContainerKind::Merchant,
             Self::Horse { columns, .. } => ContainerKind::Horse { columns },
         }
@@ -86,6 +88,8 @@ pub struct OpenContainer {
     /// shorts; the enchanting table uses all 10 (costs, seed, clues) with -1
     /// sentinels, so values are kept sign-extended.
     pub data: [i16; 10],
+    /// Which menu data fields have actually arrived from the server.
+    pub data_received: [bool; 10],
     /// The anvil rename field's state; Some only for the anvil screen.
     pub anvil: Option<crate::ui::anvil::AnvilState>,
     /// The book animation's state; Some only for the enchantment screen.
@@ -223,6 +227,8 @@ pub struct GameState {
     pub cursor_item: azalea_inventory::ItemStack,
     /// The server-opened container screen (crafting table), if any.
     pub open_container: Option<OpenContainer>,
+    /// Writable-book editor opened by the server's OpenBook packet.
+    pub book_edit: Option<crate::ui::book::BookEditState>,
     /// Which container menu was open last frame (0 = player inventory,
     /// including the creative inventory), to detect close transitions.
     pub container_was_open: Option<i32>,
@@ -557,6 +563,7 @@ impl GameState {
             inventory_state_id: 0,
             cursor_item: azalea_inventory::ItemStack::Empty,
             open_container: None,
+            book_edit: None,
             container_was_open: None,
             inv_drag: None,
             inv_last_click: None,
@@ -676,6 +683,7 @@ impl GameState {
             || self.inventory_open
             || self.creative_inventory_open
             || self.open_container.is_some()
+            || self.book_edit.is_some()
             || self.dialog_open()
             || self.game_mode_switcher.is_some()
     }
@@ -788,6 +796,9 @@ impl GameState {
             .as_ref()
             .is_some_and(|dialog| dialog.wants_text_input())
         {
+            return true;
+        }
+        if self.book_edit.is_some() {
             return true;
         }
         if self.creative_inventory_open {
@@ -1783,6 +1794,43 @@ pub(crate) fn build_server_screens(
     tick: Option<u64>,
     text_events: &[crate::ui::text_edit::TextInputEvent],
 ) {
+    if game.book_edit.is_some() {
+        use azalea_protocol::packets::game::ServerboundGamePacket;
+        use azalea_protocol::packets::game::s_edit_book::ServerboundEditBook;
+        let cursor = core.input.cursor_pos();
+        let action = core
+            .input
+            .left_just_pressed()
+            .then(|| crate::ui::book::clicked_action(cursor, sw, sh, gs))
+            .flatten();
+        if let Some(book) = &mut game.book_edit {
+            if let Some(index @ 0..=1) = action {
+                book.navigate(index);
+            }
+            let enter_sign = text_events.iter().any(|event| matches!(event, crate::ui::text_edit::TextInputEvent::Key { code: winit::keyboard::KeyCode::Enter | winit::keyboard::KeyCode::NumpadEnter, mods } if mods.edit_shortcut()));
+            let result = book.input(
+                text_events,
+                action == Some(2),
+                action == Some(3) || enter_sign,
+            );
+            book.draw(elements, sw, sh, gs, cursor);
+            if let Some((slot, pages, title)) = result {
+                connection
+                    .packet_tx
+                    .send(ServerboundGamePacket::EditBook(ServerboundEditBook {
+                        slot,
+                        pages,
+                        title,
+                    }));
+                game.book_edit = None;
+                core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
+            } else if core.input.escape_pressed() {
+                game.book_edit = None;
+                core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
+            }
+        }
+        return;
+    }
     if let Some(text) = game.code_of_conduct.clone() {
         let fs = common::FONT_SIZE * gs;
         let x = sw * 0.1;
@@ -3292,6 +3340,7 @@ pub fn update_game(
                 }));
         }
         let mut select_trade = None;
+        let mut beacon_effect_selection = None;
         let (clicked_outside, ops) = if let Some(container) = &mut game.open_container {
             let result = match container.screen {
                 ContainerScreen::Merchant => {
@@ -3406,6 +3455,25 @@ pub fn update_game(
                     gs,
                     &|t, s| gfx.renderer.menu_text_width(t, s),
                 ),
+                ContainerScreen::Beacon => {
+                    let result = crate::ui::beacon::build_beacon(
+                        &mut elements,
+                        sw,
+                        sh,
+                        core.input.cursor_pos(),
+                        &input,
+                        &container.slots,
+                        &container.data,
+                        &container.data_received,
+                        &container.title,
+                        &game.cursor_item,
+                        &mut game.inv_drag,
+                        &mut game.inv_last_click,
+                        gs,
+                    );
+                    beacon_effect_selection = result.effects;
+                    result.container
+                }
                 ContainerScreen::Enchantment => {
                     let result = crate::ui::enchantment::build_enchantment(
                         &mut elements,
@@ -3466,6 +3534,9 @@ pub fn update_game(
         close_inventory = clicked_outside;
         if let Some(index) = select_trade {
             connection.packet_tx.select_trade(index);
+        }
+        if let Some((primary, secondary)) = beacon_effect_selection {
+            connection.packet_tx.set_beacon(primary, secondary);
         }
         send_container_clicks(game, connection, ops);
         core.input.clear_just_pressed_actions();

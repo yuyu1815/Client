@@ -24,6 +24,7 @@ pub enum ContainerKind {
     ShulkerBox,
     Anvil,
     Enchantment,
+    Beacon,
     Merchant,
     Horse { columns: u8 },
 }
@@ -36,6 +37,7 @@ impl ContainerKind {
             Self::Chest { rows } => rows as usize * 9 + 36,
             Self::ShulkerBox => 63,
             Self::Enchantment => 38,
+            Self::Beacon => 37,
             Self::Merchant => 39,
             Self::Horse { columns } => 38 + 3 * columns as usize,
         }
@@ -50,6 +52,7 @@ impl ContainerKind {
             Self::Chest { rows } => rows as usize * 9,
             Self::ShulkerBox => 27,
             Self::Enchantment => 2,
+            Self::Beacon => 1,
             Self::Merchant => 3,
             Self::Horse { columns } => 2 + 3 * columns as usize,
         }
@@ -65,6 +68,7 @@ impl ContainerKind {
             | Self::Chest { .. }
             | Self::ShulkerBox
             | Self::Enchantment
+            | Self::Beacon
             | Self::Horse { .. } => None,
         }
     }
@@ -84,7 +88,7 @@ impl ContainerKind {
     /// Per-slot stack limit where a menu overrides the item's maximum.
     fn slot_limit(self, s: usize) -> i32 {
         match (self, s) {
-            (Self::Player, 5..=8) | (Self::Enchantment, 0) => 1,
+            (Self::Player, 5..=8) | (Self::Enchantment, 0) | (Self::Beacon, 0) => 1,
             _ => i32::MAX,
         }
     }
@@ -142,6 +146,8 @@ impl ContainerKind {
                 lapis: ItemStack::Empty,
                 player: SlotList::default(),
             },
+            // Azalea has no native beacon menu model; leave its clicks server-authoritative.
+            Self::Beacon => return None,
             // Azalea has no native merchant or mount menu model. Never predict
             // these by pretending they are a chest or another menu.
             Self::Merchant | Self::Horse { .. } => return None,
@@ -195,7 +201,10 @@ pub fn apply_click(
     op: &ClickOperation,
     creative: bool,
 ) -> Vec<(u16, ItemStack)> {
-    if matches!(kind, ContainerKind::Merchant | ContainerKind::Horse { .. }) {
+    if matches!(
+        kind,
+        ContainerKind::Beacon | ContainerKind::Merchant | ContainerKind::Horse { .. }
+    ) {
         return Vec::new();
     }
     if op
@@ -239,7 +248,7 @@ pub fn drag_distribution(
 ) -> (Vec<(u16, ItemStack)>, ItemStack) {
     if matches!(
         container,
-        ContainerKind::Merchant | ContainerKind::Horse { .. }
+        ContainerKind::Beacon | ContainerKind::Merchant | ContainerKind::Horse { .. }
     ) {
         return (Vec::new(), cursor.clone());
     }
@@ -285,6 +294,7 @@ pub fn drag_slot_eligible(
     let slot_index = slot as usize;
     let drag_allowed = match container {
         ContainerKind::Merchant => slot_index != 2 && slot_index < container.slot_count(),
+        ContainerKind::Beacon => false,
         ContainerKind::Horse { .. } => slot_index >= 2 && slot_index < container.slot_count(),
         _ => true,
     };

@@ -108,8 +108,8 @@ pub(crate) trait StorageHooks {
     fn on_node_removed(&mut self, _core: &StorageCore, _key: SectionKey) {}
 
     /// Initial layer for a section that started storing light. Vanilla
-    /// installs the queued layer object itself; the clone here is installed
-    /// again by `mark_new_inconsistencies` with identical bytes.
+    /// installs the queued layer object itself; the clone here is removed from
+    /// the queue during initialization so later writes cannot be overwritten.
     fn create_data_layer(&mut self, core: &StorageCore, key: SectionKey) -> DataLayer {
         core.queued_layer(key).cloned().unwrap_or_default()
     }
@@ -258,6 +258,7 @@ impl StorageCore {
     fn initialize_section(&mut self, key: SectionKey, hooks: &mut impl StorageHooks) {
         if !self.to_remove.remove(&key) {
             let layer = hooks.create_data_layer(self, key);
+            self.queued.remove(&key);
             self.updating.insert(key, layer);
             self.changed_sections.insert(key);
             hooks.on_node_added(key);
@@ -272,8 +273,8 @@ impl StorageCore {
     }
 
     /// Vanilla `markNewInconsistencies`: process deferred removals, then
-    /// install queued packet layers into sections that store light. Runs
-    /// between the decrease and increase passes.
+    /// install queued packet layers into already-storing sections. Runs between
+    /// the decrease and increase passes.
     pub fn mark_new_inconsistencies(&mut self, hooks: &mut impl StorageHooks) {
         if !self.has_inconsistencies {
             return;
@@ -315,5 +316,27 @@ impl StorageCore {
 
     pub fn light_on_in_column(&self, column: (i32, i32)) -> bool {
         self.columns_with_sources.contains(&column)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queued_layer_write_survives_inconsistency_processing() {
+        let key = SectionKey::new(0, 0, 0);
+        let pos = LightPos::new(1, 1, 1);
+        let mut storage = StorageCore::new();
+        let mut queued = DataLayer::new();
+        queued.set(1, 1, 1, 9);
+        storage.queue_section_data(key, Some(queued));
+        storage.update_section_status(key, false, &mut NoHooks);
+
+        storage.set_stored_level(pos, 4);
+        storage.mark_new_inconsistencies(&mut NoHooks);
+
+        assert_eq!(storage.get_stored_level(pos), 4);
+        assert!(storage.queued_layer(key).is_none());
     }
 }

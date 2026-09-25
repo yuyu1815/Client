@@ -3,15 +3,15 @@ use std::time::Instant;
 use azalea_inventory::ItemStack;
 use azalea_inventory::operations::ClickOperation;
 
-use super::common::SLOT_STRIDE;
+use super::common::{SLOT_STRIDE, item_display_spans, push_tooltip_lines};
 use super::container::{
-    ContainerInput, DragState, SlotCtx, push_cursor_stack, push_panel, push_recipe_book_button,
-    resolve_gesture,
+    ContainerInput, DragState, SlotCtx, push_cursor_stack, push_panel,
+    push_recipe_book_unavailable, resolve_gesture,
 };
 use crate::player::inventory::{self, Inventory};
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::PlayerPreview;
-use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
+use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId, TooltipLine};
 
 // Vanilla player-menu slot indices, as u16 for click ops.
 const SLOT_CRAFT_RESULT: u16 = inventory::CRAFT_OUTPUT as u16;
@@ -114,8 +114,23 @@ pub fn build_inventory(
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
 
-    push_recipe_book_button(elements, &panel, cursor, 104.0, 61.0);
+    push_recipe_book_unavailable(elements, &panel, 104.0, 61.0);
     push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
+    if !cursor_item.is_present()
+        && let Some(item) = hovered.and_then(|slot| inventory.slot(slot as usize).as_present())
+    {
+        push_tooltip_lines(
+            elements,
+            cursor,
+            screen_w,
+            screen_h,
+            panel.scale,
+            vec![TooltipLine {
+                spans: item_display_spans(item, super::common::WHITE),
+                right_align: false,
+            }],
+        );
+    }
 
     let (ops, clicked_outside) = resolve_gesture(
         input,

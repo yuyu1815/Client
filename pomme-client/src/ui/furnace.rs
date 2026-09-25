@@ -10,7 +10,7 @@ use azalea_inventory::ItemStack;
 use super::common::FONT_SIZE;
 use super::container::{
     ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_clipped_sprite,
-    push_cursor_stack, push_panel, push_recipe_book_button, resolve_gesture,
+    push_cursor_stack, push_panel, push_recipe_book_unavailable, resolve_gesture,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -103,7 +103,7 @@ pub fn build_furnace(
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
 
-    push_recipe_book_button(elements, &panel, cursor, 20.0, 34.0);
+    push_recipe_book_unavailable(elements, &panel, 20.0, 34.0);
     push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
 
     let (ops, clicked_outside) = resolve_gesture(

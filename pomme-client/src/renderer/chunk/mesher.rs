@@ -343,6 +343,7 @@ pub enum GrassColorModifier {
 pub struct BiomeClimate {
     pub temperature: f32,
     pub downfall: f32,
+    pub has_precipitation: bool,
     pub grass_color_override: Option<[f32; 3]>,
     pub grass_color_modifier: GrassColorModifier,
     pub foliage_color_override: Option<[f32; 3]>,
@@ -355,6 +356,7 @@ impl Default for BiomeClimate {
         Self {
             temperature: 0.8,
             downfall: 0.4,
+            has_precipitation: true,
             grass_color_override: None,
             grass_color_modifier: GrassColorModifier::None,
             foliage_color_override: None,
@@ -517,10 +519,6 @@ fn apply_grass_modifier(modifier: GrassColorModifier, base: [f32; 3], x: i32, z:
 
 fn to_u8(f: f32) -> u8 {
     (f * 255.0).round() as u8
-}
-
-fn flat_quad_light(world_light: f32, shade: f32) -> f32 {
-    world_light * shade
 }
 
 struct SimplexNoise {
@@ -1782,6 +1780,11 @@ fn mesh_chunk_snapshot(
                         &mut emitted_trace,
                     );
                     sink.trace.extend(emitted_trace);
+                } else if crate::world::block_entity::is_block_entity_block(
+                    crate::world::block::block_id(state),
+                ) {
+                    // A block entity without a baked block model has no block
+                    // geometry; its particle texture is not a substitute model.
                 } else if let Some(textures) = registry.get_textures(state) {
                     emit_cube_faces(
                         sink, block_pos, state, textures, snapshot, registry, uv_map, bx, by, bz,
@@ -1927,14 +1930,10 @@ fn emit_baked_model(
         let vertex_start = sink.vertices.len();
         let solid_start = sink.solid.len();
         let cutout_start = sink.cutout.len();
-        let lights = if let Some(dir) = quad.cullface {
-            compute_face_ao(snapshot, registry, bx, by, bz, dir, quad.shade_face)
-        } else {
-            [flat_quad_light(
-                snapshot.get_light(bx, by, bz),
-                snapshot.shade(quad.shade_face),
-            ); 4]
-        };
+        let lights = quad.shade_face.map_or_else(
+            || [snapshot.get_light(bx, by, bz); 4],
+            |dir| compute_face_ao(snapshot, registry, bx, by, bz, dir, Some(dir)),
+        );
         emit_face(
             sink,
             block_pos,
@@ -2602,10 +2601,10 @@ fn emit_multipart(
             block_pos,
             &quad.positions,
             &quad.uvs,
-            [flat_quad_light(
-                snapshot.get_light(bx, by, bz),
-                snapshot.shade(quad.shade_face),
-            ); 4],
+            quad.shade_face.map_or_else(
+                || [snapshot.get_light(bx, by, bz); 4],
+                |dir| compute_face_ao(snapshot, registry, bx, by, bz, dir, Some(dir)),
+            ),
             region,
             tint,
         );
@@ -2813,9 +2812,7 @@ fn emit_face_into(
 }
 
 fn shade_brightness(state: azalea_block::BlockState, registry: &BlockRegistry) -> f32 {
-    // TODO: non-occluding full cubes (leaves, glass, ice) still darken adjacent
-    // faces here. Vanilla's are `isViewBlocking=never` and don't contribute AO.
-    if registry.is_opaque_full_cube(state) {
+    if registry.occludes_neighbor(state) {
         0.2
     } else {
         1.0
@@ -2912,6 +2909,11 @@ fn compute_face_ao(
         let light = avg4(l(n), l(side1), l(side2), l(corner));
         ao * light * dir_shade
     })
+}
+
+#[cfg(test)]
+fn flat_quad_light(world_light: f32, shade: f32) -> f32 {
+    world_light * shade
 }
 
 fn avg4(a: f32, b: f32, c: f32, d: f32) -> f32 {
