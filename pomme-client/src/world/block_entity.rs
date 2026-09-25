@@ -307,6 +307,37 @@ mod tests {
     }
 
     #[test]
+    fn moving_block_progress_changes_render_translation() {
+        use simdnbt::owned::NbtTag;
+
+        let mut moved = NbtCompound::new();
+        moved.insert("Name", "minecraft:stone");
+        let mut payload = NbtCompound::new();
+        payload.insert("blockState", NbtTag::Compound(moved));
+        payload.insert("progress", NbtTag::Float(0.0));
+        payload.insert("extending", NbtTag::Byte(1));
+        payload.insert("source", NbtTag::Byte(0));
+        payload.insert("facing", "north");
+        let start = moving_block_render_details(&payload).unwrap().offset;
+        let mut halfway = NbtCompound::new();
+        halfway.insert(
+            "blockState",
+            NbtTag::Compound({
+                let mut state = NbtCompound::new();
+                state.insert("Name", "minecraft:stone");
+                state
+            }),
+        );
+        halfway.insert("progress", NbtTag::Float(0.5));
+        halfway.insert("extending", NbtTag::Byte(1));
+        halfway.insert("source", NbtTag::Byte(0));
+        halfway.insert("facing", "north");
+        let middle = moving_block_render_details(&halfway).unwrap().offset;
+        assert_ne!(start, middle);
+        assert_eq!(middle, glam::DVec3::new(0.0, 0.0, 0.5));
+    }
+
+    #[test]
     fn heavy_core_is_not_hidden_as_an_invisible_block() {
         assert!(!is_invisible_block("heavy_core"));
     }

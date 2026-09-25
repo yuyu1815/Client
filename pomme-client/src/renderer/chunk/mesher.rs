@@ -1870,7 +1870,7 @@ fn mesh_chunk_snapshot(
             };
 
             if crate::world::block::block_id(render.state) == "piston_head" {
-                let short = render.progress <= 0.5;
+                let short = piston_head_is_short(render.progress);
                 if let Some(state) = moving_state_with_properties(
                     render.state,
                     &[("short", if short { "true" } else { "false" })],
@@ -1895,7 +1895,7 @@ fn mesh_chunk_snapshot(
                         ("facing".into(), facing.into()),
                         (
                             "short".into(),
-                            if render.progress >= 0.5 {
+                            if retracting_source_head_is_short(render.progress) {
                                 "true"
                             } else {
                                 "false"
@@ -1995,6 +1995,14 @@ fn mesh_chunk_snapshot(
         queue_ms: 0.0,
         mesh_ms: 0.0,
     }
+}
+
+fn piston_head_is_short(progress: f32) -> bool {
+    progress <= 0.5
+}
+
+fn retracting_source_head_is_short(progress: f32) -> bool {
+    progress >= 0.5
 }
 
 fn moving_state_with_properties(
@@ -3138,11 +3146,27 @@ mod terrain_uv_tests {
     use super::{
         MeshTraceConfig, MeshTraceState, TraceTarget, add_weighted_fluid_height, flat_quad_light,
         fluid_flow_neighbor_height, fluid_height_with_above, fluid_top_uv_values,
-        moving_state_with_properties, pack_sprite_uv, unpack_sprite_uv,
+        moving_state_with_properties, pack_sprite_uv, piston_head_is_short,
+        retracting_source_head_is_short, unpack_sprite_uv,
     };
 
     fn wrapped(x: f32) -> f32 {
         x - x.floor()
+    }
+
+    #[test]
+    fn moving_piston_head_short_threshold_is_inclusive_at_half_progress() {
+        assert!(piston_head_is_short(0.0));
+        assert!(piston_head_is_short(0.5));
+        assert!(!piston_head_is_short(f32::from_bits(0.5_f32.to_bits() + 1)));
+        assert!(!piston_head_is_short(1.0));
+    }
+
+    #[test]
+    fn retracting_source_head_short_threshold_is_inclusive_at_half_progress() {
+        assert!(!retracting_source_head_is_short(0.0));
+        assert!(retracting_source_head_is_short(0.5));
+        assert!(retracting_source_head_is_short(1.0));
     }
 
     #[test]
@@ -3167,6 +3191,20 @@ mod terrain_uv_tests {
             Some("north")
         );
         assert!(moving_state_with_properties(state, &[("missing", "true")]).is_none());
+        let head = crate::world::block::state_with_properties(
+            "piston_head",
+            &[
+                ("facing".into(), "north".into()),
+                ("short".into(), "false".into()),
+                ("type".into(), "sticky".into()),
+            ],
+        )
+        .unwrap();
+        let short_head = moving_state_with_properties(head, &[("short", "true")]).unwrap();
+        let properties = crate::world::block::block_properties(short_head);
+        assert_eq!(properties.get("facing"), Some("north"));
+        assert_eq!(properties.get("short"), Some("true"));
+        assert_eq!(properties.get("type"), Some("sticky"));
     }
 
     #[test]

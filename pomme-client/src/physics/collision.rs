@@ -128,7 +128,15 @@ pub fn resolve_collision(
     velocity: Velocity,
     step_height: f64,
 ) -> (DVec3, bool) {
-    resolve_collision_with_grounded(chunk_store, player_aabb, velocity, step_height, false)
+    resolve_collision_with_context(
+        chunk_store,
+        player_aabb,
+        velocity,
+        step_height,
+        false,
+        &[],
+        None,
+    )
 }
 
 pub fn resolve_collision_with_grounded(
@@ -138,8 +146,68 @@ pub fn resolve_collision_with_grounded(
     step_height: f64,
     was_grounded: bool,
 ) -> (DVec3, bool) {
+    resolve_collision_with_context(
+        chunk_store,
+        player_aabb,
+        velocity,
+        step_height,
+        was_grounded,
+        &[],
+        None,
+    )
+}
+
+fn append_context_aabbs(
+    aabbs: &mut Vec<Aabb>,
+    region: &Aabb,
+    entities: &[Aabb],
+    border: Option<[f64; 4]>,
+) {
+    aabbs.extend(
+        entities
+            .iter()
+            .copied()
+            .filter(|aabb| aabb.intersects(region)),
+    );
+    if let Some([min_x, max_x, min_z, max_z]) = border {
+        let y = 30_000_000.0;
+        for wall in [
+            Aabb::new(
+                dvec3(min_x - 0.5, -y, min_z - y),
+                dvec3(min_x, y, max_z + y),
+            ),
+            Aabb::new(
+                dvec3(max_x, -y, min_z - y),
+                dvec3(max_x + 0.5, y, max_z + y),
+            ),
+            Aabb::new(
+                dvec3(min_x - y, -y, min_z - 0.5),
+                dvec3(max_x + y, y, min_z),
+            ),
+            Aabb::new(
+                dvec3(min_x - y, -y, max_z),
+                dvec3(max_x + y, y, max_z + 0.5),
+            ),
+        ] {
+            if wall.intersects(region) {
+                aabbs.push(wall);
+            }
+        }
+    }
+}
+
+pub fn resolve_collision_with_context(
+    chunk_store: &ChunkStore,
+    player_aabb: Aabb,
+    velocity: Velocity,
+    step_height: f64,
+    was_grounded: bool,
+    entity_aabbs: &[Aabb],
+    border_bounds: Option<[f64; 4]>,
+) -> (DVec3, bool) {
     let expanded = player_aabb.expand(*velocity);
-    let block_aabbs = collect_block_aabbs(chunk_store, &expanded);
+    let mut block_aabbs = collect_block_aabbs(chunk_store, &expanded);
+    append_context_aabbs(&mut block_aabbs, &expanded, entity_aabbs, border_bounds);
 
     let (resolved, on_ground) = collide_along_axes(&block_aabbs, player_aabb, velocity);
 
@@ -157,7 +225,8 @@ pub fn resolve_collision_with_grounded(
                 if on_ground { 0.0 } else { -COLLISION_EPSILON },
                 0.0,
             ));
-        let step_aabbs = collect_block_aabbs(chunk_store, &step_region);
+        let mut step_aabbs = collect_block_aabbs(chunk_store, &step_region);
+        append_context_aabbs(&mut step_aabbs, &step_region, entity_aabbs, border_bounds);
         let skip_height = if on_ground { resolved.y as f32 } else { 0.0 };
         let mut candidates = Vec::new();
         for block in &step_aabbs {
@@ -195,5 +264,38 @@ mod tests {
         let block = Aabb::block(1, 0, 0);
         let (resolved, _) = collide_along_axes(&[block], player, Velocity::new(5.0e-8, 0.0, 0.0));
         assert_eq!(resolved.x, 0.0);
+    }
+
+    #[test]
+    fn entity_aabb_stops_player_motion() {
+        let chunks = ChunkStore::new(1);
+        let player = Aabb::from_center(dvec3(0.5, 0.0, 0.5), 0.3, 0.9);
+        let entity = Aabb::new(dvec3(1.0, 0.0, 0.0), dvec3(1.6, 1.8, 1.0));
+        let (resolved, _) = resolve_collision_with_context(
+            &chunks,
+            player,
+            Velocity::new(1.0, 0.0, 0.0),
+            0.0,
+            false,
+            &[entity],
+            None,
+        );
+        assert!((resolved.x - 0.2).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn world_border_stops_player_at_boundary() {
+        let chunks = ChunkStore::new(1);
+        let player = Aabb::from_center(dvec3(4.5, 0.0, 0.0), 0.3, 0.9);
+        let (resolved, _) = resolve_collision_with_context(
+            &chunks,
+            player,
+            Velocity::new(1.0, 0.0, 0.0),
+            0.0,
+            false,
+            &[],
+            Some([-5.0, 5.0, -5.0, 5.0]),
+        );
+        assert!((resolved.x - 0.2).abs() < 1.0e-9);
     }
 }

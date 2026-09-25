@@ -1172,14 +1172,16 @@ impl Translation {
                 }
             } else if let Some(v) = v764.filter(|v| id == v.set_score_id) {
                 translate_set_score_764(v, payload)
-            } else if v765.is_some_and(|v| id == v.container_set_content_id) {
-                translate_container_set_content_765(id, payload, named_nbt)
-            } else if v765.is_some_and(|v| id == v.set_equipment_id) {
-                translate_set_equipment_765(id, payload, named_nbt)
-            } else if v765.is_some_and(|v| id == v.merchant_offers_id) {
-                translate_merchant_offers_765(id, payload, named_nbt)
-            } else if v765.is_some_and(|v| id == v.container_set_slot_id) {
-                v767.and_then(|v| translate_container_set_slot_765(v, payload, named_nbt))
+            } else if let Some(v) = v765.filter(|v| id == v.container_set_content_id) {
+                translate_container_set_content_765(id, payload, named_nbt, v.registry)
+            } else if let Some(v) = v765.filter(|v| id == v.set_equipment_id) {
+                translate_set_equipment_765(id, payload, named_nbt, v.registry)
+            } else if let Some(v) = v765.filter(|v| id == v.merchant_offers_id) {
+                translate_merchant_offers_765(id, payload, named_nbt, v.registry)
+            } else if let Some(v) = v765.filter(|v| id == v.container_set_slot_id) {
+                v767.and_then(|old| {
+                    translate_container_set_slot_765(old, payload, named_nbt, v.registry)
+                })
             } else if ids.v772.as_ref().is_some_and(|v| id == v.explode_id) {
                 translate_explode(id, payload, ids, self.to_native)
             } else if v777.is_some_and(|v| id == v.explode_id) {
@@ -2113,6 +2115,7 @@ fn translate_container_set_slot_765(
     v: &Ids767,
     payload: &[u8],
     named_nbt: bool,
+    registry: &'static RegistryTable,
 ) -> Option<Vec<u8>> {
     let container = *payload.first()? as i8;
     let mut cur = Cursor::new(payload);
@@ -2135,7 +2138,7 @@ fn translate_container_set_slot_765(
             out.extend_from_slice(&payload[state.start..slot_at + 2]);
         }
     }
-    translate_item_765(&mut cur, &mut out, named_nbt)?;
+    translate_item_765(&mut cur, &mut out, named_nbt, Some(registry))?;
     Some(out)
 }
 
@@ -2398,7 +2401,12 @@ fn unique_nbt_field<'a>(
 /// Converts exact legacy fields and retains every unconverted field in
 /// `custom_data`; recognized legacy keys are removed there to avoid applying
 /// both the old NBT behavior and the equivalent data component.
-fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: bool) -> Option<()> {
+fn translate_item_765(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    named_nbt: bool,
+    registry: Option<&RegistryTable>,
+) -> Option<()> {
     use simdnbt::owned::{Nbt, NbtCompound, NbtTag};
 
     let Some((item, count, nbt)) = read_old_item_nbt(cur, named_nbt)? else {
@@ -2422,11 +2430,25 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
     // PotionContents can represent this custom color without a potion/effect
     // registry lookup. Those registry-backed legacy fields stay in custom_data.
     let potion_color = unique_nbt_field(&nbt, "CustomPotionColor").and_then(|tag| tag.int());
+    let is_filled_map = registry
+        .and_then(|table| table.name_of(ClientRegistry::Item, item))
+        .is_some_and(|name| name == "minecraft:filled_map" || name == "filled_map");
+    let map_id = is_filled_map
+        .then(|| unique_nbt_field(&nbt, "map").and_then(|tag| tag.int()))
+        .flatten();
     let dyed_color = unique_nbt_field(&nbt, "display")
         .and_then(|tag| tag.compound())
         .and_then(|display| unique_nbt_field(display, "color"))
         .and_then(|tag| tag.int());
 
+    let map_color = is_filled_map
+        .then(|| {
+            unique_nbt_field(&nbt, "display")
+                .and_then(|tag| tag.compound())
+                .and_then(|display| unique_nbt_field(display, "MapColor"))
+                .and_then(|tag| tag.int())
+        })
+        .flatten();
     let display_name = unique_nbt_field(&nbt, "display")
         .and_then(|tag| tag.compound())
         .and_then(|display| unique_nbt_field(display, "Name"))
@@ -2466,6 +2488,8 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
         + usize::from(unbreakable.is_some())
         + usize::from(custom_model_data.is_some())
         + usize::from(potion_color.is_some())
+        + usize::from(map_id.is_some())
+        + usize::from(map_color.is_some())
         + usize::from(dyed_color.is_some())
         + usize::from(display_name.is_some())
         + usize::from(display_lore.is_some());
@@ -2479,6 +2503,7 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
                 || (key_str == "Unbreakable" && unbreakable.is_some())
                 || (key_str == "CustomModelData" && custom_model_data.is_some())
                 || (key_str == "CustomPotionColor" && potion_color.is_some())
+                || (key_str == "map" && map_id.is_some())
             {
                 continue;
             }
@@ -2492,6 +2517,9 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
                     }
                     if dyed_color.is_some() {
                         display.remove("color");
+                    }
+                    if map_color.is_some() {
+                        display.remove("MapColor");
                     }
                     value = NbtTag::Compound(display);
                 }
@@ -2520,6 +2548,14 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
         wire::write_varint(&mut components, 0); // flags
         wire::write_varint(&mut components, 0); // strings
         wire::write_varint(&mut components, 0); // colors
+    }
+    if let Some(map_id) = map_id {
+        wire::write_varint(&mut components, DataComponentKind::MapId.to_u32());
+        wire::write_varint(&mut components, map_id as u32);
+    }
+    if let Some(color) = map_color {
+        wire::write_varint(&mut components, DataComponentKind::MapColor.to_u32());
+        components.extend_from_slice(&color.to_be_bytes());
     }
     if let Some(color) = potion_color {
         wire::write_varint(&mut components, DataComponentKind::PotionContents.to_u32());
@@ -2556,6 +2592,7 @@ fn translate_container_set_content_765(
     id: u32,
     payload: &[u8],
     named_nbt: bool,
+    registry: &'static RegistryTable,
 ) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     advance(&mut cur, 1)?; // container id
@@ -2567,14 +2604,19 @@ fn translate_container_set_content_765(
     out.extend_from_slice(&payload[..cur.position() as usize]);
     for _ in 0..=count {
         // The trailing iteration is the carried item.
-        translate_item_765(&mut cur, &mut out, named_nbt)?;
+        translate_item_765(&mut cur, &mut out, named_nbt, Some(registry))?;
     }
     Some(out)
 }
 
 /// Rewrites `set_equipment`'s slot/item pairs (the slot byte's high bit
 /// continues the list).
-fn translate_set_equipment_765(id: u32, payload: &[u8], named_nbt: bool) -> Option<Vec<u8>> {
+fn translate_set_equipment_765(
+    id: u32,
+    payload: &[u8],
+    named_nbt: bool,
+    registry: &'static RegistryTable,
+) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // entity id
 
@@ -2584,7 +2626,7 @@ fn translate_set_equipment_765(id: u32, payload: &[u8], named_nbt: bool) -> Opti
     loop {
         let slot = read_u8(&mut cur)?;
         out.push(slot);
-        translate_item_765(&mut cur, &mut out, named_nbt)?;
+        translate_item_765(&mut cur, &mut out, named_nbt, Some(registry))?;
         if slot & 0x80 == 0 {
             return Some(out);
         }
@@ -2595,7 +2637,12 @@ fn translate_set_equipment_765(id: u32, payload: &[u8], named_nbt: bool) -> Opti
 /// `ItemCost` (item + count + component predicate, no NBT) with an explicit
 /// optional second cost; the result stays a plain (bare) stack and the
 /// per-offer numeric tail copies verbatim.
-fn translate_merchant_offers_765(id: u32, payload: &[u8], named_nbt: bool) -> Option<Vec<u8>> {
+fn translate_merchant_offers_765(
+    id: u32,
+    payload: &[u8],
+    named_nbt: bool,
+    registry: &'static RegistryTable,
+) -> Option<Vec<u8>> {
     let mut cur = Cursor::new(payload);
     varint_span(&mut cur)?; // container id
     let offers = u32::azalea_read_var(&mut cur).ok()?;
@@ -2606,7 +2653,7 @@ fn translate_merchant_offers_765(id: u32, payload: &[u8], named_nbt: bool) -> Op
     for _ in 0..offers {
         translate_item_cost_765(&mut cur, &mut out, false, named_nbt)?;
         // Result: non-optional stack, bare.
-        translate_item_765(&mut cur, &mut out, named_nbt)?;
+        translate_item_765(&mut cur, &mut out, named_nbt, Some(registry))?;
         translate_item_cost_765(&mut cur, &mut out, true, named_nbt)?;
         let tail_at = cur.position() as usize;
         advance(&mut cur, 25)?; // outOfStock, 4 ints, multiplier, demand
@@ -3639,7 +3686,12 @@ fn translate_entity_data(
         if new == 7 {
             let mut stack = Vec::new();
             let translated = if ids.v765.is_some() {
-                translate_item_765(&mut cur, &mut stack, ids.v763.is_some())
+                translate_item_765(
+                    &mut cur,
+                    &mut stack,
+                    ids.v763.is_some(),
+                    ids.v765.as_ref().map(|v| v.registry),
+                )
             } else {
                 translate_item_stack(&mut cur, &mut stack, remaps, ids.v772.is_some())
             };
@@ -3878,6 +3930,7 @@ fn translate_particles(
                     ids.v765.is_some(),
                     ids.v763.is_some(),
                     ids.color_particles,
+                    ids.v765.as_ref().map(|v| v.registry),
                 )?;
             }
             _ => {}
@@ -3898,6 +3951,7 @@ fn copy_particle_payload(
     old_item: bool,
     named_nbt: bool,
     color_particles: bool,
+    registry: Option<&RegistryTable>,
 ) -> Option<()> {
     let at = cur.position() as usize;
     match name {
@@ -3926,7 +3980,7 @@ fn copy_particle_payload(
             varint_span(cur)?; // arrival ticks
         }
         "item" if old_item => {
-            translate_item_765(cur, out, named_nbt)?;
+            translate_item_765(cur, out, named_nbt, registry)?;
             return Some(());
         }
         "item" => {
@@ -4812,6 +4866,7 @@ fn translate_level_particles_777(
             false,
             false,
             true,
+            None,
         )?;
     }
     let particle_end = cur.position() as usize;
@@ -5388,7 +5443,13 @@ mod tests {
         ];
         let mut input = Cursor::new(fixture.as_slice());
         let mut actual = Vec::new();
-        translate_item_765(&mut input, &mut actual, false).expect("valid legacy slot");
+        translate_item_765(
+            &mut input,
+            &mut actual,
+            false,
+            Some(RegistryTable::for_protocol(765).unwrap()),
+        )
+        .expect("valid legacy slot");
 
         let mut expected = vec![1, 1, 3, 0]; // count, item, additions, removals
         let mut custom_fields = simdnbt::owned::NbtCompound::new();
@@ -5411,6 +5472,54 @@ mod tests {
     }
 
     #[test]
+    fn filled_map_legacy_fields_become_map_components_and_keep_unknown_nbt() {
+        use simdnbt::owned::{Nbt, NbtCompound, NbtTag};
+
+        let registry = RegistryTable::for_protocol(765).unwrap();
+        let item = registry
+            .names(ClientRegistry::Item)
+            .iter()
+            .position(|name| name == "minecraft:filled_map" || name == "filled_map")
+            .unwrap() as u32;
+        let mut display = NbtCompound::new();
+        display.insert("MapColor", NbtTag::Int(0x123456));
+        let mut fields = NbtCompound::new();
+        fields.insert("map", NbtTag::Int(17));
+        fields.insert("display", NbtTag::Compound(display));
+        fields.insert("unknown", NbtTag::Int(99));
+
+        let mut fixture = vec![1];
+        wire::write_varint(&mut fixture, item);
+        fixture.push(1);
+        Nbt::new("".into(), fields)
+            .azalea_write(&mut fixture)
+            .expect("legacy item NBT codec");
+        let mut input = Cursor::new(fixture.as_slice());
+        let mut actual = Vec::new();
+        translate_item_765(&mut input, &mut actual, false, Some(registry))
+            .expect("valid filled-map slot");
+
+        let mut custom = NbtCompound::new();
+        custom.insert("display", NbtTag::Compound(NbtCompound::new()));
+        custom.insert("unknown", NbtTag::Int(99));
+        let mut custom_data = Vec::new();
+        Nbt::new("".into(), custom)
+            .azalea_write(&mut custom_data)
+            .expect("custom_data codec");
+        let mut expected = vec![1];
+        wire::write_varint(&mut expected, item);
+        expected.extend_from_slice(&[3, 0]);
+        wire::write_varint(&mut expected, DataComponentKind::CustomData.to_u32());
+        expected.extend_from_slice(&custom_data);
+        wire::write_varint(&mut expected, DataComponentKind::MapId.to_u32());
+        wire::write_varint(&mut expected, 17);
+        wire::write_varint(&mut expected, DataComponentKind::MapColor.to_u32());
+        expected.extend_from_slice(&0x00123456i32.to_be_bytes());
+        assert_eq!(actual, expected);
+        assert_eq!(input.position() as usize, fixture.len());
+    }
+
+    #[test]
     fn legacy_custom_potion_color_uses_potion_contents_codec() {
         // 1.20.4 stack with only CustomPotionColor=0x123456.
         let fixture = [
@@ -5419,7 +5528,13 @@ mod tests {
         ];
         let mut input = Cursor::new(fixture.as_slice());
         let mut actual = Vec::new();
-        translate_item_765(&mut input, &mut actual, false).expect("valid legacy slot");
+        translate_item_765(
+            &mut input,
+            &mut actual,
+            false,
+            Some(RegistryTable::for_protocol(765).unwrap()),
+        )
+        .expect("valid legacy slot");
 
         let mut expected = vec![1, 1, 2, 0]; // count, item, additions, removals
         let mut custom_data = Vec::new();
@@ -5484,8 +5599,17 @@ mod tests {
         payload.extend_from_slice(&[0, 0]); // empty component patch
         let mut input = Cursor::new(payload.as_slice());
         let mut output = Vec::new();
-        copy_particle_payload(&mut input, &mut output, "item", remaps, false, false, true)
-            .expect("translates item particle");
+        copy_particle_payload(
+            &mut input,
+            &mut output,
+            "item",
+            remaps,
+            false,
+            false,
+            true,
+            None,
+        )
+        .expect("translates item particle");
         let mut expected = vec![2];
         wire::write_varint(&mut expected, native_item);
         expected.extend_from_slice(&[0, 0]);
@@ -5494,8 +5618,17 @@ mod tests {
 
         let mut empty = Cursor::new(&[0][..]);
         let mut output = Vec::new();
-        copy_particle_payload(&mut empty, &mut output, "item", remaps, false, false, true)
-            .expect("translates empty particle stack");
+        copy_particle_payload(
+            &mut empty,
+            &mut output,
+            "item",
+            remaps,
+            false,
+            false,
+            true,
+            None,
+        )
+        .expect("translates empty particle stack");
         assert_eq!(output, [0]);
         assert_eq!(empty.position(), 1);
     }

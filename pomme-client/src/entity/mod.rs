@@ -1174,6 +1174,39 @@ impl EntityStore {
         }
     }
 
+    /// Nearby living collision boxes. The local entity is excluded and health
+    /// is the only available authoritative alive signal; team/spectator rules
+    /// are intentionally not inferred from incomplete client relationships.
+    pub fn collision_aabbs(&self, local_id: i32, region: &Aabb) -> Vec<Aabb> {
+        self.living
+            .iter()
+            .filter_map(|(&id, entity)| {
+                if id == local_id || entity.health <= 0.0 {
+                    return None;
+                }
+                let dimensions =
+                    azalea_entity::dimensions::EntityDimensions::from(entity.entity_type);
+                let (width, height) = if entity.is_baby {
+                    if matches!(
+                        entity.entity_type,
+                        EntityKind::Squid | EntityKind::GlowSquid
+                    ) {
+                        (0.5, 0.5)
+                    } else {
+                        (
+                            f64::from(dimensions.width) * 0.5,
+                            f64::from(dimensions.height) * 0.5,
+                        )
+                    }
+                } else {
+                    (f64::from(dimensions.width), f64::from(dimensions.height))
+                };
+                let box_ = Aabb::from_center(entity.position.into(), width * 0.5, height * 0.5);
+                (box_.intersects(region)).then_some(box_)
+            })
+            .collect()
+    }
+
     /// Replace a vehicle's ordered passenger list from SetPassengers; order is
     /// semantically significant.
     pub fn set_passengers(&mut self, vehicle_id: i32, passengers: &[i32]) {

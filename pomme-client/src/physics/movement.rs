@@ -5,7 +5,7 @@ use glam::{DVec3, dvec3};
 use winit::keyboard::KeyCode;
 
 use super::aabb::Aabb;
-use super::collision::{no_collision, resolve_collision_with_grounded};
+use super::collision::no_collision;
 use crate::app::input::{self, InputState};
 use crate::player::{CROUCH_HEIGHT, LocalPlayer, PLAYER_HALF_WIDTH, STANDING_HEIGHT};
 use crate::world::chunk::ChunkStore;
@@ -64,6 +64,26 @@ pub fn tick(
     player: &mut LocalPlayer,
     input: &InputState,
     chunk_store: &ChunkStore,
+    use_speed_multiplier: f32,
+    slow_due_to_using_item: bool,
+) {
+    tick_with_context(
+        player,
+        input,
+        chunk_store,
+        &[],
+        None,
+        use_speed_multiplier,
+        slow_due_to_using_item,
+    );
+}
+
+pub fn tick_with_context(
+    player: &mut LocalPlayer,
+    input: &InputState,
+    chunk_store: &ChunkStore,
+    entity_aabbs: &[Aabb],
+    border_bounds: Option<[f64; 4]>,
     use_speed_multiplier: f32,
     slow_due_to_using_item: bool,
 ) {
@@ -141,6 +161,8 @@ pub fn tick(
         player,
         input,
         chunk_store,
+        entity_aabbs,
+        border_bounds,
         forward,
         strafe,
         sin_y_rot,
@@ -159,6 +181,8 @@ fn travel(
     player: &mut LocalPlayer,
     input: &InputState,
     chunk_store: &ChunkStore,
+    entity_aabbs: &[Aabb],
+    border_bounds: Option<[f64; 4]>,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -169,6 +193,8 @@ fn travel(
             player,
             input,
             chunk_store,
+            entity_aabbs,
+            border_bounds,
             forward,
             strafe,
             sin_y_rot,
@@ -179,6 +205,8 @@ fn travel(
             player,
             input,
             chunk_store,
+            entity_aabbs,
+            border_bounds,
             forward,
             strafe,
             sin_y_rot,
@@ -189,6 +217,8 @@ fn travel(
             player,
             input,
             chunk_store,
+            entity_aabbs,
+            border_bounds,
             forward,
             strafe,
             sin_y_rot,
@@ -199,6 +229,8 @@ fn travel(
             player,
             input,
             chunk_store,
+            entity_aabbs,
+            border_bounds,
             forward,
             strafe,
             sin_y_rot,
@@ -219,6 +251,15 @@ fn stop_flying_on_ground(player: &mut LocalPlayer) {
 /// still applies existing velocity, gravity, collision, and drag until tick-20
 /// removal.
 pub fn tick_dead(player: &mut LocalPlayer, chunk_store: &ChunkStore) {
+    tick_dead_with_context(player, chunk_store, &[], None);
+}
+
+pub fn tick_dead_with_context(
+    player: &mut LocalPlayer,
+    chunk_store: &ChunkStore,
+    entity_aabbs: &[Aabb],
+    border_bounds: Option<[f64; 4]>,
+) {
     player.no_jump_delay = 0;
     player.sprinting = false;
 
@@ -236,6 +277,8 @@ pub fn tick_dead(player: &mut LocalPlayer, chunk_store: &ChunkStore) {
         player,
         &neutral,
         chunk_store,
+        entity_aabbs,
+        border_bounds,
         0.0,
         0.0,
         sin_y_rot,
@@ -295,6 +338,8 @@ fn tick_land(
     player: &mut LocalPlayer,
     input: &InputState,
     chunk_store: &ChunkStore,
+    entity_aabbs: &[Aabb],
+    border_bounds: Option<[f64; 4]>,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -321,10 +366,12 @@ fn tick_land(
         }
     }
 
-    apply_collision(
+    apply_collision_with_context(
         player,
         input,
         chunk_store,
+        entity_aabbs,
+        border_bounds,
         forward,
         strafe,
         sin_y_rot,
@@ -349,6 +396,8 @@ fn tick_water(
     player: &mut LocalPlayer,
     input: &InputState,
     chunk_store: &ChunkStore,
+    entity_aabbs: &[Aabb],
+    border_bounds: Option<[f64; 4]>,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -377,10 +426,12 @@ fn tick_water(
 
     let saved_vy = player.velocity.y;
 
-    apply_collision(
+    apply_collision_with_context(
         player,
         input,
         chunk_store,
+        entity_aabbs,
+        border_bounds,
         forward,
         strafe,
         sin_y_rot,
@@ -411,6 +462,8 @@ fn tick_fall_flying(
     player: &mut LocalPlayer,
     input: &InputState,
     chunks: &ChunkStore,
+    entity_aabbs: &[Aabb],
+    border_bounds: Option<[f64; 4]>,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -453,13 +506,25 @@ fn tick_fall_flying(
         );
     }
     player.velocity = (next * dvec3(0.99, 0.98, 0.99)).into();
-    apply_collision(player, input, chunks, forward, strafe, sin_y_rot, cos_y_rot);
+    apply_collision_with_context(
+        player,
+        input,
+        chunks,
+        entity_aabbs,
+        border_bounds,
+        forward,
+        strafe,
+        sin_y_rot,
+        cos_y_rot,
+    );
 }
 
 fn tick_lava(
     player: &mut LocalPlayer,
     input: &InputState,
     chunk_store: &ChunkStore,
+    entity_aabbs: &[Aabb],
+    border_bounds: Option<[f64; 4]>,
     forward: f32,
     strafe: f32,
     sin_y_rot: f32,
@@ -471,10 +536,12 @@ fn tick_lava(
     player.velocity.z += move_z;
 
     let saved_vy = player.velocity.y;
-    apply_collision(
+    apply_collision_with_context(
         player,
         input,
         chunk_store,
+        entity_aabbs,
+        border_bounds,
         forward,
         strafe,
         sin_y_rot,
@@ -532,6 +599,30 @@ fn apply_collision(
     sin_y_rot: f32,
     cos_y_rot: f32,
 ) {
+    apply_collision_with_context(
+        player,
+        input,
+        chunk_store,
+        &[],
+        None,
+        forward,
+        strafe,
+        sin_y_rot,
+        cos_y_rot,
+    );
+}
+
+fn apply_collision_with_context(
+    player: &mut LocalPlayer,
+    input: &InputState,
+    chunk_store: &ChunkStore,
+    entity_aabbs: &[Aabb],
+    border_bounds: Option<[f64; 4]>,
+    forward: f32,
+    strafe: f32,
+    sin_y_rot: f32,
+    cos_y_rot: f32,
+) {
     if player.game_mode == 3 {
         player.position += *player.velocity;
         player.on_ground = false;
@@ -568,12 +659,14 @@ fn apply_collision(
     );
     let step_height =
         player.attribute_value("minecraft:generic.step_height", f64::from(STEP_HEIGHT));
-    let (resolved, on_ground) = resolve_collision_with_grounded(
+    let (resolved, on_ground) = super::collision::resolve_collision_with_context(
         chunk_store,
         aabb,
         delta.into(),
         step_height,
         player.on_ground,
+        entity_aabbs,
+        border_bounds,
     );
 
     // Vanilla horizontal collision flags use Mth.equal(double, double), whose
@@ -1371,6 +1464,8 @@ mod tests {
             &mut player,
             &InputState::released(),
             &chunks,
+            &[],
+            None,
             0.0,
             0.0,
             0.0,
@@ -1412,6 +1507,8 @@ mod tests {
             &mut player,
             &InputState::released(),
             &ChunkStore::new(1),
+            &[],
+            None,
             0.0,
             0.0,
             0.0,

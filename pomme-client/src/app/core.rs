@@ -3629,7 +3629,20 @@ impl AppCore {
             // LocalPlayer.tick still executes its post-super player state and
             // input/position packet tail once.
             if !removed_this_tick {
-                movement::tick_dead(&mut game.player, &game.chunk_store);
+                let region = game
+                    .player
+                    .bounding_box()
+                    .expand(glam::dvec3(-2.0, -2.0, -2.0))
+                    .expand(glam::dvec3(2.0, 2.0, 2.0));
+                let entity_boxes = game
+                    .entity_store
+                    .collision_aabbs(game.player.entity_id, &region);
+                movement::tick_dead_with_context(
+                    &mut game.player,
+                    &game.chunk_store,
+                    &entity_boxes,
+                    Some(game.world_border.bounds_at(0.0)),
+                );
                 crate::entity::stop_walk_animation(
                     &mut game.player_walk_pos,
                     &mut game.player_walk_speed,
@@ -3778,10 +3791,20 @@ impl AppCore {
         if game.chunk_load_bench.is_some() {
             game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
         }
-        movement::tick(
+        let region = game
+            .player
+            .bounding_box()
+            .expand(glam::dvec3(-2.0, -2.0, -2.0))
+            .expand(glam::dvec3(2.0, 2.0, 2.0));
+        let entity_boxes = game
+            .entity_store
+            .collision_aabbs(game.player.entity_id, &region);
+        movement::tick_with_context(
             &mut game.player,
             input,
             &game.chunk_store,
+            &entity_boxes,
+            Some(game.world_border.bounds_at(0.0)),
             game.interaction.use_speed_multiplier(),
             game.interaction.slow_due_to_using_item(),
         );
