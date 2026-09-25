@@ -3004,6 +3004,16 @@ pub fn update_game(
                         for marker in &map.decorations {
                             let mx = x + 64.0 + marker.x as f32 / 2.0;
                             let my = y + 64.0 + marker.y as f32 / 2.0;
+                            elements.push(MenuElement::RotatedRect {
+                                cx: mx,
+                                cy: my - 2.0,
+                                w: 1.5,
+                                h: 5.0,
+                                radians: f32::from(marker.rotation).rem_euclid(16.0)
+                                    * std::f32::consts::TAU
+                                    / 16.0,
+                                color: [0.08, 0.08, 0.08, 1.0],
+                            });
                             let color =
                                 if marker.asset == crate::world::maps::MapDecorationAsset::Player {
                                     [1.0, 0.25, 0.2, 1.0]
@@ -3011,13 +3021,24 @@ pub fn update_game(
                                     [0.25, 0.5, 1.0, 1.0]
                                 };
                             elements.push(MenuElement::Rect {
-                                x: mx - 2.0,
-                                y: my - 2.0,
-                                w: 5.0,
-                                h: 5.0,
+                                x: mx - 1.5,
+                                y: my - 1.5,
+                                w: 3.0,
+                                h: 3.0,
                                 corner_radius: 0.0,
                                 color,
                             });
+                            if let Some(name) = &marker.name {
+                                elements.push(MenuElement::Text {
+                                    x: mx,
+                                    y: my + 4.0,
+                                    text: name.clone(),
+                                    scale: crate::ui::common::FONT_SIZE
+                                        * (25.0 / (name.chars().count() as f32 * 6.0).max(25.0)),
+                                    color: [1.0; 4],
+                                    centered: true,
+                                });
+                            }
                         }
                     }
                 }

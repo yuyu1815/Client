@@ -242,9 +242,10 @@
 //! 1.20.6's plus):
 //! - items are `bool + id + byte count + NBT`; inbound stacks translate the
 //!   legacy root into `custom_data` (retaining unknown NBT) and convert exact
-//!   `Damage`, `RepairCost`, `Unbreakable`, `display.Name` and `display.Lore`
-//!   fields to their native components. Other legacy fields remain in
-//!   `custom_data`. Merchant costs have no component patch and outbound
+//!   `Damage`, `RepairCost`, `Unbreakable`, `CustomModelData`, `display.color`,
+//!   `display.Name` and `display.Lore` fields to native components when each
+//!   key is unique and correctly typed. Other/invalid/duplicate fields remain
+//!   in `custom_data`. Merchant costs have no component patch and outbound
 //!   `container_click`/`set_creative_mode_slot` still use bare stacks
 //! - the configuration phase diverges for the first time: ids remap, and the
 //!   single whole-holder NBT `registry_data` packet fans out into the
@@ -2407,6 +2408,16 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
     let unbreakable = unique_nbt_field(&nbt, "Unbreakable")
         .and_then(|tag| tag.byte())
         .filter(|value| *value != 0);
+    // 26.2's CustomModelData codec is four counted lists (floats, flags,
+    // strings, colors); 1.20.4's single int becomes its first float value.
+    let custom_model_data = unique_nbt_field(&nbt, "CustomModelData")
+        .and_then(|tag| tag.int())
+        .filter(|value| (*value as f32) as i64 == i64::from(*value))
+        .map(|value| value as f32);
+    let dyed_color = unique_nbt_field(&nbt, "display")
+        .and_then(|tag| tag.compound())
+        .and_then(|display| unique_nbt_field(display, "color"))
+        .and_then(|tag| tag.int());
 
     let display_name = unique_nbt_field(&nbt, "display")
         .and_then(|tag| tag.compound())
@@ -2445,6 +2456,8 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
         + usize::from(damage.is_some())
         + usize::from(repair_cost.is_some())
         + usize::from(unbreakable.is_some())
+        + usize::from(custom_model_data.is_some())
+        + usize::from(dyed_color.is_some())
         + usize::from(display_name.is_some())
         + usize::from(display_lore.is_some());
     let mut components = Vec::new();
@@ -2455,6 +2468,7 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
             if (key_str == "Damage" && damage.is_some())
                 || (key_str == "RepairCost" && repair_cost.is_some())
                 || (key_str == "Unbreakable" && unbreakable.is_some())
+                || (key_str == "CustomModelData" && custom_model_data.is_some())
             {
                 continue;
             }
@@ -2465,6 +2479,9 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
                     }
                     if display_lore.is_some() {
                         display.remove("Lore");
+                    }
+                    if dyed_color.is_some() {
+                        display.remove("color");
                     }
                     value = NbtTag::Compound(display);
                 }
@@ -2485,6 +2502,18 @@ fn translate_item_765(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>, named_nbt: boo
     }
     if unbreakable.is_some() {
         wire::write_varint(&mut components, DataComponentKind::Unbreakable.to_u32());
+    }
+    if let Some(value) = custom_model_data {
+        wire::write_varint(&mut components, DataComponentKind::CustomModelData.to_u32());
+        wire::write_varint(&mut components, 1); // floats
+        components.extend_from_slice(&value.to_be_bytes());
+        wire::write_varint(&mut components, 0); // flags
+        wire::write_varint(&mut components, 0); // strings
+        wire::write_varint(&mut components, 0); // colors
+    }
+    if let Some(color) = dyed_color {
+        wire::write_varint(&mut components, DataComponentKind::DyedColor.to_u32());
+        components.extend_from_slice(&color.to_be_bytes());
     }
     if let Some(name) = display_name {
         wire::write_varint(&mut components, DataComponentKind::CustomName.to_u32());
@@ -5326,6 +5355,44 @@ mod tests {
     /// the copied buffer. A stray byte between the palette and the longs (or
     /// after a single-valued palette) shifts everything after the first
     /// section, so section 2's marker doubles as the alignment assertion.
+    #[test]
+    fn legacy_item_custom_model_and_dye_components_match_fixture() {
+        // 1.20.4 slot: present, item 1, count 1, CustomModelData=42,
+        // display.color=0x112233. Component ids come from the pinned native
+        // registry enum rather than duplicated numeric constants.
+        let fixture = [
+            1, 1, 1,  // present, item, count
+            10, // unnamed compound root (1.20.4)
+            3, 0, 15, b'C', b'u', b's', b't', b'o', b'm', b'M', b'o', b'd', b'e', b'l', b'D', b'a',
+            b't', b'a', 0, 0, 0, 42, // CustomModelData int
+            10, 0, 7, b'd', b'i', b's', b'p', b'l', b'a', b'y', // display
+            3, 0, 5, b'c', b'o', b'l', b'o', b'r', 0, 0x11, 0x22, 0x33, 0,
+            0, // display end, root end
+        ];
+        let mut input = Cursor::new(fixture.as_slice());
+        let mut actual = Vec::new();
+        translate_item_765(&mut input, &mut actual, false).expect("valid legacy slot");
+
+        let mut expected = vec![1, 1, 3, 0]; // count, item, additions, removals
+        let mut custom_fields = simdnbt::owned::NbtCompound::new();
+        custom_fields.insert(
+            "display",
+            simdnbt::owned::NbtTag::Compound(simdnbt::owned::NbtCompound::new()),
+        );
+        let mut custom_data = Vec::new();
+        simdnbt::owned::Nbt::new("".into(), custom_fields)
+            .azalea_write(&mut custom_data)
+            .expect("custom_data codec");
+        wire::write_varint(&mut expected, DataComponentKind::CustomData.to_u32());
+        expected.extend_from_slice(&custom_data);
+        wire::write_varint(&mut expected, DataComponentKind::CustomModelData.to_u32());
+        expected.extend_from_slice(&[1, 0x42, 0x28, 0, 0, 0, 0, 0]); // [42.0f32], other lists empty
+        wire::write_varint(&mut expected, DataComponentKind::DyedColor.to_u32());
+        expected.extend_from_slice(&[0, 0x11, 0x22, 0x33]);
+        assert_eq!(actual, expected);
+        assert_eq!(input.position() as usize, fixture.len());
+    }
+
     #[test]
     fn legacy_chunk_strips_data_array_len() {
         let long = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE];

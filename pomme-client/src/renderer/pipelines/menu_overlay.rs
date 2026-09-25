@@ -778,6 +778,14 @@ impl MenuOverlayPipeline {
                 } => {
                     push_rect(&mut vertices, *x, *y, *w, *h, *corner_radius, *color);
                 }
+                MenuElement::RotatedRect {
+                    cx,
+                    cy,
+                    w,
+                    h,
+                    radians,
+                    color,
+                } => push_rotated_rect(&mut vertices, *cx, *cy, *w, *h, *radians, *color),
                 MenuElement::Text {
                     x,
                     y,
@@ -1767,6 +1775,14 @@ pub enum MenuElement {
         w: f32,
         h: f32,
         corner_radius: f32,
+        color: [f32; 4],
+    },
+    RotatedRect {
+        cx: f32,
+        cy: f32,
+        w: f32,
+        h: f32,
+        radians: f32,
         color: [f32; 4],
     },
     Text {
@@ -3918,6 +3934,36 @@ fn push_fullscreen_quad(
         [0.0, 0.0],
         0.0,
     );
+}
+
+fn push_rotated_rect(
+    verts: &mut Vec<Vertex>,
+    cx: f32,
+    cy: f32,
+    w: f32,
+    h: f32,
+    radians: f32,
+    color: [f32; 4],
+) {
+    let (sin, cos) = radians.sin_cos();
+    let positions = [
+        [-w / 2.0, -h / 2.0],
+        [w / 2.0, -h / 2.0],
+        [-w / 2.0, h / 2.0],
+        [w / 2.0, -h / 2.0],
+        [w / 2.0, h / 2.0],
+        [-w / 2.0, h / 2.0],
+    ];
+    for [x, y] in positions {
+        verts.push(Vertex {
+            pos: [cx + x * cos - y * sin, cy + x * sin + y * cos],
+            uv: [0.0, 0.0],
+            color,
+            mode: 0.0,
+            rect_size: [w, h],
+            corner_radius: 0.0,
+        });
+    }
 }
 
 fn push_rect(

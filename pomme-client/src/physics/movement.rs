@@ -661,17 +661,16 @@ fn update_fall_distance(fall_distance: &mut f32, resolved_y: f64, on_ground: boo
 }
 
 fn reset_fall_distance_for_tick(player: &mut LocalPlayer) {
-    if player.in_water || player.flying || has_fall_distance_reset_effect(player) {
+    if player.in_water
+        || has_effect_named(player, "slow_falling")
+        || has_effect_named(player, "levitation")
+    {
         player.fall_distance = 0.0;
-    } else if player.in_lava {
-        // Entity.tick halves fall distance in lava; damage remains
-        // server-authoritative.
-        player.fall_distance *= 0.5;
+    } else if player.fall_flying && player.velocity.y > -0.5 && player.fall_distance > 1.0 {
+        // LivingEntity.updateFallFlying calls checkFallDistanceAccumulation;
+        // this limits stale accumulated distance, it does not erase it.
+        player.fall_distance = 1.0;
     }
-}
-
-fn has_fall_distance_reset_effect(player: &LocalPlayer) -> bool {
-    has_effect_named(player, "slow_falling") || has_effect_named(player, "levitation")
 }
 
 fn has_leather_boots(player: &LocalPlayer) -> bool {
@@ -830,21 +829,26 @@ fn is_on_climbable(chunks: &ChunkStore, position: DVec3) -> bool {
     false
 }
 
-/// Fluid flow follows FlowingFluid.getFlow; collision/full-face distinctions
-/// are approximated with the available has_collision state data.
+/// Fluid flow follows FlowingFluid.getFlow and EntityFluidInteraction's
+/// player-specific current averaging.
 fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
     use crate::world::block::{FluidKind, fluid};
 
     let bb = player.bounding_box();
     for (kind, strength, touching) in [
         (FluidKind::Water, 0.014, player.in_water),
-        (FluidKind::Lava, 0.007, player.in_lava),
+        (FluidKind::Lava, 0.002_333_333_333_333_333_5, player.in_lava),
     ] {
         if !touching {
             continue;
         }
         let mut accumulated = dvec3(0.0, 0.0, 0.0);
         let mut sample_count = 0u32;
+        let fluid_height = match kind {
+            FluidKind::Water => player.fluid_height,
+            FluidKind::Lava => player.lava_height,
+            FluidKind::Empty => 0.0,
+        };
         let (x0, x1) = (bb.min.x.floor() as i32, bb.max.x.ceil() as i32 - 1);
         let (y0, y1) = (bb.min.y.floor() as i32, bb.max.y.ceil() as i32 - 1);
         let (z0, z1) = (bb.min.z.floor() as i32, bb.max.z.ceil() as i32 - 1);
@@ -874,7 +878,7 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
                             cell_flow.x += dx as f64 * difference;
                             cell_flow.z += dz as f64 * difference;
                         } else if neighbor.kind == FluidKind::Empty
-                            && !crate::world::block::has_collision(neighbor_state)
+                            && !blocks_motion_for_fluid(neighbor_state)
                         {
                             let below = fluid(chunks.get_block_state(x + dx, y - 1, z + dz));
                             if below.kind == kind {
@@ -891,10 +895,10 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
                                 .any(|(dx, dz)| {
                                     let side = chunks.get_block_state(x + dx, y, z + dz);
                                     let above = chunks.get_block_state(x + dx, y + 1, z + dz);
-                                    crate::world::block::block_id(side) != "ice"
-                                        && crate::world::block::block_id(above) != "ice"
-                                        && (crate::world::block::has_collision(side)
-                                            || crate::world::block::has_collision(above))
+                                    (crate::world::block::block_id(side) != "ice"
+                                        && face_sturdy_for_fluid(side, dx, dz))
+                                        || (crate::world::block::block_id(above) != "ice"
+                                            && face_sturdy_for_fluid(above, dx, dz))
                                 });
                         if has_solid_side {
                             let horizontal = cell_flow.normalize_or_zero();
@@ -903,7 +907,11 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
                     }
                     let cell_length = cell_flow.length();
                     if cell_length > 0.0 {
-                        accumulated += cell_flow / cell_length;
+                        let mut flow = cell_flow / cell_length;
+                        if fluid_height < 0.4 {
+                            flow *= fluid_height;
+                        }
+                        accumulated += flow;
                     }
                     sample_count += 1;
                 }
@@ -921,6 +929,32 @@ fn apply_fluid_currents(player: &mut LocalPlayer, chunks: &ChunkStore) {
             player.velocity = (*player.velocity + impulse).into();
         }
     }
+}
+
+fn blocks_motion_for_fluid(state: azalea_block::BlockState) -> bool {
+    let id = crate::world::block::block_id(state);
+    crate::world::block::has_collision(state) && !matches!(id, "cobweb" | "bamboo_sapling")
+}
+
+/// Approximate SupportType.FULL using the state's collision shape; contextual
+/// support predicates cannot be resolved without world/entity context.
+fn face_sturdy_for_fluid(state: azalea_block::BlockState, dx: i32, dz: i32) -> bool {
+    let full_cube = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+    let boxes = match crate::physics::block_shape::partial_shape(state) {
+        Some(boxes) => boxes,
+        None => std::slice::from_ref(&full_cube),
+    };
+    boxes.iter().any(|b| {
+        if dx > 0 {
+            b[3] == 1.0 && b[2] == 0.0 && b[5] == 1.0 && b[4] == 1.0
+        } else if dx < 0 {
+            b[0] == 0.0 && b[2] == 0.0 && b[5] == 1.0 && b[4] == 1.0
+        } else if dz > 0 {
+            b[5] == 1.0 && b[0] == 0.0 && b[3] == 1.0 && b[4] == 1.0
+        } else {
+            b[2] == 0.0 && b[0] == 0.0 && b[3] == 1.0 && b[4] == 1.0
+        }
+    })
 }
 
 fn touches_block_id(chunks: &ChunkStore, aabb: &Aabb, id: &str) -> bool {
@@ -1438,6 +1472,50 @@ mod tests {
     }
 
     #[test]
+    fn fluid_blocking_and_full_face_support_are_distinct_from_collision() {
+        crate::world::block::init("26.2");
+        let stone = crate::world::block::find_state("stone", &[]);
+        let cobweb = crate::world::block::find_state("cobweb", &[]);
+        assert!(blocks_motion_for_fluid(stone));
+        assert!(!blocks_motion_for_fluid(cobweb));
+        assert!(face_sturdy_for_fluid(stone, 1, 0));
+        assert!(!face_sturdy_for_fluid(
+            crate::world::block::find_state(
+                "oak_slab",
+                &[("type", "bottom"), ("waterlogged", "false")]
+            ),
+            1,
+            0,
+        ));
+    }
+
+    #[test]
+    fn fall_distance_cap_is_only_for_fall_flying_and_effects_reset_it() {
+        let mut player = LocalPlayer::new();
+        player.velocity.y = 0.0;
+        player.fall_distance = 4.0;
+        reset_fall_distance_for_tick(&mut player);
+        assert_eq!(player.fall_distance, 4.0);
+        player.fall_flying = true;
+        reset_fall_distance_for_tick(&mut player);
+        assert_eq!(player.fall_distance, 1.0);
+        player.effects.update(crate::mob_effect::MobEffectInstance {
+            effect_id: crate::mob_effect::MOB_EFFECTS
+                .iter()
+                .position(|effect| effect.name == "slow_falling")
+                .unwrap() as u32,
+            amplifier: 0,
+            duration: 10,
+            ambient: false,
+            show_particles: true,
+            show_icon: true,
+        });
+        player.fall_distance = 4.0;
+        reset_fall_distance_for_tick(&mut player);
+        assert_eq!(player.fall_distance, 0.0);
+    }
+
+    #[test]
     fn honey_slide_matches_vanilla_speed_throttle() {
         let (horizontal_scale, vertical) = honey_slide_movement(-0.2744);
         assert!((horizontal_scale - 0.25).abs() < 1.0e-6);
@@ -1495,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn tick_and_dead_tick_reset_fall_distance_for_flight_and_effect_membership() {
+    fn tick_and_dead_tick_preserve_fall_distance_during_flight_and_reset_for_effects() {
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let input = InputState::released();
@@ -1504,13 +1582,13 @@ mod tests {
         player.flying = true;
         player.fall_distance = 8.0;
         tick(&mut player, &input, &chunks, 1.0, false);
-        assert_eq!(player.fall_distance, 0.0);
+        assert_eq!(player.fall_distance, 8.0);
         player.position = dvec3(0.5, 100.0, 0.5).into();
         player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
         player.on_ground = false;
         player.fall_distance = 8.0;
         tick_dead(&mut player, &chunks);
-        assert_eq!(player.fall_distance, 0.0);
+        assert_eq!(player.fall_distance, 8.0);
         player.flying = false;
 
         for (name, duration) in [("slow_falling", 0), ("levitation", -1)] {
