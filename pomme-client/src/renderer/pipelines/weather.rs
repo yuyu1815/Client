@@ -80,6 +80,8 @@ pub struct WeatherPipeline {
     camera_allocations: Vec<Option<Allocation>>,
     vertex_buffers: Vec<vk::Buffer>,
     vertex_allocations: Vec<Option<Allocation>>,
+    rain_verts: Vec<WeatherVertex>,
+    snow_verts: Vec<WeatherVertex>,
     sampler: vk::Sampler,
     rain_image: vk::Image,
     rain_view: vk::ImageView,
@@ -251,6 +253,8 @@ impl WeatherPipeline {
             camera_allocations,
             vertex_buffers,
             vertex_allocations,
+            rain_verts: Vec::new(),
+            snow_verts: Vec::new(),
             sampler,
             rain_image,
             rain_view,
@@ -286,8 +290,8 @@ impl WeatherPipeline {
         let cam = (*camera.position - anchor).as_vec3() + camera.third_person_offset();
         let radius_sq = (WEATHER_RADIUS as f32) * (WEATHER_RADIUS as f32);
 
-        let mut rain_verts: Vec<WeatherVertex> = Vec::new();
-        let mut snow_verts: Vec<WeatherVertex> = Vec::new();
+        self.rain_verts.clear();
+        self.snow_verts.clear();
 
         for col in columns {
             let (max_alpha, u_off, v_off, is_snow) = match col.precip {
@@ -340,9 +344,9 @@ impl WeatherPipeline {
             ];
 
             let target = if is_snow {
-                &mut snow_verts
+                &mut self.snow_verts
             } else {
-                &mut rain_verts
+                &mut self.rain_verts
             };
             for &i in &[0usize, 1, 2, 0, 2, 3] {
                 target.push(WeatherVertex {
@@ -353,17 +357,13 @@ impl WeatherPipeline {
             }
         }
 
-        let rain_count = rain_verts.len() as u32;
-        let snow_count = snow_verts.len() as u32;
+        let (rain_count, snow_count) =
+            batch_weather_vertices(&mut self.rain_verts, &mut self.snow_verts);
         if rain_count == 0 && snow_count == 0 {
             return;
         }
 
-        rain_verts.append(&mut snow_verts);
-        if rain_verts.len() > MAX_WEATHER_VERTS {
-            rain_verts.truncate(MAX_WEATHER_VERTS);
-        }
-        let bytes = bytemuck::cast_slice::<WeatherVertex, u8>(&rain_verts);
+        let bytes = bytemuck::cast_slice::<WeatherVertex, u8>(&self.rain_verts);
         if let Some(alloc) = self.vertex_allocations[frame].as_mut() {
             alloc.mapped_slice_mut().unwrap()[..bytes.len()].copy_from_slice(bytes);
         }
@@ -430,6 +430,20 @@ impl WeatherPipeline {
         device.destroy_descriptor_set_layout(self.camera_layout, None);
         device.destroy_descriptor_set_layout(self.tex_layout, None);
     }
+}
+
+// Rain precedes snow in the shared vertex buffer so both draw offsets stay
+// unchanged.
+fn batch_weather_vertices(
+    rain: &mut Vec<WeatherVertex>,
+    snow: &mut Vec<WeatherVertex>,
+) -> (u32, u32) {
+    let counts = (rain.len() as u32, snow.len() as u32);
+    rain.append(snow);
+    if rain.len() > MAX_WEATHER_VERTS {
+        rain.truncate(MAX_WEATHER_VERTS);
+    }
+    counts
 }
 
 /// Java LCG random with `nextGaussian`, used to reproduce vanilla's per-column
@@ -725,8 +739,40 @@ fn create_pipeline(
 
 #[cfg(test)]
 mod precipitation_tests {
-    use super::{Precip, precipitation_for};
+    use super::{Precip, WeatherVertex, batch_weather_vertices, precipitation_for};
     use crate::renderer::chunk::mesher::BiomeClimate;
+
+    #[test]
+    fn reused_weather_batches_keep_rain_before_snow_and_draw_offsets() {
+        let vertex = |x| WeatherVertex {
+            position: [x, 2.0, 3.0],
+            uv: [0.25, 0.75],
+            brightness: 0.5,
+        };
+        let mut rain = Vec::new();
+        let mut snow = Vec::new();
+        let mut capacities = None;
+        for _ in 0..2 {
+            rain.clear();
+            snow.clear();
+            rain.extend([vertex(1.0), vertex(2.0)]);
+            snow.push(vertex(3.0));
+            assert_eq!(batch_weather_vertices(&mut rain, &mut snow), (2, 1));
+            assert_eq!(snow.len(), 0);
+            let positions: Vec<_> = rain.iter().map(|v| v.position[0]).collect();
+            assert_eq!(positions, [1.0, 2.0, 3.0]);
+            let current = (
+                rain.as_ptr(),
+                rain.capacity(),
+                snow.as_ptr(),
+                snow.capacity(),
+            );
+            if let Some(previous) = capacities {
+                assert_eq!(current, previous);
+            }
+            capacities = Some(current);
+        }
+    }
 
     #[test]
     fn classifies_warm_and_cold_biomes_and_honors_precipitation_flag() {
