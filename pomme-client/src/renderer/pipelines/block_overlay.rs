@@ -52,6 +52,7 @@ pub struct BlockOverlayPipeline {
     atlas_view: vk::ImageView,
     atlas_sampler: vk::Sampler,
     atlas_allocation: Allocation,
+    vertices: Vec<OverlayVertex>,
 }
 
 impl BlockOverlayPipeline {
@@ -231,6 +232,7 @@ impl BlockOverlayPipeline {
             atlas_view,
             atlas_sampler,
             atlas_allocation,
+            vertices: Vec::new(),
         }
     }
 
@@ -251,12 +253,12 @@ impl BlockOverlayPipeline {
         anchor: glam::DVec3,
         stage: u32,
     ) {
-        let vertices = build_overlay_vertices(registry, state, block_pos, anchor);
-        if vertices.is_empty() {
+        build_overlay_vertices(&mut self.vertices, registry, state, block_pos, anchor);
+        if self.vertices.is_empty() {
             return;
         }
         // TODO: one overlay per frame; multiple draws would need a write cursor.
-        let bytes = bytemuck::cast_slice::<OverlayVertex, u8>(&vertices);
+        let bytes = bytemuck::cast_slice::<OverlayVertex, u8>(&self.vertices);
         self.vertex_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
             .copy_from_slice(bytes);
 
@@ -279,7 +281,7 @@ impl BlockOverlayPipeline {
             &[],
         );
         cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
-        cmd.draw(vertices.len() as u32, 1, 0, 0);
+        cmd.draw(self.vertices.len() as u32, 1, 0, 0);
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
@@ -330,31 +332,32 @@ impl BlockOverlayPipeline {
 /// is no geometry inflation: the overlay sits exactly on the block and relies
 /// on the pipeline's polygon offset to avoid z-fighting, matching vanilla.
 fn build_overlay_vertices(
+    verts: &mut Vec<OverlayVertex>,
     registry: &BlockRegistry,
     state: BlockState,
     pos: &BlockPos,
     anchor: glam::DVec3,
-) -> Vec<OverlayVertex> {
+) {
+    verts.clear();
     // Anchor-relative (see Camera::anchor); the crack UVs are projected from
     // block-local coordinates, so the rebase never touches the texture.
     let origin = (glam::DVec3::new(pos.x as f64, pos.y as f64, pos.z as f64) - anchor)
         .as_vec3()
         .to_array();
-    let mut verts = Vec::new();
 
     if let Some(model) = registry.get_baked_model_at(state, pos.x, pos.y, pos.z) {
         for quad in &model.quads {
-            push_quad(&mut verts, origin, quad);
+            push_quad(verts, origin, quad);
         }
     } else if let Some(quads) = registry.get_multipart_quads_at(state, pos.x, pos.y, pos.z) {
         for quad in &quads {
-            push_quad(&mut verts, origin, quad);
+            push_quad(verts, origin, quad);
         }
     } else if registry.get_textures(state).is_some() {
         // Blocks rendered as a plain opaque cube (no baked model): crack a unit cube.
         for dir in CUBE_FACE_DIRS {
             let (positions, _) = cube_face_geometry(dir);
-            push_face(&mut verts, origin, &positions, dir);
+            push_face(verts, origin, &positions, dir);
         }
     }
 
@@ -365,7 +368,6 @@ fn build_overlay_vertices(
         );
         verts.truncate(MAX_OVERLAY_VERTS);
     }
-    verts
 }
 
 fn push_quad(verts: &mut Vec<OverlayVertex>, origin: [f32; 3], quad: &BakedQuad) {
@@ -649,6 +651,25 @@ mod tests {
             assert!((span(us) - 1.0).abs() < 1e-4, "{dir:?} u span {}", span(us));
             assert!((span(vs) - 1.0).abs() < 1e-4, "{dir:?} v span {}", span(vs));
         }
+    }
+
+    /// Reusing the overlay's CPU staging must emit the same vertices as a fresh
+    /// build, without needing another allocation for the same block geometry.
+    #[test]
+    fn reused_overlay_vertices_match_fresh_build() {
+        let (positions, _) = cube_face_geometry(Direction::North);
+        let mut reused = Vec::new();
+        push_face(&mut reused, [0.0; 3], &positions, Direction::North);
+        let capacity = reused.capacity();
+        reused.clear();
+        push_face(&mut reused, [12.0, -4.0, 3.0], &positions, Direction::North);
+        let mut fresh = Vec::new();
+        push_face(&mut fresh, [12.0, -4.0, 3.0], &positions, Direction::North);
+        assert_eq!(
+            bytemuck::cast_slice::<OverlayVertex, u8>(&reused),
+            bytemuck::cast_slice::<OverlayVertex, u8>(&fresh)
+        );
+        assert_eq!(reused.capacity(), capacity);
     }
 
     /// Partial faces sample their own block-local sub-region of the crack
