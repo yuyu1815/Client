@@ -372,10 +372,14 @@ impl CloudPipeline {
         let faces = &mut self.faces;
         let fancy = mode == CloudMode::Fancy;
         let r2 = RADIUS_CELLS * RADIUS_CELLS;
+        // Every cell in the disc reuses one of these 2R+1 coordinates per axis.
+        // Wrap once per axis offset rather than twice for every cloud cell.
+        let xs = wrapped_cloud_axis(cell_x, grid.width);
+        let zs = wrapped_cloud_axis(cell_z, grid.height);
 
         let mut emit = |rcx: i32, rcz: i32| {
-            let gx = (cell_x + rcx).rem_euclid(grid.width as i32) as usize;
-            let gz = (cell_z + rcz).rem_euclid(grid.height as i32) as usize;
+            let gx = xs[(rcx + RADIUS_CELLS) as usize];
+            let gz = zs[(rcz + RADIUS_CELLS) as usize];
             let cell = grid.cell(gx, gz);
             if !cell.present {
                 return;
@@ -433,6 +437,12 @@ impl CloudPipeline {
     }
 }
 
+fn wrapped_cloud_axis(center: i32, size: u32) -> Vec<usize> {
+    (-RADIUS_CELLS..=RADIUS_CELLS)
+        .map(|offset| (center + offset).rem_euclid(size as i32) as usize)
+        .collect()
+}
+
 fn emit_face(faces: &mut Vec<CloudFace>, rcx: i32, rcz: i32, dir: u8, flags: u8) {
     faces.push(CloudFace {
         cell: [rcx as i16, rcz as i16],
@@ -475,6 +485,36 @@ fn build_extruded_cell(
         if interior || present {
             emit_face(faces, rcx, rcz, dir, 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RADIUS_CELLS, wrapped_cloud_axis};
+
+    #[test]
+    fn cached_cloud_coordinates_match_per_cell_wrapping() {
+        for size in [3, 128, 256] {
+            for center in [-255, -1, 0, 1, 255] {
+                let axis = wrapped_cloud_axis(center, size);
+                assert_eq!(axis.len(), (2 * RADIUS_CELLS + 1) as usize);
+                for offset in -RADIUS_CELLS..=RADIUS_CELLS {
+                    assert_eq!(
+                        axis[(offset + RADIUS_CELLS) as usize],
+                        (center + offset).rem_euclid(size as i32) as usize
+                    );
+                }
+            }
+        }
+        // One ring walk formerly wrapped twice per visited disc cell;
+        // now each axis wraps exactly 2R+1 times per rebuild.
+        let mut cells = 0;
+        for x in -RADIUS_CELLS..=RADIUS_CELLS {
+            for z in -RADIUS_CELLS..=RADIUS_CELLS {
+                cells += (x * x + z * z <= RADIUS_CELLS * RADIUS_CELLS) as usize;
+            }
+        }
+        assert!(2 * cells > 2 * (2 * RADIUS_CELLS + 1) as usize);
     }
 }
 
