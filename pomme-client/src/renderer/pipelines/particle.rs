@@ -66,6 +66,7 @@ pub struct ParticlePipeline {
     camera_allocations: Vec<Option<Allocation>>,
     vertex_buffers: Vec<vk::Buffer>,
     vertex_allocations: Vec<Option<Allocation>>,
+    vertices: Vec<ParticleVertex>,
 }
 
 impl ParticlePipeline {
@@ -203,6 +204,7 @@ impl ParticlePipeline {
             camera_allocations,
             vertex_buffers,
             vertex_allocations,
+            vertices: Vec::new(),
         };
         this.rebind_atlas(device, atlas);
         this
@@ -244,8 +246,9 @@ impl ParticlePipeline {
         }
 
         let (right, up) = camera.billboard_axes();
-        let mut verts: Vec<ParticleVertex> =
-            Vec::with_capacity(quads.len().min(MAX_PARTICLE_QUADS) * 6);
+        let verts = &mut self.vertices;
+        verts.clear();
+        verts.reserve(quads.len().min(MAX_PARTICLE_QUADS) * 6);
         // Opaque quads first, then translucent, so each layer is one
         // contiguous draw range (vanilla renders the layers separately).
         let emit = |verts: &mut Vec<ParticleVertex>, translucent: bool| {
@@ -282,9 +285,9 @@ impl ParticlePipeline {
                 }
             }
         };
-        emit(&mut verts, false);
+        emit(verts, false);
         let opaque_verts = verts.len();
-        emit(&mut verts, true);
+        emit(verts, true);
 
         let bytes = bytemuck::cast_slice::<ParticleVertex, u8>(&verts);
         if let Some(alloc) = self.vertex_allocations[frame].as_mut() {
