@@ -50,15 +50,26 @@ version management, and spawns the client with the appropriate flags.
 
 ## Building
 
-Before building, you must have [just](https://github.com/casey/just) installed.
-The Rust toolchain is pinned in `rust-toolchain.toml`; rustup picks it up.
+Use [mise](https://mise.jdx.dev/) for the client build/check/test workflow:
+
+```bash
+mise trust .mise.toml
+mise install
+```
+
+Mise manages Rust/Node/pnpm in `.mise.toml`; keep the Rust pin aligned with
+`rust-toolchain.toml` for CI/rustup. Machine-local SDK/cache paths may go in ignored
+`.mise.local.toml`.
+The existing launcher and game-running recipes also use [just](https://github.com/casey/just).
 
 ### Client
 
 Requires the [Vulkan SDK](https://vulkan.lunarg.com/) and Python (to stage
 OpenAL Soft next to the binary; without it the client runs with audio disabled).
 
-Clone with submodules, since singleplayer builds SteelMC by default:
+Clone with submodules, since singleplayer builds SteelMC by default. The submodule
+is pinned to the fork in `.gitmodules`, which fixes Git metadata watching for
+submodule builds without changing gameplay:
 
 ```bash
 git clone --recurse-submodules https://github.com/PommeMC/Client.git
@@ -74,11 +85,38 @@ still be checked out):
 just client-build --no-default-features
 ```
 
-Otherwise:
+For an optimized release build:
 
 ```bash
-just client-build --release
+mise run build-release
 ```
+
+### Faster development builds
+
+Use the opt-in `dev-fast` profile for edit/test cycles:
+
+```bash
+mise run check
+mise run build
+mise run test
+mise run test-registry
+```
+
+These tasks select `dev-fast` and use `--locked`. `mise run test` runs the client,
+protocol and singleplayer tests without hiding failures. For game execution with
+OpenAL staging, use `just client-dev --profile dev-fast -- --username Steve`.
+Agent-specific rules and known baseline failures are in [AGENTS.md](AGENTS.md).
+
+It disables optimization for workspace crates and `steel-registry`, while keeping
+other dependencies optimized, including Steel's world-generation/math overrides.
+Binaries live in `target/dev-fast` by default, or `<CARGO_TARGET_DIR>/dev-fast`
+when that environment variable is set; OpenAL staging follows the same override.
+The first build needs its own cache. Keep using the same profile and avoid
+`cargo clean` during normal iteration. For type/borrow
+checks without producing a runnable binary, use `mise run check`.
+
+Gameplay may run slower with `dev-fast`: use normal dev or `--release` for runtime
+performance checks. Their optimization settings are unchanged.
 
 ### Launcher
 
@@ -136,10 +174,12 @@ Running the standalone client requires minecraft assets, for which you have 2 op
 
 Run `just` with no arguments to list every recipe. The common ones:
 
+- `mise run check` / `mise run build` / `mise run test` / `mise run test-registry`: the standard fast Rust development workflow
+- `mise run build-release`: optimized client build
 - `just client-dev` / `just client-build` / `just client-release`: run, build, or benchmark the client; flags forward after `--`, e.g. `just client-dev -- --username Steve`
 - `just launcher-dev` / `just launcher-build`: run or bundle the launcher
 - `just client-pre-pr` / `just launcher-pre-pr`: the fmt, clippy, and test checks CI enforces
-- `just protogen` / `just registrygen` / `just knownpackgen` / `just blockgen` / `just stategen`: regenerate a version's packet-id, registry, known-pack, block-state, and per-state property tables from `reference/<version>/`; `stategen` runs vanilla's own code and needs JDK 25 (`just jdk=<bin dir> stategen`, Windows only)
+- `just protogen` / `just registrygen` / `just knownpackgen` / `just blockgen` / `just stategen`: regenerate a version's packet-id, registry, known-pack, block-state, and per-state property tables from `reference/<version>/`; `stategen` runs vanilla's own code and needs JDK 25 (set `JAVA_HOME` or use `just jdk=<bin dir> stategen`, Windows only)
 
 ### Render diagnostics
 

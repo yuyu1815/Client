@@ -19,7 +19,8 @@ openal:
         echo "warning: no python on PATH, skipping OpenAL staging (audio will be disabled)" >&2
         exit 0
     }
-    "$python" tools/fetch_openal.py target/debug target/release
+    target_dir="${CARGO_TARGET_DIR:-target}"
+    "$python" tools/fetch_openal.py "$target_dir/debug" "$target_dir/dev-fast" "$target_dir/release"
 
 client-dev *args: openal
     @cargo run -p pomme-client {{ args }}
@@ -61,21 +62,25 @@ knownpackgen version="26.2":
 blockgen version="26.2":
     @cargo run -p blockgen -- blocks reference/{{ version }}/generated/reports/blocks.json {{ version }} pomme-client/src/world/block/data/blocks-{{ version }}.json
 
-# JDK 25 bin dir for stategen; override with `just jdk=<path> stategen`.
-jdk := "C:/Program Files/Amazon Corretto/jdk25.0.2_10/bin"
+# Optional JDK 25 bin override; otherwise stategen uses JAVA_HOME/bin.
+jdk := ""
 
 # TODO: Windows only (javac.exe, ';' classpath separator); make portable.
 
 # Regenerate a version's per-state property table by running vanilla's own code
 # (tools/stategen/StateDump.java) against the reference server jar, then
 # compacting the dump with `blockgen state`. Uses the deobf server jar when
-# one exists (pre-26.x); needs the Corretto JDK for 26.x class files.
+# one exists (pre-26.x); needs JDK 25 for 26.x class files.
 stategen version="26.2":
     #!/usr/bin/env bash
     set -euo pipefail
     v="{{ version }}"
     ref="reference/$v"
     jdk="{{ jdk }}"
+    if [ -z "$jdk" ]; then
+        : "${JAVA_HOME:?Set JAVA_HOME or pass just jdk=/path/to/jdk/bin stategen}"
+        jdk="$JAVA_HOME/bin"
+    fi
     classes="$ref/server-$v.jar"
     if [ -f "$ref/server-$v-deobf.jar" ]; then classes="$ref/server-$v-deobf.jar"; fi
     if ! find "$ref/bundler" -name '*.jar' 2>/dev/null | grep -q .; then

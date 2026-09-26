@@ -70,7 +70,11 @@ uuid = { version = "1", features = ["v4"] }
 md-5 = "0.11"
 crossbeam-channel = "0.5"
 png = "0.17"
-image = "0.25"
+# Preserve the default decoders and Rayon, but skip the unused AVIF encoder (ravif).
+image = { version = "0.25", default-features = false, features = [
+    "rayon", "bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg",
+    "png", "pnm", "qoi", "tga", "tiff", "webp",
+] }
 fontdue = "0.9.3"
 freetype-rs = { version = "0.38", optional = true }
 simdnbt = "0.10"

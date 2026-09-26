@@ -72,6 +72,14 @@ debug = 1
 [profile.dev.package."*"]
 opt-level = 2
 
+# Fast edit/test cycle; keep normal dev/release for gameplay performance checks.
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 0
+
+[profile.dev-fast.package.steel-registry]
+opt-level = 0
+
 # Mirrors steel's own dev overrides. Its workspace profile does not apply when
 # pomme is the root, and without these worldgen is unusably slow and the density
 # functions overflow-panic.

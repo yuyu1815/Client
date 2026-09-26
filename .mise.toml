@@ -1,3 +1,26 @@
 [tools]
+# Keep this pin/components aligned with rust-toolchain.toml (also used by CI).
+rust = { version = "nightly-2026-08-21", components = "clippy,rustfmt,rust-analyzer,rust-src" }
 node = "22.23.3"
 pnpm = "9.9.0"
+
+[tasks.build]
+description = "Build the client for fast iteration (singleplayer enabled)"
+run = "cargo build -p pomme-client --locked --profile dev-fast"
+
+[tasks.check]
+description = "Type/borrow check without producing a runnable client"
+run = "cargo check -p pomme-client --locked --profile dev-fast"
+
+[tasks.test]
+description = "Run client, protocol and singleplayer tests; preserve failures"
+# Reapply mise env after the task shell: macOS SIP strips DYLD_* on shell startup.
+run = "mise exec -- cargo test -p pomme-client -p pomme-protocol -p pomme-singleplayer --locked --profile dev-fast --no-fail-fast"
+
+[tasks.test-registry]
+description = "Run Steel registry unit tests"
+run = "mise exec -- cargo test -p steel-registry --lib --locked --profile dev-fast"
+
+[tasks.build-release]
+description = "Build for runtime performance checks, not the edit/test loop"
+run = "cargo build -p pomme-client --locked --release"
