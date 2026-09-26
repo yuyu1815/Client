@@ -5,6 +5,59 @@ use super::entity_model::{
     bake_model, generate_cube_vertices, generate_cube_vertices_faces,
 };
 
+/// Inactive conduit shell and default player head idle geometry.
+pub fn bake_conduit_model() -> BakedEntityModel {
+    let cube = ModelCube {
+        origin: Vec3::new(-3.0, -3.0, -3.0),
+        size: Vec3::splat(6.0),
+        tex_offset: (0, 0),
+        deformation: 0.0,
+        mirror: false,
+    };
+    let mut vertices = Vec::new();
+    generate_cube_vertices(&cube, 32, 16, FACE_ALL, false, &mut vertices);
+    BakedEntityModel::new(
+        vec![EntityPart {
+            name: "shell".into(),
+            offset: Vec3::new(8.0, 8.0, 8.0),
+            default_rotation: Vec3::ZERO,
+            cubes: Vec::new(),
+            parent: None,
+        }],
+        vertices,
+        vec![(0, 36)],
+    )
+}
+
+pub fn bake_player_head_model() -> BakedEntityModel {
+    let head = ModelCube {
+        origin: Vec3::new(-4.0, -8.0, -4.0),
+        size: Vec3::splat(8.0),
+        tex_offset: (0, 0),
+        deformation: 0.0,
+        mirror: false,
+    };
+    let hat = ModelCube {
+        tex_offset: (32, 0),
+        deformation: 0.25,
+        ..head
+    };
+    let mut vertices = Vec::new();
+    generate_cube_vertices(&head, 64, 64, FACE_ALL, false, &mut vertices);
+    generate_cube_vertices(&hat, 64, 64, FACE_ALL, false, &mut vertices);
+    BakedEntityModel::new(
+        vec![EntityPart {
+            name: "head".into(),
+            offset: Vec3::ZERO,
+            default_rotation: Vec3::ZERO,
+            cubes: Vec::new(),
+            parent: None,
+        }],
+        vertices,
+        vec![(0, 72)],
+    )
+}
+
 /// Shulker box, closed state. Matches vanilla `ShulkerModel`: a 16x12x16 lid
 /// stacked on a 16x8x16 base, with the lid's bottom flush against the base's
 /// top. Texture is 64x64 `entity/shulker/shulker_<color>.png`.
@@ -173,4 +226,30 @@ pub fn bake_chest_models() -> Vec<BakedEntityModel> {
         bake_chest_layer(0.0, 15.0, 0.0, 1.0, FACE_ALL & !FACE_NEG_X),
         bake_chest_layer(1.0, 15.0, 15.0, 1.0, FACE_ALL & !FACE_POS_X),
     ]
+}
+
+#[cfg(test)]
+mod conduit_tests {
+    use super::*;
+
+    #[test]
+    fn shell_uvs_use_the_official_32_by_16_sheet() {
+        let cube = ModelCube {
+            origin: Vec3::splat(-3.0),
+            size: Vec3::splat(6.0),
+            tex_offset: (0, 0),
+            deformation: 0.0,
+            mirror: false,
+        };
+        let mut shell = Vec::new();
+        generate_cube_vertices(&cube, 32, 16, FACE_ALL, false, &mut shell);
+        let mut wrong_sheet = Vec::new();
+        generate_cube_vertices(&cube, 64, 64, FACE_ALL, false, &mut wrong_sheet);
+        assert_eq!(shell.len(), 36);
+        assert_ne!(
+            shell.iter().map(|v| v.tex_coords).collect::<Vec<_>>(),
+            wrong_sheet.iter().map(|v| v.tex_coords).collect::<Vec<_>>()
+        );
+        assert_eq!(shell, bake_conduit_model().vertices);
+    }
 }

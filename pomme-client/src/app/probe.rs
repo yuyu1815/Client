@@ -395,6 +395,7 @@ impl Probe {
                     h: rect[3],
                     item_name: item_name.clone(),
                     tint: [1.0, 1.0, 1.0, 1.0],
+                    stack_dye_rgb: None,
                 },
             );
         }

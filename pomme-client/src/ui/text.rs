@@ -189,6 +189,61 @@ pub fn format_component_spans_with_parent(
 ///
 /// `base_color` applies wherever the component carries no explicit color,
 /// mirroring vanilla `drawString`'s color argument.
+/// Book-only formatter: unlike ordinary Azalea text, book spans retain the
+/// resolved component style so click-event hit regions can be registered.
+pub(crate) fn format_book_text_spans(text: &FormattedText, base_color: [f32; 4]) -> Vec<TextSpan> {
+    let spans = RefCell::new(Vec::new());
+    let style = RefCell::new(Style::default());
+    text.to_custom_format(
+        |_running, new| {
+            *style.borrow_mut() = new.clone();
+            (String::new(), String::new())
+        },
+        |part| {
+            if !part.is_empty() {
+                let s = style.borrow();
+                let mut resolved = ResolvedStyle {
+                    color: s.color.as_ref().map(|c| c.value),
+                    shadow_color: s.shadow_color,
+                    bold: s.bold.unwrap_or(false),
+                    italic: s.italic.unwrap_or(false),
+                    underlined: s.underlined.unwrap_or(false),
+                    strikethrough: s.strikethrough.unwrap_or(false),
+                    obfuscated: s.obfuscated.unwrap_or(false),
+                    ..ResolvedStyle::default()
+                };
+                resolved.click_event = s.click_event.as_ref().and_then(|event| match event {
+                    azalea_chat::click_event::ClickEvent::ChangePage { page } => {
+                        Some(crate::chat_component::ClickEvent::ChangePage(*page))
+                    }
+                    _ => None,
+                });
+                spans.borrow_mut().push(TextSpan {
+                    text: part.to_owned(),
+                    color: s
+                        .color
+                        .as_ref()
+                        .map(|c| rgb24(c.value))
+                        .unwrap_or(base_color),
+                    bold: s.bold.unwrap_or(false),
+                    italic: s.italic.unwrap_or(false),
+                    strikethrough: s.strikethrough.unwrap_or(false),
+                    underline: s.underlined.unwrap_or(false),
+                    obfuscated: s.obfuscated.unwrap_or(false),
+                    shadow_color: s.shadow_color.map(argb32),
+                    font: s.font.as_deref().map(font_id),
+                    inline_object: None,
+                    component_style: Some(Arc::new(resolved)),
+                });
+            }
+            String::new()
+        },
+        |_| String::new(),
+        &Style::default(),
+    );
+    spans.into_inner()
+}
+
 pub fn format_text_spans(text: &FormattedText, base_color: [f32; 4]) -> Vec<TextSpan> {
     let spans: RefCell<Vec<TextSpan>> = RefCell::new(Vec::new());
     let current_style: RefCell<Option<Style>> = RefCell::new(None);

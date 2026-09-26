@@ -428,6 +428,12 @@ pub fn push_item_icon(
         h: size,
         item_name: item_resource_name(data.kind),
         tint: WHITE,
+        stack_dye_rgb: data
+            .get_component::<azalea_inventory::components::DyedColor>()
+            .map(|color| {
+                let rgb = color.rgb as u32;
+                [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
+            }),
     });
     if data.count > 1 {
         push_item_count(elements, x, y, size, scale, data.count);

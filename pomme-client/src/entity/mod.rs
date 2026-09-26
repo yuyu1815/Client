@@ -297,6 +297,9 @@ pub struct LivingEntity {
     pub has_chest: bool,
     /// Saddle equipment slot occupied (`SetEquipment`); gates the jump bar.
     pub saddled: bool,
+    /// Local AbstractHorse.onPlayerJump charge, consumed on the next grounded
+    /// tick.
+    pub horse_jump_pending_scale: f32,
     /// Packet-driven velocity (vanilla remote entities never integrate their
     /// own); feeds the squid body-rotation sim.
     pub velocity: DVec3,
@@ -451,6 +454,7 @@ impl LivingEntity {
             prev_mouth_anim: 0.0,
             has_chest: false,
             saddled: false,
+            horse_jump_pending_scale: 0.0,
             velocity: DVec3::ZERO,
             is_in_water: false,
             x_body_rot: 0.0,
@@ -502,6 +506,14 @@ impl LivingEntity {
     fn interpolate_to_pos(&mut self, pos: Position) {
         self.interp_target = pos;
         self.interp_steps = INTERPOLATION_STEPS;
+    }
+
+    /// Locally controlled mounts simulate instead of following remote lerp
+    /// targets.
+    pub(crate) fn stop_interpolation(&mut self) {
+        self.interp_target = self.position;
+        self.interp_steps = 0;
+        self.interp_head_y_rot_steps = 0;
     }
 
     pub fn tick_interpolation(&mut self) {
@@ -849,6 +861,7 @@ pub struct ItemEntity {
     /// Vanilla `ItemStack.getDamageValue()` — the other seed component.
     pub damage: i32,
     pub count: i32,
+    pub stack: Option<azalea_inventory::ItemStackData>,
     pub age: u32,
     pub bob_offset: f32,
     pub invisible: bool,
@@ -912,6 +925,7 @@ impl ItemEntityStore {
                 item_id: 0,
                 damage: 0,
                 count: 1,
+                stack: None,
                 age: 0,
                 bob_offset,
                 invisible: false,
@@ -936,12 +950,14 @@ impl ItemEntityStore {
         item_id: u32,
         damage: i32,
         count: i32,
+        stack: Option<azalea_inventory::ItemStackData>,
     ) {
         if let Some(entity) = self.items.get_mut(&id) {
             entity.item_name = item_name;
             entity.item_id = item_id;
             entity.damage = damage;
             entity.count = count;
+            entity.stack = stack;
         }
     }
 
@@ -1170,6 +1186,12 @@ pub struct VehicleState {
     pub text_display_background: u32,
     pub text_display_opacity: u8,
     pub text_display_flags: u8,
+    /// TextDisplay transform metadata indices 11..15, retained verbatim.
+    pub text_display_translation: [f32; 3],
+    pub text_display_scale: [f32; 3],
+    pub text_display_left_rotation: [f32; 4],
+    pub text_display_right_rotation: [f32; 4],
+    pub text_display_billboard: u8,
 }
 
 pub struct EntityStore {
@@ -1245,6 +1267,11 @@ impl EntityStore {
             text_display_background: 0x4000_0000,
             text_display_opacity: 0xff,
             text_display_flags: 0,
+            text_display_translation: [0.0; 3],
+            text_display_scale: [1.0; 3],
+            text_display_left_rotation: [0.0, 0.0, 0.0, 1.0],
+            text_display_right_rotation: [0.0, 0.0, 0.0, 1.0],
+            text_display_billboard: 0,
         });
         vehicle.passengers.clear();
         vehicle.passengers.extend_from_slice(passengers);
@@ -1268,6 +1295,11 @@ impl EntityStore {
             text_display_background: 0x4000_0000,
             text_display_opacity: 0xff,
             text_display_flags: 0,
+            text_display_translation: [0.0; 3],
+            text_display_scale: [1.0; 3],
+            text_display_left_rotation: [0.0, 0.0, 0.0, 1.0],
+            text_display_right_rotation: [0.0, 0.0, 0.0, 1.0],
+            text_display_billboard: 0,
         });
         state.position = position;
         state.velocity = velocity;
@@ -1324,6 +1356,29 @@ impl EntityStore {
         }
     }
 
+    pub fn set_text_display_transform(
+        &mut self,
+        id: i32,
+        index: u8,
+        value: crate::net::TextDisplayTransformValue,
+    ) {
+        let Some(vehicle) = self.vehicles.get_mut(&id) else {
+            return;
+        };
+        if vehicle.kind != Some(EntityKind::TextDisplay) {
+            return;
+        }
+        use crate::net::TextDisplayTransformValue as Value;
+        match (index, value) {
+            (11, Value::Vector(v)) => vehicle.text_display_translation = v,
+            (12, Value::Vector(v)) => vehicle.text_display_scale = v,
+            (13, Value::Quaternion(q)) => vehicle.text_display_left_rotation = q,
+            (14, Value::Quaternion(q)) => vehicle.text_display_right_rotation = q,
+            (15, Value::Billboard(b)) => vehicle.text_display_billboard = b,
+            _ => {}
+        }
+    }
+
     pub fn set_text_display_metadata(&mut self, id: i32, index: u8, value: MetaValue) {
         let Some(vehicle) = self.vehicles.get_mut(&id) else {
             return;
@@ -1376,13 +1431,37 @@ impl EntityStore {
         Some(current)
     }
 
-    /// Vanilla's first-passenger controller rule plus caller-supplied official
-    /// entity-tag policy.
+    /// Vanilla's first-passenger controller rule plus caller-supplied vehicle
+    /// policy.
     pub fn ride_authority(&self, passenger_id: i32, can_control_vehicle: bool) -> RideAuthority {
         let Some(vehicle_id) = self.vehicle_of.get(&passenger_id) else {
             return RideAuthority::Server;
         };
         if can_control_vehicle
+            && self
+                .vehicles
+                .get(vehicle_id)
+                .is_some_and(|v| v.passengers.first() == Some(&passenger_id))
+        {
+            RideAuthority::Client
+        } else {
+            RideAuthority::Server
+        }
+    }
+
+    /// 26.2 AbstractHorse: a saddled horse is controlled by its first Player
+    /// passenger. `is_local_player` must only be true for the logged-in
+    /// client's player ID.
+    pub fn horse_ride_authority(&self, passenger_id: i32, is_local_player: bool) -> RideAuthority {
+        let Some(vehicle_id) = self.vehicle_of.get(&passenger_id) else {
+            return RideAuthority::Server;
+        };
+        let Some(horse) = self.living.get(vehicle_id) else {
+            return RideAuthority::Server;
+        };
+        if is_local_player
+            && horse.entity_type == EntityKind::Horse
+            && horse.saddled
             && self
                 .vehicles
                 .get(vehicle_id)
@@ -1402,8 +1481,16 @@ impl EntityStore {
         vehicle_attachment: DVec3,
         passenger_offset: DVec3,
     ) -> Option<Position> {
-        let vehicle = self.vehicles.get(&vehicle_id)?;
-        Some((DVec3::from(vehicle.position) + vehicle_attachment - passenger_offset).into())
+        let vehicle_position = self
+            .living
+            .get(&vehicle_id)
+            .map(|entity| entity.position)
+            .or_else(|| {
+                self.vehicles
+                    .get(&vehicle_id)
+                    .map(|vehicle| vehicle.position)
+            })?;
+        Some((DVec3::from(vehicle_position) + vehicle_attachment - passenger_offset).into())
     }
 
     pub fn spawn_living(
@@ -1503,6 +1590,7 @@ impl EntityStore {
             // Equine flags byte: bit 0x10 = eating, 0x20 = standing (rear),
             // 0x40 = open mouth.
             (k, 18, Byte(f)) if is_equine(&k) => {
+                entity.is_tame = f & 0x02 != 0;
                 entity.is_eating = f & 0x10 != 0;
                 entity.is_standing = f & 0x20 != 0;
                 entity.is_open_mouth = f & 0x40 != 0;
@@ -2013,7 +2101,7 @@ mod tests {
         let uuid = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
         let mut store = ItemEntityStore::new();
         store.spawn_item(1, uuid, Position::new(0.5, 64.0, 3.5), DVec3::ZERO);
-        store.set_item_data(1, "minecraft:stone".into(), 1, 0, 1);
+        store.set_item_data(1, "minecraft:stone".into(), 1, 0, 1, None);
 
         store.set_shared_flags(1, 0x20);
         let item = store.visible_items(DVec3::new(0.5, 65.0, 1.5), 64.0)[0];
@@ -2126,6 +2214,47 @@ mod tests {
             s.vehicles[&10].look_dir,
             Some(LookDirection::new(90.0, 20.0))
         );
+    }
+
+    #[test]
+    fn text_display_transform_metadata_is_partial_and_preserves_text() {
+        let mut store = EntityStore::new();
+        store.set_passengers(1, &[]);
+        store.set_vehicle_kind(1, EntityKind::TextDisplay);
+        store.set_text_display_transform(
+            1,
+            11,
+            crate::net::TextDisplayTransformValue::Vector([2.0, 3.0, 4.0]),
+        );
+        store.set_text_display_transform(
+            1,
+            12,
+            crate::net::TextDisplayTransformValue::Vector([5.0, 6.0, 7.0]),
+        );
+        store.set_text_display_transform(
+            1,
+            13,
+            crate::net::TextDisplayTransformValue::Quaternion([1.0, 2.0, 3.0, 4.0]),
+        );
+        store.set_text_display_transform(
+            1,
+            14,
+            crate::net::TextDisplayTransformValue::Quaternion([5.0, 6.0, 7.0, 8.0]),
+        );
+        store.set_text_display_transform(
+            1,
+            15,
+            crate::net::TextDisplayTransformValue::Billboard(255),
+        );
+        store.set_text_display_text(1, Vec::new());
+        let state = &store.vehicles[&1];
+        assert_eq!(state.text_display_translation, [2.0, 3.0, 4.0]);
+        assert_eq!(state.text_display_scale, [5.0, 6.0, 7.0]);
+        assert_eq!(state.text_display_left_rotation, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(state.text_display_right_rotation, [5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(state.text_display_billboard, 255);
+        assert_eq!(state.text_display_text, Some(Vec::new()));
+        assert_eq!(state.text_display_background, 0x4000_0000);
     }
 
     #[test]

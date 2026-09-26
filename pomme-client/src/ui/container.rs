@@ -515,6 +515,7 @@ pub fn push_recipe_entries(
             } else {
                 [0.6, 0.6, 0.6, 1.0]
             },
+            stack_dye_rgb: None,
         });
         if *count > 1 {
             elements.push(MenuElement::TextFlat {
@@ -588,6 +589,7 @@ pub fn push_recipe_entries(
                     h: 16.0 * panel.scale,
                     item_name: name,
                     tint: [1.0, 1.0, 1.0, 0.5],
+                    stack_dye_rgb: None,
                 });
             }
         }
@@ -608,6 +610,7 @@ pub fn push_recipe_entries(
                 h: 16.0 * panel.scale,
                 item_name: name,
                 tint: [1.0, 1.0, 1.0, 0.5],
+                stack_dye_rgb: None,
             });
         }
     }

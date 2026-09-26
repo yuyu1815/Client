@@ -7,7 +7,7 @@ use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacke
 use azalea_registry::builtin::{EntityKind, SoundEvent};
 use azalea_registry::identifier::Identifier;
 use azalea_registry::{DataRegistry, Holder, Registry};
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, TrySendError};
 
 use super::NetworkEvent;
 use super::chat_security::ProfileKeyServices;
@@ -106,29 +106,31 @@ pub fn handle_game_packet(
         azalea_registry::identifier::Identifier,
         Vec<u8>,
     >,
-) {
+) -> Result<(), TrySendError<NetworkEvent>> {
+    // Mandatory world events must stay FIFO: on overflow the caller disconnects,
+    // rather than continuing with a permanently incomplete world snapshot.
     match packet {
         ClientboundGamePacket::Login(p) => {
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
-                let _ = event_tx.try_send(dimension_info(
+                event_tx.try_send(dimension_info(
                     dim,
                     p.common.is_debug,
                     dimension_clock_id(registry_holder, dim),
-                ));
+                ))?;
             }
-            let _ = event_tx.try_send(NetworkEvent::DimensionName {
+            event_tx.try_send(NetworkEvent::DimensionName {
                 name: p.common.dimension.to_string(),
-            });
+            })?;
             let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
                 game_mode: p.common.game_type as u8,
                 previous: Some(p.common.previous_game_type.0.map(|m| m.to_id())),
             });
-            let _ = event_tx.try_send(NetworkEvent::ServerViewDistance {
+            event_tx.try_send(NetworkEvent::ServerViewDistance {
                 distance: p.chunk_radius,
-            });
-            let _ = event_tx.try_send(NetworkEvent::ServerSimulationDistance {
+            })?;
+            event_tx.try_send(NetworkEvent::ServerSimulationDistance {
                 distance: p.simulation_distance,
-            });
+            })?;
             let _ = event_tx.try_send(NetworkEvent::PlayerLogin {
                 entity_id: p.player_id.0,
                 hardcore: p.hardcore,
@@ -141,10 +143,10 @@ pub fn handle_game_packet(
         }
         ClientboundGamePacket::ChunksBiomes(p) => {
             for chunk in &p.chunk_biome_data {
-                let _ = event_tx.try_send(NetworkEvent::ChunkBiomes {
+                event_tx.try_send(NetworkEvent::ChunkBiomes {
                     pos: chunk.pos,
                     data: chunk.buffer.clone(),
-                });
+                })?;
             }
         }
         ClientboundGamePacket::LevelChunkWithLight(p) => {
@@ -154,14 +156,8 @@ pub fn handle_game_packet(
                 p.z,
                 p.chunk_data.block_entities.len()
             );
-            let _ = event_tx.try_send(NetworkEvent::ChunkLoaded {
-                pos: ChunkPos::new(p.x, p.z),
-                data: p.chunk_data.data.clone(),
-                heightmaps: p.chunk_data.heightmaps.clone(),
-                light: (&p.light_data).into(),
-            });
             let chunk_pos = ChunkPos::new(p.x, p.z);
-            let entries: Vec<_> = p
+            let block_entities = p
                 .chunk_data
                 .block_entities
                 .iter()
@@ -175,19 +171,26 @@ pub fn handle_game_packet(
                     };
                     let compound = match &be.data {
                         simdnbt::owned::Nbt::Some(base) => base.clone().as_compound(),
-                        simdnbt::owned::Nbt::None => simdnbt::owned::NbtCompound::default(),
+                        // Vanilla omits empty update tags (e.g. copper golem statues).
+                        simdnbt::owned::Nbt::None => simdnbt::owned::NbtCompound::new(),
                     };
                     (block_pos, be.kind, compound)
                 })
                 .collect();
-            let _ = event_tx.try_send(NetworkEvent::BlockEntitySync { chunk_pos, entries });
+            event_tx.try_send(NetworkEvent::ChunkLoaded {
+                pos: chunk_pos,
+                data: p.chunk_data.data.clone(),
+                heightmaps: p.chunk_data.heightmaps.clone(),
+                light: (&p.light_data).into(),
+                block_entities,
+            })?;
         }
         ClientboundGamePacket::BlockEvent(p) => {
-            let _ = event_tx.try_send(NetworkEvent::BlockEvent {
+            event_tx.try_send(NetworkEvent::BlockEvent {
                 pos: p.pos,
                 action_id: p.action_id,
                 action_parameter: p.action_parameter,
-            });
+            })?;
         }
         ClientboundGamePacket::Explode(p) => {
             let _ = event_tx.try_send(NetworkEvent::Explosion(super::ExplosionPayload {
@@ -232,29 +235,36 @@ pub fn handle_game_packet(
                 simdnbt::owned::Nbt::Some(base) => Some(base.clone().as_compound()),
                 simdnbt::owned::Nbt::None => None,
             };
-            let _ = event_tx.try_send(NetworkEvent::BlockEntityUpdate {
+            event_tx.try_send(NetworkEvent::BlockEntityUpdate {
                 pos: p.pos,
                 kind: p.block_entity_type,
                 nbt,
-            });
+            })?;
         }
         ClientboundGamePacket::LightUpdate(p) => {
-            let _ = event_tx.try_send(NetworkEvent::LightUpdate {
+            event_tx.try_send(NetworkEvent::LightUpdate {
                 pos: ChunkPos::new(p.x, p.z),
                 light: (&p.light_data).into(),
-            });
+            })?;
         }
         ClientboundGamePacket::ForgetLevelChunk(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ChunkUnloaded { pos: p.pos });
+            event_tx.try_send(NetworkEvent::ChunkUnloaded { pos: p.pos })?;
         }
         ClientboundGamePacket::SetChunkCacheCenter(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ChunkCacheCenter { x: p.x, z: p.z });
+            event_tx.try_send(NetworkEvent::ChunkCacheCenter { x: p.x, z: p.z })?;
         }
         ClientboundGamePacket::PlayerPosition(p) => {
             let _ = event_tx.try_send(NetworkEvent::PlayerPosition {
                 id: p.id,
                 change: p.change.clone(),
                 relative: p.relative.clone(),
+            });
+        }
+        ClientboundGamePacket::MoveVehicle(p) => {
+            let _ = event_tx.try_send(NetworkEvent::MoveVehicle {
+                pos: glam::dvec3(p.pos.x, p.pos.y, p.pos.z),
+                yaw: p.look_direction.y_rot(),
+                pitch: p.look_direction.x_rot(),
             });
         }
         ClientboundGamePacket::PlayerRotation(p) => {
@@ -510,6 +520,19 @@ pub fn handle_game_packet(
                         entity_id: p.entity_id.0,
                         max_health: value.clamp(1.0, 1024.0) as f32,
                     },
+                    Attribute::MovementSpeed | Attribute::JumpStrength | Attribute::StepHeight => {
+                        NetworkEvent::EntityAttributeUpdate {
+                            entity_id: p.entity_id.0,
+                            attribute: match snapshot.attribute {
+                                Attribute::MovementSpeed => "minecraft:movement_speed",
+                                Attribute::JumpStrength => "minecraft:jump_strength",
+                                Attribute::StepHeight => "minecraft:step_height",
+                                _ => unreachable!(),
+                            }
+                            .to_owned(),
+                            value,
+                        }
+                    }
                     _ => continue,
                 };
                 let _ = event_tx.try_send(event);
@@ -684,7 +707,7 @@ pub fn handle_game_packet(
                                 %error,
                                 "Skipping malformed scoreboard objective number format"
                             );
-                            return;
+                            return Ok(());
                         }
                     };
                     (
@@ -723,7 +746,7 @@ pub fn handle_game_packet(
                         %error,
                         "Skipping malformed scoreboard score number format"
                     );
-                    return;
+                    return Ok(());
                 }
             };
             let _ = event_tx.try_send(NetworkEvent::ScoreboardScore {
@@ -769,10 +792,10 @@ pub fn handle_game_packet(
             }
         }
         ClientboundGamePacket::BlockUpdate(p) => {
-            let _ = event_tx.try_send(NetworkEvent::BlockUpdate {
+            event_tx.try_send(NetworkEvent::BlockUpdate {
                 pos: p.pos,
                 state: p.block_state,
-            });
+            })?;
         }
         ClientboundGamePacket::SectionBlocksUpdate(p) => {
             let updates: Vec<_> = p
@@ -787,10 +810,10 @@ pub fn handle_game_packet(
                     (block_pos, s.state)
                 })
                 .collect();
-            let _ = event_tx.try_send(NetworkEvent::SectionBlocksUpdate { updates });
+            event_tx.try_send(NetworkEvent::SectionBlocksUpdate { updates })?;
         }
         ClientboundGamePacket::BlockChangedAck(p) => {
-            let _ = event_tx.try_send(NetworkEvent::BlockChangedAck { seq: p.seq });
+            event_tx.try_send(NetworkEvent::BlockChangedAck { seq: p.seq })?;
         }
         ClientboundGamePacket::TickingState(p) => {
             let _ = event_tx.try_send(NetworkEvent::TickingState {
@@ -824,12 +847,12 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::SetChunkCacheRadius(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ServerViewDistance { distance: p.radius });
+            event_tx.try_send(NetworkEvent::ServerViewDistance { distance: p.radius })?;
         }
         ClientboundGamePacket::SetSimulationDistance(p) => {
-            let _ = event_tx.try_send(NetworkEvent::ServerSimulationDistance {
+            event_tx.try_send(NetworkEvent::ServerSimulationDistance {
                 distance: p.simulation_distance,
-            });
+            })?;
         }
         ClientboundGamePacket::GameEvent(p) => {
             use azalea_protocol::packets::game::c_game_event::EventType;
@@ -841,7 +864,7 @@ pub fn handle_game_packet(
                     });
                 }
                 EventType::WaitForLevelChunks => {
-                    let _ = event_tx.try_send(NetworkEvent::LevelChunksLoadStart);
+                    event_tx.try_send(NetworkEvent::LevelChunksLoadStart)?;
                 }
                 EventType::StartRaining
                 | EventType::StopRaining
@@ -1018,21 +1041,29 @@ pub fn handle_game_packet(
                 }
                 // index 8 = item stack data for item entities
                 if item.index == 8
-                    && let azalea_entity::EntityDataValue::ItemStack(
-                        azalea_inventory::ItemStack::Present(data),
-                    ) = &item.value
+                    && let azalea_entity::EntityDataValue::ItemStack(stack) = &item.value
                 {
-                    let name = crate::player::inventory::item_resource_name(data.kind);
+                    let data = match stack {
+                        azalea_inventory::ItemStack::Present(data) => Some(data),
+                        azalea_inventory::ItemStack::Empty => None,
+                    };
+                    let name = data.map_or_else(String::new, |data| {
+                        crate::player::inventory::item_resource_name(data.kind)
+                    });
+                    let item_id = data.map_or(0, |data| data.kind.to_u32());
                     let damage = data
-                        .get_component::<azalea_inventory::components::Damage>()
-                        .map(|component| component.amount)
-                        .unwrap_or(0);
+                        .and_then(|data| {
+                            data.get_component::<azalea_inventory::components::Damage>()
+                        })
+                        .map_or(0, |component| component.amount);
+                    let count = data.map_or(0, |data| data.count);
                     let _ = event_tx.try_send(NetworkEvent::EntityItemData {
                         id: p.id.0,
                         item_name: name,
-                        item_id: data.kind.to_u32(),
+                        item_id,
                         damage,
-                        count: data.count,
+                        count,
+                        stack: data.cloned(),
                     });
                 }
                 // Index 6 = entity pose
@@ -1051,6 +1082,29 @@ pub fn handle_game_packet(
                     let _ = event_tx.try_send(NetworkEvent::EntitySleepingPos {
                         id: p.id.0,
                         pos: *pos,
+                    });
+                }
+                let text_display_transform = match (&item.value, item.index) {
+                    (azalea_entity::EntityDataValue::Vector3(v), 11 | 12) => {
+                        Some(crate::net::TextDisplayTransformValue::Vector([
+                            v.x, v.y, v.z,
+                        ]))
+                    }
+                    (azalea_entity::EntityDataValue::Quaternion(q), 13 | 14) => {
+                        Some(crate::net::TextDisplayTransformValue::Quaternion([
+                            q.x, q.y, q.z, q.w,
+                        ]))
+                    }
+                    (azalea_entity::EntityDataValue::Byte(v), 15) => {
+                        Some(crate::net::TextDisplayTransformValue::Billboard(*v))
+                    }
+                    _ => None,
+                };
+                if let Some(value) = text_display_transform {
+                    let _ = event_tx.try_send(NetworkEvent::TextDisplayTransform {
+                        id: p.id.0,
+                        index: item.index,
+                        value,
                     });
                 }
                 // 26.2 Display.TextDisplay.DATA_TEXT_ID follows the 15
@@ -1270,20 +1324,20 @@ pub fn handle_game_packet(
             });
         }
         ClientboundGamePacket::Respawn(p) => {
-            let _ = event_tx.try_send(NetworkEvent::PlayerRespawned {
+            event_tx.try_send(NetworkEvent::PlayerRespawned {
                 keep_entity_data: p.data_to_keep & 2 != 0,
                 keep_attribute_modifiers: p.data_to_keep & 1 != 0,
-            });
+            })?;
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
-                let _ = event_tx.try_send(dimension_info(
+                event_tx.try_send(dimension_info(
                     dim,
                     p.common.is_debug,
                     dimension_clock_id(registry_holder, dim),
-                ));
+                ))?;
             }
-            let _ = event_tx.try_send(NetworkEvent::DimensionName {
+            event_tx.try_send(NetworkEvent::DimensionName {
                 name: p.common.dimension.to_string(),
-            });
+            })?;
             let _ = event_tx.try_send(NetworkEvent::GameModeChanged {
                 game_mode: p.common.game_type as u8,
                 previous: Some(p.common.previous_game_type.0.map(|m| m.to_id())),
@@ -1441,6 +1495,7 @@ pub fn handle_game_packet(
         }
         _other => {}
     }
+    Ok(())
 }
 
 fn send_scoreboard_team(
@@ -2078,6 +2133,186 @@ mod tests {
     use super::*;
     use crate::net::sender::Outbound;
 
+    fn statue_chunk_packet(nbt: simdnbt::owned::Nbt) -> ClientboundGamePacket {
+        use azalea_protocol::packets::game::c_level_chunk_with_light::{
+            BlockEntity, ClientboundLevelChunkPacketData, ClientboundLevelChunkWithLight,
+        };
+        ClientboundGamePacket::LevelChunkWithLight(ClientboundLevelChunkWithLight {
+            x: -2,
+            z: 1,
+            chunk_data: ClientboundLevelChunkPacketData {
+                heightmaps: Vec::new(),
+                data: Arc::new(vec![0; 8].into_boxed_slice()),
+                block_entities: vec![BlockEntity {
+                    packed_xz: 0xf1,
+                    y: (-64i16) as u16,
+                    kind: azalea_registry::builtin::BlockEntityKind::CopperGolemStatue,
+                    data: nbt,
+                }],
+            },
+            light_data: Default::default(),
+        })
+    }
+
+    fn dispatch_world_packet(
+        packet: &ClientboundGamePacket,
+        event_tx: &Sender<NetworkEvent>,
+    ) -> Result<(), TrySendError<NetworkEvent>> {
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_game_packet(
+            packet,
+            &PacketSender::new(out_tx),
+            event_tx,
+            &RegistryHolder::default(),
+            &Arc::new(Mutex::new(None)),
+            &mut ChunkBatchSizeCalculator::default(),
+            &mut std::collections::HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn last_queue_slot_accepts_chunk_and_empty_statue_nbt_together() {
+        use azalea_registry::builtin::BlockEntityKind;
+        use simdnbt::owned::{Nbt, NbtCompound};
+
+        assert_eq!(BlockEntityKind::CopperGolemStatue.to_u32(), 47);
+        for nbt in [Nbt::None, Nbt::new("".into(), NbtCompound::new())] {
+            let (tx, rx) = crossbeam_channel::bounded(4096);
+            for _ in 0..4095 {
+                tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+            }
+            dispatch_world_packet(&statue_chunk_packet(nbt), &tx).unwrap();
+            assert_eq!(rx.len(), 4096);
+            for _ in 0..4095 {
+                assert!(matches!(
+                    rx.try_recv().unwrap(),
+                    NetworkEvent::LevelChunksLoadStart
+                ));
+            }
+            let NetworkEvent::ChunkLoaded {
+                pos,
+                block_entities,
+                ..
+            } = rx.try_recv().unwrap()
+            else {
+                panic!("expected atomic chunk snapshot");
+            };
+            assert_eq!(pos, ChunkPos::new(-2, 1));
+            assert_eq!(block_entities.len(), 1);
+            let (pos, kind, nbt) = &block_entities[0];
+            assert_eq!(*pos, BlockPos::new(-17, -64, 17));
+            assert_eq!(*kind, BlockEntityKind::CopperGolemStatue);
+            assert!(nbt.is_empty());
+            assert!(rx.is_empty());
+        }
+    }
+
+    #[test]
+    fn mandatory_world_packets_fail_on_full_or_disconnected_queue() {
+        use azalea_protocol::packets::game::c_block_entity_data::ClientboundBlockEntityData;
+        use azalea_protocol::packets::game::c_block_update::ClientboundBlockUpdate;
+        use azalea_protocol::packets::game::c_forget_level_chunk::ClientboundForgetLevelChunk;
+        use azalea_protocol::packets::game::c_light_update::ClientboundLightUpdate;
+        use azalea_protocol::packets::game::c_section_blocks_update::ClientboundSectionBlocksUpdate;
+        let pos = BlockPos::new(-17, -64, 17);
+        for packet in [
+            statue_chunk_packet(simdnbt::owned::Nbt::None),
+            ClientboundGamePacket::ForgetLevelChunk(ClientboundForgetLevelChunk {
+                pos: ChunkPos::new(-2, 1),
+            }),
+            ClientboundGamePacket::BlockEntityData(ClientboundBlockEntityData {
+                pos,
+                block_entity_type: azalea_registry::builtin::BlockEntityKind::CopperGolemStatue,
+                tag: simdnbt::owned::Nbt::None,
+            }),
+            ClientboundGamePacket::BlockUpdate(ClientboundBlockUpdate {
+                pos,
+                block_state: azalea_block::BlockState::AIR,
+            }),
+            ClientboundGamePacket::SectionBlocksUpdate(ClientboundSectionBlocksUpdate {
+                section_pos: azalea_core::position::ChunkSectionPos::new(-2, -4, 1),
+                states: Vec::new(),
+            }),
+            ClientboundGamePacket::LightUpdate(ClientboundLightUpdate {
+                x: -2,
+                z: 1,
+                light_data: Default::default(),
+            }),
+        ] {
+            let (tx, rx) = crossbeam_channel::bounded(4096);
+            for _ in 0..4096 {
+                tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+            }
+            let error = dispatch_world_packet(&packet, &tx).unwrap_err();
+            assert!(matches!(error, TrySendError::Full(_)));
+            if let TrySendError::Full(NetworkEvent::ChunkLoaded { block_entities, .. }) = error {
+                assert_eq!(block_entities.len(), 1);
+                assert!(block_entities[0].2.is_empty());
+            }
+            assert_eq!(rx.len(), 4096);
+            assert!(
+                rx.try_iter()
+                    .all(|event| matches!(event, NetworkEvent::LevelChunksLoadStart))
+            );
+            drop(rx);
+            assert!(matches!(
+                dispatch_world_packet(&packet, &tx),
+                Err(TrySendError::Disconnected(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn chunk_then_standalone_be_and_block_updates_then_unload_stay_fifo() {
+        use azalea_protocol::packets::game::c_block_entity_data::ClientboundBlockEntityData;
+        use azalea_protocol::packets::game::c_block_update::ClientboundBlockUpdate;
+        use azalea_protocol::packets::game::c_forget_level_chunk::ClientboundForgetLevelChunk;
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        let pos = BlockPos::new(-17, -64, 17);
+        dispatch_world_packet(&statue_chunk_packet(simdnbt::owned::Nbt::None), &tx).unwrap();
+        dispatch_world_packet(
+            &ClientboundGamePacket::BlockEntityData(ClientboundBlockEntityData {
+                pos,
+                block_entity_type: azalea_registry::builtin::BlockEntityKind::CopperGolemStatue,
+                tag: simdnbt::owned::Nbt::None,
+            }),
+            &tx,
+        )
+        .unwrap();
+        dispatch_world_packet(
+            &ClientboundGamePacket::BlockUpdate(ClientboundBlockUpdate {
+                pos,
+                block_state: azalea_block::BlockState::AIR,
+            }),
+            &tx,
+        )
+        .unwrap();
+        dispatch_world_packet(
+            &ClientboundGamePacket::ForgetLevelChunk(ClientboundForgetLevelChunk {
+                pos: ChunkPos::new(-2, 1),
+            }),
+            &tx,
+        )
+        .unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::ChunkLoaded { .. }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::BlockEntityUpdate { nbt: None, .. }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::BlockUpdate { .. }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::ChunkUnloaded { .. }
+        ));
+        assert!(rx.is_empty());
+    }
+
     #[test]
     fn animate_critical_actions_dispatch_distinct_events_and_other_actions_do_not() {
         use azalea_core::entity_id::MinecraftEntityId;
@@ -2111,7 +2346,8 @@ mod tests {
                 &command_tree,
                 &mut batches,
                 &mut cookies,
-            );
+            )
+            .unwrap();
             assert!(
                 matches!(event_rx.recv().unwrap(), NetworkEvent::CriticalHit { id: 41, kind } if kind == expected)
             );
@@ -2127,7 +2363,8 @@ mod tests {
             &command_tree,
             &mut batches,
             &mut cookies,
-        );
+        )
+        .unwrap();
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::EntityWakeUp { id: 41 }
@@ -2146,7 +2383,8 @@ mod tests {
                 &command_tree,
                 &mut batches,
                 &mut cookies,
-            );
+            )
+            .unwrap();
             if let Some(id) = expected {
                 assert!(
                     matches!(event_rx.recv().unwrap(), NetworkEvent::TotemUsed { entity_id } if entity_id == id)
@@ -2196,7 +2434,8 @@ mod tests {
             &command_tree,
             &mut batches,
             &mut cookies,
-        );
+        )
+        .unwrap();
         let NetworkEvent::Explosion(event) = event_rx.recv().unwrap() else {
             panic!("expected Explosion event");
         };
@@ -2234,7 +2473,8 @@ mod tests {
                 &command_tree,
                 &mut batches,
                 &mut cookies,
-            );
+            )
+            .unwrap();
         };
         dispatch(ClientboundGamePacket::PlayerRotation(
             ClientboundPlayerRotation {
@@ -2341,7 +2581,8 @@ mod tests {
                 &command_tree,
                 &mut batches,
                 &mut cookies,
-            );
+            )
+            .unwrap();
         };
         dispatch(ClientboundGamePacket::MerchantOffers(
             ClientboundMerchantOffers {
@@ -2538,7 +2779,8 @@ mod tests {
                 &command_tree,
                 &mut ChunkBatchSizeCalculator::default(),
                 &mut std::collections::HashMap::new(),
-            );
+            )
+            .unwrap();
         };
 
         receive(5);
@@ -2576,7 +2818,8 @@ mod tests {
                 &command_tree,
                 batches,
                 cookies,
-            );
+            )
+            .unwrap();
         };
 
         dispatch(

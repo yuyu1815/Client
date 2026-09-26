@@ -25,8 +25,8 @@
 //! # Simple allocation example
 //!
 //! ```no_run
-//! use pomme_gpu_allocator::vulkan::*;
 //! use pomme_gpu_allocator::MemoryLocation;
+//! use pomme_gpu_allocator::vulkan::*;
 //! use pyronyx::vk;
 //!
 //! // Create these Vulkan handles using your application's Vulkan setup.

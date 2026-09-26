@@ -20,6 +20,7 @@ use crate::world::chunk::ChunkStore;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct ChunkVertex {
     pub position: [f32; 3],
     pub tex_coords: [u16; 2],
@@ -2269,9 +2270,16 @@ fn classify_block(state: azalea_block::BlockState) -> BlockKind {
         }
         "water" | "bubble_column" => BlockKind::Water,
         "lava" => BlockKind::Lava,
-        // Drawn by the block-entity pipeline; nothing to mesh.
-        id if crate::world::block_entity::rendered_kind(id).is_some() => BlockKind::Air,
-        _ => BlockKind::Solid,
+        id => classify_block_entity_geometry(id),
+    }
+}
+
+fn classify_block_entity_geometry(id: &str) -> BlockKind {
+    match crate::world::block_entity::rendered_kind(id) {
+        // The sign renderer draws text only; the blockstate model supplies its board/post.
+        Some(azalea_registry::builtin::BlockEntityKind::Sign) | None => BlockKind::Solid,
+        // These entities replace the chunk model (notably copper-golem statues).
+        Some(_) => BlockKind::Air,
     }
 }
 
@@ -2318,7 +2326,7 @@ fn fluid_render_height(
     let fluid = crate::world::block::fluid(state);
     if crate::world::block::same_fluid(kind, fluid) {
         fluid_height_with_above(
-            kind,
+            fluid,
             crate::world::block::fluid(snapshot.get_block_state(bx, by + 1, bz)),
         )
     } else if registry.occludes_neighbor(state) {
@@ -2457,20 +2465,22 @@ fn should_render_backward_up_face(
     bz: i32,
 ) -> bool {
     let fluid = crate::world::block::fluid(fluid_state);
-    for dx in -1..=1 {
-        for dz in -1..=1 {
-            if dx == 0 && dz == 0 {
-                continue;
-            }
-            let state = snapshot.get_block_state(bx + dx, by, bz + dz);
-            if !crate::world::block::same_fluid(fluid, crate::world::block::fluid(state))
-                && !registry.occludes_neighbor(state)
-            {
-                return true;
-            }
-        }
-    }
-    false
+    backward_up_face_visible(|dx, dz| {
+        let state = snapshot.get_block_state(bx + dx, by + 1, bz + dz);
+        (
+            crate::world::block::same_fluid(fluid, crate::world::block::fluid(state)),
+            registry.occludes_neighbor(state),
+        )
+    })
+}
+
+fn backward_up_face_visible(mut cell: impl FnMut(i32, i32) -> (bool, bool)) -> bool {
+    (-1..=1).any(|dx| {
+        (-1..=1).any(|dz| {
+            let (same_fluid, occludes) = cell(dx, dz);
+            !same_fluid && !occludes
+        })
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2759,7 +2769,18 @@ fn emit_fluid(
             region,
             tint,
         );
+        // Flow sprites have no water_overlay material, so match vanilla's
+        // two-sided ordinary fluid sides while reusing identical vertex data.
+        emit_reverse_quad_winding(indices);
     }
+}
+
+fn emit_reverse_quad_winding(indices: &mut Vec<u32>) {
+    let start = indices.len() - 6;
+    let [a, b, c, d, e, f] = indices[start..] else {
+        unreachable!();
+    };
+    indices.extend_from_slice(&[a, c, b, d, f, e]);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3151,11 +3172,36 @@ mod terrain_uv_tests {
     use serde_json::json;
 
     use super::{
-        MeshTraceConfig, MeshTraceState, TraceTarget, add_weighted_fluid_height, flat_quad_light,
-        fluid_flow_neighbor_height, fluid_height_with_above, fluid_top_uv_values,
+        MeshTraceConfig, MeshTraceState, TraceTarget, add_weighted_fluid_height,
+        backward_up_face_visible, classify_block_entity_geometry, emit_reverse_quad_winding,
+        flat_quad_light, fluid_flow_neighbor_height, fluid_height_with_above, fluid_top_uv_values,
         moving_state_with_properties, pack_sprite_uv, piston_head_is_short,
         retracting_source_head_is_short, unpack_sprite_uv,
     };
+
+    #[test]
+    fn block_entity_geometry_only_suppresses_replacement_meshes() {
+        assert!(matches!(
+            classify_block_entity_geometry("oak_sign"),
+            super::BlockKind::Solid
+        ));
+        assert!(matches!(
+            classify_block_entity_geometry("copper_golem_statue"),
+            super::BlockKind::Air
+        ));
+        assert!(matches!(
+            classify_block_entity_geometry("chest"),
+            super::BlockKind::Air
+        ));
+    }
+
+    #[test]
+    fn reverse_quad_winding_adds_six_indices_and_flips_both_triangles() {
+        let mut indices = vec![10, 11, 12, 12, 13, 10];
+        emit_reverse_quad_winding(&mut indices);
+        assert_eq!(indices.len(), 12);
+        assert_eq!(indices, [10, 11, 12, 12, 13, 10, 10, 12, 11, 12, 10, 13]);
+    }
 
     fn wrapped(x: f32) -> f32 {
         x - x.floor()
@@ -3306,6 +3352,33 @@ mod terrain_uv_tests {
             Some(8.0 / 9.0),
             "same-fluid neighbor uses its own height",
         );
+    }
+
+    #[test]
+    fn backward_up_face_checks_the_upper_nine_cells() {
+        assert!(
+            backward_up_face_visible(|dx, dz| { (dx != 0 || dz != 0, false) }),
+            "air above the center must expose the backward face"
+        );
+        assert!(!backward_up_face_visible(|_, _| (true, false)));
+    }
+
+    #[test]
+    fn neighboring_fluid_height_uses_its_own_amount() {
+        let water = crate::world::block::Fluid {
+            kind: crate::world::block::FluidKind::Water,
+            amount: 8,
+            falling: false,
+        };
+        let neighbor = crate::world::block::Fluid { amount: 4, ..water };
+        let empty = crate::world::block::Fluid {
+            kind: crate::world::block::FluidKind::Empty,
+            amount: 0,
+            falling: false,
+        };
+
+        assert_eq!(fluid_height_with_above(water, empty), 8.0 / 9.0);
+        assert_eq!(fluid_height_with_above(neighbor, empty), 4.0 / 9.0);
     }
 
     #[test]

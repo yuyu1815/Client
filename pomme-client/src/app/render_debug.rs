@@ -57,15 +57,28 @@ fn average_height(self_height: f32, a: f32, b: f32, corner: f32) -> f32 {
     weighted[0] / weighted[1]
 }
 
+fn flow_neighbor_height(current: Fluid, neighbor: Fluid, below: Option<Fluid>) -> Option<f32> {
+    if same(current, neighbor) {
+        Some(neighbor.height())
+    } else if neighbor.kind == FluidKind::Empty {
+        below
+            .filter(|below| same(current, *below))
+            .map(|below| below.height())
+    } else {
+        None
+    }
+}
+
 fn flow(world: &ChunkStore, x: i32, y: i32, z: i32, current: Fluid) -> [f32; 2] {
     let mut v = [0.0f32; 2];
     for (dx, dz) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
         let state = world.get_block_state(x + dx, y, z + dz);
         let neighbor = fluid(state);
-        if !same(current, neighbor) {
+        let below = (neighbor.kind == FluidKind::Empty && crate::world::block::is_air(state))
+            .then(|| fluid(world.get_block_state(x + dx, y - 1, z + dz)));
+        let Some(height) = flow_neighbor_height(current, neighbor, below) else {
             continue;
-        }
-        let height = neighbor.height();
+        };
         if height <= 0.0 {
             continue;
         }
@@ -172,7 +185,14 @@ fn atlas_debug(renderer: &Renderer, model: &mut Value) {
     model["atlasRegions"] = Value::Object(regions);
 }
 
-fn fluid_debug(world: &ChunkStore, x: i32, y: i32, z: i32, state: BlockState) -> Option<Value> {
+fn fluid_debug(
+    renderer: &Renderer,
+    world: &ChunkStore,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: BlockState,
+) -> Option<Value> {
     let current = fluid(state);
     (current.kind != FluidKind::Empty).then(|| {
         let above = fluid(world.get_block_state(x, y + 1, z));
@@ -189,7 +209,24 @@ fn fluid_debug(world: &ChunkStore, x: i32, y: i32, z: i32, state: BlockState) ->
             average_height(self_height, south, east, render_height(world, x + 1, y, z + 1, current)),
         ];
         let flowing = flow != [0.0, 0.0];
+        let sprite_key = if current.kind == FluidKind::Water {
+            if flowing { "water_flow" } else { "water_still" }
+        } else if flowing { "lava_flow" } else { "lava_still" };
+        let region = renderer.atlas_uv_map().get_region(sprite_key);
+        let rect_count = renderer.atlas_uv_map().rects().len();
+        let rect_buffer_bytes = renderer.atlas_sprite_rects_bytes();
         json!({
+            "atlasRecord": {
+                "key": sprite_key,
+                "regionSprite": region.sprite,
+                "regionPixelRect": region.pixel_rect,
+                "uv": [region.u_min, region.v_min, region.u_max, region.v_max],
+                "rectCount": rect_count,
+                "rectBufferBytes": rect_buffer_bytes,
+                "indexInRange": (region.sprite as usize) < rect_count && (region.sprite as u64 + 1) * 16 <= rect_buffer_bytes,
+                "asset": "PNG path/dimensions/mips and bind descriptor generation are not exposed by existing probe"
+            },
+
             "kind": format!("{:?}", current.kind),
             "type": if current.kind == FluidKind::Water {
                 if current.is_source() { "minecraft:water" } else { "minecraft:flowing_water" }
@@ -204,7 +241,7 @@ fn fluid_debug(world: &ChunkStore, x: i32, y: i32, z: i32, state: BlockState) ->
             "rendererHeight": if same(current, above) { 1.0 } else { current.height() },
             "flow": {"x": flow[0], "z": flow[1]},
             "cornerHeights": {"northWest": corners[0], "northEast": corners[1], "southWest": corners[2], "southEast": corners[3]},
-            "selectedSprite": if flowing { if current.kind == FluidKind::Water { "water_flow" } else { "lava_flow" } } else { if current.kind == FluidKind::Water { "water_still" } else { "lava_still" } },
+            "selectedSprite": sprite_key,
             "topUv": top_uv(flow),
             "pipeline": {"layer": "translucent", "depthTest": true, "depthWrite": false, "blend": "src-alpha,one-minus-src-alpha"},
         })
@@ -280,7 +317,7 @@ fn sample_rows(
                 "z": z,
                 "model": model_debug(renderer, *state, *x, *y, *z),
                 "opaqueLight": opaque_light_debug(world, *x, *y, *z, *state),
-                "fluid": fluid_debug(world, *x, *y, *z, *state),
+                "fluid": fluid_debug(renderer, world, *x, *y, *z, *state),
             })
         })
         .collect()
@@ -355,7 +392,7 @@ pub(crate) fn snapshot_with_prepared(
             "colorEncoding": "linear floats -> B8G8R8A8_SRGB framebuffer encode",
             "renderContract": renderer.probe_render_debug(sky.clear_color_linear(dimension, render_distance)),
             "actualDrawTrace": renderer.probe_actual_draw_trace(),
-            "samplerState": {"atlasFormat": "R8G8B8A8_SRGB", "magFilter": "NEAREST", "minFilter": "NEAREST", "mipmapMode": "LINEAR", "maxLod": 4, "anisotropy": 1.0, "addressMode": "CLAMP_TO_EDGE", "rgss": "not used by terrain shader"},
+            "samplerState": {"atlasFormat": "R8G8B8A8_SRGB", "magFilter": "NEAREST", "minFilter": "NEAREST", "mipmapMode": "LINEAR", "maxLod": 4, "anisotropy": 1.0, "addressMode": "CLAMP_TO_EDGE", "rgss": "used by terrain shaders (chunk.frag and water.frag)"},
             "samplingProvenance": "terrain atlas uses the existing nearest mag/min sampler with textureGrad; linear+texel-center experiment was reverted after the same-case stone MAE worsened",
             "lightmap": {"eyeBrightness": lightmap_brightness, "rawSkyBlockEmission": "world-input.jsonl"},
         },

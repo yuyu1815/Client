@@ -729,6 +729,7 @@ fn draw_tabs(
             h: icon_size,
             item_name: meta.icon.into(),
             tint: WHITE,
+            stack_dye_rgb: None,
         });
     }
 }

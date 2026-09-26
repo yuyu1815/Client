@@ -7,8 +7,8 @@ use azalea_core::position::BlockPos;
 use azalea_entity::dimensions::EntityDimensions;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    AttributeModifiers, Consumable, EquipmentSlotGroup, Food, ItemUseAnimation,
-    MinimumAttackCharge, Tool, ToolRule, UseEffects,
+    AttributeModifiers, BlocksAttacks, Consumable, EquipmentSlotGroup, Food, ItemUseAnimation,
+    KineticWeapon, MinimumAttackCharge, Tool, ToolRule, UseEffects,
 };
 use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use azalea_protocol::packets::game::ServerboundGamePacket;
@@ -48,6 +48,13 @@ const SWING_DURATION: i32 = 6;
 const CONSUME_EFFECTS_START_FRACTION: f32 = 0.21875;
 const CONSUME_EFFECTS_INTERVAL: i32 = 4;
 const MAX_FOOD_LEVEL: u32 = 20;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ItemUseResult {
+    Pass,
+    Success,
+    Fail,
+}
 
 /// Handles the predicted-break effects need (vanilla level event 2001 spawns
 /// break particles alongside the sound).
@@ -94,6 +101,7 @@ struct ActiveUse {
     hand: InteractionHand,
     kind: ItemKind,
     anim: ItemUseAnimation,
+    bow: bool,
     sound: SoundRef,
     has_particles: bool,
     /// Atlas key for the crumb particles, e.g. `item/cooked_beef`.
@@ -295,9 +303,9 @@ impl InteractionState {
     }
 
     /// A swing from using an item or entity; see [`send_use_swing`].
-    fn swing_use(&mut self, sender: &PacketSender) {
+    fn swing_use(&mut self, sender: &PacketSender, hand: InteractionHand) {
         self.start_swing();
-        send_use_swing(sender);
+        send_use_swing(sender, hand);
     }
 
     fn update_swing(&mut self) {
@@ -368,13 +376,16 @@ impl InteractionState {
         on_ground: bool,
         creative: bool,
         spectator: bool,
+        entities: &EntityStore,
         hand: InteractionHand,
         hand_on_cooldown: bool,
         food: u32,
         selected_slot: u8,
         held_stack: Option<&ItemStackData>,
         offhand_stack: Option<&ItemStackData>,
+        has_projectile: bool,
         place_block: Option<BlockState>,
+        offhand_place_block: Option<BlockState>,
         hands_empty: bool,
         effects: &mut BreakEffects,
     ) -> Vec<BlockPos> {
@@ -456,13 +467,16 @@ impl InteractionState {
                 eye_pos,
                 look,
                 place_block,
+                offhand_place_block,
                 held_stack,
                 food,
                 creative,
                 spectator,
+                entities,
                 hand,
                 hand_on_cooldown,
                 offhand_stack,
+                has_projectile,
                 sneaking,
                 suppress_block_use,
                 effects,
@@ -711,13 +725,16 @@ impl InteractionState {
         eye_pos: DVec3,
         look: LookDirection,
         place_block: Option<BlockState>,
+        offhand_place_block: Option<BlockState>,
         held_stack: Option<&ItemStackData>,
         food: u32,
         creative: bool,
         spectator: bool,
+        entities: &EntityStore,
         hand: InteractionHand,
         hand_on_cooldown: bool,
         offhand_stack: Option<&ItemStackData>,
+        has_projectile: bool,
         sneaking: bool,
         suppress_block_use: bool,
         effects: &mut BreakEffects,
@@ -729,12 +746,8 @@ impl InteractionState {
 
         self.use_delay = USE_DELAY;
 
-        // Vanilla `startUseItem` checks the entity target before block/item
-        // use and sends one interact packet; the server does the rest
-        // (trading, feeding, leads, the villager head-shake).
-        // TODO: consuming unconditionally is an approximation; vanilla falls
-        // through to `useItem` when the client-side `interactOn` returns PASS
-        // (e.g. eating while the crosshair rests on a passive mob).
+        // The server result is asynchronous; only known ordinary cows are
+        // classified as PASS. Unknown and interactive entities stay conservative.
         if let Some(HitResult::Entity(hit)) = self.target {
             sender.send_raw(wire::encode_interact(
                 hit.entity_id,
@@ -742,11 +755,13 @@ impl InteractionState {
                 hit.location - hit.entity_pos,
                 sneaking,
             ));
-            if !spectator {
-                self.swing_use(sender);
-            }
             // Spectator entity interaction is packet-only; no local item use.
-            return true;
+            if spectator || !entity_interaction_passes(entities, hit.entity_id, held_stack) {
+                if !spectator {
+                    self.swing_use(sender, hand);
+                }
+                return true;
+            }
         }
 
         let hit_block = if let Some(HitResult::Block(hit)) = self.target {
@@ -779,7 +794,7 @@ impl InteractionState {
                 }
             }
             if place_block.is_some() && !hand_on_cooldown {
-                self.swing_use(sender);
+                self.swing_use(sender, hand);
                 self.predict_place(
                     hit,
                     place_block,
@@ -790,23 +805,7 @@ impl InteractionState {
                 );
                 return true;
             }
-            if held_stack.is_none() && offhand_stack.is_some() {
-                self.seq += 1;
-                sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
-                    hand: InteractionHand::OffHand,
-                    block_hit: BlockHit {
-                        block_pos: hit.block_pos,
-                        direction: hit.face,
-                        location: azalea_vec3(hit.hit_point),
-                        inside: hit.inside,
-                        world_border: hit.world_border,
-                    },
-                    seq: self.seq,
-                }));
-                false
-            } else {
-                true
-            }
+            place_block.is_none() && held_stack.is_some()
         } else {
             false
         };
@@ -830,9 +829,15 @@ impl InteractionState {
             creative,
             hand,
             hand_on_cooldown,
+            has_projectile,
             effects,
         );
-        if used {
+        // `use_item` may send a packet and still PASS locally (e.g. a stick);
+        // only SUCCESS/FAIL stops vanilla's offhand fallback.
+        if used != ItemUseResult::Pass {
+            if matches!(self.target, Some(HitResult::Entity(_))) && used == ItemUseResult::Success {
+                self.swing_use(sender, hand);
+            }
             return true;
         }
 
@@ -841,10 +846,36 @@ impl InteractionState {
         // server-authoritative here; block PASS is approximated above.
         if should_try_offhand(
             self.target.is_none(),
-            !hit_block,
-            held_stack.is_none(),
+            !hit_block || matches!(self.target, Some(HitResult::Block(_))) && place_block.is_none(),
+            used == ItemUseResult::Pass,
             offhand_stack.is_some(),
         ) {
+            if let Some(HitResult::Block(hit)) = self.target {
+                self.seq += 1;
+                sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
+                    hand: InteractionHand::OffHand,
+                    block_hit: BlockHit {
+                        block_pos: hit.block_pos,
+                        direction: hit.face,
+                        location: azalea_vec3(hit.hit_point),
+                        inside: hit.inside,
+                        world_border: hit.world_border,
+                    },
+                    seq: self.seq,
+                }));
+                if let Some(state) = offhand_place_block {
+                    self.swing_use(sender, InteractionHand::OffHand);
+                    self.predict_place(
+                        hit,
+                        Some(state),
+                        chunks,
+                        player_pos,
+                        player_aabb,
+                        dirty_chunks,
+                    );
+                    return true;
+                }
+            }
             return self.use_item(
                 sender,
                 audio,
@@ -857,8 +888,9 @@ impl InteractionState {
                 creative,
                 InteractionHand::OffHand,
                 false,
+                has_projectile,
                 effects,
-            );
+            ) != ItemUseResult::Pass;
         }
         hit_block
     }
@@ -881,10 +913,11 @@ impl InteractionState {
         creative: bool,
         hand: InteractionHand,
         hand_on_cooldown: bool,
+        has_projectile: bool,
         effects: &mut BreakEffects,
-    ) -> bool {
+    ) -> ItemUseResult {
         let Some(stack) = held_stack else {
-            return false;
+            return ItemUseResult::Pass;
         };
 
         self.seq += 1;
@@ -896,12 +929,34 @@ impl InteractionState {
         }));
 
         if hand_on_cooldown {
-            return true;
+            return ItemUseResult::Fail;
+        }
+        if stack.kind == ItemKind::Bow && !creative && !has_projectile {
+            return ItemUseResult::Fail;
         }
         self.using_bow = stack.kind == ItemKind::Bow;
+        if self.using_bow {
+            self.using_item = Some(ActiveUse {
+                hand,
+                kind: stack.kind,
+                anim: ItemUseAnimation::Eat,
+                bow: true,
+                sound: SoundRef::event("entity.generic.eat"),
+                has_particles: false,
+                texture: String::new(),
+                use_effects: UseEffects::default(),
+                duration: 72_000,
+                remaining: 72_000,
+            });
+            return ItemUseResult::Success;
+        }
 
         let Some(consumable) = stack_component::<Consumable>(stack) else {
-            return true;
+            return if main_hand_use_succeeds(stack) {
+                ItemUseResult::Success
+            } else {
+                ItemUseResult::Pass
+            };
         };
         // Vanilla `Consumable.canConsume` → `Player.canEat`: food needs
         // hunger unless it can always be eaten; creative players (vanilla
@@ -909,7 +964,7 @@ impl InteractionState {
         if let Some(f) = stack_component::<Food>(stack)
             && !(creative || f.can_always_eat || food < MAX_FOOD_LEVEL)
         {
-            return true;
+            return ItemUseResult::Fail;
         }
 
         let duration = (consumable.consume_seconds * 20.0) as i32;
@@ -917,6 +972,7 @@ impl InteractionState {
             hand,
             kind: stack.kind,
             anim: consumable.animation,
+            bow: false,
             sound: SoundRef::resolve(&consumable.sound),
             has_particles: consumable.has_consume_particles,
             texture: format!("item/{}", item_resource_name(stack.kind)),
@@ -940,7 +996,7 @@ impl InteractionState {
                 look,
             );
         }
-        true
+        ItemUseResult::Success
     }
 
     /// A respawn constructs a fresh LocalPlayer in vanilla. Reset only the
@@ -1040,7 +1096,7 @@ impl InteractionState {
         // `Consumable.shouldEmitParticlesAndSounds`.
         let elapsed = active.duration - active.remaining;
         let wait = (active.duration as f32 * CONSUME_EFFECTS_START_FRACTION) as i32;
-        if elapsed > wait && active.remaining % CONSUME_EFFECTS_INTERVAL == 0 {
+        if !active.bow && elapsed > wait && active.remaining % CONSUME_EFFECTS_INTERVAL == 0 {
             emit_consume_effects(
                 active,
                 5,
@@ -1087,6 +1143,9 @@ impl InteractionState {
         let Some(active) = self.using_item.take() else {
             return;
         };
+        if active.bow {
+            return;
+        }
         emit_consume_effects(
             &active, 16, audio, particles, chunks, player_pos, eye_pos, look,
         );
@@ -1113,7 +1172,8 @@ impl InteractionState {
     pub fn use_animation(&self, partial_tick: f32) -> Option<UseAnim> {
         let active = self.using_item.as_ref()?;
         if active.remaining <= 0
-            || !matches!(active.anim, ItemUseAnimation::Eat | ItemUseAnimation::Drink)
+            || (!active.bow
+                && !matches!(active.anim, ItemUseAnimation::Eat | ItemUseAnimation::Drink))
         {
             return None;
         }
@@ -1121,6 +1181,7 @@ impl InteractionState {
             curr_usage_time: active.remaining as f32 - partial_tick + 1.0,
             duration: active.duration as f32,
             left_hand: active.hand == InteractionHand::OffHand,
+            bow: active.bow,
         })
     }
 
@@ -1572,6 +1633,10 @@ fn emit_consume_effects(
             1.0 + 0.2 * (fastrand::f32() - fastrand::f32()),
         )
     };
+    // Observe requests before the silent test engine's empty sound index drops
+    // them.
+    #[cfg(test)]
+    tests::CONSUME_SOUND_REQUESTS.with(|count| count.set(count.get() + 1));
     audio.play_world_sound(
         &active.sound,
         CATEGORY_PLAYERS,
@@ -1598,13 +1663,55 @@ fn play_block_sound(audio: &mut AudioEngine, event: &str, pos: BlockPos, volume:
     );
 }
 
+fn entity_interaction_passes(
+    entities: &EntityStore,
+    entity_id: i32,
+    stack: Option<&ItemStackData>,
+) -> bool {
+    entity_passes_for_item(
+        entities
+            .living
+            .get(&entity_id)
+            .map(|entity| entity.entity_type),
+        stack,
+    )
+}
+
+fn entity_passes_for_item(entity: Option<EntityKind>, stack: Option<&ItemStackData>) -> bool {
+    // Bow use follows Entity.interact's PASS for these ordinary entities.
+    // Interactive entities (villagers, horses, armor stands, frames, etc.) and
+    // unclassified entities remain conservative; stateful overrides aren't modeled.
+    stack.is_some_and(|stack| stack.kind == ItemKind::Bow)
+        && matches!(
+            entity,
+            Some(
+                EntityKind::Cow
+                    | EntityKind::Sheep
+                    | EntityKind::Chicken
+                    | EntityKind::Zombie
+                    | EntityKind::Skeleton
+                    | EntityKind::Player
+            )
+        )
+}
+
 fn should_try_offhand(
     target_is_air: bool,
     block_interaction_passed: bool,
-    main_hand_empty: bool,
+    main_hand_passed: bool,
     offhand_nonempty: bool,
 ) -> bool {
-    (target_is_air || block_interaction_passed) && main_hand_empty && offhand_nonempty
+    (target_is_air || block_interaction_passed) && main_hand_passed && offhand_nonempty
+}
+
+/// Local approximation of vanilla's client-side `useItem` result.
+/// `UseEffects` is present on every item and `Tool` only controls mining;
+/// neither starts a use in vanilla `Item.use` (a stick must PASS).
+fn main_hand_use_succeeds(stack: &ItemStackData) -> bool {
+    stack.kind == ItemKind::Bow
+        || stack_component::<Consumable>(stack).is_some()
+        || stack_component::<BlocksAttacks>(stack).is_some()
+        || stack_component::<KineticWeapon>(stack).is_some()
 }
 
 fn stack_for_hand<'a>(
@@ -1908,17 +2015,19 @@ fn send_action(
 
 /// Reports a swing from using an item, block or entity where the wire
 /// version does (`Translation::reports_use_swings`).
-pub(crate) fn send_use_swing(sender: &PacketSender) {
+pub(crate) fn send_use_swing(sender: &PacketSender, hand: InteractionHand) {
     if crate::net::translate::active().is_none_or(|t| t.reports_use_swings()) {
-        send_swing(sender);
+        send_swing_hand(sender, hand);
     }
 }
 
 pub(crate) fn send_swing(sender: &PacketSender) {
+    send_swing_hand(sender, InteractionHand::MainHand);
+}
+
+fn send_swing_hand(sender: &PacketSender, hand: InteractionHand) {
     use azalea_protocol::packets::game::s_swing::ServerboundSwing;
-    sender.send(ServerboundGamePacket::Swing(ServerboundSwing {
-        hand: InteractionHand::MainHand,
-    }));
+    sender.send(ServerboundGamePacket::Swing(ServerboundSwing { hand }));
 }
 
 /// Q / Ctrl+Q, vanilla `LocalPlayer.drop`'s player-action packet.
@@ -1948,6 +2057,12 @@ mod tests {
     use azalea_registry::identifier::Identifier;
 
     use super::*;
+
+    std::thread_local! {
+        pub(super) static CONSUME_SOUND_REQUESTS: std::cell::Cell<usize> = const {
+            std::cell::Cell::new(0)
+        };
+    }
 
     #[test]
     fn approximate_nearest_direction_keeps_north_at_smallest_subnormal_dot() {
@@ -2043,6 +2158,7 @@ mod tests {
             hand: InteractionHand::OffHand,
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
+            bow: false,
             sound: SoundRef::event("entity.generic.eat"),
             has_particles: true,
             texture: "item/apple".to_string(),
@@ -2070,6 +2186,7 @@ mod tests {
             hand: InteractionHand::MainHand,
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
+            bow: false,
             sound: SoundRef::event("entity.generic.eat"),
             has_particles: true,
             texture: "item/apple".to_string(),
@@ -2113,6 +2230,7 @@ mod tests {
             hand: InteractionHand::MainHand,
             kind: ItemKind::Apple,
             anim: ItemUseAnimation::Eat,
+            bow: false,
             sound: SoundRef::event("entity.generic.eat"),
             has_particles: true,
             texture: "item/apple".to_string(),
@@ -2152,11 +2270,425 @@ mod tests {
     }
 
     #[test]
-    fn offhand_use_falls_through_after_air_or_passed_block_interaction() {
-        assert!(should_try_offhand(true, false, true, true));
+    fn entity_pass_fallback_is_limited_to_known_plain_bow_targets() {
+        let bow = ItemStackData::new(ItemKind::Bow, 1);
+        for entity in [
+            EntityKind::Cow,
+            EntityKind::Sheep,
+            EntityKind::Chicken,
+            EntityKind::Zombie,
+            EntityKind::Skeleton,
+            EntityKind::Player,
+        ] {
+            assert!(
+                entity_passes_for_item(Some(entity), Some(&bow)),
+                "{entity:?}"
+            );
+        }
+        for entity in [
+            EntityKind::Villager,
+            EntityKind::Horse,
+            EntityKind::ArmorStand,
+        ] {
+            assert!(
+                !entity_passes_for_item(Some(entity), Some(&bow)),
+                "{entity:?}"
+            );
+        }
+        assert!(!entity_passes_for_item(None, Some(&bow)));
+        assert!(!entity_passes_for_item(Some(EntityKind::Cow), None));
+        let stick = ItemStackData::new(ItemKind::Stick, 1);
+        assert!(!entity_passes_for_item(Some(EntityKind::Cow), Some(&stick)));
+    }
+
+    fn headless_use_fixture() -> (
+        ChunkStore,
+        AudioEngine,
+        EntityStore,
+        ParticleStore,
+        BlockRegistry,
+    ) {
+        use std::sync::Arc;
+
+        use crate::renderer::chunk::atlas::AtlasUVMap;
+        use crate::renderer::chunk::mesher::Colormap;
+
+        let colors = Arc::new(Colormap::test_empty());
+        (
+            border_test_world().0,
+            AudioEngine::silent_for_test(),
+            EntityStore::new(),
+            ParticleStore::new(
+                AtlasUVMap::test_empty(),
+                colors.clone(),
+                colors.clone(),
+                colors,
+            ),
+            BlockRegistry::test_empty(),
+        )
+    }
+
+    #[test]
+    fn start_use_item_orders_main_and_offhand_packets() {
+        use InteractionHand::{MainHand, OffHand};
+
+        use crate::net::sender::Outbound;
+
+        #[derive(Debug, PartialEq)]
+        enum Sent {
+            On(InteractionHand, u32),
+            Use(InteractionHand, u32),
+            Swing(InteractionHand),
+        }
+
+        // Vanilla 26.2 Minecraft.startUseItem tries both hands on PASS;
+        // successful placement also reports a client swing in this version.
+        let cases = [
+            (
+                "stick + placeable offhand",
+                ItemKind::Stick,
+                ItemKind::Stone,
+                false,
+                vec![
+                    Sent::On(MainHand, 1),
+                    Sent::Use(MainHand, 2),
+                    Sent::On(OffHand, 3),
+                    Sent::Swing(OffHand),
+                ],
+            ),
+            (
+                "stick + apple offhand",
+                ItemKind::Stick,
+                ItemKind::Apple,
+                false,
+                vec![
+                    Sent::On(MainHand, 1),
+                    Sent::Use(MainHand, 2),
+                    Sent::On(OffHand, 3),
+                    Sent::Use(OffHand, 4),
+                ],
+            ),
+            (
+                "shield consumes main-hand use",
+                ItemKind::Shield,
+                ItemKind::Stone,
+                false,
+                vec![Sent::On(MainHand, 1), Sent::Use(MainHand, 2)],
+            ),
+            (
+                "spectator stops after main-hand block use",
+                ItemKind::Stick,
+                ItemKind::Stone,
+                true,
+                vec![Sent::On(MainHand, 1)],
+            ),
+        ];
+
+        for (name, main_kind, off_kind, spectator, expected) in cases {
+            let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+            let stone = crate::world::block::first_state_of("stone").unwrap();
+            let hit = BlockHitResult {
+                block_pos: BlockPos::new(2, 64, 2),
+                face: Direction::Up,
+                hit_point: dvec3(2.5, 65.0, 2.5),
+                inside: false,
+                world_border: false,
+            };
+            chunks.set_block_state(2, 64, 2, stone);
+            assert_eq!(chunks.get_block_state(2, 64, 2), stone, "{name}");
+            let placed_pos = hit.block_pos.offset_with_direction(hit.face);
+            assert!(is_air(chunks.get_block_state(2, 65, 2)), "{name}");
+            let mut state = InteractionState::new();
+            state.target = Some(HitResult::Block(hit));
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let sender = PacketSender::new(tx);
+            let biome_climate = HashMap::new();
+            let mut effects = BreakEffects {
+                particles: &mut particles,
+                registry: &registry,
+                biome_climate: &biome_climate,
+            };
+            let mut dirty_chunks = Vec::new();
+            let main = ItemStackData::new(main_kind, 1);
+            let off = ItemStackData::new(off_kind, 1);
+            let player_pos = dvec3(0.5, 64.0, 0.5);
+            assert!(
+                state.start_use_item(
+                    &sender,
+                    &mut audio,
+                    &chunks,
+                    player_pos,
+                    Aabb::from_center(player_pos, 0.3, 0.9),
+                    player_pos + dvec3(0.0, 1.62, 0.0),
+                    LookDirection::default(),
+                    None,
+                    (off_kind == ItemKind::Stone).then_some(stone),
+                    Some(&main),
+                    10, // hungry, so the offhand apple starts consuming
+                    false,
+                    spectator,
+                    &entities,
+                    MainHand,
+                    false,
+                    Some(&off),
+                    false,
+                    false,
+                    false,
+                    &mut effects,
+                    &mut dirty_chunks,
+                ),
+                "{name}",
+            );
+
+            let mut actual = Vec::new();
+            while let Ok(outbound) = rx.try_recv() {
+                let Outbound::Packet(packet) = outbound else {
+                    panic!("{name}: unexpected non-packet outbound");
+                };
+                actual.push(match *packet {
+                    ServerboundGamePacket::UseItemOn(packet) => {
+                        assert_eq!(packet.block_hit.block_pos, hit.block_pos, "{name}");
+                        assert_eq!(packet.block_hit.direction, hit.face, "{name}");
+                        Sent::On(packet.hand, packet.seq)
+                    }
+                    ServerboundGamePacket::UseItem(packet) => Sent::Use(packet.hand, packet.seq),
+                    ServerboundGamePacket::Swing(packet) => Sent::Swing(packet.hand),
+                    packet => panic!("{name}: unexpected packet {packet:?}"),
+                });
+            }
+            assert_eq!(actual, expected, "{name}");
+            let placed = main_kind == ItemKind::Stick && off_kind == ItemKind::Stone && !spectator;
+            assert_eq!(
+                chunks.get_block_state(2, 65, 2),
+                if placed { stone } else { BlockState::AIR },
+                "{name}",
+            );
+            assert_eq!(
+                dirty_chunks,
+                if placed { vec![placed_pos] } else { vec![] },
+                "{name}",
+            );
+            assert_eq!(
+                state.pending_predictions.len(),
+                usize::from(placed),
+                "{name}"
+            );
+            if placed {
+                assert_eq!(state.pending_predictions[&placed_pos].seq, 3, "{name}");
+            }
+            assert_eq!(
+                state.using_item.as_ref().map(|use_| (use_.hand, use_.kind)),
+                (off_kind == ItemKind::Apple).then_some((OffHand, ItemKind::Apple)),
+                "{name}",
+            );
+        }
+    }
+
+    #[test]
+    fn bow_press_hold_release_packets_and_renderer_stages() {
+        use azalea_inventory::ItemStack;
+        use winit::event::{ElementState, MouseButton};
+
+        use crate::net::sender::Outbound;
+        use crate::player::inventory::{HOTBAR_START, Inventory, OFFHAND};
+        use crate::renderer::pipelines::held_item::selected_item_model_name;
+
+        for (name, arrow_slot, creative) in [
+            ("survival arrow slot 40", Some(40), false),
+            ("survival arrow slot 0", Some(0), false),
+            ("survival arrow offhand", Some(OFFHAND), false),
+            ("survival without arrows", None, false),
+            ("creative without arrows", None, true),
+        ] {
+            let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let sender = PacketSender::new(tx);
+            let biome_climate = HashMap::new();
+            let mut effects = BreakEffects {
+                particles: &mut particles,
+                registry: &registry,
+                biome_climate: &biome_climate,
+            };
+            let mut inventory = Inventory::new();
+            inventory.set_slot(
+                HOTBAR_START,
+                ItemStack::Present(ItemStackData::new(ItemKind::Bow, 1)),
+            );
+            if let Some(slot) = arrow_slot {
+                inventory.set_slot(
+                    slot,
+                    ItemStack::Present(ItemStackData::new(ItemKind::Arrow, 1)),
+                );
+            }
+            // tick receives this boolean from app/core.rs, not an Inventory.
+            // Mirror that boundary's full-slot scan (including 0, 40 and offhand).
+            let has_projectile = inventory.slots().iter().any(|stack| {
+                matches!(stack, ItemStack::Present(data) if data.count > 0 && matches!(
+                    data.kind, ItemKind::Arrow | ItemKind::SpectralArrow | ItemKind::TippedArrow
+                ))
+            });
+            assert_eq!(has_projectile, arrow_slot.is_some(), "{name}");
+            let offhand = match inventory.offhand() {
+                ItemStack::Present(data) if data.count > 0 => Some(data),
+                _ => None,
+            };
+            let player_pos = dvec3(0.5, 64.0, 0.5);
+            let eye_pos = player_pos + dvec3(0.0, 1.62, 0.0);
+            assert!(is_air(chunks.get_block_state(0, 65, 0)), "{name}");
+            let mut state = InteractionState::new();
+            assert!(state.target.is_none(), "air use: {name}");
+            // released() skips the input path; new() captures the cursor without
+            // a window, but does initialize optional gilrs controller support.
+            let mut input = InputState::new();
+            assert!(input.is_cursor_captured(), "{name}");
+            CONSUME_SOUND_REQUESTS.with(|count| count.set(0));
+
+            let mut tick =
+                |state: &mut InteractionState, input: &InputState, audio: &mut AudioEngine| {
+                    let dirty = state.tick(
+                        input,
+                        &chunks,
+                        &sender,
+                        audio,
+                        player_pos,
+                        Aabb::from_center(player_pos, 0.3, 0.9),
+                        eye_pos,
+                        LookDirection::default(),
+                        true,
+                        creative,
+                        false,
+                        &entities,
+                        InteractionHand::MainHand,
+                        false,
+                        MAX_FOOD_LEVEL,
+                        input.selected_slot(),
+                        inventory.held_stack(input.selected_slot()),
+                        offhand,
+                        has_projectile,
+                        None,
+                        None,
+                        false,
+                        &mut effects,
+                    );
+                    assert!(dirty.is_empty(), "air use must not dirty blocks: {name}");
+                };
+            assert_eq!(
+                selected_item_model_name("bow", state.use_animation(1.0), false),
+                "bow",
+            );
+            input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+            assert!(input.action_just_pressed(input::Action::Use), "{name}");
+            tick(&mut state, &input, &mut audio);
+            match rx.try_recv().expect("one bow press packet") {
+                Outbound::Packet(packet) => match *packet {
+                    ServerboundGamePacket::UseItem(packet) => {
+                        assert_eq!(packet.hand, InteractionHand::MainHand, "{name}");
+                        assert_eq!(packet.seq, 1, "{name}");
+                    }
+                    packet => panic!("{name}: unexpected press packet {packet:?}"),
+                },
+                _ => panic!("{name}: expected typed UseItem packet"),
+            }
+            assert!(rx.try_recv().is_err(), "extra press packet: {name}");
+            input.clear_just_pressed_actions();
+            assert!(!input.action_just_pressed(input::Action::Use), "{name}");
+            assert!(input.performing_action(input::Action::Use), "{name}");
+
+            let can_use = has_projectile || creative;
+            assert_eq!(state.using_item.is_some(), can_use, "{name}");
+            assert_eq!(
+                state.using_bow, can_use,
+                "failed use must not latch: {name}"
+            );
+            if can_use {
+                // The press tick already runs update_using_item once. Use the
+                // real timer and renderer bridge at the end of each tick (+1
+                // partial tick cancels use_animation's interpolation offset).
+                for elapsed in 1..=18 {
+                    if elapsed > 1 {
+                        tick(&mut state, &input, &mut audio);
+                    }
+                    let active = state.using_item.as_ref().expect("held bow remains active");
+                    assert!(active.bow, "{name}");
+                    assert_eq!(active.kind, ItemKind::Bow, "{name}");
+                    assert_eq!(active.hand, InteractionHand::MainHand, "{name}");
+                    assert_eq!(active.duration - active.remaining, elapsed, "{name}");
+                    let anim = state.use_animation(1.0).expect("active bow animation");
+                    assert!(anim.bow && !anim.left_hand, "{name}");
+                    assert_eq!(
+                        anim.duration - anim.curr_usage_time,
+                        elapsed as f32,
+                        "{name}"
+                    );
+                    let expected = match elapsed {
+                        1..=12 => "bow_pulling_0",
+                        13..=17 => "bow_pulling_1",
+                        _ => "bow_pulling_2",
+                    };
+                    // Calls the same selector -> bow_model_name used by update_and_draw.
+                    assert_eq!(
+                        selected_item_model_name("bow", Some(anim), false),
+                        expected,
+                        "{name}: tick {elapsed}",
+                    );
+                    assert_eq!(
+                        selected_item_model_name("bow", Some(anim), true),
+                        "bow",
+                        "inactive offhand: {name}",
+                    );
+                    assert!(rx.try_recv().is_err(), "held bow resent UseItem: {name}");
+                }
+            } else {
+                assert!(state.use_animation(1.0).is_none(), "{name}");
+                assert_eq!(
+                    selected_item_model_name("bow", state.use_animation(1.0), false),
+                    "bow",
+                );
+            }
+
+            input.on_mouse_button(MouseButton::Right, ElementState::Released);
+            tick(&mut state, &input, &mut audio);
+            if can_use {
+                match rx.try_recv().expect("one release packet") {
+                    Outbound::Packet(packet) => match *packet {
+                        ServerboundGamePacket::PlayerAction(packet) => {
+                            assert!(matches!(packet.action, Action::ReleaseUseItem), "{name}");
+                            assert_eq!(packet.pos, BlockPos::new(0, 0, 0), "{name}");
+                            assert_eq!(packet.direction, Direction::Down, "{name}");
+                            assert_eq!(packet.seq, 0, "{name}");
+                        }
+                        packet => panic!("{name}: unexpected release packet {packet:?}"),
+                    },
+                    _ => panic!("{name}: expected typed ReleaseUseItem packet"),
+                }
+            }
+            assert!(state.using_item.is_none() && !state.using_bow, "{name}");
+            assert!(state.use_animation(1.0).is_none(), "{name}");
+            assert_eq!(
+                selected_item_model_name("bow", state.use_animation(1.0), false),
+                "bow",
+            );
+            input.clear_just_pressed_actions();
+            for _ in 0..5 {
+                tick(&mut state, &input, &mut audio);
+            }
+            assert!(rx.try_recv().is_err(), "duplicate/spurious release: {name}");
+            CONSUME_SOUND_REQUESTS.with(|count| {
+                assert_eq!(
+                    count.get(),
+                    0,
+                    "bow must not request bite/completion sounds: {name}",
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn offhand_use_falls_through_for_passed_main_hand_only() {
+        assert!(should_try_offhand(true, false, true, true)); // stick + apple
+        assert!(!should_try_offhand(true, false, false, true)); // shield/food succeeded
         assert!(should_try_offhand(false, true, true, true));
         assert!(!should_try_offhand(false, false, true, true));
-        assert!(!should_try_offhand(true, false, false, true));
         assert!(!should_try_offhand(true, false, true, false));
     }
 

@@ -7,6 +7,7 @@ use crate::entity::EntityStore;
 use crate::player::tab_list::{TabList, TabListPlayer};
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::common::FONT_SIZE;
+use crate::ui::font::DEFAULT_CELL_HEIGHT;
 use crate::ui::hud::Scoreboard;
 use crate::ui::text::TextSpan;
 
@@ -571,7 +572,9 @@ mod tab_score_tests {
         elements
             .iter()
             .filter_map(|e| match e {
-                MenuElement::Image { sprite, .. } => Some(*sprite),
+                MenuElement::Image { sprite, .. } | MenuElement::CroppedImage { sprite, .. } => {
+                    Some(*sprite)
+                }
                 _ => None,
             })
             .collect()
@@ -958,11 +961,30 @@ mod tab_score_tests {
     fn world_scaled_name_tag_projects_to_screen_pixels() {
         let at_10_blocks = name_tag_screen_scale(10.0, 1000, 90.0);
         let at_20_blocks = name_tag_screen_scale(20.0, 1000, 90.0);
-        assert!((at_10_blocks - 11.25).abs() < 0.001);
-        assert!((at_20_blocks - 5.625).abs() < 0.001);
-        assert!((name_tag_screen_scale(10.0, 2000, 90.0) - 22.5).abs() < 0.001);
+        assert!((at_10_blocks - 1.25).abs() < 0.001);
+        assert!((at_20_blocks - 0.625).abs() < 0.001);
+        assert!((name_tag_screen_scale(10.0, 2000, 90.0) - 2.5).abs() < 0.001);
         assert!(name_tag_in_range(63.999_f64.powi(2)));
         assert!(!name_tag_in_range(64.0_f64.powi(2)));
+    }
+
+    #[test]
+    fn text_display_scale_matches_two_line_pixel_geometry() {
+        let pixel_scale = name_tag_screen_scale(10.0, 1000, 90.0);
+        // Renderer glyph vertices scale by `scale / gm.cell_h` (8 pixels).
+        let display_scale = pixel_scale * DEFAULT_CELL_HEIGHT as f32;
+        let display_pixel_scale = display_scale / DEFAULT_CELL_HEIGHT as f32;
+        let glyph_height = display_pixel_scale * 8.0;
+        let line_step = display_pixel_scale * 10.0;
+        assert!((glyph_height - 10.0).abs() < 0.001);
+        assert!((line_step - 12.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn name_tag_scale_matches_glyph_vertex_scale() {
+        let scale = name_tag_screen_scale(40.0, 1000, 90.0);
+        assert!((scale - 0.3125).abs() < 0.001);
+        assert!((scale * DEFAULT_CELL_HEIGHT as f32 - 2.5).abs() < 0.001);
     }
 }
 
@@ -978,8 +1000,7 @@ pub struct PlayerNameplates<'a> {
     pub project: &'a dyn Fn(glam::DVec3) -> Option<(f32, f32, f32)>,
 }
 
-// Vanilla 26.2 Font.lineHeight * EntityRenderer.NAMETAG_SCALE.
-const NAME_TAG_LINE_HEIGHT: f32 = 9.0;
+// Vanilla 26.2 fixed world scale; TextSpans.scale is in glyph-cell units.
 const NAME_TAG_WORLD_SCALE: f32 = 0.025;
 const NAME_TAG_DISTANCE: f64 = 64.0;
 
@@ -987,12 +1008,11 @@ fn name_tag_in_range(distance_squared: f64) -> bool {
     distance_squared < NAME_TAG_DISTANCE * NAME_TAG_DISTANCE
 }
 
-// Project the official 9 * 0.025 world-unit text height through the same
-// vertical perspective projection used for its anchor. `depth` is clip.w.
+// Project the fixed world scale through the vertical perspective projection
+// used for its anchor. RotatedTextDisplay.scale uses glyph-cell units.
 fn name_tag_screen_scale(depth: f32, screen_height: u32, fov_degrees: f32) -> f32 {
     let half_fov = fov_degrees.to_radians() * 0.5;
-    (NAME_TAG_LINE_HEIGHT * NAME_TAG_WORLD_SCALE * screen_height as f32 * 0.5)
-        / (depth * half_fov.tan())
+    (NAME_TAG_WORLD_SCALE * screen_height as f32 * 0.5) / (depth * half_fov.tan())
 }
 
 pub fn build_text_display_overlays(
@@ -1001,6 +1021,7 @@ pub fn build_text_display_overlays(
     screen_height: u32,
     fov_degrees: f32,
     camera_pos: glam::DVec3,
+    camera_look_deg: (f32, f32),
     project: &dyn Fn(glam::DVec3) -> Option<(f32, f32, f32, f32)>,
 ) {
     for entity in entity_store.vehicles.values() {
@@ -1013,17 +1034,36 @@ pub fn build_text_display_overlays(
         if !name_tag_in_range((glam::DVec3::from(entity.position) - camera_pos).length_squared()) {
             continue;
         }
-        let Some((x, y, depth, draw_depth)) = project(glam::DVec3::from(entity.position)) else {
+        let center = entity.text_display_billboard == 3;
+        let (yaw, pitch) = camera_look_deg;
+        let (yaw, pitch) = (f64::from(yaw).to_radians(), f64::from(pitch).to_radians());
+        let right = glam::DVec3::new(yaw.cos(), 0.0, yaw.sin());
+        let up = glam::DVec3::new(
+            -yaw.sin() * pitch.sin(),
+            pitch.cos(),
+            yaw.cos() * pitch.sin(),
+        );
+        let base = glam::DVec3::from(entity.position);
+        let anchor = if center {
+            base + right * f64::from(entity.text_display_translation[0])
+                + up * f64::from(entity.text_display_translation[1])
+        } else {
+            base
+        };
+        let Some((x, y, depth, draw_depth)) = project(anchor) else {
             continue;
         };
-        let scale = name_tag_screen_scale(depth, screen_height, fov_degrees);
-        let yaw: f64 = entity.look_dir.map_or(0.0, |look| look.y_rot_deg()).into();
-        let yaw = yaw.to_radians();
-        let right = glam::DVec3::new(yaw.cos(), 0.0, yaw.sin()) * 0.25;
-        let radians = project(glam::DVec3::from(entity.position) + right)
-            .map_or(0.0, |(right_x, right_y, _, _)| {
-                (right_y - y).atan2(right_x - x)
-            });
+        let metadata_scale = entity.text_display_scale;
+        let uniform = (metadata_scale[0] - metadata_scale[1]).abs() < 1e-5
+            && (metadata_scale[1] - metadata_scale[2]).abs() < 1e-5;
+        let scale = name_tag_screen_scale(depth, screen_height, fov_degrees)
+            * DEFAULT_CELL_HEIGHT as f32
+            * if center && uniform {
+                metadata_scale[0].abs()
+            } else {
+                1.0
+            };
+        let radians = 0.0;
         let flags = entity.text_display_flags;
         let alignment = if flags & 0x08 != 0 {
             1 // Vanilla getAlign gives LEFT precedence when both bits are set.

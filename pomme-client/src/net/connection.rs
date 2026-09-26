@@ -1244,7 +1244,12 @@ async fn game_loop(
                     &shared_tree,
                     &mut batch_size_calculator,
                     &mut server_cookies,
-                );
+                )
+                .map_err(|error| {
+                    ConnectionError::Disconnected(format!(
+                        "Failed to queue mandatory world event: {error}"
+                    ))
+                })?;
             }
             Err(e) => skip_malformed_packet(e)?,
         }
@@ -1407,6 +1412,117 @@ mod tests {
     use pomme_protocol::version::NATIVE;
 
     use super::*;
+
+    #[tokio::test]
+    async fn full_world_queue_disconnects_game_loop_without_partial_chunk() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use azalea_protocol::packets::game::c_level_chunk_with_light::{
+            BlockEntity, ClientboundLevelChunkPacketData, ClientboundLevelChunkWithLight,
+        };
+        use uuid::Uuid;
+
+        let (client_end, server_end) = super::super::conn::memory_pipes();
+        let mut peer = Conn::from_memory(server_end);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(4096);
+        // The game loop publishes two registry events before reading packets.
+        for _ in 0..4094 {
+            event_tx
+                .try_send(NetworkEvent::LevelChunksLoadStart)
+                .unwrap();
+        }
+        peer.write_packet(ClientboundLevelChunkWithLight {
+            x: 0,
+            z: 0,
+            chunk_data: ClientboundLevelChunkPacketData {
+                heightmaps: Vec::new(),
+                data: Arc::new(Vec::new().into_boxed_slice()),
+                block_entities: vec![BlockEntity {
+                    packed_xz: 0,
+                    y: 0,
+                    kind: azalea_registry::builtin::BlockEntityKind::CopperGolemStatue,
+                    data: simdnbt::owned::Nbt::None,
+                }],
+            },
+            light_data: Default::default(),
+        })
+        .await
+        .unwrap();
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+        let (key_tx, key_pair_rx) = mpsc::unbounded_channel();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            game_loop(
+                Conn::from_memory(client_end),
+                &event_tx,
+                GameLoopArgs {
+                    outbound_tx,
+                    outbound_rx,
+                    joined: Joined {
+                        configured: Configured {
+                            registries: Arc::default(),
+                            dialogs: Arc::default(),
+                        },
+                        deferred_login: None,
+                    },
+                    view_distance: 8,
+                    chat_options: Default::default(),
+                    chat: ChatSender::new(Uuid::nil(), Uuid::nil(), None, key_tx),
+                    key_pair_rx,
+                    server_cookies: Default::default(),
+                },
+            ),
+        )
+        .await
+        .expect("world enqueue failure must end the game loop");
+        assert!(matches!(result, Err(ConnectionError::Disconnected(reason))
+            if reason.contains("Failed to queue mandatory world event")));
+        assert_eq!(event_rx.len(), 4096);
+        for _ in 0..4094 {
+            assert!(matches!(
+                event_rx.try_recv().unwrap(),
+                NetworkEvent::LevelChunksLoadStart
+            ));
+        }
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            NetworkEvent::Registries(_)
+        ));
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            NetworkEvent::DialogRegistry(_)
+        ));
+        assert!(event_rx.is_empty());
+    }
+
+    #[tokio::test]
+    async fn terminal_event_yields_until_queue_space_is_available() {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+        let terminal = tokio::spawn(async move {
+            send_terminal_event(
+                &tx,
+                NetworkEvent::Disconnected {
+                    reason: "full".into(),
+                },
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!terminal.is_finished());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::LevelChunksLoadStart
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), terminal)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(rx.try_recv().unwrap(), NetworkEvent::Disconnected { reason } if reason == "full")
+        );
+    }
 
     #[test]
     fn translated_creative_slot_uses_delimited_components_since_1_21_5() {

@@ -1877,18 +1877,34 @@ pub(crate) fn build_server_screens(
     }
     if game.book_view.is_some() {
         let cursor = core.input.cursor_pos();
-        let action = core
-            .input
-            .left_just_pressed()
-            .then(|| crate::ui::book::clicked_action(cursor, sw, sh, gs))
+        let (page, pages) = game
+            .book_view
+            .as_ref()
+            .map_or((0, 1), |book| (book.page, book.pages.len()));
+        let pressed = core.input.left_just_pressed();
+        let done = pressed && crate::ui::book::view_done_hit(cursor, sw, sh, gs);
+        let action = pressed
+            .then(|| crate::ui::book::view_hit_action(cursor, sw, sh, gs, page, pages))
             .flatten();
         if let Some(book) = &mut game.book_view {
             if let Some(index @ 0..=1) = action {
                 book.navigate(index);
+            } else if pressed && !done {
+                if let Some(crate::chat_component::ClickEvent::ChangePage(target)) = book
+                    .style_at(cursor)
+                    .and_then(|style| style.click_event.clone())
+                {
+                    if target > 0 && !book.pages.is_empty() {
+                        book.set_page((target as usize) - 1);
+                    }
+                }
             }
-            book.draw(elements, sw, sh, gs);
+            core.input.consume_left_just_pressed();
+            book.draw(elements, sw, sh, gs, cursor, &|spans, scale| {
+                gfx.renderer.menu_spans_width(spans, scale)
+            });
         }
-        if core.input.escape_pressed() {
+        if done || core.input.escape_pressed() {
             game.book_view = None;
             core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
         }
@@ -1901,8 +1917,9 @@ pub(crate) fn build_server_screens(
         let action = core
             .input
             .left_just_pressed()
-            .then(|| crate::ui::book::clicked_action(cursor, sw, sh, gs))
+            .then(|| crate::ui::book::edit_hit_action(cursor, sw, sh, gs))
             .flatten();
+        core.input.consume_left_just_pressed();
         if let Some(book) = &mut game.book_edit {
             if let Some(index @ 0..=1) = action {
                 book.navigate(index);
@@ -3138,27 +3155,17 @@ pub fn update_game(
         let direction = frame
             .item_frame_direction
             .unwrap_or(azalea_core::direction::Direction::North);
-        let (rotation_y, rotation_x): (f32, f32) = match direction {
-            azalea_core::direction::Direction::Down => (0.0, 90.0),
-            azalea_core::direction::Direction::Up => (0.0, -90.0),
-            azalea_core::direction::Direction::North => (180.0, 0.0),
-            azalea_core::direction::Direction::South => (0.0, 0.0),
-            azalea_core::direction::Direction::West => (-90.0, 0.0),
-            azalea_core::direction::Direction::East => (90.0, 0.0),
-        };
-        let frame_rotation = glam::Mat4::from_rotation_y(rotation_y.to_radians())
-            * glam::Mat4::from_rotation_x(rotation_x.to_radians())
-            * glam::Mat4::from_rotation_z((frame.item_frame_rotation as f32 * 45.0).to_radians());
-        let map_center = *frame.position
-            + frame_rotation
-                .transform_point3(glam::Vec3::new(0.0, 0.0, 0.4375))
-                .as_dvec3()
-            - gfx.renderer.camera_anchor();
+        let frame_rotation = item_frame_base_rotation(direction);
+        let map_center =
+            item_frame_base_position(*frame.position, direction) - gfx.renderer.camera_anchor();
         map_quads.push(MapQuadDraw {
             map_id,
             map_data: map.clone(),
             position: map_center.as_vec3(),
-            rotation: frame_rotation.to_scale_rotation_translation().1,
+            rotation: crate::renderer::pipelines::map_quad::frame_map_rotation(
+                glam::Quat::from_mat4(&frame_rotation),
+                frame.item_frame_rotation,
+            ),
         });
     }
 
@@ -3198,16 +3205,6 @@ pub fn update_game(
 
     if !benchmark_running {
         let renderer = &gfx.renderer;
-        let project_text_display =
-            |position| renderer.project_world_to_screen_with_vulkan_depth(position);
-        crate::ui::player_tab::build_text_display_overlays(
-            &mut elements,
-            &game.entity_store,
-            renderer.screen_height(),
-            renderer.camera_fov_degrees(),
-            renderer.camera_render_position(),
-            &project_text_display,
-        );
         if !game.hide_gui {
             crate::ui::player_tab::build_player_nameplates(
                 &mut elements,
@@ -4288,8 +4285,11 @@ pub fn update_game(
                     } else {
                         (([0.0; 3], false), ([0.0; 3], false))
                     };
+                let player_head_profile_source = matches!(id, "player_head" | "player_wall_head")
+                    .then(|| crate::world::block_entity::player_head_profile_source(&be.nbt));
                 Some(crate::renderer::BlockEntityRenderInfo {
                     pos: *pos,
+                    player_head_profile_source,
                     kind: be.kind,
                     statue_pose: statue.map(|(pose, _)| pose),
                     yaw,
@@ -4344,7 +4344,13 @@ pub fn update_game(
                 (name != "air").then(|| {
                     let light =
                         get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
-                    (name, light)
+                    let raw_dye_rgb = data
+                        .get_component::<azalea_inventory::components::DyedColor>()
+                        .map(|color| {
+                            let rgb = color.rgb;
+                            [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
+                        });
+                    (name, light, raw_dye_rgb)
                 })
             }
             _ => None,
@@ -4386,6 +4392,8 @@ pub fn update_game(
             .probe
             .as_ref()
             .is_none_or(|probe| probe.held_item_draw_enabled());
+    gfx.renderer
+        .update_placed_head_skins(&block_entity_renders, &core.tokio_rt);
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
         hide_cursor,
@@ -4399,6 +4407,8 @@ pub fn update_game(
         game.dimension.as_str(),
         sky,
         &entity_renders,
+        // World text is independent of F1, but suppressed during benchmarks as before.
+        (!benchmark_running).then_some(&game.entity_store),
         &item_renders,
         &block_entity_renders,
         &particle_quads,
@@ -4657,13 +4667,26 @@ fn transform_item_bounds(
 
 #[cfg(test)]
 mod dropped_item_tests {
-    use super::{item_stack_seed, transform_item_bounds};
+    use super::{item_frame_base_rotation, item_stack_seed, transform_item_bounds};
 
     #[test]
     fn dropped_item_scatter_seed_includes_damage() {
         assert_eq!(item_stack_seed(42, 0), 42);
         assert_eq!(item_stack_seed(42, 7), 49);
         assert_eq!(item_stack_seed(u32::MAX, 2), 1);
+    }
+
+    #[test]
+    fn item_frame_diamond_rotation_keeps_fixed_item_center_on_face_normal() {
+        use glam::{Mat4, Vec3};
+        for rotation in [0.0_f32, 90.0] {
+            let frame = item_frame_base_rotation(azalea_core::direction::Direction::North);
+            let center = (frame
+                * Mat4::from_rotation_z(rotation.to_radians())
+                * Mat4::from_translation(Vec3::new(0.0, 0.0, 0.4375)))
+            .transform_point3(Vec3::ZERO);
+            assert!(center.abs_diff_eq(Vec3::new(0.0, 0.0, 0.4375), 1e-6));
+        }
     }
 
     #[test]
@@ -4716,6 +4739,7 @@ fn dropped_item_geometry(renderer: &Renderer, item_name: &str) -> (glam::Mat4, f
 fn emit_item_copies(
     infos: &mut Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo>,
     item_name: &str,
+    raw_dye_rgb: Option<[u8; 3]>,
     item_id: u32,
     damage: i32,
     count: i32,
@@ -4751,6 +4775,7 @@ fn emit_item_copies(
     let mut push = |copy_offset: glam::Mat4| {
         infos.push(ItemRenderInfo {
             item_name: item_name.to_string(),
+            raw_dye_rgb,
             model_matrix: base * copy_offset * ground_transform,
             light,
             nether_lighting,
@@ -4792,6 +4817,39 @@ fn emit_item_copies(
             push(glam::Mat4::from_translation(off));
         }
     }
+}
+
+fn item_frame_base_rotation(direction: azalea_core::direction::Direction) -> glam::Mat4 {
+    use azalea_core::direction::Direction as D;
+    match direction {
+        D::North => glam::Mat4::IDENTITY,
+        D::South => glam::Mat4::from_rotation_y(180_f32.to_radians()),
+        D::East => glam::Mat4::from_rotation_y(-90_f32.to_radians()),
+        D::West => glam::Mat4::from_rotation_y(90_f32.to_radians()),
+        D::Up => {
+            glam::Mat4::from_rotation_x(-90_f32.to_radians())
+                * glam::Mat4::from_rotation_y(180_f32.to_radians())
+        }
+        D::Down => {
+            glam::Mat4::from_rotation_x(90_f32.to_radians())
+                * glam::Mat4::from_rotation_y(180_f32.to_radians())
+        }
+    }
+}
+
+fn item_frame_base_position(
+    position: glam::DVec3,
+    direction: azalea_core::direction::Direction,
+) -> glam::DVec3 {
+    let normal = match direction {
+        azalea_core::direction::Direction::Down => glam::DVec3::NEG_Y,
+        azalea_core::direction::Direction::Up => glam::DVec3::Y,
+        azalea_core::direction::Direction::North => glam::DVec3::NEG_Z,
+        azalea_core::direction::Direction::South => glam::DVec3::Z,
+        azalea_core::direction::Direction::West => glam::DVec3::NEG_X,
+        azalea_core::direction::Direction::East => glam::DVec3::X,
+    };
+    position + normal * 0.46875
 }
 
 fn build_item_render_infos(
@@ -4842,6 +4900,13 @@ fn build_item_render_infos(
         emit_item_copies(
             &mut infos,
             &item.item_name,
+            item.stack
+                .as_ref()
+                .and_then(|stack| stack.get_component::<azalea_inventory::components::DyedColor>())
+                .map(|color| {
+                    let rgb = color.rgb;
+                    [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
+                }),
             item.item_id,
             item.damage,
             item.count,
@@ -4874,6 +4939,7 @@ fn build_item_render_infos(
         emit_item_copies(
             &mut infos,
             &pickup.item_name,
+            None,
             pickup.item_id,
             pickup.damage,
             pickup.count,
@@ -4908,10 +4974,20 @@ fn build_item_render_infos(
         )
     }) {
         let Some(kind) = frame.kind else { continue };
-        let item_name = if kind == azalea_registry::builtin::EntityKind::GlowItemFrame {
-            "pomme:glow_item_frame_body"
-        } else {
-            "pomme:item_frame_body"
+        let has_map = matches!(
+            &frame.item_frame_item,
+            azalea_inventory::ItemStack::Present(stack)
+                if !stack.is_empty()
+                    && stack.get_component::<azalea_inventory::components::MapId>().is_some()
+        );
+        let item_name = match (
+            kind == azalea_registry::builtin::EntityKind::GlowItemFrame,
+            has_map,
+        ) {
+            (false, false) => "pomme:item_frame_body",
+            (true, false) => "pomme:glow_item_frame_body",
+            (false, true) => "pomme:item_frame_map_body",
+            (true, true) => "pomme:glow_item_frame_map_body",
         };
         let position = *frame.position;
         // ItemFrame metadata direction is authoritative; entity yaw doesn't
@@ -4919,21 +4995,15 @@ fn build_item_render_infos(
         let direction = frame
             .item_frame_direction
             .unwrap_or(azalea_core::direction::Direction::North);
-        let (rotation_y, rotation_x): (f32, f32) = match direction {
-            azalea_core::direction::Direction::Down => (0.0, 90.0),
-            azalea_core::direction::Direction::Up => (0.0, -90.0),
-            azalea_core::direction::Direction::North => (180.0, 0.0),
-            azalea_core::direction::Direction::South => (0.0, 0.0),
-            azalea_core::direction::Direction::West => (-90.0, 0.0),
-            azalea_core::direction::Direction::East => (90.0, 0.0),
-        };
-        let base_matrix = glam::Mat4::from_translation((position - anchor).as_vec3())
-            * glam::Mat4::from_rotation_y(rotation_y.to_radians())
-            * glam::Mat4::from_rotation_x(rotation_x.to_radians());
+        let base_rotation = item_frame_base_rotation(direction);
+        let base_matrix = glam::Mat4::from_translation(
+            (item_frame_base_position(position, direction) - anchor).as_vec3(),
+        ) * base_rotation;
+        // build_item_mesh already centers baked model vertices by subtracting 0.5.
         infos.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
             item_name: item_name.to_owned(),
-            model_matrix: base_matrix
-                * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.4375)),
+            raw_dye_rgb: None,
+            model_matrix: base_matrix,
             light: get_entity_light(
                 chunk_store,
                 Position::new(position.x, position.y, position.z),
@@ -4966,9 +5036,19 @@ fn build_item_render_infos(
                     (frame.item_frame_rotation as f32 * 45.0).to_radians(),
                 )
                 * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.4375))
-                * dropped_item_geometry(renderer, &name).0;
+                * renderer
+                    .registry()
+                    .get_item_fixed_transform(&name)
+                    .unwrap_or(glam::Mat4::IDENTITY);
+            let raw_dye_rgb = stack
+                .get_component::<azalea_inventory::components::DyedColor>()
+                .map(|color| {
+                    let rgb = color.rgb;
+                    [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
+                });
             infos.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
                 item_name: name,
+                raw_dye_rgb,
                 model_matrix: frame_item_transform,
                 light: get_entity_light(
                     chunk_store,
@@ -5488,10 +5568,58 @@ mod tests {
     use super::{
         advance_server_time, bump_loaded_content_generations, credits_may_advance,
         death_confirm_escape_allowed, finish_win_credits, finish_win_credits_if_allowed,
-        has_red_overlay, is_win_game_event, limited_crafting_param, section_bit, section_bits,
-        server_tick_runs, show_death_screen_param,
+        has_red_overlay, is_win_game_event, item_frame_base_position, item_frame_base_rotation,
+        limited_crafting_param, section_bit, section_bits, server_tick_runs,
+        show_death_screen_param,
     };
     use crate::renderer::SkyState;
+
+    #[test]
+    fn item_frame_base_and_face_normal_match_all_six_directions() {
+        use azalea_core::direction::Direction as D;
+        use glam::DVec3;
+
+        for (direction, normal) in [
+            (D::North, DVec3::NEG_Z),
+            (D::South, DVec3::Z),
+            (D::East, DVec3::X),
+            (D::West, DVec3::NEG_X),
+            (D::Up, DVec3::Y),
+            (D::Down, DVec3::NEG_Y),
+        ] {
+            assert_eq!(
+                item_frame_base_position(DVec3::ZERO, direction),
+                normal * 0.46875
+            );
+        }
+        // North frame: body mesh is already centered; adding another -0.5
+        // would move its intended [-0.03125, 0.03125] depth interval away.
+        let north_base = item_frame_base_position(DVec3::ZERO, D::North).z;
+        assert!((north_base - (-0.46875)).abs() < 1e-6);
+        assert!(((-0.46875_f32 + 0.4375) - (-0.03125)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn item_frame_item_center_matches_official_horizontal_rotations() {
+        use azalea_core::direction::Direction as D;
+        use glam::{DVec3, Vec3};
+
+        for (direction, expected) in [
+            (D::North, Vec3::new(0.0, 0.0, -0.03125)),
+            (D::South, Vec3::new(0.0, 0.0, 0.03125)),
+            (D::East, Vec3::new(0.03125, 0.0, 0.0)),
+            (D::West, Vec3::new(-0.03125, 0.0, 0.0)),
+        ] {
+            let position = item_frame_base_position(DVec3::ZERO, direction).as_vec3();
+            let matrix =
+                glam::Mat4::from_translation(position) * item_frame_base_rotation(direction);
+            let center = matrix.transform_point3(Vec3::new(0.0, 0.0, 0.4375));
+            assert!(
+                center.abs_diff_eq(expected, 1e-6),
+                "{direction:?}: {center:?}"
+            );
+        }
+    }
 
     #[test]
     fn tab_overlay_visibility_requires_every_existing_gate() {
@@ -5649,7 +5777,7 @@ mod tests {
         let mut sky = SkyState::default_day();
         let mut items = ItemEntityStore::new();
         items.spawn_item(1, Uuid::nil(), Position::new(0.0, 64.0, 0.0), DVec3::ZERO);
-        items.set_item_data(1, "minecraft:stone".into(), 1, 0, 1);
+        items.set_item_data(1, "minecraft:stone".into(), 1, 0, 1, None);
         let age = |items: &ItemEntityStore| items.visible_items(DVec3::ZERO, 100.0)[0].age;
         assert_eq!(age(&items), 0);
 

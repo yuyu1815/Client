@@ -25,8 +25,9 @@ vec4 sample_atlas_sprite_rgss(sampler2D atlas_texture, vec2 sprite_uv, uint spri
     vec2 sprite_size;
     vec2 uv = atlas_sprite_uv(atlas_texture, sprite_uv, sprite, atlas_size, sprite_size);
     vec2 pixel_size = 1.0 / atlas_size;
-    vec2 du = dFdx(uv);
-    vec2 dv = dFdy(uv);
+    vec2 atlas_scale = sprite_size / atlas_size;
+    vec2 du = dFdx(sprite_uv) * atlas_scale;
+    vec2 dv = dFdy(sprite_uv) * atlas_scale;
     vec2 texel_screen_size = sqrt(du * du + dv * dv);
 
     vec2 texel_coords = uv / pixel_size;

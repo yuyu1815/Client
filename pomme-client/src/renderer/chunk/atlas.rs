@@ -71,6 +71,10 @@ impl AtlasUVMap {
         self.regions.get(name).copied().unwrap_or(self.missing)
     }
 
+    pub fn rects(&self) -> &[[u32; 4]] {
+        &self.rects
+    }
+
     pub fn has_region(&self, name: &str) -> bool {
         self.regions.contains_key(name)
     }
@@ -530,13 +534,13 @@ fn load_source(
     match util::load_png(&file_path) {
         Some((data, width, height)) => {
             let Some(metadata) = read_texture_metadata(metadata_path.as_deref()) else {
-                tracing::warn!("Invalid texture metadata: {name}");
+                tracing::warn!(texture = %name, png = %file_path.display(), metadata = ?metadata_path, "Invalid texture metadata");
                 return Source::empty(name);
             };
             let Some(animation) =
                 animation_layout_from_metadata(metadata.animation.as_ref(), width, height)
             else {
-                tracing::warn!("Invalid texture animation metadata: {name}");
+                tracing::warn!(texture = %name, png = %file_path.display(), metadata = ?metadata_path, width, height, "Invalid texture animation metadata");
                 return Source::empty(name);
             };
             let alpha_mask =
@@ -568,7 +572,11 @@ fn load_source(
             }
         }
         None => {
-            tracing::warn!("Missing texture: {name}");
+            let cause = match std::fs::File::open(&file_path) {
+                Err(error) => format!("open failed: {error}"),
+                Ok(_) => "PNG decode failed".to_string(),
+            };
+            tracing::warn!(texture = %name, asset = %asset_key, png = %file_path.display(), metadata = ?metadata_path, %cause, "Missing texture");
             Source::empty(name)
         }
     }
@@ -602,24 +610,35 @@ impl TextureAtlas {
 
         let mip_level = effective_mip_level(&sources);
         let mip_align = 1 << mip_level;
-        let mut total_area: u64 = (MISSING_TILE * MISSING_TILE) as u64;
+        let padding = 1 << mip_level;
+        let mut total_area: u64 = u64::from(MISSING_TILE + 2 * padding).pow(2);
         for source in &sources {
             if !source.data.is_empty() {
-                total_area += u64::from(source.w.next_multiple_of(mip_align))
-                    * u64::from(source.h.next_multiple_of(mip_align));
+                let outer_w = source.w + 2 * padding;
+                let outer_h = source.h + 2 * padding;
+                total_area += u64::from(outer_w.next_multiple_of(mip_align))
+                    * u64::from(outer_h.next_multiple_of(mip_align));
             }
         }
-        sources.sort_by_key(|s| std::cmp::Reverse(s.h.max(MISSING_TILE)));
+        sources.sort_by_key(|s| std::cmp::Reverse((s.h + 2 * padding).max(MISSING_TILE)));
 
         const MAX_ATLAS_SIZE: u32 = 8192;
         let mut atlas_size = (((total_area as f64) * 1.4).sqrt().ceil() as u32).next_power_of_two();
 
         let (placements, missing_region) = loop {
-            let (result, all_fit) = pack(&sources, atlas_size, mip_align);
+            let (result, all_fit) = pack(&sources, atlas_size, mip_align, padding);
             if all_fit || atlas_size >= MAX_ATLAS_SIZE {
                 if !all_fit {
+                    let failed: Vec<_> = result
+                        .0
+                        .iter()
+                        .filter_map(|(name, placement)| {
+                            placement.is_none().then_some(name.as_str())
+                        })
+                        .collect();
                     tracing::warn!(
-                        "Atlas at {MAX_ATLAS_SIZE} cap; oversize sources fall back to missing tile"
+                        count = failed.len(), sprites = ?failed,
+                        "Atlas at {MAX_ATLAS_SIZE} cap; listed sources fall back to missing tile"
                     );
                 }
                 break result;
@@ -637,18 +656,27 @@ impl TextureAtlas {
                 } else {
                     [0, 0, 0, 255]
                 };
-                let idx = ((py * atlas_size + px) * 4) as usize;
+                let idx = (((py + padding) * atlas_size + px + padding) * 4) as usize;
                 atlas_pixels[idx..idx + 4].copy_from_slice(&color);
             }
         }
+
+        let missing_padding = padding.min(MISSING_TILE);
+        extrude_padding(
+            &mut atlas_pixels,
+            atlas_size,
+            missing_region.pixel_rect.map(u32::from),
+            missing_padding,
+        );
 
         let mut regions = HashMap::new();
         let mut sprite_alpha_masks = HashMap::new();
         let mut rects = vec![missing_region.pixel_rect.map(u32::from)];
         for src in &sources {
             match placements.get(src.name.as_str()) {
-                Some(Some((cx, cy))) => {
-                    let mut region = pixel_region(*cx, *cy, src.w, src.h, atlas_size);
+                Some(Some((outer_x, outer_y))) => {
+                    let (cx, cy) = content_origin(*outer_x, *outer_y, padding);
+                    let mut region = pixel_region(cx, cy, src.w, src.h, atlas_size);
                     region.sprite = u16::try_from(rects.len())
                         .expect("an 8192² atlas holds fewer than 65536 sprites");
                     region.opaque = src.opaque;
@@ -662,6 +690,12 @@ impl TextureAtlas {
                             atlas_pixels[d..d + 4].copy_from_slice(&src.data[s..s + 4]);
                         }
                     }
+                    extrude_padding(
+                        &mut atlas_pixels,
+                        atlas_size,
+                        [cx, cy, src.w, src.h],
+                        padding,
+                    );
                     if let Some(mask) = &src.alpha_mask {
                         sprite_alpha_masks.insert(src.name.clone(), mask.clone());
                     }
@@ -688,8 +722,14 @@ impl TextureAtlas {
             missing: missing_region,
         };
 
-        let staging_pixels =
-            build_mip_chain(atlas_pixels, atlas_size, mip_level, &sources, &placements);
+        let staging_pixels = build_mip_chain(
+            atlas_pixels,
+            atlas_size,
+            mip_level,
+            padding,
+            &sources,
+            &placements,
+        );
         let mut animations = Vec::new();
         for source in &mut sources {
             let animated = source
@@ -718,6 +758,7 @@ impl TextureAtlas {
                 mip_source.strategy,
                 mip_source.alpha_cutoff_bias,
             );
+            let (x, y) = content_origin(x, y, padding);
             animations.push(AnimatedSprite {
                 x,
                 y,
@@ -751,7 +792,7 @@ impl TextureAtlas {
             mip_levels,
         );
 
-        let sampler = unsafe { util::create_nearest_sampler_mipmapped(device, mip_levels) };
+        let sampler = unsafe { util::create_linear_sampler_mipmapped(device, mip_levels) };
 
         tracing::info!(
             "Atlas built: {atlas_size}x{atlas_size}, mip level {mip_level}, {} regions",
@@ -822,8 +863,10 @@ impl TextureAtlas {
                     );
                     blend_animation_frames(&current, &next, sample.blend)
                 };
+                let padding = (1 << self.mip_level) >> level;
+                let padded = extrude_frame_rgba(&frame_pixels, width, height, padding);
                 let buffer_offset = pixels.len() as u64;
-                pixels.extend_from_slice(&frame_pixels);
+                pixels.extend_from_slice(&padded);
                 regions.push(vk::BufferImageCopy {
                     buffer_offset,
                     buffer_row_length: 0,
@@ -835,13 +878,13 @@ impl TextureAtlas {
                         layer_count: 1,
                     },
                     image_offset: vk::Offset3D {
-                        x: (sprite.x >> level) as i32,
-                        y: (sprite.y >> level) as i32,
+                        x: (sprite.x >> level) as i32 - padding as i32,
+                        y: (sprite.y >> level) as i32 - padding as i32,
                         z: 0,
                     },
                     image_extent: vk::Extent3D {
-                        width,
-                        height,
+                        width: width + 2 * padding,
+                        height: height + 2 * padding,
                         depth: 1,
                     },
                 });
@@ -917,10 +960,48 @@ fn effective_mip_level(sources: &[Source]) -> u32 {
         })
 }
 
+fn extrude_frame_rgba(frame: &[u8], width: u32, height: u32, padding: u32) -> Vec<u8> {
+    let out_width = width + 2 * padding;
+    let out_height = height + 2 * padding;
+    let mut output = vec![0; (out_width * out_height * 4) as usize];
+    for y in 0..out_height {
+        for x in 0..out_width {
+            let sx = x.saturating_sub(padding).min(width - 1);
+            let sy = y.saturating_sub(padding).min(height - 1);
+            let src = ((sy * width + sx) * 4) as usize;
+            let dst = ((y * out_width + x) * 4) as usize;
+            output[dst..dst + 4].copy_from_slice(&frame[src..src + 4]);
+        }
+    }
+    output
+}
+
+fn extrude_padding(pixels: &mut [u8], atlas_size: u32, rect: [u32; 4], padding: u32) {
+    let [x, y, width, height] = rect;
+    for py in y.saturating_sub(padding)..(y + height + padding).min(atlas_size) {
+        for px in x.saturating_sub(padding)..(x + width + padding).min(atlas_size) {
+            let sx = px.clamp(x, x + width - 1);
+            let sy = py.clamp(y, y + height - 1);
+            let src = ((sy * atlas_size + sx) * 4) as usize;
+            let dst = ((py * atlas_size + px) * 4) as usize;
+            if src != dst {
+                let pixel = [
+                    pixels[src],
+                    pixels[src + 1],
+                    pixels[src + 2],
+                    pixels[src + 3],
+                ];
+                pixels[dst..dst + 4].copy_from_slice(&pixel);
+            }
+        }
+    }
+}
+
 fn build_mip_chain(
     atlas_pixels: Vec<u8>,
     atlas_size: u32,
     mip_level: u32,
+    padding: u32,
     sources: &[Source],
     placements: &HashMap<String, Option<(u32, u32)>>,
 ) -> Vec<u8> {
@@ -931,7 +1012,15 @@ fn build_mip_chain(
         levels.push(vec![0; (size * size * 4) as usize]);
     }
 
-    let missing = extract_rect_rgba(&levels[0], atlas_size, 0, 0, MISSING_TILE, MISSING_TILE);
+    let missing_x = padding;
+    let missing = extract_rect_rgba(
+        &levels[0],
+        atlas_size,
+        missing_x,
+        missing_x,
+        MISSING_TILE,
+        MISSING_TILE,
+    );
     let missing_mips = generate_rgba_mips(
         missing,
         MISSING_TILE,
@@ -947,8 +1036,19 @@ fn build_mip_chain(
             MISSING_TILE >> level,
             &mut levels[level as usize],
             atlas_size >> level,
-            0,
-            0,
+            padding >> level,
+            padding >> level,
+        );
+        extrude_padding(
+            &mut levels[level as usize],
+            atlas_size >> level,
+            [
+                padding >> level,
+                padding >> level,
+                MISSING_TILE >> level,
+                MISSING_TILE >> level,
+            ],
+            padding >> level,
         );
     }
 
@@ -978,14 +1078,24 @@ fn build_mip_chain(
                 mip_source.animation.initial_display_frame,
                 level,
             );
+            let width = source.w >> level;
+            let height = source.h >> level;
+            let cx = (x + padding) >> level;
+            let cy = (y + padding) >> level;
             copy_rect_rgba(
                 &frame,
-                source.w >> level,
-                source.h >> level,
+                width,
+                height,
                 &mut levels[level as usize],
                 atlas_size >> level,
-                x >> level,
-                y >> level,
+                cx,
+                cy,
+            );
+            extrude_padding(
+                &mut levels[level as usize],
+                atlas_size >> level,
+                [cx, cy, width, height],
+                padding >> level,
             );
         }
     }
@@ -1387,31 +1497,37 @@ fn sprite_transparency(data: &[u8]) -> (bool, bool) {
 
 type PackResult = (HashMap<String, Option<(u32, u32)>>, AtlasRegion);
 
-fn pack(sources: &[Source], atlas_size: u32, mip_align: u32) -> (PackResult, bool) {
+fn content_origin(outer_x: u32, outer_y: u32, padding: u32) -> (u32, u32) {
+    (outer_x + padding, outer_y + padding)
+}
+
+fn pack(sources: &[Source], atlas_size: u32, mip_align: u32, padding: u32) -> (PackResult, bool) {
     let mut placements: HashMap<String, Option<(u32, u32)>> = HashMap::new();
-    let missing_region = pixel_region(0, 0, MISSING_TILE, MISSING_TILE, atlas_size);
-    let mut cursor_x = MISSING_TILE;
+    let missing_region = pixel_region(padding, padding, MISSING_TILE, MISSING_TILE, atlas_size);
+    let mut cursor_x = MISSING_TILE + 2 * padding;
     let mut cursor_y = 0;
-    let mut shelf_h = MISSING_TILE;
+    let mut shelf_h = MISSING_TILE + 2 * padding;
     let mut all_fit = true;
     for src in sources {
         if src.data.is_empty() {
             placements.insert(src.name.clone(), None);
             continue;
         }
-        if cursor_x + src.w > atlas_size {
+        let outer_w = src.w + 2 * padding;
+        let outer_h = src.h + 2 * padding;
+        if cursor_x + outer_w > atlas_size {
             cursor_y = (cursor_y + shelf_h).next_multiple_of(mip_align);
             cursor_x = 0;
             shelf_h = 0;
         }
-        if cursor_y + src.h > atlas_size {
+        if cursor_y + outer_h > atlas_size {
             all_fit = false;
             placements.insert(src.name.clone(), None);
             continue;
         }
         placements.insert(src.name.clone(), Some((cursor_x, cursor_y)));
-        cursor_x = (cursor_x + src.w).next_multiple_of(mip_align);
-        shelf_h = shelf_h.max(src.h);
+        cursor_x = (cursor_x + outer_w).next_multiple_of(mip_align);
+        shelf_h = shelf_h.max(outer_h);
     }
     ((placements, missing_region), all_fit)
 }
@@ -1421,8 +1537,67 @@ mod tests {
     use super::*;
     use crate::test_util::test_temp_dir;
 
+    #[test]
+    fn official_water_flow_animation_metadata_infers_32px_frames() {
+        let file: TextureMetadataFile = serde_json::from_str(r#"{"animation":{}}"#).unwrap();
+        let layout = animation_layout_from_metadata(file.animation.as_ref(), 32, 1024).unwrap();
+        assert_eq!((layout.frame_width, layout.frame_height), (32, 32));
+        assert_eq!(layout.unique_frames.len(), 32);
+        assert_eq!(layout.sequence.len(), 32);
+    }
+
     fn alpha_index(x: usize, y: usize, width: usize) -> usize {
         (y * width + x) * 4 + 3
+    }
+
+    #[test]
+    fn animated_frame_padding_tracks_updated_edges_and_size() {
+        let frame = vec![1, 2, 3, 4, 9, 8, 7, 6];
+        let padded = extrude_frame_rgba(&frame, 2, 1, 2);
+        assert_eq!(padded.len(), (6 * 5 * 4) as usize);
+        for y in 0..5 {
+            assert_eq!(&padded[((y * 6) * 4) as usize..][..4], &[1, 2, 3, 4]);
+            assert_eq!(&padded[((y * 6 + 5) * 4) as usize..][..4], &[9, 8, 7, 6]);
+        }
+    }
+
+    #[test]
+    fn padding_is_extruded_from_each_edge_and_corner() {
+        let size = 12;
+        let mut pixels = vec![0; size * size * 4];
+        let color = [12, 34, 56, 78];
+        for y in 4..8 {
+            for x in 4..8 {
+                let i = (y * size + x) * 4;
+                pixels[i..i + 4].copy_from_slice(&color);
+            }
+        }
+        extrude_padding(&mut pixels, size as u32, [4, 4, 4, 4], 2);
+        for &(x, y) in &[
+            (2, 4),
+            (7, 4),
+            (4, 2),
+            (4, 7),
+            (2, 2),
+            (7, 2),
+            (2, 7),
+            (7, 7),
+        ] {
+            let i = (y * size + x) * 4;
+            assert_eq!(&pixels[i..i + 4], &color);
+        }
+    }
+
+    #[test]
+    fn packing_reserves_padding_and_returns_outer_origin() {
+        let sources = [solid_source("test", 16, 16, [255, 255, 255, 255])];
+        // Missing tile outer bounds are 48x48; this sprite also needs 48x48.
+        // At width 64 they cannot share a shelf, nor fit on consecutive shelves.
+        let (result, all_fit) = pack(&sources, 128, 16, 16);
+        assert!(all_fit);
+        let outer = result.0["test"].unwrap();
+        assert_eq!(outer, (48, 0));
+        assert_eq!(content_origin(outer.0, outer.1, 16), (64, 16));
     }
 
     #[test]
@@ -1473,7 +1648,7 @@ mod tests {
             ("blue".to_string(), Some((32, 0))),
         ]);
         let pixels = vec![0u8; (SIZE * SIZE * 4) as usize];
-        let chain = build_mip_chain(pixels, SIZE, MAX_MIP_LEVEL, &sources, &placements);
+        let chain = build_mip_chain(pixels, SIZE, MAX_MIP_LEVEL, 0, &sources, &placements);
 
         let mut offset = (SIZE * SIZE * 4) as usize;
         for level in 1..=MAX_MIP_LEVEL {
@@ -1607,6 +1782,7 @@ mod tests {
             vec![0; (SIZE * SIZE * 4) as usize],
             SIZE,
             mip_level,
+            2,
             std::slice::from_ref(&source),
             &placements,
         );

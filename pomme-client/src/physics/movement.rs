@@ -1112,7 +1112,10 @@ fn can_fall_at_least(
 /// `Entity.getOnPos(0.500001F)`.
 // ponytail: collision resolver has no mainSupportingBlockPos; use the official
 // floor fallback.
-fn block_friction(chunks: &ChunkStore, position: crate::entity::components::Position) -> f32 {
+pub(crate) fn block_friction(
+    chunks: &ChunkStore,
+    position: crate::entity::components::Position,
+) -> f32 {
     let id = crate::world::block::block_id(chunks.get_block_state(
         position.x.floor() as i32,
         (position.y - f64::from(0.500_001_f32)).floor() as i32,
@@ -1227,7 +1230,11 @@ fn is_minor_horizontal_collision(
     angle < MINOR_COLLISION_ANGLE
 }
 
-fn movement_input(input: &InputState, crouching: bool, use_speed_multiplier: f32) -> (f32, f32) {
+pub(crate) fn movement_input(
+    input: &InputState,
+    crouching: bool,
+    use_speed_multiplier: f32,
+) -> (f32, f32) {
     // Keep the LocalPlayer input pipeline in float exactly like vanilla. Pomme's
     // analog stick is already clamped to unit length; keyboard input is first
     // normalized just like KeyboardInput.tick(). `strafe` follows vanilla xxa:

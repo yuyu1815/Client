@@ -53,6 +53,24 @@ pub(crate) fn compute_shape(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> 
         ));
     }
 
+    if matches!(
+        id,
+        "oak_shelf"
+            | "spruce_shelf"
+            | "birch_shelf"
+            | "jungle_shelf"
+            | "acacia_shelf"
+            | "dark_oak_shelf"
+            | "mangrove_shelf"
+            | "cherry_shelf"
+            | "bamboo_shelf"
+            | "crimson_shelf"
+            | "warped_shelf"
+            | "pale_oak_shelf"
+    ) {
+        return Some(shelf_shape(props.get("facing").unwrap_or("north")));
+    }
+
     match id {
         "dirt_path" | "farmland" => Some(vec![[0.0, 0.0, 0.0, 1.0, 0.9375, 1.0]]),
         _ if id.ends_with("_carpet") => Some(vec![[0.0, 0.0, 0.0, 1.0, 0.0625, 1.0]]),
@@ -108,6 +126,17 @@ pub(crate) fn compute_outline(id: &str, props: &PropMap) -> Option<Vec<LocalBox>
         "water" | "lava" | "bubble_column" => Some(Vec::new()),
         _ => None,
     }
+}
+
+fn shelf_shape(facing: &str) -> Vec<LocalBox> {
+    [
+        [0.0, 0.75, 0.6875, 1.0, 1.0, 0.8125],
+        [0.0, 0.0, 0.8125, 1.0, 1.0, 1.0],
+        [0.0, 0.0, 0.6875, 1.0, 0.25, 0.8125],
+    ]
+    .into_iter()
+    .map(|b| rotate_horizontal_box(b, facing))
+    .collect()
 }
 
 fn fence_gate_shape(props: &PropMap) -> Vec<LocalBox> {
@@ -359,6 +388,60 @@ fn ccw(facing: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::{LocalBox, outline_shape, partial_shape};
+
+    #[test]
+    fn shelves_match_vanilla_shapes_and_outline_in_all_horizontal_directions() {
+        crate::world::block::init("26.2");
+        let expected = [
+            (
+                "north",
+                [
+                    [0.0, 0.75, 0.6875, 1.0, 1.0, 0.8125],
+                    [0.0, 0.0, 0.8125, 1.0, 1.0, 1.0],
+                    [0.0, 0.0, 0.6875, 1.0, 0.25, 0.8125],
+                ],
+            ),
+            (
+                "east",
+                [
+                    [0.1875, 0.75, 0.0, 0.3125, 1.0, 1.0],
+                    [0.0, 0.0, 0.0, 0.1875, 1.0, 1.0],
+                    [0.1875, 0.0, 0.0, 0.3125, 0.25, 1.0],
+                ],
+            ),
+            (
+                "south",
+                [
+                    [0.0, 0.75, 0.1875, 1.0, 1.0, 0.3125],
+                    [0.0, 0.0, 0.0, 1.0, 1.0, 0.1875],
+                    [0.0, 0.0, 0.1875, 1.0, 0.25, 0.3125],
+                ],
+            ),
+            (
+                "west",
+                [
+                    [0.6875, 0.75, 0.0, 0.8125, 1.0, 1.0],
+                    [0.8125, 0.0, 0.0, 1.0, 1.0, 1.0],
+                    [0.6875, 0.0, 0.0, 0.8125, 0.25, 1.0],
+                ],
+            ),
+        ];
+        for (facing, boxes) in &expected {
+            let state = crate::world::block::find_state("oak_shelf", &[("facing", *facing)]);
+            assert_eq!(partial_shape(state), Some(&boxes[..]), "{facing}");
+            assert_eq!(outline_shape(state), boxes, "{facing}");
+        }
+
+        let north = expected[0].1;
+        let player = [0.2, 0.0, 0.0, 0.8, 1.8, 0.6];
+        let intersects = |a: LocalBox, b: LocalBox| {
+            a[0] < b[3] && a[3] > b[0] && a[1] < b[4] && a[4] > b[1] && a[2] < b[5] && a[5] > b[2]
+        };
+        assert!(!north.iter().any(|&b| intersects(b, player)));
+        assert!(intersects(north[1], [0.2, 0.0, 0.85, 0.8, 1.8, 0.95]));
+    }
+
     #[test]
     fn supported_collision_families_follow_state_connections() {
         crate::world::block::init("26.2");

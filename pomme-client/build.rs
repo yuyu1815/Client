@@ -81,6 +81,7 @@ fn main() {
         ("block_entity.vert", shaderc::ShaderKind::Vertex),
         ("sign_text.vert", shaderc::ShaderKind::Vertex),
         ("sign_text.frag", shaderc::ShaderKind::Fragment),
+        ("text_display.frag", shaderc::ShaderKind::Fragment),
         ("chunk_border.vert", shaderc::ShaderKind::Vertex),
         ("chunk_border.frag", shaderc::ShaderKind::Fragment),
         ("item_entity.vert", shaderc::ShaderKind::Vertex),

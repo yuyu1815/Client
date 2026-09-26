@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use chrono::Datelike;
 use glam::{Mat4, Quat, Vec3};
 use serde::Deserialize;
 
@@ -347,6 +348,8 @@ pub enum ItemTint {
     Untinted,
     /// Vanilla `Constant` source, decoded from opaque ARGB/RGB input.
     Constant([u8; 3]),
+    /// Vanilla `Dye` source, with the item's undyed default color.
+    Dye { default_rgb: [u8; 3] },
     /// Vanilla `GrassColorSource`; the RGB is the source's level-independent
     /// result.
     Grass {
@@ -369,6 +372,7 @@ impl ItemTint {
         match self {
             Self::Untinted => [255, 255, 255],
             Self::Constant(rgb) => *rgb,
+            Self::Dye { default_rgb } => *default_rgb,
             Self::Grass { rgb, .. } => *rgb,
             Self::Unknown { .. } => [255, 255, 255],
         }
@@ -386,6 +390,7 @@ impl ItemTint {
         match self {
             Self::Untinted => "untinted",
             Self::Constant(_) => "constant",
+            Self::Dye { .. } => "dye",
             Self::Grass { .. } => "grass",
             Self::Unknown { .. } => "unknown",
         }
@@ -426,6 +431,17 @@ pub struct BakedModel {
     /// Vanilla `canOcclude`: full cubes occlude, but cutout blocks like leaves
     /// don't, so neighbor faces against them still render.
     pub occludes: bool,
+}
+
+/// Clone a single-layer dye model with its tint baked into tint-index-0 quads.
+pub(crate) fn colorized_dye_variant(model: &BakedModel, rgb: [u8; 3]) -> BakedModel {
+    let mut variant = model.clone();
+    for quad in &mut variant.quads {
+        if quad.tint_index == Some(0) && matches!(quad.item_tint, ItemTint::Dye { .. }) {
+            quad.item_tint = ItemTint::Constant(rgb);
+        }
+    }
+    variant
 }
 
 fn default_ambient_occlusion() -> bool {
@@ -735,6 +751,7 @@ pub struct BakedItemModels {
     pub particle_icons: HashMap<String, String>,
     pub flat_tints: HashMap<String, ItemTint>,
     pub ground_transforms: HashMap<String, Mat4>,
+    pub fixed_transforms: HashMap<String, Mat4>,
 }
 
 /// Every `minecraft/items/*.json` name across the jar and the active packs,
@@ -774,6 +791,7 @@ pub fn bake_item_models(
     let mut particle_icons: HashMap<String, String> = HashMap::new();
     let mut flat_tints: HashMap<String, ItemTint> = HashMap::new();
     let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
+    let mut fixed_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
 
     for item_name in item_definition_names(jar_assets_dir, packs) {
@@ -805,6 +823,7 @@ pub fn bake_item_models(
         // composite disagrees (beds share `block/template_bed`), so the first
         // part's wins and a disagreement is logged rather than modelled.
         let mut ground_transform: Option<Mat4> = None;
+        let mut fixed_transform: Option<Mat4> = None;
         for (part_index, part) in parts.iter().enumerate() {
             let resolved = resolve_model(
                 &part.path,
@@ -822,6 +841,9 @@ pub fn bake_item_models(
                 if let Some(icon) = resolved.textures.get(slot).and_then(|v| texture_to_name(v)) {
                     particle_icons.insert(item_name.to_string(), icon);
                 }
+            }
+            if fixed_transform.is_none() {
+                fixed_transform = resolved.fixed_transform;
             }
             match ground_transform {
                 None => ground_transform = Some(resolved.ground_transform),
@@ -876,17 +898,33 @@ pub fn bake_item_models(
         if let Some(transform) = ground_transform {
             ground_transforms.insert(item_name.to_string(), transform);
         }
+        if let Some(transform) = fixed_transform {
+            fixed_transforms.insert(item_name.to_string(), transform);
+        }
         if let Some(mut baked) = merged {
             apply_gui_lambert(&mut baked.quads, BLOCK_GUI_ROTATION_DEG);
             item_models.insert(item_name.to_string(), baked);
         }
     }
 
+    // Vanilla 26.2 bow range-dispatch leaves are separate meshes; the held
+    // renderer selects them only while the bow is actively used.
     for (name, model_id) in [
+        ("bow_pulling_0", "minecraft:item/bow_pulling_0"),
+        ("bow_pulling_1", "minecraft:item/bow_pulling_1"),
+        ("bow_pulling_2", "minecraft:item/bow_pulling_2"),
         ("pomme:item_frame_body", "minecraft:block/item_frame"),
         (
             "pomme:glow_item_frame_body",
             "minecraft:block/glow_item_frame",
+        ),
+        (
+            "pomme:item_frame_map_body",
+            "minecraft:block/item_frame_map",
+        ),
+        (
+            "pomme:glow_item_frame_map_body",
+            "minecraft:block/glow_item_frame_map",
         ),
     ] {
         let resolved = resolve_model(
@@ -906,6 +944,248 @@ pub fn bake_item_models(
     flat_keys.remove("chest");
     particle_icons.remove("chest");
 
+    // Vanilla player-head item: bake the default Steve slim skin shell only
+    // when the resolved item definition remains the official special model.
+    let player_head_item = resolve_asset_path_with_packs(
+        jar_assets_dir,
+        asset_index,
+        "minecraft/items/player_head.json",
+        packs,
+    );
+    if let Ok(text) = std::fs::read_to_string(player_head_item)
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+        && json
+            .pointer("/model/type")
+            .and_then(serde_json::Value::as_str)
+            == Some("minecraft:special")
+        && json
+            .pointer("/model/model/type")
+            .and_then(serde_json::Value::as_str)
+            == Some("minecraft:player_head")
+        && let Some(transform) = json
+            .pointer("/model/transformation")
+            .map_or(Some(Mat4::IDENTITY), parse_item_transformation)
+    {
+        // The special node's T(.5,0,.5) Rx(180) belongs to the geometry, not
+        // GROUND. Keep the base model's independently resolved display maps.
+        item_models.insert(
+            "player_head".to_string(),
+            bake_player_head_item_model(transform),
+        );
+        flat_keys.remove("player_head");
+        flat_tints.remove("player_head");
+    }
+
+    // Vanilla 26.2 special conduit shell; only synthesize it when the resolved
+    // item definition is still the vanilla special type.
+    let conduit_item = resolve_asset_path_with_packs(
+        jar_assets_dir,
+        asset_index,
+        "minecraft/items/conduit.json",
+        packs,
+    );
+    if std::fs::read_to_string(conduit_item)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .is_some_and(|json| {
+            json.pointer("/model/type")
+                .and_then(serde_json::Value::as_str)
+                == Some("minecraft:special")
+                && json
+                    .pointer("/model/model/type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("minecraft:conduit")
+        })
+    {
+        item_models.insert("conduit".to_string(), bake_conduit_item_model());
+        ground_transforms.insert(
+            "conduit".to_string(),
+            DisplayTransform {
+                rotation: Vec3::ZERO,
+                translation: Vec3::new(0.0, 3.0 / 16.0, 0.0),
+                scale: Vec3::splat(0.5),
+            }
+            .to_matrix(),
+        );
+    }
+
+    // Vanilla's special chest item model points at an empty base model. Reuse
+    // the existing chest mesh for this one special type until special models
+    // are generally baked.
+    let copper_item = resolve_asset_path_with_packs(
+        jar_assets_dir,
+        asset_index,
+        "minecraft/items/copper_chest.json",
+        packs,
+    );
+    if std::fs::read_to_string(copper_item)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .is_some_and(|json| {
+            json.pointer("/model/type")
+                .and_then(serde_json::Value::as_str)
+                == Some("minecraft:special")
+                && json
+                    .pointer("/model/model/type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("minecraft:chest")
+                && json
+                    .pointer("/model/model/texture")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("minecraft:copper")
+        })
+    {
+        let mut model = bake_chest_item_model();
+        for quad in &mut model.quads {
+            quad.texture = "entity/chest/copper".to_string();
+        }
+        item_models.insert("copper_chest".to_string(), model);
+        ground_transforms.insert("copper_chest".to_string(), default_block_ground_transform());
+    }
+
+    // Special shulker item definitions have an empty base model; bake their
+    // closed vanilla cuboids as ordinary CPU item quads (not the BE GPU mesh).
+    for item_name in item_definition_names(jar_assets_dir, packs) {
+        if item_name != "shulker_box" && !item_name.ends_with("_shulker_box") {
+            continue;
+        }
+        let path = resolve_asset_path_with_packs(
+            jar_assets_dir,
+            asset_index,
+            &format!("minecraft/items/{item_name}.json"),
+            packs,
+        );
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if json
+            .pointer("/model/type")
+            .and_then(serde_json::Value::as_str)
+            != Some("minecraft:special")
+            || json
+                .pointer("/model/model/type")
+                .and_then(serde_json::Value::as_str)
+                != Some("minecraft:shulker_box")
+        {
+            continue;
+        }
+        let texture = json
+            .pointer("/model/model/texture")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("minecraft:shulker");
+        let texture = texture.strip_prefix("minecraft:").unwrap_or(texture);
+        let texture = format!(
+            "entity/shulker/{}",
+            if texture == "shulker" {
+                "shulker".to_string()
+            } else {
+                format!(
+                    "shulker_{}",
+                    texture.strip_prefix("shulker_").unwrap_or(texture)
+                )
+            }
+        );
+        let mut model = bake_chest_item_model();
+        // Replace chest's two cuboids with a closed shulker base and lid.
+        model.quads.clear();
+        let shade = vanilla_gui_face_shades(CHEST_GUI_ROTATION_DEG);
+        add_chest_cube(
+            &mut model.quads,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.5,
+            1.0,
+            0.0,
+            28.0,
+            16.0,
+            8.0,
+            16.0,
+            &texture,
+            shade,
+        );
+        add_chest_cube(
+            &mut model.quads,
+            0.0,
+            0.5,
+            0.0,
+            1.0,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            16.0,
+            12.0,
+            16.0,
+            &texture,
+            shade,
+        );
+        item_models.insert(item_name.clone(), model);
+        ground_transforms.insert(item_name, default_block_ground_transform());
+    }
+
+    let trapped_item = resolve_asset_path_with_packs(
+        jar_assets_dir,
+        asset_index,
+        "minecraft/items/trapped_chest.json",
+        packs,
+    );
+    if let Ok(text) = std::fs::read_to_string(trapped_item)
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+        && json
+            .pointer("/model/type")
+            .and_then(serde_json::Value::as_str)
+            == Some("minecraft:select")
+        && json
+            .pointer("/model/property")
+            .and_then(serde_json::Value::as_str)
+            == Some("minecraft:local_time")
+        && json
+            .pointer("/model/cases/0/model/type")
+            .and_then(serde_json::Value::as_str)
+            == Some("minecraft:special")
+        && json
+            .pointer("/model/cases/0/model/model/type")
+            .and_then(serde_json::Value::as_str)
+            == Some("minecraft:chest")
+        && json
+            .pointer("/model/cases/0/model/model/texture")
+            .and_then(serde_json::Value::as_str)
+            == Some("minecraft:christmas")
+        && json
+            .pointer("/model/fallback/type")
+            .and_then(serde_json::Value::as_str)
+            == Some("minecraft:special")
+        && json
+            .pointer("/model/fallback/model/type")
+            .and_then(serde_json::Value::as_str)
+            == Some("minecraft:chest")
+        && json
+            .pointer("/model/fallback/model/texture")
+            .and_then(serde_json::Value::as_str)
+            == Some("minecraft:trapped")
+    {
+        let today = chrono::Local::now().date_naive();
+        let texture = if trapped_chest_is_christmas(today.month(), today.day()) {
+            "entity/chest/christmas"
+        } else {
+            "entity/chest/trapped"
+        };
+        let mut model = bake_chest_item_model();
+        for quad in &mut model.quads {
+            quad.texture = texture.to_string();
+        }
+        item_models.insert("trapped_chest".to_string(), model);
+        ground_transforms.insert(
+            "trapped_chest".to_string(),
+            default_block_ground_transform(),
+        );
+    }
+
     tracing::info!(
         "Baked {} item models, {} flat items, and registered {} generated-item textures",
         item_models.len(),
@@ -919,6 +1199,138 @@ pub fn bake_item_models(
         particle_icons,
         flat_tints,
         ground_transforms,
+        fixed_transforms,
+    }
+}
+
+fn trapped_chest_is_christmas(month: u32, day: u32) -> bool {
+    month == 12 && (24..=26).contains(&day)
+}
+
+#[cfg(test)]
+mod trapped_chest_date_tests {
+    use super::trapped_chest_is_christmas;
+
+    #[test]
+    fn christmas_texture_date_boundaries() {
+        for (day, christmas) in [(23, false), (24, true), (26, true), (27, false)] {
+            assert_eq!(trapped_chest_is_christmas(12, day), christmas);
+        }
+        assert!(!trapped_chest_is_christmas(11, 25));
+    }
+}
+
+/// ConduitRenderer.createShellLayer: (-3,-3,-3), 6x6x6, then the item's
+/// T(.5,.5,.5). Match entity_model's cube_face_positions/push_face without
+/// packing UVs into ChunkVertex: BakedQuad keeps exact 32x16 sheet fractions.
+pub(crate) fn bake_conduit_item_model() -> BakedModel {
+    let a = 5.0 / 16.0;
+    let b = 11.0 / 16.0;
+    // ModelPart.Cube order: -Z, +Z, minY, maxY, -X, +X.
+    let faces = [
+        (
+            [[b, a, a], [a, a, a], [a, b, a], [b, b, a]],
+            [6.0, 6.0, 12.0, 12.0],
+        ),
+        (
+            [[a, a, b], [b, a, b], [b, b, b], [a, b, b]],
+            [18.0, 6.0, 24.0, 12.0],
+        ),
+        (
+            [[b, a, b], [a, a, b], [a, a, a], [b, a, a]],
+            [6.0, 0.0, 12.0, 6.0],
+        ),
+        (
+            [[b, b, a], [a, b, a], [a, b, b], [b, b, b]],
+            [12.0, 6.0, 18.0, 0.0],
+        ),
+        (
+            [[a, a, a], [a, a, b], [a, b, b], [a, b, a]],
+            [0.0, 6.0, 6.0, 12.0],
+        ),
+        (
+            [[b, a, b], [b, a, a], [b, b, a], [b, b, b]],
+            [12.0, 6.0, 18.0, 12.0],
+        ),
+    ];
+    let mut quads: Vec<_> = faces
+        .into_iter()
+        .map(|(positions, [u0, v0, u1, v1])| BakedQuad {
+            positions,
+            ambient_occlusion: true,
+            // No half-texel inset; maxY's V-reversed rect is intentional.
+            uvs: [
+                [u1 / 32.0, v0 / 16.0],
+                [u0 / 32.0, v0 / 16.0],
+                [u0 / 32.0, v1 / 16.0],
+                [u1 / 32.0, v1 / 16.0],
+            ],
+            texture: "entity/conduit/base".to_string(),
+            cullface: None,
+            tint_index: None,
+            tint: Tint::None,
+            item_tint: ItemTint::Untinted,
+            shade_light: 1.0,
+            shade_face: None,
+        })
+        .collect();
+    apply_gui_lambert(&mut quads, CHEST_GUI_ROTATION_DEG);
+    BakedModel {
+        quads,
+        ambient_occlusion: true,
+        is_full_cube: false,
+        occludes: false,
+    }
+}
+
+/// SkullModel.createHumanoidHeadLayer in literal ModelPart space. Bake the
+/// special node transform once, before build_item_mesh's p-.5 centering; no
+/// placed-skull yaw, entity Y flip, or part pivot. PROFILE skins are separate.
+pub(crate) fn bake_player_head_item_model(transform: Mat4) -> BakedModel {
+    use crate::renderer::entity_model::{ModelCube, cube_faces};
+
+    let head = ModelCube {
+        origin: Vec3::new(-4.0, -8.0, -4.0),
+        size: Vec3::splat(8.0),
+        tex_offset: (0, 0),
+        deformation: 0.0,
+        mirror: false,
+    };
+    let hat = ModelCube {
+        tex_offset: (32, 0),
+        deformation: 0.25,
+        ..head
+    };
+    let mut quads = Vec::with_capacity(12);
+    for cube in [head, hat] {
+        for (positions, [u0, v0, u1, v1]) in cube_faces(&cube, false) {
+            quads.push(BakedQuad {
+                positions: positions
+                    .map(|p| transform.transform_point3(Vec3::from_array(p)).to_array()),
+                uvs: [
+                    [u1 / 64.0, v0 / 64.0],
+                    [u0 / 64.0, v0 / 64.0],
+                    [u0 / 64.0, v1 / 64.0],
+                    [u1 / 64.0, v1 / 64.0],
+                ],
+                texture: "entity/player/slim/steve".to_string(),
+                ambient_occlusion: true,
+                cullface: None,
+                tint_index: None,
+                tint: Tint::None,
+                item_tint: ItemTint::Untinted,
+                shade_light: 1.0,
+                shade_face: None,
+            });
+        }
+    }
+    // template_skull's GUI rotation is (30,45,0), not block/block's 225 Y.
+    apply_gui_lambert(&mut quads, CHEST_GUI_ROTATION_DEG);
+    BakedModel {
+        quads,
+        ambient_occlusion: true,
+        is_full_cube: false,
+        occludes: false,
     }
 }
 
@@ -1277,6 +1689,15 @@ fn parse_item_tint(value: &serde_json::Value) -> ItemTint {
             .unwrap_or_else(|| ItemTint::Unknown {
                 kind: "constant".to_string(),
             }),
+        "dye" => {
+            let value = value
+                .get("default")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(-6265536) as u32;
+            ItemTint::Dye {
+                default_rgb: [(value >> 16) as u8, (value >> 8) as u8, value as u8],
+            }
+        }
         "grass" => {
             let temperature = value
                 .get("temperature")
@@ -1306,6 +1727,22 @@ fn parse_item_tint(value: &serde_json::Value) -> ItemTint {
         other => ItemTint::Unknown {
             kind: other.to_string(),
         },
+    }
+}
+
+pub(crate) fn resolve_stack_item_tint(
+    tint: &ItemTint,
+    stack: &azalea_inventory::ItemStackData,
+) -> [u8; 3] {
+    match tint {
+        ItemTint::Dye { default_rgb } => stack
+            .get_component::<azalea_inventory::components::DyedColor>()
+            .map(|color| {
+                let rgb = color.rgb as u32;
+                [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
+            })
+            .unwrap_or(*default_rgb),
+        _ => tint.rgb(),
     }
 }
 
@@ -1631,6 +2068,7 @@ struct ResolvedModel {
     elements: Vec<ElementDef>,
     ambient_occlusion: bool,
     ground_transform: Mat4,
+    fixed_transform: Option<Mat4>,
 }
 
 fn resolve_model(
@@ -1644,6 +2082,7 @@ fn resolve_model(
     let mut elements: Option<Vec<ElementDef>> = None;
     let mut ambient_occlusion = None;
     let mut ground_transform: Option<Mat4> = None;
+    let mut fixed_transform: Option<Mat4> = None;
     let mut current_id = model_id.to_string();
 
     for _ in 0..20 {
@@ -1662,6 +2101,13 @@ fn resolve_model(
         }
         if ambient_occlusion.is_none() {
             ambient_occlusion = model.ambientocclusion;
+        }
+        if fixed_transform.is_none() {
+            fixed_transform = model
+                .display
+                .get("fixed")
+                .and_then(parse_display_transform)
+                .map(|t| t.to_matrix());
         }
         if ground_transform.is_none()
             && let Some(transform) = model
@@ -1688,6 +2134,7 @@ fn resolve_model(
         elements: elements.unwrap_or_default(),
         ambient_occlusion: ambient_occlusion.unwrap_or(true),
         ground_transform: ground_transform.unwrap_or(Mat4::IDENTITY),
+        fixed_transform,
     }
 }
 
@@ -2332,6 +2779,65 @@ mod tests {
     }
 
     #[test]
+    fn dye_variant_only_changes_index_zero_dye_quads_and_preserves_source() {
+        let quad = |tint_index, item_tint| BakedQuad {
+            ambient_occlusion: true,
+            positions: [[0.0; 3]; 4],
+            uvs: [[0.0; 2]; 4],
+            texture: "leather".into(),
+            cullface: None,
+            tint_index,
+            tint: Tint::None,
+            item_tint,
+            shade_light: 1.0,
+            shade_face: None,
+        };
+        let model = BakedModel {
+            quads: vec![
+                quad(
+                    Some(0),
+                    ItemTint::Dye {
+                        default_rgb: [160, 101, 64],
+                    },
+                ),
+                quad(None, ItemTint::Untinted),
+                quad(Some(0), ItemTint::Constant([1, 2, 3])),
+                quad(
+                    Some(1),
+                    ItemTint::Dye {
+                        default_rgb: [160, 101, 64],
+                    },
+                ),
+            ],
+            ambient_occlusion: true,
+            is_full_cube: false,
+            occludes: false,
+        };
+        let original = model.clone();
+        let default = colorized_dye_variant(&model, [160, 101, 64]);
+        let red = colorized_dye_variant(&model, [17, 34, 51]);
+        let blue = colorized_dye_variant(&model, [68, 85, 102]);
+        assert_eq!(red.quads[0].item_tint, ItemTint::Constant([17, 34, 51]));
+        assert_eq!(blue.quads[2].item_tint, ItemTint::Constant([1, 2, 3]));
+        assert_eq!(blue.quads[3].item_tint, original.quads[3].item_tint);
+        assert_eq!(red.quads[1].item_tint, ItemTint::Untinted);
+        assert_eq!(
+            default.quads[0].item_tint,
+            ItemTint::Constant([160, 101, 64])
+        );
+        assert_eq!(blue.quads[0].item_tint, ItemTint::Constant([68, 85, 102]));
+        assert_eq!(red.quads[0].positions, original.quads[0].positions);
+        assert_eq!(red.quads[0].uvs, original.quads[0].uvs);
+        assert_eq!(red.quads[0].texture, original.quads[0].texture);
+        assert_eq!(
+            model.quads[0].item_tint,
+            ItemTint::Dye {
+                default_rgb: [160, 101, 64]
+            }
+        );
+    }
+
+    #[test]
     fn gui_item_lighting_replaces_terrain_cardinal_shade() {
         let mut quad = BakedQuad {
             ambient_occlusion: true,
@@ -2436,10 +2942,18 @@ mod tests {
             parse_item_tints(&serde_json::json!({"type": "minecraft:model"})),
             Vec::<ItemTint>::new()
         );
-        assert!(matches!(
-            parse_item_tint(&serde_json::json!({"type": "minecraft:dye"})),
-            ItemTint::Unknown { .. }
-        ));
+        assert_eq!(
+            parse_item_tint(&serde_json::json!({"type": "minecraft:dye"})).rgb(),
+            [160, 101, 64]
+        );
+        assert_eq!(
+            parse_item_tint(&serde_json::json!({"type": "minecraft:dye", "default": -15654349}))
+                .rgb(),
+            [17, 34, 51]
+        );
+        for tint in [ItemTint::Untinted, ItemTint::Unknown { kind: "x".into() }] {
+            assert_eq!(tint.rgb(), [255, 255, 255]);
+        }
         assert_eq!(
             resolve_item_tint(&[ItemTint::Constant([1, 2, 3])], Some(0)).rgb(),
             [1, 2, 3]
@@ -2497,6 +3011,7 @@ mod tests {
                 shade: true,
             }],
             ground_transform: Mat4::IDENTITY,
+            fixed_transform: None,
         };
 
         let baked = bake_resolved_model(&resolved, 0, 270, false, |_| Tint::None).unwrap();
@@ -2651,6 +3166,405 @@ mod tests {
     }
 
     use crate::test_util::test_temp_dir;
+
+    const PLAYER_HEAD_ITEM: &str = r#"{"model":{
+        "type":"minecraft:special", "base":"minecraft:item/template_skull",
+        "model":{"type":"minecraft:player_head"},
+        "transformation":{"translation":[0.5,0,0.5],"left_rotation":[1,0,0,0],
+                          "right_rotation":[0,0,0,1],"scale":[1,1,1]}
+    }}"#;
+    const SKULL_BASE: &str = r#"{"textures":{"particle":"block/soul_sand"},"display":{
+        "gui":{"rotation":[30,45,0],"translation":[0,3,0],"scale":[1,1,1]},
+        "fixed":{"rotation":[0,180,0],"translation":[0,4,0],"scale":[1,1,1]},
+        "ground":{"translation":[0,3,0],"scale":[0.5,0.5,0.5]},
+        "thirdperson_righthand":{"rotation":[45,45,0],"translation":[0,3,0],"scale":[0.5,0.5,0.5]},
+        "on_shelf":{"translation":[0,8,0],"scale":[2,2,2]}
+    }}"#;
+
+    #[test]
+    fn player_head_exact_inflation_uv_facing_and_raw_cube_parity() {
+        let json: serde_json::Value = serde_json::from_str(PLAYER_HEAD_ITEM).unwrap();
+        let transform = parse_item_transformation(&json["model"]["transformation"]).unwrap();
+        let model = bake_player_head_item_model(transform);
+        assert_eq!(model.quads.len(), 12);
+        assert!(!model.is_full_cube && !model.occludes);
+        // Independent pixel-space anchors AFTER T(.5,0,.5) Rx180. The face
+        // rectangle (8,8)-(16,16) now points +Z, never mirrored or inset.
+        let positions = [
+            [[12, 8, 12], [4, 8, 12], [4, 0, 12], [12, 0, 12]],
+            [[4, 8, 4], [12, 8, 4], [12, 0, 4], [4, 0, 4]],
+            [[12, 8, 4], [4, 8, 4], [4, 8, 12], [12, 8, 12]],
+            [[12, 0, 12], [4, 0, 12], [4, 0, 4], [12, 0, 4]],
+            [[4, 8, 12], [4, 8, 4], [4, 0, 4], [4, 0, 12]],
+            [[12, 8, 4], [12, 8, 12], [12, 0, 12], [12, 0, 4]],
+        ];
+        let uvs = [
+            [[16, 8], [8, 8], [8, 16], [16, 16]],
+            [[32, 8], [24, 8], [24, 16], [32, 16]],
+            [[16, 0], [8, 0], [8, 8], [16, 8]],
+            [[24, 8], [16, 8], [16, 0], [24, 0]],
+            [[8, 8], [0, 8], [0, 16], [8, 16]],
+            [[24, 8], [16, 8], [16, 16], [24, 16]],
+        ];
+        let directions = [
+            Direction::South,
+            Direction::North,
+            Direction::Up,
+            Direction::Down,
+            Direction::West,
+            Direction::East,
+        ];
+        let shades = vanilla_gui_face_shades(CHEST_GUI_ROTATION_DEG);
+        let expected_shades = [
+            shades[3], shades[2], shades[0], shades[1], shades[4], shades[5],
+        ];
+        let raw = crate::renderer::block_entity_model::bake_player_head_model();
+        assert_eq!(raw.vertices.len(), 72);
+        for (index, quad) in model.quads.iter().enumerate() {
+            let face = index % 6;
+            let hat = index >= 6;
+            assert_eq!(quad.texture, "entity/player/slim/steve");
+            assert_eq!(quad.cullface, None);
+            assert_eq!(quad.item_tint, ItemTint::Untinted);
+            assert_eq!(
+                direction_from_positions(&quad.positions),
+                Some(directions[face])
+            );
+            assert!((quad.shade_light - expected_shades[face]).abs() < 1e-6);
+            for corner in 0..4 {
+                let p = positions[face][corner].map(|p| p as f32);
+                let expected: [f32; 3] = std::array::from_fn(|axis| {
+                    let center = [8.0, 4.0, 8.0][axis];
+                    (p[axis]
+                        + if hat {
+                            (p[axis] - center).signum() * 0.25
+                        } else {
+                            0.0
+                        })
+                        / 16.0
+                });
+                assert_eq!(quad.positions[corner], expected);
+                let [u, v] = uvs[face][corner];
+                assert_eq!(
+                    quad.uvs[corner],
+                    [
+                        (u + if hat { 32 } else { 0 }) as f32 / 64.0,
+                        v as f32 / 64.0
+                    ]
+                );
+                // The BE helper is used ONLY as raw ModelPart data: no yaw/pivot.
+                let vertex = &raw.vertices[index * 6 + [0, 1, 2, 5][corner]];
+                assert_eq!(
+                    quad.positions[corner],
+                    transform
+                        .transform_point3(Vec3::from_array(vertex.position))
+                        .to_array()
+                );
+                assert_eq!(
+                    vertex.tex_coords,
+                    crate::renderer::chunk::mesher::pack_uv(
+                        quad.uvs[corner][0],
+                        quad.uvs[corner][1]
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn player_head_special_base_displays_and_ordinary_pack_override() {
+        use crate::renderer::pipelines::item_display::{
+            DisplayResolver, DisplayTransform as Context,
+        };
+        let root = test_temp_dir("player_head_item_pack");
+        let jar = root.join("jar");
+        let instance = root.join("instance");
+        let items = jar.join("minecraft/items");
+        let models = jar.join("minecraft/models/item");
+        let pack = instance.join("resourcepacks/test_pack");
+        let pack_items = pack.join("assets/minecraft/items");
+        let pack_models = pack.join("assets/minecraft/models/item");
+        for dir in [&items, &models, &pack_items, &pack_models] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(items.join("player_head.json"), PLAYER_HEAD_ITEM).unwrap();
+        std::fs::write(models.join("template_skull.json"), SKULL_BASE).unwrap();
+        let baked = bake_item_models(&jar, &None, None);
+        let head = &baked.models["player_head"];
+        assert_eq!(head.quads.len(), 12);
+        assert_eq!(
+            head.quads[0].positions[0],
+            [12.0 / 16.0, 8.0 / 16.0, 12.0 / 16.0]
+        );
+        assert!(!baked.flat_texture_keys.contains_key("player_head"));
+        assert_eq!(
+            crate::renderer::chunk::atlas::atlas_asset_path(&head.quads[0].texture),
+            "minecraft/textures/entity/player/slim/steve.png"
+        );
+        let ground = Context {
+            rotation: Vec3::ZERO,
+            translation: Vec3::new(0.0, 3.0 / 16.0, 0.0),
+            scale: Vec3::splat(0.5),
+        };
+        let fixed = Context {
+            rotation: Vec3::new(0.0, 180.0, 0.0),
+            translation: Vec3::new(0.0, 4.0 / 16.0, 0.0),
+            scale: Vec3::ONE,
+        };
+        assert!(baked.ground_transforms["player_head"].abs_diff_eq(ground.to_matrix(), 1e-6));
+        assert!(baked.fixed_transforms["player_head"].abs_diff_eq(fixed.to_matrix(), 1e-6));
+        for (key, expected) in [
+            (
+                "gui",
+                Context {
+                    rotation: Vec3::new(30.0, 45.0, 0.0),
+                    scale: Vec3::ONE,
+                    ..ground
+                },
+            ),
+            ("ground", ground),
+            ("fixed", fixed),
+            ("firstperson_righthand", Context::IDENTITY),
+            ("firstperson_lefthand", Context::IDENTITY),
+            (
+                "thirdperson_righthand",
+                Context {
+                    rotation: Vec3::new(45.0, 45.0, 0.0),
+                    ..ground
+                },
+            ),
+            (
+                "on_shelf",
+                Context {
+                    translation: Vec3::new(0.0, 0.5, 0.0),
+                    scale: Vec3::splat(2.0),
+                    ..Context::IDENTITY
+                },
+            ),
+            ("head", Context::IDENTITY),
+            ("none", Context::IDENTITY),
+        ] {
+            let resolver = DisplayResolver::new(&jar, key);
+            let actual = resolver.resolve(
+                "player_head",
+                Context {
+                    scale: Vec3::splat(9.0),
+                    ..Context::IDENTITY
+                },
+            );
+            assert!(
+                actual.to_matrix().abs_diff_eq(expected.to_matrix(), 1e-6),
+                "{key}"
+            );
+            // Each context consumes the same already-transformed quad, then p-.5.
+            let centered = Vec3::from_array(head.quads[0].positions[0]) - Vec3::splat(0.5);
+            assert!(
+                actual.to_matrix().transform_point3(centered).abs_diff_eq(
+                    expected
+                        .to_matrix()
+                        .transform_point3(Vec3::new(0.25, 0.0, 0.25)),
+                    1e-6
+                ),
+                "{key}"
+            );
+        }
+        // The special node transformation is read once, not hardcoded or put
+        // back into GROUND. This also covers an absent node transformation.
+        std::fs::write(
+            pack.join("pack.mcmeta"),
+            r#"{"pack":{"pack_format":84,"description":"test"}}"#,
+        )
+        .unwrap();
+        let mut special: serde_json::Value = serde_json::from_str(PLAYER_HEAD_ITEM).unwrap();
+        special["model"]
+            .as_object_mut()
+            .unwrap()
+            .remove("transformation");
+        std::fs::write(pack_items.join("player_head.json"), special.to_string()).unwrap();
+        let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
+        packs.enable_local_pack("test_pack");
+        let untransformed = bake_item_models(&jar, &None, Some(&packs));
+        assert_eq!(
+            untransformed.models["player_head"].quads[0].positions[0],
+            [0.25, -0.5, -0.25]
+        );
+        assert!(
+            untransformed.ground_transforms["player_head"].abs_diff_eq(ground.to_matrix(), 1e-6)
+        );
+
+        std::fs::write(
+            pack_items.join("player_head.json"),
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/replacement"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pack_models.join("replacement.json"),
+            r##"{
+            "textures":{"all":"minecraft:block/replacement"},
+            "elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"north":{"texture":"#all"}}}],
+            "display":{"ground":{"translation":[0,7,0]},"fixed":{"translation":[0,2,0]}}
+        }"##,
+        )
+        .unwrap();
+        let baked = bake_item_models(&jar, &None, Some(&packs));
+        assert_eq!(baked.models["player_head"].quads.len(), 1);
+        assert_eq!(baked.models["player_head"].quads[0].texture, "replacement");
+        assert_eq!(
+            baked.ground_transforms["player_head"],
+            Mat4::from_translation(Vec3::new(0.0, 7.0 / 16.0, 0.0))
+        );
+        assert_eq!(
+            baked.fixed_transforms["player_head"],
+            Mat4::from_translation(Vec3::new(0.0, 2.0 / 16.0, 0.0))
+        );
+        std::fs::write(
+            pack_models.join("replacement.json"),
+            r#"{"textures":{"layer0":"minecraft:item/replacement"}}"#,
+        )
+        .unwrap();
+        let baked = bake_item_models(&jar, &None, Some(&packs));
+        assert!(!baked.models.contains_key("player_head"));
+        assert_eq!(baked.flat_texture_keys["player_head"], "item/replacement");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conduit_shell_has_exact_vanilla_positions_and_32x16_face_uvs() {
+        let model = bake_conduit_item_model();
+        assert_eq!(model.quads.len(), 6);
+        assert!(!model.is_full_cube && !model.occludes);
+        // Independent pixel-space anchors in ModelPart.Polygon vertex order.
+        let positions = [
+            [[11, 5, 5], [5, 5, 5], [5, 11, 5], [11, 11, 5]],
+            [[5, 5, 11], [11, 5, 11], [11, 11, 11], [5, 11, 11]],
+            [[11, 5, 11], [5, 5, 11], [5, 5, 5], [11, 5, 5]],
+            [[11, 11, 5], [5, 11, 5], [5, 11, 11], [11, 11, 11]],
+            [[5, 5, 5], [5, 5, 11], [5, 11, 11], [5, 11, 5]],
+            [[11, 5, 11], [11, 5, 5], [11, 11, 5], [11, 11, 11]],
+        ];
+        let uvs = [
+            [[12, 6], [6, 6], [6, 12], [12, 12]],
+            [[24, 6], [18, 6], [18, 12], [24, 12]],
+            [[12, 0], [6, 0], [6, 6], [12, 6]],
+            [[18, 6], [12, 6], [12, 0], [18, 0]],
+            [[6, 6], [0, 6], [0, 12], [6, 12]],
+            [[18, 6], [12, 6], [12, 12], [18, 12]],
+        ];
+        let directions = [
+            Direction::North,
+            Direction::South,
+            Direction::Down,
+            Direction::Up,
+            Direction::West,
+            Direction::East,
+        ];
+        for (face, quad) in model.quads.iter().enumerate() {
+            assert_eq!(quad.texture, "entity/conduit/base");
+            assert_eq!(quad.cullface, None);
+            assert_eq!(quad.tint, Tint::None);
+            assert_eq!(quad.item_tint, ItemTint::Untinted);
+            assert_eq!(
+                direction_from_positions(&quad.positions),
+                Some(directions[face])
+            );
+            for corner in 0..4 {
+                assert_eq!(
+                    quad.positions[corner],
+                    positions[face][corner].map(|p| p as f32 / 16.0)
+                );
+                let [u, v] = uvs[face][corner];
+                assert_eq!(quad.uvs[corner], [u as f32 / 32.0, v as f32 / 16.0]);
+            }
+        }
+    }
+
+    #[test]
+    fn conduit_special_ground_and_ordinary_pack_override() {
+        let root = test_temp_dir("conduit_item_pack");
+        let jar = root.join("jar");
+        let instance = root.join("instance");
+        let items = jar.join("minecraft/items");
+        let models = jar.join("minecraft/models/item");
+        let pack = instance.join("resourcepacks/test_pack");
+        let pack_items = pack.join("assets/minecraft/items");
+        let pack_models = pack.join("assets/minecraft/models/item");
+        for dir in [&items, &models, &pack_items, &pack_models] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            items.join("conduit.json"),
+            r#"{"model":{
+            "type":"minecraft:special", "base":"minecraft:item/conduit",
+            "model":{"type":"minecraft:conduit"},
+            "transformation":{"translation":[0.5,0.5,0.5]}
+        }}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("conduit.json"),
+            r#"{
+            "display":{"ground":{"translation":[0,3,0],"scale":[0.5,0.5,0.5]}}
+        }"#,
+        )
+        .unwrap();
+        let baked = bake_item_models(&jar, &None, None);
+        assert_eq!(baked.models["conduit"].quads.len(), 6);
+        assert!(!baked.flat_texture_keys.contains_key("conduit"));
+        let ground = baked.ground_transforms["conduit"];
+        assert_eq!(
+            ground,
+            Mat4::from_translation(Vec3::new(0.0, 3.0 / 16.0, 0.0))
+                * Mat4::from_scale(Vec3::splat(0.5))
+        );
+        assert_eq!(
+            ground.transform_point3(Vec3::splat(-3.0 / 16.0)),
+            Vec3::new(-3.0 / 32.0, 3.0 / 32.0, -3.0 / 32.0)
+        );
+        assert_eq!(
+            ground.transform_point3(Vec3::splat(3.0 / 16.0)),
+            Vec3::new(3.0 / 32.0, 9.0 / 32.0, 3.0 / 32.0)
+        );
+
+        std::fs::write(
+            pack.join("pack.mcmeta"),
+            r#"{"pack":{"pack_format":84,"description":"test"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pack_items.join("conduit.json"),
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/replacement"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pack_models.join("replacement.json"),
+            r##"{
+            "textures":{"all":"minecraft:block/replacement"},
+            "elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"north":{"texture":"#all"}}}],
+            "display":{"ground":{"translation":[0,7,0],"scale":[1,1,1]}}
+        }"##,
+        )
+        .unwrap();
+        let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
+        packs.enable_local_pack("test_pack");
+        let baked = bake_item_models(&jar, &None, Some(&packs));
+        assert_eq!(baked.models["conduit"].quads.len(), 1);
+        assert_eq!(baked.models["conduit"].quads[0].texture, "replacement");
+        assert_eq!(
+            baked.ground_transforms["conduit"],
+            Mat4::from_translation(Vec3::new(0.0, 7.0 / 16.0, 0.0))
+        );
+
+        // A pack may also replace the special item with an ordinary flat sprite.
+        std::fs::write(
+            pack_models.join("replacement.json"),
+            r#"{"textures":{"layer0":"minecraft:item/replacement"}}"#,
+        )
+        .unwrap();
+        let baked = bake_item_models(&jar, &None, Some(&packs));
+        assert!(!baked.models.contains_key("conduit"));
+        assert_eq!(baked.flat_texture_keys["conduit"], "item/replacement");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn item_definition_and_ground_transform_follow_resource_pack_override() {

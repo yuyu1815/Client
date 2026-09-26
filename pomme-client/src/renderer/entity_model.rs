@@ -5608,19 +5608,9 @@ pub(crate) const FACE_NEG_X: u8 = 1 << 4;
 pub(crate) const FACE_POS_X: u8 = 1 << 5;
 pub(crate) const FACE_ALL: u8 = 0x3F;
 
-/// Emits one vanilla `ModelPart.Cube` with the vanilla box unwrap. `y_down`
-/// picks the coordinate space: negated Y for entity models, literal y-up for
-/// block-entity models (chests).
-pub(crate) fn generate_cube_vertices(
-    cube: &ModelCube,
-    tex_w: u32,
-    tex_h: u32,
-    faces: u8,
-    y_down: bool,
-    vertices: &mut Vec<ChunkVertex>,
-) {
-    let tw = tex_w as f32;
-    let th = tex_h as f32;
+/// Unpacked vanilla cube faces, shared by entity triangles and special item
+/// quads. UV rectangles stay in sheet pixels (no inset or u16 quantization).
+pub(crate) fn cube_faces(cube: &ModelCube, y_down: bool) -> [([[f32; 3]; 4], [f32; 4]); 6] {
     let u = cube.tex_offset.0 as f32;
     let v = cube.tex_offset.1 as f32;
     let w = cube.size.x;
@@ -5641,6 +5631,22 @@ pub(crate) fn generate_cube_vertices(
     ];
 
     let positions = cube_face_positions(cube, y_down);
+    std::array::from_fn(|i| (positions[i], face_uv[i]))
+}
+
+/// Emits one vanilla `ModelPart.Cube` with the vanilla box unwrap. `y_down`
+/// picks the coordinate space: negated Y for entity models, literal y-up for
+/// block-entity models (chests).
+pub(crate) fn generate_cube_vertices(
+    cube: &ModelCube,
+    tex_w: u32,
+    tex_h: u32,
+    faces: u8,
+    y_down: bool,
+    vertices: &mut Vec<ChunkVertex>,
+) {
+    let tw = tex_w as f32;
+    let th = tex_h as f32;
 
     // Vanilla samplers REPEAT while pomme's vertex format clamps UVs to the
     // sheet; shift any face rect that lies wholly off-sheet (negative
@@ -5655,7 +5661,7 @@ pub(crate) fn generate_cube_vertices(
         }
     };
 
-    for (slot, (pos, uv)) in positions.iter().zip(&face_uv).enumerate() {
+    for (slot, (pos, uv)) in cube_faces(cube, y_down).iter().enumerate() {
         if faces & (1 << slot) == 0 {
             continue;
         }

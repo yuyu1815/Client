@@ -555,6 +555,40 @@ pub async fn get_client_logs(state: State<'_, AppState>) -> Result<VecDeque<Stri
     Ok(logs.clone())
 }
 
+fn client_binary_candidates(
+    dir: &std::path::Path,
+    exe_name: &str,
+    debug: bool,
+) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if debug {
+        // A launcher in target/debug may sit beside a stale client build.
+        candidates.extend(
+            dir.ancestors()
+                .skip(1)
+                .take(6)
+                .map(|ancestor| ancestor.join("target/dev-fast").join(exe_name)),
+        );
+    }
+    candidates.push(dir.join(exe_name));
+    let mut ancestor = dir.to_path_buf();
+    for _ in 0..6 {
+        if !ancestor.pop() {
+            break;
+        }
+
+        let profiles: &[&str] = if debug {
+            &["debug", "release"]
+        } else {
+            &["release", "debug"]
+        };
+        for profile in profiles {
+            candidates.push(ancestor.join("target").join(profile).join(exe_name));
+        }
+    }
+    candidates
+}
+
 fn find_client_binary() -> Result<std::path::PathBuf, String> {
     #[cfg(target_family = "windows")]
     const EXENAME: &str = "pomme-client.exe";
@@ -565,32 +599,102 @@ fn find_client_binary() -> Result<std::path::PathBuf, String> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let same_dir = dir.join(EXENAME);
-        if same_dir.exists() {
-            return Ok(same_dir);
-        }
+        #[cfg(debug_assertions)]
+        let debug = true;
+        #[cfg(not(debug_assertions))]
+        let debug = false;
 
-        let mut ancestor = dir.to_path_buf();
-        for _ in 0..6 {
-            if !ancestor.pop() {
-                break;
-            }
-
-            #[cfg(debug_assertions)]
-            let profiles = ["debug", "release"];
-            #[cfg(not(debug_assertions))]
-            let profiles = ["release", "debug"];
-
-            for profile in profiles {
-                let candidate = ancestor.join("target").join(profile).join(EXENAME);
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
-            }
+        if let Some(candidate) = client_binary_candidates(dir, EXENAME, debug)
+            .into_iter()
+            .find(|candidate| candidate.exists())
+        {
+            return Ok(candidate);
         }
     }
 
     Err("Pomme client not found. It will be bundled in future releases.".into())
+}
+
+#[cfg(test)]
+mod client_binary_search_tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+
+    use super::client_binary_candidates;
+
+    fn fixture() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "pomme-binary-search-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn debug_prefers_dev_fast_over_stale_beside_launcher() {
+        let root = fixture();
+        let launcher_dir = root.join("target/debug");
+        let beside = launcher_dir.join("pomme-client.exe");
+        let dev_fast = root.join("target/dev-fast/pomme-client.exe");
+        fs::create_dir_all(&launcher_dir).unwrap();
+        fs::create_dir_all(dev_fast.parent().unwrap()).unwrap();
+        fs::write(&beside, b"old debug client").unwrap();
+        fs::write(&dev_fast, b"new dev-fast client").unwrap();
+
+        let candidates = client_binary_candidates(&launcher_dir, "pomme-client.exe", true);
+        assert_eq!(candidates.iter().find(|p| p.exists()), Some(&dev_fast));
+        let release = client_binary_candidates(&launcher_dir, "pomme-client.exe", false);
+        assert_eq!(release.iter().find(|p| p.exists()), Some(&beside));
+        assert!(!release.contains(&dev_fast));
+
+        fs::remove_file(&dev_fast).unwrap();
+        assert_eq!(candidates.iter().find(|p| p.exists()), Some(&beside));
+        assert_eq!(fs::read(&beside).unwrap(), b"old debug client");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn debug_prefers_dev_fast_then_beside_then_debug() {
+        let root = fixture();
+        let launcher_dir = root
+            .join("launcher")
+            .join("src-tauri")
+            .join("target")
+            .join("debug");
+        let dev_fast = root.join("target/dev-fast/pomme-client.exe");
+        let debug = root.join("target/debug/pomme-client.exe");
+        let release_client = root.join("target/release/pomme-client.exe");
+        let beside = launcher_dir.join("pomme-client.exe");
+        for path in [&dev_fast, &debug, &release_client, &beside] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, []).unwrap();
+        }
+
+        let candidates = client_binary_candidates(&launcher_dir, "pomme-client.exe", true);
+        assert_eq!(
+            candidates.iter().find(|p| p.exists()).cloned(),
+            Some(dev_fast.clone())
+        );
+        let release = client_binary_candidates(&launcher_dir, "pomme-client.exe", false);
+        assert_eq!(release.iter().find(|p| p.exists()), Some(&beside));
+        assert!(!release.contains(&dev_fast));
+
+        fs::remove_file(&dev_fast).unwrap();
+        assert_eq!(candidates.iter().find(|p| p.exists()), Some(&beside));
+        fs::remove_file(&beside).unwrap();
+        assert_eq!(candidates.iter().find(|p| p.exists()), Some(&debug));
+        assert_eq!(release.iter().find(|p| p.exists()), Some(&release_client));
+        fs::remove_file(&debug).unwrap();
+        assert_eq!(
+            candidates.iter().find(|p| p.exists()),
+            Some(&release_client)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[tauri::command]

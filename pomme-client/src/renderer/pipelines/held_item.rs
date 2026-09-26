@@ -28,6 +28,7 @@ pub struct UseAnim {
     pub curr_usage_time: f32,
     pub duration: f32,
     pub left_hand: bool,
+    pub bow: bool,
 }
 
 pub struct HeldItemPipeline {
@@ -111,7 +112,13 @@ impl HeldItemPipeline {
         meshes: &ItemEntityPipeline,
         bob: Mat4,
     ) {
-        let Some((buffer, vertex_count)) = meshes.mesh_handle(&item.name) else {
+        let selected_name = selected_item_model_name(&item.name, use_anim, left_hand);
+        let selected_name = if meshes.mesh_handle(selected_name).is_some() {
+            selected_name
+        } else {
+            &item.name
+        };
+        let Some((buffer, vertex_count)) = meshes.mesh_handle(selected_name) else {
             self.last_draw_trace = Some(serde_json::json!({
                 "status": "skipped", "reason": "no_item_mesh", "item": item.name,
                 "frameIndex": frame, "vertexCount": 0,
@@ -132,8 +139,9 @@ impl HeldItemPipeline {
                 .resolve(&item.name, default_first_person(item.has_3d_model, false))
         };
         let arm = match use_anim.filter(|anim| anim.left_hand == left_hand) {
+            Some(anim) if anim.bow => bow_item_matrix(anim),
             Some(anim) => eat_item_matrix(anim),
-            None => first_person_item_matrix(swing_progress),
+            None => first_person_item_matrix(swing_progress, left_hand),
         };
         // build_item_mesh stores vertices centered at the origin; ItemTransform's
         // final -0.5 translation applies to vanilla's uncentered [0, 1] vertices.
@@ -250,16 +258,40 @@ impl HeldItemPipeline {
     }
 }
 
-// Vanilla ItemInHandRenderer: applyItemArmTransform + swingArm (right hand,
-// inverseArmHeight = 0).
-fn first_person_item_matrix(swing_progress: f32) -> Mat4 {
+/// CPU model selection shared by the draw path and headless interaction tests.
+pub(crate) fn selected_item_model_name(
+    base_name: &str,
+    use_anim: Option<UseAnim>,
+    left_hand: bool,
+) -> &str {
+    use_anim
+        .filter(|anim| base_name == "bow" && anim.bow && anim.left_hand == left_hand)
+        .as_ref()
+        .map(bow_model_name)
+        .unwrap_or(base_name)
+}
+
+fn bow_model_name(anim: &UseAnim) -> &'static str {
+    let elapsed = (anim.duration - anim.curr_usage_time).max(0.0);
+    if elapsed >= 18.0 {
+        "bow_pulling_2"
+    } else if elapsed >= 13.0 {
+        "bow_pulling_1"
+    } else {
+        "bow_pulling_0"
+    }
+}
+
+// Vanilla ItemInHandRenderer: applyItemArmTransform + swingArm.
+fn first_person_item_matrix(swing_progress: f32, left_hand: bool) -> Mat4 {
     let a = swing_progress;
     let sq = a.sqrt();
     let pi = std::f32::consts::PI;
 
-    Mat4::from_translation(Vec3::new(0.56, -0.52, -0.72))
+    let hand_sign = if left_hand { -1.0 } else { 1.0 };
+    Mat4::from_translation(Vec3::new(hand_sign * 0.56, -0.52, -0.72))
         * Mat4::from_translation(Vec3::new(
-            -0.4 * (sq * pi).sin(),
+            hand_sign * -0.4 * (sq * pi).sin(),
             0.2 * (sq * pi * 2.0).sin(),
             -0.2 * (a * pi).sin(),
         ))
@@ -267,6 +299,23 @@ fn first_person_item_matrix(swing_progress: f32) -> Mat4 {
         * Mat4::from_rotation_z(((sq * pi).sin() * -20.0).to_radians())
         * Mat4::from_rotation_x(((sq * pi).sin() * -80.0).to_radians())
         * Mat4::from_rotation_y((-45.0_f32).to_radians())
+}
+
+// Vanilla ItemInHandRenderer BOW branch (26.2): fixed bow pose plus the
+// 20-tick quadratic draw power, applied after the ordinary arm transform.
+fn bow_item_matrix(anim: UseAnim) -> Mat4 {
+    let time_held = anim.duration - anim.curr_usage_time;
+    let mut power = time_held / 20.0;
+    power = ((power * power + power * 2.0) / 3.0).min(1.0);
+    let invert = if anim.left_hand { -1.0 } else { 1.0 };
+    first_person_item_matrix(0.0, anim.left_hand)
+        * Mat4::from_translation(Vec3::new(invert * -0.2785682, 0.18344387, 0.15731531))
+        * Mat4::from_rotation_x((-13.935_f32).to_radians())
+        * Mat4::from_rotation_y((invert * 35.3_f32).to_radians())
+        * Mat4::from_rotation_z((invert * -9.785_f32).to_radians())
+        * Mat4::from_translation(Vec3::new(0.0, 0.0, power * 0.04))
+        * Mat4::from_scale(Vec3::new(1.0, 1.0, 1.0 + power * 0.2))
+        * Mat4::from_rotation_y((invert * -45.0_f32).to_radians())
 }
 
 // Vanilla ItemInHandRenderer: applyEatTransform then applyItemArmTransform
@@ -314,8 +363,78 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bow_mesh_stage_uses_elapsed_ticks() {
+        let stage = |ticks: f32| {
+            bow_model_name(&UseAnim {
+                curr_usage_time: 72_000.0 - ticks,
+                duration: 72_000.0,
+                left_hand: false,
+                bow: true,
+            })
+        };
+        for (ticks, expected) in [
+            (0.0, "bow_pulling_0"),
+            (12.0, "bow_pulling_0"),
+            (13.0, "bow_pulling_1"),
+            (17.0, "bow_pulling_1"),
+            (18.0, "bow_pulling_2"),
+            (20.0, "bow_pulling_2"),
+        ] {
+            assert_eq!(stage(ticks), expected);
+        }
+    }
+
+    #[test]
+    fn held_item_matrix_places_each_hand_on_its_side_during_idle_and_swing() {
+        let idle_right = first_person_item_matrix(0.0, false).w_axis.x;
+        let idle_left = first_person_item_matrix(0.0, true).w_axis.x;
+        assert!((idle_right - 0.56).abs() < 1e-6);
+        assert!((idle_left + 0.56).abs() < 1e-6);
+
+        let swing_right = first_person_item_matrix(0.5, false).w_axis.x;
+        let swing_left = first_person_item_matrix(0.5, true).w_axis.x;
+        assert!(swing_right > 0.0 && swing_left < 0.0);
+        assert!((swing_right + swing_left).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bow_draw_power_matches_vanilla_twenty_tick_curve_and_hand_sign() {
+        let anim = |ticks_held: f32, left_hand| UseAnim {
+            curr_usage_time: 72_000.0 - ticks_held,
+            duration: 72_000.0,
+            left_hand,
+            bow: true,
+        };
+        let idle = bow_item_matrix(anim(0.0, false));
+        let early = bow_item_matrix(anim(10.0, false));
+        let full = bow_item_matrix(anim(20.0, false));
+        let left = bow_item_matrix(anim(20.0, true));
+        let base_right = first_person_item_matrix(0.0, false);
+
+        assert!(idle.abs_diff_eq(
+            base_right
+                * Mat4::from_translation(Vec3::new(-0.2785682, 0.18344387, 0.15731531,))
+                * Mat4::from_rotation_x((-13.935_f32).to_radians())
+                * Mat4::from_rotation_y(35.3_f32.to_radians())
+                * Mat4::from_rotation_z((-9.785_f32).to_radians())
+                * Mat4::from_rotation_y((-45.0_f32).to_radians()),
+            1e-6
+        ));
+        // Official 26.2: (0.5^2 + 2 * 0.5) / 3 = 5/12 at 10 ticks.
+        // Undo the final -45-degree Y rotation to measure the stretched Z axis.
+        let stretch_axis = Mat4::from_rotation_y(45_f32.to_radians()).transform_vector3(Vec3::Z);
+        assert!(
+            (early.transform_vector3(stretch_axis).length() - (1.0 + (5.0_f32 / 12.0) * 0.2)).abs()
+                < 1e-5
+        );
+        assert!((full.transform_vector3(stretch_axis).length() - 1.2).abs() < 1e-5);
+        assert!(!full.abs_diff_eq(base_right, 1e-3));
+        assert!((left.w_axis.x + full.w_axis.x).abs() < 1e-6);
+    }
+
+    #[test]
     fn held_display_transform_pivots_around_model_center() {
-        let arm = first_person_item_matrix(0.0);
+        let arm = first_person_item_matrix(0.0, false);
         let model = arm * default_first_person(true, false).to_matrix();
         let center = model.transform_point3(Vec3::ZERO);
         let arm_origin = arm.transform_point3(Vec3::ZERO);

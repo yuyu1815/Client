@@ -82,6 +82,13 @@ pub struct ServerTransfer {
     pub cookies: std::collections::HashMap<azalea_registry::identifier::Identifier, Vec<u8>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TextDisplayTransformValue {
+    Vector([f32; 3]),
+    Quaternion([f32; 4]),
+    Billboard(u8),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CriticalHitKind {
     Critical,
@@ -123,6 +130,9 @@ pub enum NetworkEvent {
         data: Arc<Box<[u8]>>,
         heightmaps: Vec<(HeightmapKind, Box<[u64]>)>,
         light: PacketLightData,
+        /// The chunk's authoritative BE snapshot, including entries with empty
+        /// NBT.
+        block_entities: Vec<(BlockPos, BlockEntityKind, NbtCompound)>,
     },
     ChunkBiomes {
         pos: ChunkPos,
@@ -145,6 +155,12 @@ pub enum NetworkEvent {
         id: u32,
         change: azalea_protocol::common::movements::PositionMoveRotation,
         relative: azalea_protocol::common::movements::RelativeMovements,
+    },
+    /// Vehicle correction has no entity or teleport id in the protocol.
+    MoveVehicle {
+        pos: DVec3,
+        yaw: f32,
+        pitch: f32,
     },
     PlayerRotation {
         y_rot: f32,
@@ -203,6 +219,11 @@ pub enum NetworkEvent {
     EntityMaxHealthUpdate {
         entity_id: i32,
         max_health: f32,
+    },
+    EntityAttributeUpdate {
+        entity_id: i32,
+        attribute: String,
+        value: f64,
     },
     ContainerContent {
         container_id: i32,
@@ -401,10 +422,6 @@ pub enum NetworkEvent {
     SectionBlocksUpdate {
         updates: Vec<(BlockPos, BlockState)>,
     },
-    BlockEntitySync {
-        chunk_pos: ChunkPos,
-        entries: Vec<(BlockPos, BlockEntityKind, NbtCompound)>,
-    },
     BlockEntityUpdate {
         pos: BlockPos,
         kind: BlockEntityKind,
@@ -566,6 +583,7 @@ pub enum NetworkEvent {
         item_id: u32,
         damage: i32,
         count: i32,
+        stack: Option<azalea_inventory::ItemStackData>,
     },
     /// ItemFrame metadata index 8: the direction the frame faces.
     ItemFrameDirection {
@@ -587,6 +605,11 @@ pub enum NetworkEvent {
     TextDisplayText {
         id: i32,
         text: Vec<crate::ui::text::TextSpan>,
+    },
+    TextDisplayTransform {
+        id: i32,
+        index: u8,
+        value: TextDisplayTransformValue,
     },
     EntityHeadRotation {
         id: i32,

@@ -13,6 +13,119 @@ pub struct StoredBlockEntity {
     pub nbt: NbtCompound,
 }
 
+/// Stable, non-URL identity for a player-head texture source.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PlayerHeadProfileSource {
+    ResourceTexture(String),
+    EmbeddedTexturesProperty(String),
+    Profile(String),
+    Default,
+}
+
+/// Parse only the 26.2 `profile` field; never interpret NBT as a URL or path.
+pub fn player_head_profile_source(nbt: &NbtCompound) -> PlayerHeadProfileSource {
+    use simdnbt::owned::{NbtList, NbtTag};
+    let Some(profile) = nbt.get("profile") else {
+        return PlayerHeadProfileSource::Default;
+    };
+    if let NbtTag::String(name) = profile {
+        let name = name.to_str();
+        return if name.is_empty() {
+            PlayerHeadProfileSource::Default
+        } else {
+            PlayerHeadProfileSource::Profile(name.into_owned())
+        };
+    }
+    let Some(profile) = profile.compound() else {
+        return PlayerHeadProfileSource::Default;
+    };
+    if let Some(NbtTag::String(texture)) = profile.get("texture") {
+        let texture = texture.to_str();
+        if valid_player_head_resource_texture(&texture) {
+            return PlayerHeadProfileSource::ResourceTexture(texture.into_owned());
+        }
+    }
+    let property = profile
+        .get("properties")
+        .and_then(|tag| tag.compound())
+        .and_then(|props| props.get("textures"))
+        .and_then(|tag| match tag {
+            NbtTag::List(NbtList::Compound(values)) => values.iter().find_map(|value| {
+                if value.get("name")?.string()?.to_str() == "textures" {
+                    Some(value.get("value")?.string()?.to_str().into_owned())
+                } else {
+                    None
+                }
+            }),
+            NbtTag::Compound(props) => props.get("textures").and_then(|tag| match tag {
+                NbtTag::List(NbtList::String(values)) => {
+                    values.first().map(|v| v.to_str().into_owned())
+                }
+                _ => None,
+            }),
+            _ => None,
+        });
+    if let Some(value) = property {
+        return PlayerHeadProfileSource::EmbeddedTexturesProperty(value);
+    }
+    let id = profile
+        .get("id")
+        .and_then(|tag| tag.int_array())
+        .and_then(|v| {
+            (v.len() == 4).then(|| {
+                v.iter()
+                    .flat_map(|n| n.to_be_bytes())
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            })
+        })
+        .filter(|id| valid_profile_id(id));
+    let name = profile
+        .get("name")
+        .and_then(|tag| tag.string())
+        .map(|v| v.to_str().into_owned())
+        .filter(|name| valid_profile_name(name));
+    id.or(name).map_or(
+        PlayerHeadProfileSource::Default,
+        PlayerHeadProfileSource::Profile,
+    )
+}
+
+pub fn valid_player_head_resource_texture(value: &str) -> bool {
+    let Some((namespace, path)) = value.split_once(':') else {
+        return false;
+    };
+    fn component(s: &str) -> bool {
+        !s.is_empty()
+            && s.bytes().all(|b| {
+                b.is_ascii_lowercase()
+                    || b.is_ascii_digit()
+                    || matches!(b, b'_' | b'-' | b'.' | b'/')
+            })
+            && !s.starts_with('/')
+            && !s
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+    }
+    component(namespace) && !namespace.contains('/') && component(path) && !path.contains('%')
+}
+
+fn valid_profile_id(id: &str) -> bool {
+    (id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        || (id.len() == 36
+            && id.bytes().enumerate().all(|(i, b)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    b == b'-'
+                } else {
+                    b.is_ascii_hexdigit()
+                }
+            }))
+}
+
+fn valid_profile_name(name: &str) -> bool {
+    (1..=16).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// Extract the four vanilla-rendered text lines for one sign face. The NBT
 /// stores each line as a JSON component string; malformed components fall back
 /// to their raw text rather than preventing editing.
@@ -78,6 +191,8 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
         // Copper chests share vanilla's `chest` block entity type; the
         // weathering stage only picks the texture.
         s if s.ends_with("copper_chest") => Some(BlockEntityKind::Chest),
+        "conduit" => Some(BlockEntityKind::Conduit),
+        "player_head" | "player_wall_head" => Some(BlockEntityKind::Skull),
         s if s.ends_with("copper_golem_statue") => Some(BlockEntityKind::CopperGolemStatue),
         s if s == "shulker_box" || s.ends_with("_shulker_box") => Some(BlockEntityKind::ShulkerBox),
         s if (s.ends_with("_sign") || s.ends_with("_wall_sign"))
@@ -123,6 +238,8 @@ fn is_rendered(kind: BlockEntityKind) -> bool {
             | BlockEntityKind::ShulkerBox
             | BlockEntityKind::Sign
             | BlockEntityKind::CopperGolemStatue
+            | BlockEntityKind::Conduit
+            | BlockEntityKind::Skull
     )
 }
 
@@ -325,6 +442,31 @@ pub fn is_fluid_block(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_head_resource_identifier_rejects_traversal_and_non_asset_paths() {
+        assert!(valid_player_head_resource_texture(
+            "minecraft:entity/player/slim/steve"
+        ));
+        for value in [
+            "minecraft:../secret",
+            "minecraft:/absolute",
+            "C:/x",
+            "minecraft:a\\\\b",
+            "minecraft:a%2fb",
+            "minecraft:a//b",
+        ] {
+            assert!(!valid_player_head_resource_texture(value), "{value}");
+        }
+    }
+
+    #[test]
+    fn profile_identifiers_are_strictly_validated() {
+        assert!(valid_profile_id("0123456789abcdef0123456789abcdef"));
+        assert!(!valid_profile_id("not-a-uuid"));
+        assert!(valid_profile_name("Player_1"));
+        assert!(!valid_profile_name("../player"));
+    }
 
     #[test]
     fn standing_and_wall_signs_use_the_sign_renderer_but_hanging_signs_do_not() {

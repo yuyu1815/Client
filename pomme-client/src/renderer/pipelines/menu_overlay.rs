@@ -1006,9 +1006,13 @@ impl MenuOverlayPipeline {
                     depth,
                     background,
                 } => {
-                    // TextDisplay line width and line spacing are in Minecraft
-                    // font pixels; `scale` projects the font's 9-pixel cell.
-                    let pixel_scale = *scale / 9.0;
+                    // Glyph vertices and measured widths use `scale / gm.cell_h`.
+                    // Match TextDisplay's 10-pixel line advance to that same unit.
+                    let pixel_scale = *scale
+                        / self
+                            .mc_glyph_map
+                            .as_ref()
+                            .map_or(8.0, |gm| gm.cell_h as f32);
                     let lines = self.mc_glyph_map.as_ref().map_or_else(
                         || vec![spans.clone()],
                         |gm| split_text_display_lines(spans, *line_width as f32, gm),
@@ -1109,6 +1113,20 @@ impl MenuOverlayPipeline {
                         push_textured_quad(&mut vertices, *x, *y, *w, *h, region, *tint, 2.0);
                     }
                 }
+                MenuElement::CroppedImage {
+                    x,
+                    y,
+                    w,
+                    h,
+                    sprite,
+                    uv_range,
+                    tint,
+                } => {
+                    if let Some(region) = self.sprite_atlas.regions.get(sprite) {
+                        let cropped = crop_sprite_region(region, *uv_range);
+                        push_textured_quad(&mut vertices, *x, *y, *w, *h, &cropped, *tint, 2.0);
+                    }
+                }
                 MenuElement::RotatedImage {
                     cx,
                     cy,
@@ -1196,6 +1214,7 @@ impl MenuOverlayPipeline {
                     h,
                     item_name,
                     tint,
+                    stack_dye_rgb: _,
                 } => {
                     if let Some(uv) = item_atlas_uvs.get(item_name) {
                         push_quad(
@@ -2175,6 +2194,16 @@ pub enum MenuElement {
         sprite: SpriteId,
         tint: [f32; 4],
     },
+    CroppedImage {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        sprite: SpriteId,
+        /// Normalized [u0, v0, u1, v1] within the packed sprite (not atlas).
+        uv_range: [f32; 4],
+        tint: [f32; 4],
+    },
     RotatedImage {
         cx: f32,
         cy: f32,
@@ -2200,6 +2229,7 @@ pub enum MenuElement {
         h: f32,
         item_name: String,
         tint: [f32; 4],
+        stack_dye_rgb: Option<[u8; 3]>,
     },
     McText {
         x: f32,
@@ -2313,6 +2343,11 @@ pub enum MenuElement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SpriteId {
     MapDecoration(crate::world::maps::MapDecorationAsset),
+    BookBackground,
+    BookPageForward,
+    BookPageForwardHighlighted,
+    BookPageBackward,
+    BookPageBackwardHighlighted,
     Hotbar,
     HotbarSelection,
     HeartContainer,
@@ -2581,6 +2616,25 @@ struct SpriteAtlas {
     regions: HashMap<SpriteId, SpriteRegion>,
 }
 
+fn crop_sprite_region(region: &SpriteRegion, uv: [f32; 4]) -> SpriteRegion {
+    let (u0, v0, u1, v1) = (
+        uv[0].clamp(0.0, 1.0),
+        uv[1].clamp(0.0, 1.0),
+        uv[2].clamp(0.0, 1.0),
+        uv[3].clamp(0.0, 1.0),
+    );
+    let (du, dv) = (region.u1 - region.u0, region.v1 - region.v0);
+    SpriteRegion {
+        u0: region.u0 + du * u0,
+        v0: region.v0 + dv * v0,
+        u1: region.u0 + du * u1,
+        v1: region.v0 + dv * v1,
+        src_w: region.src_w * (u1 - u0),
+        src_h: region.src_h * (v1 - v0),
+        nine_slice_border: 0.0,
+    }
+}
+
 const INV_TEX_W: u32 = 176;
 const INV_TEX_H: u32 = 166;
 
@@ -2669,6 +2723,31 @@ fn build_sprite_atlas(
     Option<Allocation>,
 ) {
     let sprites: &[(SpriteId, &str, f32)] = &[
+        (
+            SpriteId::BookBackground,
+            "minecraft/textures/gui/book.png",
+            0.0,
+        ),
+        (
+            SpriteId::BookPageForward,
+            "minecraft/textures/gui/sprites/widget/page_forward.png",
+            0.0,
+        ),
+        (
+            SpriteId::BookPageForwardHighlighted,
+            "minecraft/textures/gui/sprites/widget/page_forward_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::BookPageBackward,
+            "minecraft/textures/gui/sprites/widget/page_backward.png",
+            0.0,
+        ),
+        (
+            SpriteId::BookPageBackwardHighlighted,
+            "minecraft/textures/gui/sprites/widget/page_backward_highlighted.png",
+            0.0,
+        ),
         (
             SpriteId::Hotbar,
             "minecraft/textures/gui/sprites/hud/hotbar.png",
@@ -4651,7 +4730,7 @@ fn inline_object_advance(bold: bool) -> f32 {
 
 /// Split styled TextDisplay spans using the same word/mid-word break rules as
 /// Minecraft's `StringSplitter.splitLines`, retaining each character's style.
-fn split_text_display_lines(
+pub(crate) fn split_text_display_lines(
     spans: &[TextSpan],
     max_width: f32,
     gm: &GlyphMap,
@@ -5219,6 +5298,29 @@ fn create_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn book_sprite_crop_stays_inside_its_packed_region() {
+        let region = SpriteRegion {
+            u0: 0.2,
+            v0: 0.3,
+            u1: 0.6,
+            v1: 0.7,
+            src_w: 256.0,
+            src_h: 256.0,
+            nine_slice_border: 0.0,
+        };
+        let crop = crop_sprite_region(&region, [0.0, 0.0, 192.0 / 256.0, 192.0 / 256.0]);
+        assert_eq!([crop.u0, crop.v0], [region.u0, region.v0]);
+        assert!((crop.u1 - 0.5).abs() < 1e-6 && (crop.v1 - 0.6).abs() < 1e-6);
+        let adjacent = crop_sprite_region(&region, [192.0 / 256.0, 0.0, 1.0, 1.0]);
+        assert!((adjacent.u0 - crop.u1).abs() < 1e-6);
+        assert_eq!(adjacent.u1, region.u1);
+        assert_eq!(
+            [region.u0, region.v0, region.u1, region.v1],
+            [0.2, 0.3, 0.6, 0.7]
+        );
+    }
 
     #[test]
     fn vertex_capacity_grows_geometrically_to_cover_required_range() {

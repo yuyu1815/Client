@@ -83,12 +83,30 @@ pub struct BlockRegistry {
     item_particle_icons: HashMap<String, String>,
     flat_item_tints: HashMap<String, model::ItemTint>,
     item_ground_transforms: HashMap<String, glam::Mat4>,
+    item_fixed_transforms: HashMap<String, glam::Mat4>,
     /// Block name -> its single `BlockState`, for one-state blocks (see
     /// `placeable_block_for_item`).
     placeable_blocks: HashMap<&'static str, BlockState>,
 }
 
 impl BlockRegistry {
+    #[cfg(test)]
+    pub(crate) fn test_empty() -> Self {
+        Self {
+            textures: HashMap::new(),
+            baked: HashMap::new(),
+            multipart: HashMap::new(),
+            item_models: HashMap::new(),
+            flat_item_textures: Default::default(),
+            flat_item_texture_keys: HashMap::new(),
+            item_particle_icons: HashMap::new(),
+            flat_item_tints: HashMap::new(),
+            item_ground_transforms: HashMap::new(),
+            item_fixed_transforms: HashMap::new(),
+            placeable_blocks: HashMap::new(),
+        }
+    }
+
     pub fn load(
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
@@ -134,6 +152,7 @@ impl BlockRegistry {
         let item_particle_icons = baked_items.particle_icons;
         let flat_item_tints = baked_items.flat_tints;
         let item_ground_transforms = baked_items.ground_transforms;
+        let item_fixed_transforms = baked_items.fixed_transforms;
 
         Self {
             textures,
@@ -145,6 +164,7 @@ impl BlockRegistry {
             item_particle_icons,
             flat_item_tints,
             item_ground_transforms,
+            item_fixed_transforms,
             placeable_blocks: build_placeable_blocks(),
         }
     }
@@ -200,6 +220,10 @@ impl BlockRegistry {
 
     pub fn get_item_ground_transform(&self, name: &str) -> Option<glam::Mat4> {
         self.item_ground_transforms.get(name).copied()
+    }
+
+    pub fn get_item_fixed_transform(&self, name: &str) -> Option<glam::Mat4> {
+        self.item_fixed_transforms.get(name).copied()
     }
 
     pub(crate) fn debug_item_snapshot(&self, name: &str) -> serde_json::Value {
@@ -472,6 +496,7 @@ mod item_particle_tests {
             flat_item_texture_keys: HashMap::new(),
             flat_item_tints: HashMap::new(),
             item_ground_transforms: HashMap::new(),
+            item_fixed_transforms: HashMap::new(),
             placeable_blocks: HashMap::new(),
             item_particle_icons: HashMap::from([
                 ("stone".into(), "base_particle".into()),

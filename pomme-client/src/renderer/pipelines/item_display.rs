@@ -164,6 +164,12 @@ fn resolve_display(
             .get("parent")
             .and_then(|p| p.as_str())
             .map(|p| strip_mc_prefix(p).to_string());
+        if current.is_none() {
+            // A successfully resolved model with no entry uses NO_TRANSFORM.
+            // In particular template_skull has no first-person entries: the
+            // missing-asset block fallback would incorrectly shrink/turn it.
+            return Some(DisplayTransform::IDENTITY);
+        }
     }
 
     None
@@ -188,6 +194,45 @@ mod tests {
             .resolve("totem_of_undying", DisplayTransform::IDENTITY)
             .scale
             .x
+    }
+
+    #[test]
+    fn player_head_missing_display_is_identity_but_missing_asset_keeps_fallback() {
+        let root = std::env::temp_dir().join(format!("head-display-{}", uuid::Uuid::new_v4()));
+        write(
+            &root,
+            "minecraft/items/player_head.json",
+            r#"{"model":{
+            "type":"minecraft:special","base":"minecraft:item/child",
+            "model":{"type":"minecraft:player_head"}
+        }}"#,
+        );
+        model(
+            &root,
+            "child",
+            r#"{"parent":"minecraft:item/template_skull"}"#,
+        );
+        model(
+            &root,
+            "template_skull",
+            r#"{"display":{"gui":{"rotation":[30,45,0]}}}"#,
+        );
+        let fallback = DisplayTransform {
+            scale: Vec3::splat(0.4),
+            ..DisplayTransform::IDENTITY
+        };
+        for key in ["firstperson_righthand", "firstperson_lefthand"] {
+            let resolver = DisplayResolver::new(&root.join("assets"), key);
+            assert_eq!(
+                resolver.resolve("player_head", fallback).to_matrix(),
+                Mat4::IDENTITY
+            );
+            assert_eq!(
+                resolver.resolve("missing_item", fallback).to_matrix(),
+                fallback.to_matrix()
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

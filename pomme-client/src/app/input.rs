@@ -617,6 +617,17 @@ impl InputState {
         self.pressed.contains(&key)
     }
 
+    /// Headless fixed-tick tests cannot construct winit's platform-owned
+    /// KeyEvent.
+    #[cfg(test)]
+    pub(crate) fn set_test_key(&mut self, key: KeyCode, down: bool) {
+        if down {
+            self.pressed.insert(key);
+        } else {
+            self.pressed.remove(&key);
+        }
+    }
+
     /// Pressed since the last `end_frame`, OS key repeats included (vanilla
     /// screens and debug chords receive GLFW repeat events).
     pub fn key_just_pressed(&self, key: KeyCode) -> bool {
@@ -915,6 +926,10 @@ impl InputState {
 
     pub fn left_just_pressed(&self) -> bool {
         self.left_click.just_pressed
+    }
+
+    pub fn consume_left_just_pressed(&mut self) {
+        self.left_click.just_pressed = false;
     }
 
     pub fn right_just_pressed(&self) -> bool {

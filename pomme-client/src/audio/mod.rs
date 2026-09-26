@@ -342,6 +342,12 @@ impl AudioEngine {
         (engine, event_tx, command_rx)
     }
 
+    /// Worker-free engine for headless tests outside the audio module.
+    #[cfg(test)]
+    pub(crate) fn silent_for_test() -> Self {
+        Self::for_test().0
+    }
+
     #[cfg(test)]
     fn starting_for_test() -> (Self, Sender<AudioInitResult>, Receiver<AudioCommand>) {
         let (command_tx, command_rx) = crossbeam_channel::unbounded();

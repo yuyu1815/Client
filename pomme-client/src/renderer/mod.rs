@@ -7,6 +7,7 @@ pub(crate) mod item_activation_math;
 pub mod map_texture;
 pub(crate) mod packing;
 pub mod pipelines;
+mod placed_head_skin;
 mod screenshot;
 pub(crate) mod world_shadow;
 pub use screenshot::ProbeScreenshotReply;
@@ -44,6 +45,7 @@ use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
+use pipelines::text_display::extract_text_displays;
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
 use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
 use pyronyx::vk;
@@ -54,6 +56,7 @@ use winit::window::Window;
 
 use crate::app::input::InputState;
 use crate::assets::AssetIndex;
+use crate::entity::EntityStore;
 use crate::entity::components::{LookDirection, Position};
 use crate::item_activation::ItemActivationDraw;
 use crate::renderer::pipelines::chunk_borders::ChunkBorderPipeline;
@@ -73,6 +76,9 @@ pub enum RendererError {
 
     #[error("failed to initialize Minecraft fonts: {0}")]
     Font(String),
+
+    #[error("failed to load placed-head slim Steve fallback: {0}")]
+    HeadSkin(String),
 }
 
 #[derive(Clone, Copy)]
@@ -137,6 +143,7 @@ enum RenderMode<'a> {
         sky: SkyState,
         fog_color: [f32; 3],
         entities: &'a [EntityRenderInfo],
+        text_display_source: Option<&'a EntityStore>,
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
         block_entities: &'a [BlockEntityRenderInfo],
         particles: &'a [ParticleQuad],
@@ -209,6 +216,7 @@ pub struct Renderer {
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
     block_entity_pipeline: BlockEntityPipeline,
+    placed_head_skins: placed_head_skin::PlacedHeadSkinCache,
     chunk_buffers: ChunkBufferStore,
     mesh_trace: MeshTraceState,
     render_finished_per_image: Vec<vk::Semaphore>,
@@ -237,6 +245,9 @@ impl Renderer {
             ..
         } = font_sources;
         let size = window.inner_size();
+        let placed_head_skins =
+            placed_head_skin::PlacedHeadSkinCache::load(jar_assets_dir, asset_index)
+                .map_err(RendererError::HeadSkin)?;
 
         let registry_handle = {
             let jar_assets_dir = jar_assets_dir.to_path_buf();
@@ -586,6 +597,7 @@ impl Renderer {
             book_preview,
             entity_renderer,
             block_entity_pipeline,
+            placed_head_skins,
             chunk_border_pipeline,
             world_border_pipeline,
             world_border_state: None,
@@ -1382,6 +1394,10 @@ impl Renderer {
         &self.atlas.uv_map
     }
 
+    pub(crate) fn atlas_sprite_rects_bytes(&self) -> u64 {
+        self.atlas.sprite_rects_bytes()
+    }
+
     pub fn create_mesh_dispatcher(
         &self,
         biome_climate: std::sync::Arc<
@@ -1429,6 +1445,35 @@ impl Renderer {
             .map(|state| (state, partial_tick.clamp(0.0, 1.0)));
     }
 
+    /// Prepare CPU full-sheet skins; called before render_world using the app's
+    /// existing runtime. This never constructs a GPU texture or descriptor.
+    pub(crate) fn update_placed_head_skins(
+        &mut self,
+        heads: &[BlockEntityRenderInfo],
+        rt: &tokio::runtime::Runtime,
+    ) {
+        self.placed_head_skins.update(
+            heads
+                .iter()
+                .filter_map(|head| head.player_head_profile_source.as_ref()),
+            rt,
+        );
+    }
+
+    /// Narrow handoff to the next drawing phase: resolved source key + 64x64
+    /// RGBA SkinData. Pending, failed and unsupported sources return slim Steve
+    /// with the Default key; callers must look up the current source each
+    /// frame.
+    pub(crate) fn placed_head_skin(
+        &self,
+        source: &crate::world::block_entity::PlayerHeadProfileSource,
+    ) -> (
+        &crate::world::block_entity::PlayerHeadProfileSource,
+        &SkinData,
+    ) {
+        self.placed_head_skins.skin(source)
+    }
+
     pub fn update_chunk_borders(&mut self, min_y: i32, max_y: i32) {
         self.chunk_border_pipeline.update_lines(
             *self.camera.position,
@@ -1447,12 +1492,16 @@ impl Renderer {
         overlay: Vec<MenuElement>,
         swing_progress: f32,
         use_anim: Option<pipelines::held_item::UseAnim>,
-        held_item: (Option<(String, f32)>, Option<(String, f32)>),
+        held_item: (
+            Option<(String, f32, Option<[u8; 3]>)>,
+            Option<(String, f32, Option<[u8; 3]>)>,
+        ),
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
         dimension: &str,
         sky: SkyState,
         entities: &[EntityRenderInfo],
+        text_display_source: Option<&EntityStore>,
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
         block_entities: &[BlockEntityRenderInfo],
         particles: &[ParticleQuad],
@@ -1466,6 +1515,15 @@ impl Renderer {
         eyes_in_water: bool,
         item_activation: Option<ItemActivationDraw<'_>>,
     ) -> Result<(), RendererError> {
+        // CPU completions were drained by update_placed_head_skins before this
+        // call. Upload before recording so newly ready heads switch this frame.
+        self.block_entity_pipeline.update_player_head_textures(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            &self.placed_head_skins,
+        );
         // Refresh the far plane before this frame's view/projection and fog.
         self.held_item_gate_trace = Some(serde_json::json!({
             "showHand": show_hand,
@@ -1510,7 +1568,8 @@ impl Renderer {
         }
 
         let held_item = (
-            held_item.0.map(|(name, light)| {
+            held_item.0.map(|(name, light, raw_dye_rgb)| {
+                let name = self.resolve_dye_variant_key(&name, raw_dye_rgb);
                 let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
                 pipelines::held_item::HeldItemInfo {
                     name,
@@ -1519,7 +1578,8 @@ impl Renderer {
                     nether_lighting: dimension == "minecraft:the_nether",
                 }
             }),
-            held_item.1.map(|(name, light)| {
+            held_item.1.map(|(name, light, raw_dye_rgb)| {
+                let name = self.resolve_dye_variant_key(&name, raw_dye_rgb);
                 let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
                 pipelines::held_item::HeldItemInfo {
                     name,
@@ -1538,6 +1598,14 @@ impl Renderer {
         } else {
             sky.clear_color_linear(dimension, render_distance)
         };
+        let item_entities: Vec<_> = item_entities
+            .iter()
+            .cloned()
+            .map(|mut info| {
+                info.item_name = self.resolve_dye_variant_key(&info.item_name, info.raw_dye_rgb);
+                info
+            })
+            .collect();
         self.render_frame(
             window,
             hide_cursor,
@@ -1554,7 +1622,8 @@ impl Renderer {
                 sky,
                 fog_color: clear_col,
                 entities,
-                item_entities,
+                text_display_source,
+                item_entities: &item_entities,
                 block_entities,
                 particles,
                 weather,
@@ -1605,6 +1674,8 @@ impl Renderer {
         packs: &crate::resource_pack::ResourcePackManager,
     ) {
         self.ctx.device.wait_idle().unwrap();
+        self.block_entity_pipeline
+            .invalidate_player_head_textures(&self.ctx.device, &self.ctx.allocator);
         self.activation_pack_dirs = packs.active_pack_dirs().map(Path::to_path_buf).collect();
         if let Some(pipeline) = self.activation_pipeline.as_mut() {
             pipeline.update_display_resources(
@@ -1816,6 +1887,30 @@ impl Renderer {
         self.item_entity_pipeline.mesh_info(name)
     }
 
+    fn resolve_dye_variant_key(&mut self, name: &str, raw_rgb: Option<[u8; 3]>) -> String {
+        let Some(model) = self.registry.get_item_model(name) else {
+            return name.to_owned();
+        };
+        let Some(default_rgb) = model.quads.iter().find_map(|quad| match &quad.item_tint {
+            crate::world::block::model::ItemTint::Dye { default_rgb }
+                if quad.tint_index == Some(0) =>
+            {
+                Some(*default_rgb)
+            }
+            _ => None,
+        }) else {
+            return name.to_owned();
+        };
+        self.item_entity_pipeline.ensure_dye_variant_mesh(
+            &self.ctx.device,
+            &self.ctx.allocator,
+            name,
+            raw_rgb.unwrap_or(default_rgb),
+            model,
+            &self.atlas.uv_map,
+        )
+    }
+
     pub fn ensure_item_mesh(&mut self, name: &str) -> pipelines::item_entity::ItemMeshInfo {
         if let Some(info) = self.item_entity_pipeline.mesh_info(name) {
             return info;
@@ -1872,6 +1967,7 @@ impl Renderer {
         mode: RenderMode<'_>,
         item_activation: Option<ItemActivationDraw<'_>>,
     ) -> Result<(), RendererError> {
+        let mut mode = mode;
         if self.swapchain_dirty {
             self.recreate_swapchain()?;
         }
@@ -1887,6 +1983,8 @@ impl Renderer {
 
         // Fence signalled: reclaim resources the GPU is now provably done with.
         self.menu_pipeline
+            .begin_frame(frame, &self.ctx.device, &self.ctx.allocator);
+        self.block_entity_pipeline
             .begin_frame(frame, &self.ctx.device, &self.ctx.allocator);
         self.chunk_buffers.begin_frame();
         self.map_quad_pipeline.begin_frame(&self.ctx.device, frame);
@@ -1919,10 +2017,10 @@ impl Renderer {
             render_distance,
             eyes_in_water,
             ..
-        } = mode
+        } = &mode
         {
             let uniform =
-                CameraUniform::new(&self.camera, fog_color, render_distance, eyes_in_water);
+                CameraUniform::new(&self.camera, *fog_color, *render_distance, *eyes_in_water);
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
@@ -1994,10 +2092,29 @@ impl Renderer {
             },
         ];
 
-        let menu_elements: &[MenuElement] = match &mode {
-            RenderMode::World { overlay, .. } => overlay.as_slice(),
-            RenderMode::MainMenu { elements, .. } => elements.as_slice(),
+        let mut original_names: HashMap<String, String> = HashMap::new();
+        let menu_elements: &mut Vec<MenuElement> = match &mut mode {
+            RenderMode::World { overlay, .. } => overlay,
+            RenderMode::MainMenu { elements, .. } => elements,
         };
+        for elem in menu_elements.iter_mut() {
+            if let MenuElement::ItemIcon {
+                item_name,
+                stack_dye_rgb,
+                ..
+            } = elem
+            {
+                let original = item_name.clone();
+                if matches!(original.as_str(), "player_head" | "conduit") {
+                    continue;
+                }
+                let variant = self.resolve_dye_variant_key(&original, *stack_dye_rgb);
+                if variant != original {
+                    original_names.insert(variant.clone(), original);
+                    *item_name = variant;
+                }
+            }
+        }
 
         let target_slot_px =
             pipelines::gui_item_atlas::slot_px_for_gui_scale(crate::ui::hud::gui_scale(
@@ -2056,7 +2173,14 @@ impl Renderer {
                     bake_list.push(BakeJob {
                         slot,
                         name: name.clone(),
-                        is_block: self.registry.get_item_model(name).is_some(),
+                        is_block: self
+                            .registry
+                            .get_item_model(
+                                original_names
+                                    .get(name)
+                                    .map_or(name.as_str(), String::as_str),
+                            )
+                            .is_some(),
                         needs_clear: matches!(state, pipelines::gui_item_atlas::SlotState::Stale),
                     });
                 }
@@ -2078,6 +2202,9 @@ impl Renderer {
                     sy,
                     self.gui_item_atlas.slot_px(),
                     &job.name,
+                    original_names
+                        .get(&job.name)
+                        .map_or(job.name.as_str(), String::as_str),
                     job.is_block,
                 );
             }
@@ -2119,7 +2246,6 @@ impl Renderer {
         let sh = self.swapchain.extent.height as f32;
 
         let frame_start = std::time::Instant::now();
-        let mut world_menu_vertex_base = 0;
 
         match &mode {
             RenderMode::World {
@@ -2134,6 +2260,7 @@ impl Renderer {
                 sky,
                 fog_color: _,
                 entities,
+                text_display_source,
                 item_entities,
                 block_entities,
                 particles,
@@ -2213,6 +2340,7 @@ impl Renderer {
                     anchor,
                     eye,
                     block_entities,
+                    &self.placed_head_skins,
                     self.menu_pipeline.world_font(),
                 );
 
@@ -2297,17 +2425,30 @@ impl Renderer {
                     self.chunk_border_pipeline.draw(cmd, frame);
                 }
 
-                // Draw world-occluded TextDisplays while scene depth is intact.
-                world_menu_vertex_base = self.menu_pipeline.draw_occluded_text_displays(
-                    &self.ctx.device,
-                    &self.ctx.allocator,
-                    cmd,
-                    sw,
-                    sh,
-                    overlay,
-                    &item_atlas_uvs,
-                    frame,
-                );
+                // Both TextDisplay modes are world draws, before the hand clears
+                // scene depth. Borrow this frame's atlas (also used by signs), not
+                // cached UVs/descriptors: resource-pack reload replaces the map/images.
+                if let Some(store) = text_display_source
+                    && let Some((font, textures)) = self.menu_pipeline.world_font()
+                {
+                    let (yaw, pitch) = self.camera.effective_look_deg();
+                    let mut draws = extract_text_displays(store, anchor, yaw, pitch, font);
+                    // SEE_THROUGH is composited after depth-tested displays.
+                    draws.sort_by_key(|draw| draw.see_through);
+                    for draw in &draws {
+                        if let Err(error) = self.block_entity_pipeline.draw_text_display(
+                            &self.ctx.device,
+                            &self.ctx.allocator,
+                            cmd,
+                            frame,
+                            draw,
+                            textures,
+                        ) {
+                            // Finish/submission must still signal this slot's fence.
+                            tracing::warn!(entity_id = draw.entity_id, %error, "TextDisplay draw skipped");
+                        }
+                    }
+                }
 
                 let clear_attachment = vk::ClearAttachment {
                     aspect_mask: vk::ImageAspectFlags::Depth,
@@ -2388,18 +2529,17 @@ impl Renderer {
                     }
                 });
                 if activation_draw.is_none() {
-                    self.menu_pipeline
-                        .draw_from_excluding_occluded_text_displays(
-                            &self.ctx.device,
-                            &self.ctx.allocator,
-                            cmd,
-                            sw,
-                            sh,
-                            overlay,
-                            &item_atlas_uvs,
-                            world_menu_vertex_base,
-                            frame,
-                        );
+                    self.menu_pipeline.draw_from(
+                        &self.ctx.device,
+                        &self.ctx.allocator,
+                        cmd,
+                        sw,
+                        sh,
+                        overlay,
+                        &item_atlas_uvs,
+                        0,
+                        frame,
+                    );
                 }
                 let vignette_brightness: Vec<f32> = overlay
                     .iter()
@@ -2534,18 +2674,17 @@ impl Renderer {
                         );
                     }
                     // MenuOverlay follows the mesh in this pass; common end_render_pass closes it.
-                    self.menu_pipeline
-                        .draw_from_excluding_occluded_text_displays(
-                            &self.ctx.device,
-                            &self.ctx.allocator,
-                            cmd,
-                            sw,
-                            sh,
-                            overlay,
-                            &item_atlas_uvs,
-                            world_menu_vertex_base,
-                            frame,
-                        );
+                    self.menu_pipeline.draw_from(
+                        &self.ctx.device,
+                        &self.ctx.allocator,
+                        cmd,
+                        sw,
+                        sh,
+                        overlay,
+                        &item_atlas_uvs,
+                        0,
+                        frame,
+                    );
                 }
 
                 self.last_timings.cull_ms = cull_ms;
@@ -2841,6 +2980,8 @@ pub(crate) async fn fetch_skin_texture_from_profile_property(
     })
 }
 
+const MAX_TEXTURE_PROPERTY_BYTES: usize = 64 * 1024;
+
 fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String> {
     #[derive(serde::Deserialize)]
     struct TexturesPayload {
@@ -2861,6 +3002,9 @@ fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String>
         model: Option<String>,
     }
 
+    if value.len() > MAX_TEXTURE_PROPERTY_BYTES {
+        return Err("skin texture property exceeds 64 KiB limit".into());
+    }
     use base64::Engine;
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(value)
@@ -2893,15 +3037,59 @@ fn error_chain(e: impl std::error::Error) -> String {
     msg
 }
 
+fn validate_minecraft_skin_url(raw: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(raw).map_err(error_chain)?;
+    let allowed_scheme = matches!(url.scheme(), "http" | "https");
+    let allowed_host = url
+        .host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("textures.minecraft.net"));
+    let default_port = match url.scheme() {
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => None,
+    };
+    if !allowed_scheme
+        || !allowed_host
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some_and(|port| Some(port) != default_port)
+    {
+        // Official Authlib permits only Mojang's texture host. This intentionally
+        // rejects custom-server skin URLs for SSRF safety; callers use Steve fallback.
+        return Err("skin URL is not allowed by Minecraft texture policy".into());
+    }
+    Ok(url)
+}
+
 async fn fetch_skin_image(skin_url: &str) -> Result<(Vec<u8>, u32, u32), String> {
-    let skin_bytes = reqwest::get(skin_url)
-        .await
-        .map_err(error_chain)?
-        .error_for_status()
-        .map_err(error_chain)?
-        .bytes()
-        .await
-        .map_err(error_chain)?;
+    const MAX_SKIN_BYTES: usize = 2 * 1024 * 1024;
+    let url = validate_minecraft_skin_url(skin_url)?;
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("valid skin HTTP client configuration")
+    });
+    let mut response = client.get(url).send().await.map_err(error_chain)?;
+    if response.status().is_redirection() {
+        return Err(format!("skin URL redirect rejected: {}", response.status()));
+    }
+    response.error_for_status_ref().map_err(error_chain)?;
+    if response
+        .content_length()
+        .is_some_and(|n| n > MAX_SKIN_BYTES as u64)
+    {
+        return Err("skin image exceeds 2 MiB limit".into());
+    }
+    let mut skin_bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(error_chain)? {
+        if skin_bytes.len().saturating_add(chunk.len()) > MAX_SKIN_BYTES {
+            return Err("skin image exceeds 2 MiB limit".into());
+        }
+        skin_bytes.extend_from_slice(&chunk);
+    }
 
     let img = image::load_from_memory(&skin_bytes).map_err(error_chain)?;
     let rgba = img.to_rgba8();
@@ -3076,6 +3264,31 @@ impl Drop for Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_skin_url_boundary() {
+        for url in [
+            "https://textures.minecraft.net/texture/x",
+            "http://textures.minecraft.net/texture/x",
+            "https://TEXTURES.MINECRAFT.NET/texture/x",
+        ] {
+            assert!(validate_minecraft_skin_url(url).is_ok(), "{url}");
+        }
+        for url in [
+            "https://textures.minecraft.net.evil/",
+            "https://textures.minecraft.net.evil/",
+            "https://textures.minecraft.net@127.0.0.1/",
+            "https://user@textures.minecraft.net/",
+            "https://user:pass@textures.minecraft.net/",
+            "http://127.0.0.1/",
+            "file://textures.minecraft.net/skin.png",
+            "https://textures.minecraft.net:444/",
+            "https://textures.minecraft.net:80/",
+            "//textures.minecraft.net/skin.png",
+        ] {
+            assert!(validate_minecraft_skin_url(url).is_err(), "{url}");
+        }
+    }
 
     #[test]
     fn decodes_skin_url_from_textures_property() {

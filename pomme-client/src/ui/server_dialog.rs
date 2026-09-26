@@ -1868,6 +1868,7 @@ impl Draw<'_> {
             h: common::SLOT_SIZE * gs,
             item_name: item.icon_name().to_owned(),
             tint: common::WHITE,
+            stack_dye_rgb: None,
         });
         // TODO: vanilla also draws the durability bar and the cooldown
         // overlay; Pomme has no renderer for either yet.

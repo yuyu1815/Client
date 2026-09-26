@@ -266,6 +266,34 @@ fn set_player_inventory_slot(
     true
 }
 
+/// Commit a chunk's BE snapshot only after its terrain has decoded
+/// successfully.
+fn load_network_chunk(
+    chunks: &mut ChunkStore,
+    animations: &mut crate::world::block_entity_anim::BlockEntityAnimStore,
+    pos: azalea_core::position::ChunkPos,
+    data: &[u8],
+    heightmaps: &[(azalea_core::heightmap_kind::HeightmapKind, Box<[u64]>)],
+    block_entities: Vec<(
+        azalea_core::position::BlockPos,
+        azalea_registry::builtin::BlockEntityKind,
+        simdnbt::owned::NbtCompound,
+    )>,
+) -> Result<(), crate::world::chunk::ChunkError> {
+    chunks.load_chunk(pos, data, heightmaps)?;
+    chunks
+        .block_entities
+        .retain(|p, _| p.x.div_euclid(16) != pos.x || p.z.div_euclid(16) != pos.z);
+    animations.drop_chunk(pos.x, pos.z);
+    for (pos, kind, nbt) in block_entities {
+        chunks.block_entities.insert(
+            pos,
+            crate::world::block_entity::StoredBlockEntity { kind, nbt },
+        );
+    }
+    Ok(())
+}
+
 fn update_block_entity(
     block_entities: &mut HashMap<
         azalea_core::position::BlockPos,
@@ -406,11 +434,7 @@ pub struct PlayerInputState {
     sprint: bool,
 }
 
-fn player_input_state(
-    input: &InputState,
-    analog_move: glam::Vec2,
-    sprinting: bool,
-) -> PlayerInputState {
+fn player_input_state(input: &InputState, analog_move: glam::Vec2) -> PlayerInputState {
     PlayerInputState {
         forward: input.key_pressed(KEY_FORWARD) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
         backward: input.key_pressed(KEY_BACK) || analog_move.y < -STICK_MOVEMENT_THRESHOLD,
@@ -418,7 +442,270 @@ fn player_input_state(
         right: input.key_pressed(KEY_RIGHT) || analog_move.x < -STICK_MOVEMENT_THRESHOLD,
         jump: input.performing_action(Action::Jump),
         shift: input.performing_action(Action::Sneak),
-        sprint: sprinting,
+        sprint: input.performing_action(Action::Sprint),
+    }
+}
+
+fn send_changed_player_input(
+    input: &InputState,
+    sender: &crate::net::sender::PacketSender,
+    last_sent: &mut PlayerInputState,
+) {
+    let axes = input
+        .get_gamepad_movement_axes()
+        .unwrap_or(glam::Vec2::ZERO);
+    let current = player_input_state(input, axes);
+    if current != *last_sent {
+        sender.send(ServerboundGamePacket::PlayerInput(
+            serverbound_player_input(&current),
+        ));
+        *last_sent = current;
+    }
+}
+
+fn controlled_horse_id(
+    entities: &crate::entity::EntityStore,
+    player_id: i32,
+    riding_vehicle_id: Option<i32>,
+) -> Option<i32> {
+    riding_vehicle_id.filter(|id| {
+        entities.vehicle_of.get(&player_id) == Some(id)
+            && entities.horse_ride_authority(player_id, true)
+                == crate::entity::RideAuthority::Client
+    })
+}
+
+/// Called only by the fixed-tick movement tail, after travel and passenger
+/// follow. Mounted Rot is unconditional and immediately precedes the actual
+/// horse transform.
+fn send_mounted_movement(
+    sender: &crate::net::sender::PacketSender,
+    entities: &crate::entity::EntityStore,
+    player: &LocalPlayer,
+    riding_vehicle_id: Option<i32>,
+) -> bool {
+    if riding_vehicle_id.is_none() {
+        return false;
+    }
+    sender.send(ServerboundGamePacket::MovePlayerRot(
+        azalea_protocol::packets::game::ServerboundMovePlayerRot {
+            look_direction: player.look_dir.into(),
+            flags: azalea_protocol::common::movements::MoveFlags {
+                on_ground: player.on_ground,
+                horizontal_collision: player.horizontal_collision,
+            },
+        },
+    ));
+    if let Some(id) = controlled_horse_id(entities, player.entity_id, riding_vehicle_id) {
+        let horse = &entities.living[&id];
+        sender.send_raw(pomme_protocol::wire::encode_move_vehicle(
+            horse.position.into(),
+            horse.look_dir.y_rot_deg(),
+            horse.look_dir.x_rot_deg(),
+            horse.on_ground,
+        ));
+    }
+    true
+}
+
+/// Actual horse land/air travel and passenger-follow portion of the fixed game
+/// tick. Returns false for other mounts/on foot; those retain their existing
+/// travel path.
+fn tick_ridden_horse(
+    entities: &mut crate::entity::EntityStore,
+    chunks: &ChunkStore,
+    player: &mut LocalPlayer,
+    input: &InputState,
+    riding_vehicle_id: Option<i32>,
+    border_bounds: Option<[f64; 4]>,
+) -> bool {
+    if !riding_vehicle_id.is_some_and(|id| {
+        entities
+            .living
+            .get(&id)
+            .is_some_and(|horse| horse.entity_type == azalea_registry::builtin::EntityKind::Horse)
+    }) {
+        return false;
+    }
+    let controlled_horse_id = controlled_horse_id(entities, player.entity_id, riding_vehicle_id);
+    if let Some(id) = controlled_horse_id {
+        use crate::physics::horse::{HorseTickResult, horse_aabb, tick_controlled_horse_land};
+        let horse = &entities.living[&id];
+        // Include this tick's acceleration, jump and maxUpStep in the broadphase,
+        // not just the previous velocity or the narrower passenger AABB.
+        let speed = horse
+            .attributes
+            .get("minecraft:movement_speed")
+            .copied()
+            .unwrap_or(0.225);
+        let step = horse
+            .attributes
+            .get("minecraft:step_height")
+            .copied()
+            .unwrap_or(1.0)
+            .max(1.0);
+        let jump = horse
+            .attributes
+            .get("minecraft:jump_strength")
+            .copied()
+            .unwrap_or(0.7);
+        let jump_boost = horse
+            .effects
+            .values()
+            .find(|effect| {
+                crate::mob_effect::info(effect.effect_id)
+                    .is_some_and(|info| info.name == "jump_boost")
+            })
+            .map_or(0.0, |effect| {
+                f64::from(0.1_f32 * (f32::from(effect.amplifier) + 1.0))
+            });
+        let margin = glam::dvec3(speed + 1.0, step + jump + jump_boost + 1.0, speed + 1.0);
+        let region = horse_aabb(horse)
+            .expand(horse.velocity)
+            .expand(-margin)
+            .expand(margin);
+        let horse_boxes = entities.collision_aabbs(id, &region);
+        let horse = entities.living.get_mut(&id).unwrap();
+        let result = tick_controlled_horse_land(
+            horse,
+            chunks,
+            player.look_dir,
+            movement::movement_input(input, false, 1.0),
+            &horse_boxes,
+            border_bounds,
+        );
+        match result {
+            HorseTickResult::Applied => {
+                let (position, velocity, look) = (horse.position, horse.velocity, horse.look_dir);
+                entities.set_vehicle_transform(id, position, velocity);
+                entities.set_vehicle_rotation(id, look);
+            }
+            HorseTickResult::UnsupportedFluid => {
+                // ponytail: hold position until fluid travel is implemented;
+                // warn once/process, without surrendering local authority.
+                static WARN_FLUID: std::sync::Once = std::sync::Once::new();
+                WARN_FLUID.call_once(|| tracing::warn!(
+                    "Controlled horse fluid travel unsupported; holding position (tick packets continue)"
+                ));
+                horse.velocity = glam::DVec3::ZERO;
+                horse.horse_jump_pending_scale = 0.0;
+                let position = horse.position;
+                entities.set_vehicle_transform(id, position, glam::DVec3::ZERO);
+            }
+        }
+    }
+    if let Some(vehicle_id) = riding_vehicle_id {
+        if let Some(position) = entities.passenger_position(
+            vehicle_id,
+            glam::dvec3(0.0, 1.443750023841858, 0.0),
+            glam::dvec3(0.0, 0.6, 0.0),
+        ) {
+            if controlled_horse_id.is_none() {
+                player.prev_position = position;
+            }
+            player.position = position;
+            player.velocity = crate::entity::components::Velocity::default();
+        }
+    }
+    true
+}
+
+/// A received correction adds one immediate reply, independent of the tick
+/// cadence.
+fn apply_horse_correction(
+    entities: &mut crate::entity::EntityStore,
+    player_id: i32,
+    vehicle_id: Option<i32>,
+    pos: glam::DVec3,
+    yaw: f32,
+    pitch: f32,
+    sender: &crate::net::sender::PacketSender,
+) {
+    let Some(id) = controlled_horse_id(entities, player_id, vehicle_id) else {
+        return;
+    };
+    // The shared authority gate excludes unspawned SetPassengers placeholders.
+    let horse = &entities.living[&id];
+    let current = glam::DVec3::from(horse.position);
+    let delta = pos - current;
+    if delta.length_squared() > 1.0e-5_f32 as f64 {
+        let position = crate::entity::components::Position::from(pos);
+        if let Some(horse) = entities.living.get_mut(&id) {
+            horse.position = position;
+            horse.prev_position = position;
+            let look = crate::entity::components::LookDirection::new(yaw, pitch);
+            horse.look_dir = look;
+            horse.prev_look_dir = look;
+            horse.head_y_rot_deg = yaw;
+            horse.prev_head_y_rot_deg = yaw;
+            horse.body_y_rot_deg = yaw;
+            horse.prev_body_y_rot_deg = yaw;
+        }
+        entities.set_vehicle_spawn_transform(
+            id,
+            position,
+            glam::DVec3::ZERO,
+            crate::entity::components::LookDirection::new(yaw, pitch),
+        );
+    }
+    let horse = &entities.living[&id];
+    sender.send_raw(pomme_protocol::wire::encode_move_vehicle(
+        horse.position.into(),
+        horse.look_dir.y_rot_deg(),
+        horse.look_dir.x_rot_deg(),
+        horse.on_ground,
+    ));
+}
+
+fn tick_riding_jump(
+    entities: &mut crate::entity::EntityStore,
+    player: &mut LocalPlayer,
+    controlled_horse_id: Option<i32>,
+    jumpable: bool,
+    jump_held: bool,
+    sender: &crate::net::sender::PacketSender,
+) {
+    if jumpable {
+        let p = player;
+        if p.jump_riding_ticks < 0 {
+            p.jump_riding_ticks += 1;
+            if p.jump_riding_ticks == 0 {
+                p.jump_riding_scale = 0.0;
+            }
+        }
+        if p.was_jump_pressed && !jump_held {
+            p.jump_riding_ticks = -10;
+            // AbstractHorse.onPlayerJump uses the quantized charge sent to the server.
+            let jump_amount = (p.jump_riding_scale * 100.0).floor() as u32;
+            if let Some(id) = controlled_horse_id {
+                if let Some(horse) = entities.living.get_mut(&id) {
+                    horse.horse_jump_pending_scale = if jump_amount >= 90 {
+                        1.0
+                    } else {
+                        0.4 + 0.4 * jump_amount as f32 / 90.0
+                    };
+                }
+            }
+            use azalea_protocol::packets::game::s_player_command as cmd;
+            sender.send(player_command_packet(
+                p.entity_id,
+                cmd::Action::StartRidingJump,
+                jump_amount,
+            ));
+        } else if !p.was_jump_pressed && jump_held {
+            p.jump_riding_ticks = 0;
+            p.jump_riding_scale = 0.0;
+        } else if p.was_jump_pressed {
+            p.jump_riding_ticks += 1;
+            p.jump_riding_scale = if p.jump_riding_ticks < 10 {
+                p.jump_riding_ticks as f32 * 0.1
+            } else {
+                0.8 + 2.0 / (p.jump_riding_ticks - 9) as f32 * 0.1
+            };
+        }
+    } else {
+        // Vanilla keeps jumpRidingTicks; only the scale resets.
+        player.jump_riding_scale = 0.0;
     }
 }
 
@@ -1409,11 +1696,8 @@ impl AppCore {
         let mut processed = 0u32;
         self.drain_player_skin_results(renderer);
 
-        while let Ok(event) = rx.try_recv() {
+        for event in rx.try_iter().take(4096) {
             processed += 1;
-            if processed > 4096 {
-                break;
-            }
             match event {
                 NetworkEvent::Connected { profile_name } => {
                     if let Some(state) = connect_phase.as_deref_mut() {
@@ -1511,8 +1795,16 @@ impl AppCore {
                     data,
                     heightmaps,
                     light,
+                    block_entities,
                 } => {
-                    if let Err(e) = game.chunk_store.load_chunk(pos, &data, &heightmaps) {
+                    if let Err(e) = load_network_chunk(
+                        &mut game.chunk_store,
+                        &mut game.block_entity_anim,
+                        pos,
+                        &data,
+                        &heightmaps,
+                        block_entities,
+                    ) {
                         tracing::error!("Failed to load chunk [{}, {}]: {e}", pos.x, pos.z);
                         continue;
                     }
@@ -1641,6 +1933,17 @@ impl AppCore {
                         new_look_dir,
                     ));
                 }
+                NetworkEvent::MoveVehicle { pos, yaw, pitch } => {
+                    apply_horse_correction(
+                        &mut game.entity_store,
+                        game.player.entity_id,
+                        game.controlled_vehicle_id,
+                        pos,
+                        yaw,
+                        pitch,
+                        &connection.packet_tx,
+                    );
+                }
                 NetworkEvent::PlayerRotation {
                     y_rot,
                     x_rot,
@@ -1752,6 +2055,13 @@ impl AppCore {
                 }
                 NetworkEvent::ClearMobEffects => {
                     game.player.effects.clear();
+                }
+                NetworkEvent::EntityAttributeUpdate {
+                    entity_id,
+                    attribute,
+                    value,
+                } => {
+                    game.entity_store.set_attribute(entity_id, attribute, value);
                 }
                 NetworkEvent::EntityMaxHealthUpdate {
                     entity_id,
@@ -1983,7 +2293,7 @@ impl AppCore {
                                     .map(|book| {
                                         book.pages
                                             .into_iter()
-                                            .map(|page| page.raw.to_string())
+                                            .map(|page| page.raw)
                                             .collect()
                                     });
                                 if let Some(pages) = pages {
@@ -2328,18 +2638,6 @@ impl AppCore {
                 NetworkEvent::SectionBlocksUpdate { updates } => {
                     for (pos, state) in updates {
                         apply_server_block(game, &mut priority_remesh, pos, state);
-                    }
-                }
-                NetworkEvent::BlockEntitySync { chunk_pos, entries } => {
-                    game.chunk_store.block_entities.retain(|p, _| {
-                        p.x.div_euclid(16) != chunk_pos.x || p.z.div_euclid(16) != chunk_pos.z
-                    });
-                    game.block_entity_anim.drop_chunk(chunk_pos.x, chunk_pos.z);
-                    for (pos, kind, nbt) in entries {
-                        game.chunk_store.block_entities.insert(
-                            pos,
-                            crate::world::block_entity::StoredBlockEntity { kind, nbt },
-                        );
                     }
                 }
                 NetworkEvent::OpenSignEditor { pos, is_front_text } => {
@@ -3086,10 +3384,11 @@ impl AppCore {
                     item_id,
                     damage,
                     count,
+                    stack,
                 } => {
                     renderer.ensure_item_mesh(&item_name);
                     game.item_entity_store
-                        .set_item_data(id, item_name, item_id, damage, count);
+                        .set_item_data(id, item_name, item_id, damage, count, stack);
                 }
                 NetworkEvent::ItemFrameDirection { id, direction } => {
                     game.entity_store.set_item_frame_direction(id, direction);
@@ -3109,6 +3408,10 @@ impl AppCore {
                 }
                 NetworkEvent::TextDisplayText { id, text } => {
                     game.entity_store.set_text_display_text(id, text);
+                }
+                NetworkEvent::TextDisplayTransform { id, index, value } => {
+                    game.entity_store
+                        .set_text_display_transform(id, index, value);
                 }
                 NetworkEvent::EntityData { id, index, value } => {
                     if id == game.player.entity_id
@@ -3628,6 +3931,17 @@ impl AppCore {
             1.0
         });
 
+        let controlled_horse_id = controlled_horse_id(
+            &game.entity_store,
+            game.player.entity_id,
+            game.riding_vehicle_id,
+        );
+        if let Some(id) = controlled_horse_id {
+            if let Some(horse) = game.entity_store.living.get_mut(&id) {
+                horse.stop_interpolation();
+            }
+        }
+
         // Vanilla ClientLevel keeps ticking other entities while the local
         // player is dead.
         game.entity_store.tick_living(
@@ -3746,7 +4060,10 @@ impl AppCore {
                         .inventory
                         .remove_from_selected(self.input.selected_slot(), whole_stack)
                     {
-                        crate::player::interaction::send_use_swing(&connection.packet_tx);
+                        crate::player::interaction::send_use_swing(
+                            &connection.packet_tx,
+                            azalea_protocol::packets::game::s_interact::InteractionHand::MainHand,
+                        );
                     }
                 }
             }
@@ -3787,39 +4104,15 @@ impl AppCore {
         // Equine jump cooldown is always 0, so the cooldown gate collapses
         // into the vehicle check.
         let jump_held = input.performing_action(Action::Jump);
-        if game.riding_jumpable_vehicle() {
-            let p = &mut game.player;
-            if p.jump_riding_ticks < 0 {
-                p.jump_riding_ticks += 1;
-                if p.jump_riding_ticks == 0 {
-                    p.jump_riding_scale = 0.0;
-                }
-            }
-            if p.was_jump_pressed && !jump_held {
-                p.jump_riding_ticks = -10;
-                // Vanilla also calls vehicle.onPlayerJump() for client horse
-                // physics; pomme has no vehicle physics, the server moves us.
-                use azalea_protocol::packets::game::s_player_command as cmd;
-                connection.packet_tx.send(player_command_packet(
-                    p.entity_id,
-                    cmd::Action::StartRidingJump,
-                    (p.jump_riding_scale * 100.0).floor() as u32,
-                ));
-            } else if !p.was_jump_pressed && jump_held {
-                p.jump_riding_ticks = 0;
-                p.jump_riding_scale = 0.0;
-            } else if p.was_jump_pressed {
-                p.jump_riding_ticks += 1;
-                p.jump_riding_scale = if p.jump_riding_ticks < 10 {
-                    p.jump_riding_ticks as f32 * 0.1
-                } else {
-                    0.8 + 2.0 / (p.jump_riding_ticks - 9) as f32 * 0.1
-                };
-            }
-        } else {
-            // Vanilla keeps jumpRidingTicks; only the scale resets.
-            game.player.jump_riding_scale = 0.0;
-        }
+        let jumpable = game.riding_jumpable_vehicle();
+        tick_riding_jump(
+            &mut game.entity_store,
+            &mut game.player,
+            controlled_horse_id,
+            jumpable,
+            jump_held,
+            &connection.packet_tx,
+        );
 
         game.player.look_dir = renderer.camera_look_dir();
 
@@ -3859,15 +4152,29 @@ impl AppCore {
         let entity_boxes = game
             .entity_store
             .collision_aabbs(game.player.entity_id, &region);
-        movement::tick_with_context(
+        if !tick_ridden_horse(
+            &mut game.entity_store,
+            &game.chunk_store,
             &mut game.player,
             input,
-            &game.chunk_store,
-            &entity_boxes,
+            game.riding_vehicle_id,
             Some(game.world_border.bounds_at(0.0)),
-            game.interaction.use_speed_multiplier(),
-            game.interaction.slow_due_to_using_item(),
-        );
+        ) {
+            movement::tick_with_context(
+                &mut game.player,
+                input,
+                &game.chunk_store,
+                &entity_boxes,
+                Some(game.world_border.bounds_at(0.0)),
+                game.interaction.use_speed_multiplier(),
+                game.interaction.slow_due_to_using_item(),
+            );
+        }
+        // Mounted movement skips movement::tick_with_context, which normally
+        // records this edge state for the next tick's ride-jump charge logic.
+        if game.riding_vehicle_id.is_some() {
+            game.player.was_jump_pressed = jump_held;
+        }
         let dx = game.player.position.x - game.player.prev_position.x;
         let dz = game.player.position.z - game.player.prev_position.z;
         crate::entity::update_walk_animation(
@@ -3910,7 +4217,28 @@ impl AppCore {
             let name = crate::player::inventory::item_resource_name(data.kind);
             renderer.registry().placeable_block_for_item(&name)
         });
+        let offhand_place_block = offhand_stack.and_then(|data| {
+            let name = crate::player::inventory::item_resource_name(data.kind);
+            renderer.registry().placeable_block_for_item(&name)
+        });
         let hands_empty = held_stack.is_none() && game.player.inventory.offhand().is_empty();
+        let has_projectile = game
+            .player
+            .inventory
+            .slots()
+            .iter()
+            .any(|stack| match stack {
+                azalea_inventory::ItemStack::Present(data) => {
+                    data.count > 0
+                        && matches!(
+                            data.kind,
+                            azalea_registry::builtin::ItemKind::Arrow
+                                | azalea_registry::builtin::ItemKind::SpectralArrow
+                                | azalea_registry::builtin::ItemKind::TippedArrow
+                        )
+                }
+                azalea_inventory::ItemStack::Empty => false,
+            });
 
         let player_aabb = game.player.bounding_box();
         let dirty = game.interaction.tick(
@@ -3925,13 +4253,16 @@ impl AppCore {
             game.player.on_ground,
             crate::player::is_creative(game.player.game_mode),
             crate::player::is_spectator(game.player.game_mode),
+            &game.entity_store,
             azalea_protocol::packets::game::s_interact::InteractionHand::MainHand,
             hand_on_cooldown,
             game.player.food,
             input.selected_slot(),
             held_stack,
             offhand_stack,
+            has_projectile,
             place_block,
+            offhand_place_block,
             hands_empty,
             &mut crate::player::interaction::BreakEffects {
                 particles: &mut game.particle_store,
@@ -3992,20 +4323,7 @@ impl AppCore {
     }
 
     fn send_input_packet(input: &InputState, connection: &ConnectionHandle, game: &mut GameState) {
-        let sender = &connection.packet_tx;
-
-        let analog_move = input
-            .get_gamepad_movement_axes()
-            .unwrap_or(glam::Vec2::ZERO);
-
-        let current = player_input_state(input, analog_move, game.player.sprinting);
-
-        if current != game.last_sent_input {
-            sender.send(ServerboundGamePacket::PlayerInput(
-                serverbound_player_input(&current),
-            ));
-            game.last_sent_input = current;
-        }
+        send_changed_player_input(input, &connection.packet_tx, &mut game.last_sent_input);
     }
 
     fn send_player_command(
@@ -4048,6 +4366,16 @@ impl AppCore {
 
         let pos = game.player.position;
         let look_dir = game.player.look_dir;
+
+        if send_mounted_movement(
+            sender,
+            &game.entity_store,
+            &game.player,
+            game.riding_vehicle_id,
+        ) {
+            game.last_sent_look_dir = look_dir;
+            return;
+        }
 
         let dx = pos.x - game.last_sent_pos.x;
         let dy = pos.y - game.last_sent_pos.y;
@@ -4201,9 +4529,9 @@ mod tests {
     use super::{
         CursorOp, DeathRoute, HeadProfile, PendingPackDownload, Velocity, accepted_player_chat_tag,
         add_explosion_knockback, apply_passengers, apply_vehicle_teleport, cursor_step,
-        death_route, entity_look_direction, explosion_sound_pitch, local_player_motion,
-        pack_download_action, player_command_packet, player_input_state, player_ride_state,
-        player_rotation_packet, post_teleport_echo, register_nonliving_spawn,
+        death_route, entity_look_direction, explosion_sound_pitch, load_network_chunk,
+        local_player_motion, pack_download_action, player_command_packet, player_input_state,
+        player_ride_state, player_rotation_packet, post_teleport_echo, register_nonliving_spawn,
         resolve_entity_teleport, resolve_head_profile, resolve_rotation,
         server_view_distance_update, serverbound_player_input, set_first_disconnect_reason,
         set_player_experience, set_player_inventory_slot, take_finished_pack_downloads,
@@ -4215,6 +4543,171 @@ mod tests {
     use crate::player::valid_player_name;
     use crate::resource_pack::ResourcePackManager;
     use crate::ui::chat::ChatMessageTag;
+
+    fn empty_chunk_section() -> Vec<u8> {
+        use azalea_buf::AzBuf;
+        let mut data = Vec::new();
+        azalea_world::chunk::Section::default()
+            .azalea_write(&mut data)
+            .unwrap();
+        data
+    }
+
+    #[test]
+    fn bounded_network_drain_applies_chunk_and_be_before_next_tick_update() {
+        use azalea_core::position::{BlockPos, ChunkPos};
+        use azalea_registry::builtin::BlockEntityKind;
+        use simdnbt::owned::NbtCompound;
+
+        use crate::net::NetworkEvent;
+        use crate::world::block_entity_anim::BlockEntityAnimStore;
+        use crate::world::chunk::ChunkStore;
+
+        let chunk_pos = ChunkPos::new(-2, 1);
+        let pos = BlockPos::new(-17, -64, 17);
+        let kind = BlockEntityKind::CopperGolemStatue;
+        let mut chunks = ChunkStore::new_with_dimension(2, 16, -64);
+        let mut animations = BlockEntityAnimStore::default();
+        let (tx, rx) = crossbeam_channel::bounded(4096);
+        let light = azalea_protocol::packets::game::c_light_update::ClientboundLightUpdatePacketData::default();
+        for _ in 0..4095 {
+            tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+        }
+        tx.try_send(NetworkEvent::ChunkLoaded {
+            pos: chunk_pos,
+            data: std::sync::Arc::new(empty_chunk_section().into_boxed_slice()),
+            heightmaps: Vec::new(),
+            light: (&light).into(),
+            block_entities: vec![(pos, kind, NbtCompound::new())],
+        })
+        .unwrap();
+
+        let mut drained = 0;
+        for event in rx.try_iter().take(4096) {
+            // A later packet arrives as soon as the consumer frees a slot.
+            if drained == 0 {
+                let mut nbt = NbtCompound::new();
+                nbt.insert("later", 1i32);
+                tx.try_send(NetworkEvent::BlockEntityUpdate {
+                    pos,
+                    kind,
+                    nbt: Some(nbt),
+                })
+                .unwrap();
+            }
+            drained += 1;
+            match event {
+                NetworkEvent::ChunkLoaded {
+                    pos,
+                    data,
+                    heightmaps,
+                    block_entities,
+                    ..
+                } => {
+                    load_network_chunk(
+                        &mut chunks,
+                        &mut animations,
+                        pos,
+                        &data,
+                        &heightmaps,
+                        block_entities,
+                    )
+                    .unwrap();
+                }
+                NetworkEvent::LevelChunksLoadStart => {}
+                _ => panic!("later update must remain queued for the next tick"),
+            }
+        }
+        assert_eq!(drained, 4096);
+        assert!(chunks.get_chunk(&chunk_pos).is_some());
+        assert_eq!(chunks.block_entities[&pos].kind, kind);
+        assert!(chunks.block_entities[&pos].nbt.is_empty());
+
+        let NetworkEvent::BlockEntityUpdate { pos, kind, nbt } = rx.try_recv().unwrap() else {
+            panic!("expected the later standalone update");
+        };
+        update_block_entity(&mut chunks.block_entities, pos, kind, nbt);
+        assert_eq!(chunks.block_entities[&pos].nbt.int("later"), Some(1));
+        assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn chunk_reload_replaces_be_and_animation_only_after_successful_decode() {
+        use azalea_core::position::{BlockPos, ChunkPos};
+        use azalea_registry::builtin::BlockEntityKind;
+        use simdnbt::owned::NbtCompound;
+
+        use crate::world::block_entity::StoredBlockEntity;
+        use crate::world::block_entity_anim::BlockEntityAnimStore;
+        use crate::world::chunk::ChunkStore;
+
+        let chunk_pos = ChunkPos::new(-2, 1);
+        let stale = BlockPos::new(-32, -64, 16);
+        let statue = BlockPos::new(-17, -64, 31);
+        let neighbor = BlockPos::new(-16, -64, 31);
+        let mut chunks = ChunkStore::new_with_dimension(2, 16, -64);
+        let mut animations = BlockEntityAnimStore::default();
+        let data = empty_chunk_section();
+        chunks.load_chunk(chunk_pos, &data, &[]).unwrap();
+        for pos in [stale, neighbor] {
+            chunks.block_entities.insert(
+                pos,
+                StoredBlockEntity {
+                    kind: BlockEntityKind::Chest,
+                    nbt: NbtCompound::new(),
+                },
+            );
+            animations.set_open_count(pos, 1);
+        }
+        let entries = || {
+            vec![(
+                statue,
+                BlockEntityKind::CopperGolemStatue,
+                NbtCompound::new(),
+            )]
+        };
+        assert!(
+            load_network_chunk(&mut chunks, &mut animations, chunk_pos, &[], &[], entries(),)
+                .is_err()
+        );
+        assert_eq!(chunks.block_entities.len(), 2);
+        assert_eq!(chunks.block_entities[&stale].kind, BlockEntityKind::Chest);
+        assert!(animations.container(&stale).unwrap().opening);
+        assert!(animations.container(&neighbor).unwrap().opening);
+
+        load_network_chunk(
+            &mut chunks,
+            &mut animations,
+            chunk_pos,
+            &data,
+            &[],
+            entries(),
+        )
+        .unwrap();
+        assert!(!chunks.block_entities.contains_key(&stale));
+        assert_eq!(
+            chunks.block_entities[&statue].kind,
+            BlockEntityKind::CopperGolemStatue
+        );
+        assert!(chunks.block_entities[&statue].nbt.is_empty());
+        assert!(animations.container(&stale).is_none());
+        animations.set_open_count(statue, 1);
+
+        // An empty authoritative snapshot is a deletion, not "no update".
+        load_network_chunk(
+            &mut chunks,
+            &mut animations,
+            chunk_pos,
+            &data,
+            &[],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(chunks.block_entities.len(), 1);
+        assert!(chunks.block_entities.contains_key(&neighbor));
+        assert!(animations.container(&statue).is_none());
+        assert!(animations.container(&neighbor).unwrap().opening);
+    }
 
     #[test]
     fn pushed_pack_downloads_keep_identity_when_they_finish_in_reverse_order() {
@@ -4846,20 +5339,18 @@ mod tests {
     fn controller_packet_directions_match_physical_stick_direction() {
         let input = InputState::released();
 
-        let right_state =
-            player_input_state(&input, gamepad_movement_axes(glam::vec2(1.0, 0.0)), false);
+        let right_state = player_input_state(&input, gamepad_movement_axes(glam::vec2(1.0, 0.0)));
         let right = serverbound_player_input(&right_state);
         assert!(right.right);
         assert!(!right.left);
 
-        let left_state =
-            player_input_state(&input, gamepad_movement_axes(glam::vec2(-1.0, 0.0)), false);
+        let left_state = player_input_state(&input, gamepad_movement_axes(glam::vec2(-1.0, 0.0)));
         let left = serverbound_player_input(&left_state);
         assert!(left.left);
         assert!(!left.right);
 
         let forward_right_state =
-            player_input_state(&input, gamepad_movement_axes(glam::vec2(0.8, 0.8)), false);
+            player_input_state(&input, gamepad_movement_axes(glam::vec2(0.8, 0.8)));
         let forward_right = serverbound_player_input(&forward_right_state);
         assert!(forward_right.forward);
         assert!(forward_right.right);
@@ -4980,5 +5471,370 @@ mod tests {
         assert_eq!(server_view_distance_update(20, 12), Some(20));
         // Wire values past the chunk grid's extent clamp to it.
         assert_eq!(server_view_distance_update(300, 12), Some(128));
+    }
+}
+
+#[cfg(test)]
+mod mounted_tick_tests {
+    use azalea_registry::builtin::EntityKind;
+
+    use super::*;
+    use crate::entity::{EntityStore, LivingEntity};
+    use crate::net::sender::{Outbound, PacketSender};
+    use crate::world::block;
+
+    const HORSE: i32 = 42;
+
+    // Exercises the real extracted tick phases against ChunkStore/LivingEntity and
+    // PacketSender, not synthetic transforms. This is NOT a Renderer/AppCore E2E
+    // test.
+    struct Ride {
+        chunks: ChunkStore,
+        entities: EntityStore,
+        player: LocalPlayer,
+        input: InputState,
+        last_input: PlayerInputState,
+        sender: PacketSender,
+        rx: tokio::sync::mpsc::UnboundedReceiver<Outbound>,
+        mounted: Option<i32>,
+    }
+
+    impl Ride {
+        fn new(yaw: f32) -> Self {
+            block::init("26.2");
+            let mut chunks = ChunkStore::new(1);
+            chunks.partial_storage.set(
+                &azalea_core::position::ChunkPos::new(0, 0),
+                Some(azalea_world::chunk::Chunk::default()),
+                &mut chunks.chunk_storage,
+            );
+            let stone = block::first_state_of("stone").unwrap();
+            for x in 0..16 {
+                for z in 0..16 {
+                    chunks.set_block_state(x, 60, z, stone);
+                }
+            }
+            let mut player = LocalPlayer::new();
+            player.entity_id = 73;
+            player.look_dir = LookDirection::new(yaw, 40.0);
+            // Deliberately different from the horse's flags/position/pitch.
+            player.on_ground = false;
+            player.horizontal_collision = true;
+            let mut entities = EntityStore::new();
+            entities.spawn_living(
+                HORSE,
+                EntityKind::Horse,
+                Position::new(14.0, 61.0, 2.0),
+                LookDirection::default(),
+                0.0,
+                None,
+            );
+            entities.set_passengers(HORSE, &[player.entity_id]);
+            let horse = entities.living.get_mut(&HORSE).unwrap();
+            horse.saddled = true;
+            horse.on_ground = true;
+            horse.velocity.y = -0.08 * f64::from(0.98_f32);
+            let mut input = InputState::released();
+            input.set_test_key(KEY_FORWARD, true);
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            Self {
+                chunks,
+                entities,
+                player,
+                input,
+                last_input: PlayerInputState::default(),
+                sender: PacketSender::new(tx),
+                rx,
+                mounted: Some(HORSE),
+            }
+        }
+
+        fn tick(&mut self) -> Vec<Outbound> {
+            let controlled =
+                controlled_horse_id(&self.entities, self.player.entity_id, self.mounted);
+            if let Some(id) = controlled {
+                self.entities
+                    .living
+                    .get_mut(&id)
+                    .unwrap()
+                    .stop_interpolation();
+            }
+            self.entities
+                .tick_living(&self.chunks, self.player.position, 2);
+            self.player.snapshot_render_state();
+            let jump_held = self.input.performing_action(Action::Jump);
+            let jumpable = self
+                .mounted
+                .and_then(|id| self.entities.living.get(&id))
+                .is_some_and(|horse| crate::entity::is_equine(&horse.entity_type) && horse.saddled);
+            tick_riding_jump(
+                &mut self.entities,
+                &mut self.player,
+                controlled,
+                jumpable,
+                jump_held,
+                &self.sender,
+            );
+            tick_ridden_horse(
+                &mut self.entities,
+                &self.chunks,
+                &mut self.player,
+                &self.input,
+                self.mounted,
+                None,
+            );
+            if self.mounted.is_some() {
+                self.player.was_jump_pressed = jump_held;
+            }
+            send_changed_player_input(&self.input, &self.sender, &mut self.last_input);
+            send_mounted_movement(&self.sender, &self.entities, &self.player, self.mounted);
+            self.drain()
+        }
+
+        fn drain(&mut self) -> Vec<Outbound> {
+            std::iter::from_fn(|| self.rx.try_recv().ok()).collect()
+        }
+
+        fn horse(&self) -> &LivingEntity {
+            &self.entities.living[&HORSE]
+        }
+    }
+
+    fn assert_vehicle(bytes: &[u8], horse: &LivingEntity) {
+        // 33-byte body + one-byte ID; there is no entity ID in this payload.
+        assert_eq!(bytes.len(), 34);
+        assert_eq!(bytes[0], 0x22);
+        let xyz = std::array::from_fn::<_, 3, _>(|i| {
+            f64::from_be_bytes(bytes[1 + i * 8..9 + i * 8].try_into().unwrap())
+        });
+        assert_eq!(xyz, [horse.position.x, horse.position.y, horse.position.z]);
+        assert_eq!(
+            f32::from_be_bytes(bytes[25..29].try_into().unwrap()),
+            horse.look_dir.y_rot_deg()
+        );
+        assert_eq!(
+            f32::from_be_bytes(bytes[29..33].try_into().unwrap()),
+            horse.look_dir.x_rot_deg()
+        );
+        assert_eq!(bytes[33], u8::from(horse.on_ground));
+    }
+
+    // Exact queue shape also rejects duplicate MoveVehicle and all
+    // foot-position/status packets.
+    fn assert_tick(packets: &[Outbound], ride: &Ride, input_changed: bool, controlled: bool) {
+        let prefix = usize::from(input_changed);
+        assert_eq!(packets.len(), prefix + 1 + usize::from(controlled));
+        if input_changed {
+            let Outbound::Packet(packet) = &packets[0] else {
+                panic!("expected PlayerInput")
+            };
+            let ServerboundGamePacket::PlayerInput(input) = packet.as_ref() else {
+                panic!("expected PlayerInput before Rot")
+            };
+            assert_eq!(input.forward, ride.input.key_pressed(KEY_FORWARD));
+            assert_eq!(input.sprint, ride.input.performing_action(Action::Sprint));
+        }
+        let Outbound::Packet(packet) = &packets[prefix] else {
+            panic!("expected Rot")
+        };
+        let ServerboundGamePacket::MovePlayerRot(rot) = packet.as_ref() else {
+            panic!("mounted ticks must not emit foot position/status packets")
+        };
+        assert_eq!(rot.look_direction.y_rot(), ride.player.look_dir.y_rot_deg());
+        assert_eq!(rot.look_direction.x_rot(), ride.player.look_dir.x_rot_deg());
+        assert_eq!(rot.flags.on_ground, ride.player.on_ground);
+        assert_eq!(
+            rot.flags.horizontal_collision,
+            ride.player.horizontal_collision
+        );
+        if controlled {
+            let Outbound::Raw(bytes) = &packets[prefix + 1] else {
+                panic!("Rot must precede MoveVehicle")
+            };
+            assert_vehicle(bytes, ride.horse());
+        }
+    }
+
+    #[test]
+    fn actual_twenty_ticks_wire_simulated_horse_and_change_only_input() {
+        for yaw in [0.0, 90.0] {
+            let mut ride = Ride::new(yaw);
+            let origin = ride.horse().position;
+            let (mut rotations, mut vehicles, mut inputs) = (0, 0, 0);
+            for tick in 0..20 {
+                // Sprint key changes while LocalPlayer.sprinting remains false.
+                if tick == 5 || tick == 10 {
+                    ride.input.set_test_key(KeyCode::ControlLeft, tick == 5);
+                }
+                // Remote lerp targets must not override local travel.
+                ride.entities
+                    .teleport_living(HORSE, Position::new(100.0, 80.0, 100.0), true);
+                let packets = ride.tick();
+                let changed = matches!(tick, 0 | 5 | 10);
+                assert_tick(&packets, &ride, changed, true);
+                for packet in &packets {
+                    match packet {
+                        Outbound::Raw(_) => vehicles += 1,
+                        Outbound::Packet(packet) => match packet.as_ref() {
+                            ServerboundGamePacket::MovePlayerRot(_) => rotations += 1,
+                            ServerboundGamePacket::PlayerInput(_) => inputs += 1,
+                            _ => panic!("unexpected tick packet"),
+                        },
+                        _ => panic!("unexpected outbound work"),
+                    }
+                }
+                assert!(!ride.player.sprinting);
+                assert_eq!(ride.player.position.x, ride.horse().position.x);
+                assert_eq!(ride.player.position.z, ride.horse().position.z);
+                assert!(
+                    (ride.player.position.y - ride.horse().position.y - 0.843750023841858).abs()
+                        < 1e-12
+                );
+            }
+            assert_eq!((rotations, vehicles, inputs), (20, 20, 3));
+            let displacement = ride.horse().position - origin;
+            if yaw == 0.0 {
+                assert!(displacement.z > 9.0 && displacement.x.abs() < 1e-7);
+            } else {
+                assert!(displacement.x < -9.0 && displacement.z.abs() < 1e-7);
+            }
+            assert_eq!(ride.horse().look_dir, LookDirection::new(yaw, 20.0));
+        }
+    }
+
+    #[test]
+    fn unsaddled_second_passenger_placeholder_and_dismount_send_no_vehicle() {
+        for mode in 0..3 {
+            let mut ride = Ride::new(0.0);
+            match mode {
+                0 => ride.entities.living.get_mut(&HORSE).unwrap().saddled = false,
+                1 => ride
+                    .entities
+                    .set_passengers(HORSE, &[99, ride.player.entity_id]),
+                _ => {
+                    ride.entities.living.remove(&HORSE);
+                }
+            }
+            let origin = Position::new(14.0, 61.0, 2.0);
+            let target = origin + dvec3(0.0, 0.0, 1.0);
+            ride.entities.teleport_living(HORSE, target, true);
+            for tick in 0..20 {
+                let packets = ride.tick();
+                assert_tick(&packets, &ride, tick == 0, false);
+            }
+            if mode != 2 {
+                assert_eq!(
+                    ride.horse().position,
+                    target,
+                    "remote interpolation must continue"
+                );
+            }
+            apply_horse_correction(
+                &mut ride.entities,
+                ride.player.entity_id,
+                Some(HORSE),
+                dvec3(3.0, 61.0, 3.0),
+                90.0,
+                0.0,
+                &ride.sender,
+            );
+            assert!(ride.drain().is_empty());
+        }
+        let mut ride = Ride::new(0.0);
+        let packets = ride.tick();
+        assert_tick(&packets, &ride, true, true);
+        ride.entities.set_passengers(HORSE, &[]);
+        ride.mounted = None;
+        for _ in 0..20 {
+            // Only the mounted subpath is invoked; ordinary on-foot travel is not under
+            // test.
+            assert!(
+                ride.tick().is_empty(),
+                "dismount must stop the mounted cadence"
+            );
+        }
+    }
+
+    #[test]
+    fn jump_command_precedes_tick_pair_and_correction_is_one_extra_reply() {
+        let mut ride = Ride::new(0.0);
+        ride.tick();
+        ride.player.was_jump_pressed = true;
+        ride.player.jump_riding_scale = 0.8;
+        let packets = ride.tick();
+        let Outbound::Packet(command) = &packets[0] else {
+            panic!("missing jump command")
+        };
+        let ServerboundGamePacket::PlayerCommand(command) = command.as_ref() else {
+            panic!("wrong command")
+        };
+        assert_eq!(
+            command.action,
+            azalea_protocol::packets::game::s_player_command::Action::StartRidingJump
+        );
+        assert_eq!(command.data, 80);
+        assert_eq!(command.id.0, ride.player.entity_id);
+        assert_tick(&packets[1..], &ride, false, true);
+        assert!(ride.horse().position.y > 61.0);
+        assert!(!ride.horse().on_ground);
+        let correction = dvec3(12.0, 63.0, 4.0);
+        apply_horse_correction(
+            &mut ride.entities,
+            ride.player.entity_id,
+            Some(HORSE),
+            correction,
+            90.0,
+            10.0,
+            &ride.sender,
+        );
+        let replies = ride.drain();
+        assert_eq!(replies.len(), 1);
+        let Outbound::Raw(bytes) = &replies[0] else {
+            panic!("expected raw correction reply")
+        };
+        assert_vehicle(bytes, ride.horse());
+        assert_eq!(glam::DVec3::from(ride.horse().position), correction);
+        let packets = ride.tick();
+        assert_tick(&packets, &ride, false, true);
+        // Tiny/rotation-only correction still echoes exactly once, retaining current
+        // pose.
+        let current = glam::DVec3::from(ride.horse().position);
+        apply_horse_correction(
+            &mut ride.entities,
+            ride.player.entity_id,
+            Some(HORSE),
+            current,
+            180.0,
+            -10.0,
+            &ride.sender,
+        );
+        let replies = ride.drain();
+        assert_eq!(replies.len(), 1);
+        let Outbound::Raw(bytes) = &replies[0] else {
+            panic!("expected raw correction reply")
+        };
+        assert_vehicle(bytes, ride.horse());
+    }
+
+    #[test]
+    fn unsupported_fluids_stop_motion_but_keep_controlled_tick_cadence() {
+        for fluid in ["water", "lava"] {
+            let mut ride = Ride::new(0.0);
+            ride.chunks
+                .set_block_state(13, 61, 2, block::first_state_of(fluid).unwrap());
+            let origin = ride.horse().position;
+            ride.entities
+                .living
+                .get_mut(&HORSE)
+                .unwrap()
+                .horse_jump_pending_scale = 0.8;
+            for tick in 0..20 {
+                let packets = ride.tick();
+                assert_tick(&packets, &ride, tick == 0, true);
+                assert_eq!(ride.horse().position, origin);
+                assert_eq!(ride.horse().velocity, glam::DVec3::ZERO);
+                assert_eq!(ride.horse().horse_jump_pending_scale, 0.0);
+            }
+        }
     }
 }

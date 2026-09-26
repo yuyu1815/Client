@@ -19,5 +19,6 @@ pub mod panorama;
 pub mod particle;
 pub mod skin_preview;
 pub mod sky;
+pub mod text_display;
 pub mod weather;
 pub mod world_border;

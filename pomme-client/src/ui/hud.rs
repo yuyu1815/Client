@@ -705,6 +705,7 @@ pub fn build_hud(
                     h: item_size,
                     item_name: item_resource_name(data.kind),
                     tint: WHITE,
+                    stack_dye_rgb: None,
                 });
                 let cooldown = item_cooldowns.fraction(item, partial_tick);
                 if cooldown > 0.0 {

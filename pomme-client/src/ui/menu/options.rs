@@ -1679,9 +1679,9 @@ mod tests {
         elements
             .iter()
             .filter_map(|e| match e {
-                MenuElement::NineSlice { sprite, .. } | MenuElement::Image { sprite, .. } => {
-                    Some(*sprite)
-                }
+                MenuElement::NineSlice { sprite, .. }
+                | MenuElement::Image { sprite, .. }
+                | MenuElement::CroppedImage { sprite, .. } => Some(*sprite),
                 _ => None,
             })
             .collect()

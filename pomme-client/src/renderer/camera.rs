@@ -463,6 +463,10 @@ impl Camera {
     /// Camera yaw/pitch in degrees as vanilla `Camera.setRotation` sees them:
     /// the mirrored third-person view turns around (yaw + 180, pitch negated).
     pub fn effective_look_deg(&self) -> (f32, f32) {
+        if self.top_down.is_some() {
+            // Match view_basis/billboard_axes: straight down, north (-Z) up.
+            return (180.0, 90.0);
+        }
         let yaw = self.look_dir.y_rot_deg();
         let pitch = self.look_dir.x_rot_deg();
         if self.mode == CameraMode::ThirdPersonFront {
@@ -598,6 +602,32 @@ mod tests {
                 (actual - expected).abs() < 1e-6,
                 "{context}: matrix element {index} was {actual}, expected {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn effective_look_matches_world_billboard_axes_in_all_views() {
+        let mut camera = Camera::new(16.0 / 9.0);
+        camera.look_dir = LookDirection::new(37.0, -24.0);
+        for mode in [
+            CameraMode::FirstPerson,
+            CameraMode::ThirdPersonBack,
+            CameraMode::ThirdPersonFront,
+        ] {
+            camera.mode = mode;
+            for top_down in [false, true] {
+                camera.top_down = top_down.then_some(50.0);
+                let (yaw, pitch) = camera.effective_look_deg();
+                let (sy, cy) = yaw.to_radians().sin_cos();
+                let (sp, cp) = pitch.to_radians().sin_cos();
+                let forward = Vec3::new(-sy * cp, -sp, cy * cp);
+                let right = Vec3::new(-cy, 0.0, -sy);
+                let up = Vec3::new(-sy * sp, cp, cy * sp);
+                let (world_right, world_up) = camera.billboard_axes();
+                assert!(forward.distance(camera.view_basis().0) < 1e-5);
+                assert!(right.distance(world_right) < 1e-5);
+                assert!(up.distance(world_up) < 1e-5);
+            }
         }
     }
 

@@ -86,6 +86,7 @@ impl UnihexGlyph {
 }
 
 pub const GLYPH_ATLAS_SIZE: u32 = 2048;
+pub const DEFAULT_CELL_HEIGHT: u32 = 8;
 /// Glyphs are baked eagerly into fixed layers, so cap the atlas memory: 64
 /// gray layers are 256 MiB, 32 colored layers 512 MiB.
 // TODO: bake lazily into 256px pages like vanilla `GlyphStitcher`.
@@ -467,6 +468,33 @@ pub struct GlyphMap {
 }
 
 impl GlyphMap {
+    /// Synthetic atlas placements for CPU geometry tests; no resources or GPU.
+    #[cfg(test)]
+    pub(crate) fn with_test_glyphs(glyphs: &[(&str, char, GlyphInfo)]) -> Self {
+        let mut font_sets = HashMap::new();
+        for (font, ch, glyph) in glyphs {
+            let set = font_sets
+                .entry((*font).to_owned())
+                .or_insert_with(|| FontSetData {
+                    glyphs: HashMap::new(),
+                    non_fishy: HashMap::new(),
+                    obfuscation_glyphs: HashMap::new(),
+                });
+            set.glyphs.insert(*ch, Arc::new(glyph.clone()));
+        }
+        Self {
+            font_sets,
+            missing_glyph: Arc::new(
+                glyphs
+                    .first()
+                    .expect("test needs a fallback glyph")
+                    .2
+                    .clone(),
+            ),
+            cell_h: DEFAULT_CELL_HEIGHT,
+        }
+    }
+
     /// Loads every font in the resource stack (vanilla `FontManager.prepare`).
     pub fn load(
         sources: FontSources<'_>,
@@ -532,7 +560,7 @@ impl GlyphMap {
         let map = Self {
             font_sets,
             missing_glyph,
-            cell_h: 8,
+            cell_h: DEFAULT_CELL_HEIGHT,
         };
         Ok((map, pixels))
     }

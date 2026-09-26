@@ -132,6 +132,7 @@ pub fn build_game_mode_switcher(
             h: 16.0 * gs,
             item_name: (*item).into(),
             tint: WHITE,
+            stack_dye_rgb: None,
         });
         if mouse_moved && common::hit_test(cursor, [x, y0, SLOT_AREA * gs, SLOT_AREA * gs]) {
             state.selected = *mode;

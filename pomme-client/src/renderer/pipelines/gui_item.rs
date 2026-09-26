@@ -269,14 +269,17 @@ impl GuiItemPipeline {
         slot_x_px: u32,
         slot_y_px: u32,
         slot_size_px: u32,
-        item_name: &str,
+        mesh_key: &str,
+        original_name: &str,
         is_block: bool,
     ) {
-        let Some((buffer, vertex_count)) = item_entity.gui_mesh_handle(item_name) else {
+        let Some((buffer, vertex_count)) = item_entity.gui_mesh_handle(mesh_key) else {
             return;
         };
 
-        let display = self.display.resolve(item_name, default_display(is_block));
+        let display = self
+            .display
+            .resolve(original_name, default_display(is_block));
         let model = slot_model_matrix(
             slot_x_px as f32,
             slot_y_px as f32,
@@ -285,7 +288,7 @@ impl GuiItemPipeline {
             display,
         );
 
-        let pipeline = if item_entity.mesh_is_translucent(item_name) {
+        let pipeline = if item_entity.mesh_is_translucent(mesh_key) {
             self.translucent_pipeline
         } else {
             self.pipeline

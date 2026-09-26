@@ -75,8 +75,10 @@ fn pack_normal(normal: glam::Vec3) -> [i8; 4] {
     ]
 }
 
+#[derive(Clone)]
 pub struct ItemRenderInfo {
     pub item_name: String,
+    pub raw_dye_rgb: Option<[u8; 3]>,
     pub model_matrix: Mat4,
     pub light: f32,
     pub nether_lighting: bool,
@@ -836,6 +838,28 @@ impl ItemEntityPipeline {
                 "provenance": "CPU-built item vertex payload retained by ItemEntityPipeline before mapped Vulkan upload; no GPU readback",
             })
         })
+    }
+
+    /// Build/cache an independently named CPU-colorized mesh variant; the
+    /// source model is untouched.
+    pub(crate) fn ensure_dye_variant_mesh(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        item_name: &str,
+        rgb: [u8; 3],
+        model: &BakedModel,
+        uv_map: &AtlasUVMap,
+    ) -> String {
+        let key = format!(
+            "__pomme_dye_variant__:{item_name}:#{:02x}{:02x}{:02x}",
+            rgb[0], rgb[1], rgb[2]
+        );
+        if !self.meshes.contains_key(&key) {
+            let variant = crate::world::block::model::colorized_dye_variant(model, rgb);
+            self.ensure_mesh(device, allocator, &key, &variant, uv_map);
+        }
+        key
     }
 
     pub fn ensure_mesh(
@@ -1902,6 +1926,87 @@ mod tests {
         for (face, expected) in vertices.as_chunks::<6>().0.iter().zip(expected) {
             for vertex in face {
                 assert_eq!(unpack_normal(vertex), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn player_head_quads_feed_all_item_contexts_with_72_vertices() {
+        let transform = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
+            * glam::Mat4::from_quat(glam::Quat::from_xyzw(1.0, 0.0, 0.0, 0.0));
+        let model = crate::world::block::model::bake_player_head_item_model(transform);
+        let atlas = AtlasUVMap::test_empty();
+        let directions = [
+            glam::Vec3::Z,
+            glam::Vec3::NEG_Z,
+            glam::Vec3::Y,
+            glam::Vec3::NEG_Y,
+            glam::Vec3::NEG_X,
+            glam::Vec3::X,
+        ];
+        // These are the actual shared CPU conversions consumed by GUI
+        // bake_to_slot, either hand, dropped items and FIXED item frames.
+        // No context re-applies the special model's T Rx or a placed-BE yaw.
+        for gui_order in [false, true] {
+            let vertices = build_item_mesh(&model, &atlas, gui_order);
+            assert_eq!(vertices.len(), 72);
+            assert_eq!(
+                mesh_bounds(&vertices[..36]),
+                (
+                    glam::Vec3::new(-0.25, -0.5, -0.25),
+                    glam::Vec3::new(0.25, 0.0, 0.25)
+                )
+            );
+            assert_eq!(
+                mesh_bounds(&vertices[36..]),
+                (
+                    glam::Vec3::new(-4.25, -8.25, -4.25) / 16.0,
+                    glam::Vec3::new(4.25, 0.25, 4.25) / 16.0
+                )
+            );
+            for (face, quad) in model.quads.iter().enumerate() {
+                for (offset, corner) in [0, 1, 2, 2, 3, 0].into_iter().enumerate() {
+                    let vertex = &vertices[face * 6 + offset];
+                    assert_eq!(vertex.position, quad.positions[corner].map(|p| p - 0.5));
+                    assert_eq!(vertex.tex_coords, quad.uvs[corner]);
+                    assert_eq!(unpack_normal(vertex), directions[face % 6]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conduit_quads_feed_gui_held_and_drop_mesh_with_36_vertices() {
+        let model = crate::world::block::model::bake_conduit_item_model();
+        // Unit UV region isolates CPU mesh conversion, not atlas loading/GPU upload.
+        let atlas = AtlasUVMap::test_empty();
+        let directions = [
+            glam::Vec3::NEG_Z,
+            glam::Vec3::Z,
+            glam::Vec3::NEG_Y,
+            glam::Vec3::Y,
+            glam::Vec3::NEG_X,
+            glam::Vec3::X,
+        ];
+        // Opaque GUI, held and dropped items share `false`; translucent GUI
+        // uses `true`. Both paths must retain the shell's exact UVs and bounds.
+        for gui_order in [false, true] {
+            let vertices = build_item_mesh(&model, &atlas, gui_order);
+            assert_eq!(vertices.len(), 36);
+            assert_eq!(
+                mesh_bounds(&vertices),
+                (
+                    glam::Vec3::splat(-3.0 / 16.0),
+                    glam::Vec3::splat(3.0 / 16.0)
+                )
+            );
+            for (face, quad) in model.quads.iter().enumerate() {
+                for (offset, corner) in [0, 1, 2, 2, 3, 0].into_iter().enumerate() {
+                    let vertex = &vertices[face * 6 + offset];
+                    assert_eq!(vertex.position, quad.positions[corner].map(|p| p - 0.5));
+                    assert_eq!(vertex.tex_coords, quad.uvs[corner]);
+                    assert_eq!(unpack_normal(vertex), directions[face]);
+                }
             }
         }
     }

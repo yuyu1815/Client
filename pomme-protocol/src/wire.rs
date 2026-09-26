@@ -44,6 +44,20 @@ pub fn encode_interact(
     buf
 }
 
+/// Vanilla 26.2 `ServerboundMoveVehiclePacket`; Azalea's typed packet omits
+/// the required on-ground byte, so encode the raw native wire layout here.
+pub fn encode_move_vehicle(pos: DVec3, yaw: f32, pitch: f32, on_ground: bool) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(33);
+    write_varint(&mut buf, game_serverbound_id("move_vehicle"));
+    for value in [pos.x, pos.y, pos.z] {
+        buf.extend_from_slice(&value.to_be_bytes());
+    }
+    buf.extend_from_slice(&yaw.to_be_bytes());
+    buf.extend_from_slice(&pitch.to_be_bytes());
+    buf.push(on_ground as u8);
+    buf
+}
+
 /// Vanilla `ServerboundAttackPacket`: left-click on an entity. Encoded here
 /// because azalea serializes the entity id as a fixed i32 instead of a
 /// varint.
@@ -194,6 +208,22 @@ mod tests {
 
         let offhand = encode_interact(42, InteractionHand::OffHand, DVec3::ZERO, true);
         assert_eq!(offhand, [0x1A, 42, 1, 0, 1]);
+    }
+
+    #[test]
+    fn move_vehicle_packet_layout() {
+        let pos = DVec3::new(1.25, -2.5, 3.75);
+        for on_ground in [false, true] {
+            let bytes = encode_move_vehicle(pos, 90.0, -45.0, on_ground);
+            assert_eq!(bytes.len(), 34); // one-byte 0x22 id + 33-byte payload
+            assert_eq!(bytes[0], 0x22);
+            assert_eq!(&bytes[1..9], &pos.x.to_be_bytes());
+            assert_eq!(&bytes[9..17], &pos.y.to_be_bytes());
+            assert_eq!(&bytes[17..25], &pos.z.to_be_bytes());
+            assert_eq!(&bytes[25..29], &90.0f32.to_be_bytes());
+            assert_eq!(&bytes[29..33], &(-45.0f32).to_be_bytes());
+            assert_eq!(bytes[33], on_ground as u8);
+        }
     }
 
     #[test]

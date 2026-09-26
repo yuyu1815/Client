@@ -9,7 +9,11 @@ use crate::renderer::camera::CameraUniform;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const MAPS_PER_DESCRIPTOR_POOL: u32 = 256;
-const MAP_PLANE_OFFSET: f32 = 1.0 / 1024.0;
+const MAP_PLANE_Z: f32 = -0.01;
+
+pub(crate) fn frame_map_rotation(facing_base: Quat, item_rotation: i32) -> Quat {
+    facing_base * Quat::from_rotation_z(((item_rotation % 4) as f32 * 90.0 + 180.0).to_radians())
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -133,32 +137,7 @@ impl MapQuadPipeline {
             .map(|_| vec![create_texture_pool(device)])
             .collect();
 
-        let vertices = [
-            Vertex {
-                position: [-0.5, -0.5, 0.0],
-                uv: [0.0, 1.0],
-            },
-            Vertex {
-                position: [0.5, -0.5, 0.0],
-                uv: [1.0, 1.0],
-            },
-            Vertex {
-                position: [0.5, 0.5, 0.0],
-                uv: [1.0, 0.0],
-            },
-            Vertex {
-                position: [-0.5, -0.5, 0.0],
-                uv: [0.0, 1.0],
-            },
-            Vertex {
-                position: [0.5, 0.5, 0.0],
-                uv: [1.0, 0.0],
-            },
-            Vertex {
-                position: [-0.5, 0.5, 0.0],
-                uv: [0.0, 0.0],
-            },
-        ];
+        let vertices = map_quad_vertices();
         let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
             device,
             allocator,
@@ -232,9 +211,8 @@ impl MapQuadPipeline {
             }));
     }
 
-    /// `position` is the center of the frame's map plane in anchor-relative
-    /// world coordinates. A 1/1024-block camera-ward offset avoids coplanar
-    /// fighting with the item-frame backing. Each draw consumes one descriptor
+    /// `position` is the item-frame origin in anchor-relative world
+    /// coordinates. Each draw consumes one descriptor
     /// from that frame's pools; additional pools are retained between frames.
     pub fn draw(
         &mut self,
@@ -277,9 +255,7 @@ impl MapQuadPipeline {
         };
         device.update_descriptor_sets(&[write], &[]);
 
-        let model = Mat4::from_translation(position)
-            * Mat4::from_quat(rotation)
-            * Mat4::from_translation(Vec3::Z * MAP_PLANE_OFFSET);
+        let model = map_model(position, rotation);
         let push = ModelPush {
             model: model.to_cols_array_2d(),
         };
@@ -299,6 +275,127 @@ impl MapQuadPipeline {
         );
         cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
         cmd.draw(6, 1, 0, 0);
+    }
+}
+
+fn map_quad_vertices() -> [Vertex; 6] {
+    [
+        Vertex {
+            position: [-0.5, -0.5, 0.0],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, 0.0],
+            uv: [1.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, 0.5, 0.0],
+            uv: [1.0, 1.0],
+        },
+        Vertex {
+            position: [-0.5, -0.5, 0.0],
+            uv: [0.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, 0.5, 0.0],
+            uv: [1.0, 0.0],
+        },
+        Vertex {
+            position: [-0.5, 0.5, 0.0],
+            uv: [0.0, 1.0],
+        },
+    ]
+}
+
+fn map_model(position: Vec3, frame_rotation: Quat) -> Mat4 {
+    Mat4::from_translation(position)
+        * Mat4::from_quat(frame_rotation)
+        // frame_map_rotation already includes vanilla's 180-degree map rotation.
+        * Mat4::from_translation(Vec3::Z * 0.429609375)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_quad_corners_match_official_frame_transform() {
+        let vertices = map_quad_vertices();
+        for (direction, rotation, facing) in [
+            ("North", 0_i32, Quat::IDENTITY),
+            ("North", 2, Quat::IDENTITY),
+            (
+                "East",
+                0,
+                Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+            ),
+            (
+                "East",
+                2,
+                Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+            ),
+        ] {
+            let position = if direction == "North" {
+                Vec3::new(0.0, 0.0, -0.46875)
+            } else {
+                Vec3::new(0.46875, 0.0, 0.0)
+            };
+            let model = map_model(position, frame_map_rotation(facing, rotation));
+            let corner = |v: &Vertex| model.transform_point3(Vec3::from_array(v.position));
+            let uv0 = vertices.iter().find(|v| v.uv == [0.0, 0.0]).unwrap();
+            let expected = if direction == "North" {
+                if rotation == 0 {
+                    Vec3::new(0.5, 0.5, -0.039140625)
+                } else {
+                    Vec3::new(-0.5, -0.5, -0.039140625)
+                }
+            } else if rotation == 0 {
+                Vec3::new(0.039140625, 0.5, 0.5)
+            } else {
+                Vec3::new(0.039140625, -0.5, -0.5)
+            };
+            assert!(
+                corner(uv0).abs_diff_eq(expected, 1e-6),
+                "{direction} rotation {rotation}: {:?}",
+                corner(uv0)
+            );
+            let normal = model.transform_vector3(Vec3::Z);
+            let expected_normal = if direction == "North" {
+                Vec3::Z
+            } else {
+                -Vec3::X
+            };
+            assert!(
+                normal.abs_diff_eq(expected_normal, 1e-6),
+                "{direction}: {normal:?}"
+            );
+            let plane_depth = if direction == "North" {
+                corner(uv0).z
+            } else {
+                corner(uv0).x
+            };
+            assert!(
+                (plane_depth
+                    - if direction == "North" {
+                        -0.039140625
+                    } else {
+                        0.039140625
+                    })
+                .abs()
+                    < 1e-6
+            );
+            assert_eq!(
+                vertices.iter().map(|v| v.uv).collect::<Vec<_>>(),
+                vec![
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [1.0, 1.0],
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [0.0, 1.0]
+                ]
+            );
+        }
     }
 }
 
