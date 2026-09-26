@@ -29,6 +29,7 @@ pub struct ChunkBorderPipeline {
     vertex_buffer: vk::Buffer,
     vertex_alloc: Allocation,
     vertex_count: u32,
+    vertices: Vec<LineVertex>,
 }
 
 impl ChunkBorderPipeline {
@@ -262,6 +263,7 @@ impl ChunkBorderPipeline {
             vertex_buffer,
             vertex_alloc,
             vertex_count: 0,
+            vertices: Vec::new(),
         }
     }
 
@@ -275,79 +277,11 @@ impl ChunkBorderPipeline {
     /// grid at extreme coordinates. The grid cell comes from `pivot` (the
     /// player eye): vanilla outlines the entity's chunk, not the camera's.
     pub fn update_lines(&mut self, pivot: glam::DVec3, eye: glam::DVec3, min_y: i32, max_y: i32) {
-        let chunk_x = (pivot.x.floor() as i32).div_euclid(16) * 16;
-        let chunk_z = (pivot.z.floor() as i32).div_euclid(16) * 16;
-
-        let mut verts: Vec<LineVertex> = Vec::new();
-        let y_min = min_y as f64;
-        let y_max = max_y as f64;
-
-        let push_line = |verts: &mut Vec<LineVertex>,
-                         x0: f64,
-                         y0: f64,
-                         z0: f64,
-                         x1: f64,
-                         y1: f64,
-                         z1: f64,
-                         color: [f32; 4]| {
-            verts.push(LineVertex {
-                position: [
-                    (x0 - eye.x) as f32,
-                    (y0 - eye.y) as f32,
-                    (z0 - eye.z) as f32,
-                ],
-                color,
-            });
-            verts.push(LineVertex {
-                position: [
-                    (x1 - eye.x) as f32,
-                    (y1 - eye.y) as f32,
-                    (z1 - eye.z) as f32,
-                ],
-                color,
-            });
-        };
-
-        // Vertical lines at chunk corners (red)
-        for dx in [0, 16] {
-            for dz in [0, 16] {
-                let x = (chunk_x + dx) as f64;
-                let z = (chunk_z + dz) as f64;
-                push_line(&mut verts, x, y_min, z, x, y_max, z, RED);
-            }
-        }
-
-        // Vertical lines along chunk edges (blue) - every block along edges
-        for d in 1..16 {
-            let x0 = chunk_x as f64;
-            let x1 = (chunk_x + 16) as f64;
-            let z0 = chunk_z as f64;
-            let z1 = (chunk_z + 16) as f64;
-            let p = (chunk_x + d) as f64;
-            let q = (chunk_z + d) as f64;
-            push_line(&mut verts, p, y_min, z0, p, y_max, z0, BLUE);
-            push_line(&mut verts, p, y_min, z1, p, y_max, z1, BLUE);
-            push_line(&mut verts, x0, y_min, q, x0, y_max, q, BLUE);
-            push_line(&mut verts, x1, y_min, q, x1, y_max, q, BLUE);
-        }
-
-        // Horizontal lines at section boundaries (yellow)
-        for section in 0..=((max_y - min_y) / 16) {
-            let y = (min_y + section * 16) as f64;
-            let x0 = chunk_x as f64;
-            let x1 = (chunk_x + 16) as f64;
-            let z0 = chunk_z as f64;
-            let z1 = (chunk_z + 16) as f64;
-            push_line(&mut verts, x0, y, z0, x1, y, z0, YELLOW);
-            push_line(&mut verts, x0, y, z1, x1, y, z1, YELLOW);
-            push_line(&mut verts, x0, y, z0, x0, y, z1, YELLOW);
-            push_line(&mut verts, x1, y, z0, x1, y, z1, YELLOW);
-        }
-
+        build_border_vertices(&mut self.vertices, pivot, eye, min_y, max_y);
         let max_verts = 4096;
-        let count = verts.len().min(max_verts);
+        let count = self.vertices.len().min(max_verts);
         let data = self.vertex_alloc.mapped_slice_mut().unwrap();
-        let bytes = bytemuck::cast_slice(&verts[..count]);
+        let bytes = bytemuck::cast_slice(&self.vertices[..count]);
         data[..bytes.len()].copy_from_slice(bytes);
         self.vertex_count = count as u32;
     }
@@ -393,5 +327,111 @@ impl ChunkBorderPipeline {
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.desc_pool, None);
         device.destroy_descriptor_set_layout(self.desc_layout, None);
+    }
+}
+
+fn build_border_vertices(
+    verts: &mut Vec<LineVertex>,
+    pivot: glam::DVec3,
+    eye: glam::DVec3,
+    min_y: i32,
+    max_y: i32,
+) {
+    let chunk_x = (pivot.x.floor() as i32).div_euclid(16) * 16;
+    let chunk_z = (pivot.z.floor() as i32).div_euclid(16) * 16;
+
+    verts.clear();
+    let y_min = min_y as f64;
+    let y_max = max_y as f64;
+
+    let push_line = |verts: &mut Vec<LineVertex>,
+                     x0: f64,
+                     y0: f64,
+                     z0: f64,
+                     x1: f64,
+                     y1: f64,
+                     z1: f64,
+                     color: [f32; 4]| {
+        verts.push(LineVertex {
+            position: [
+                (x0 - eye.x) as f32,
+                (y0 - eye.y) as f32,
+                (z0 - eye.z) as f32,
+            ],
+            color,
+        });
+        verts.push(LineVertex {
+            position: [
+                (x1 - eye.x) as f32,
+                (y1 - eye.y) as f32,
+                (z1 - eye.z) as f32,
+            ],
+            color,
+        });
+    };
+
+    // Vertical lines at chunk corners (red)
+    for dx in [0, 16] {
+        for dz in [0, 16] {
+            let x = (chunk_x + dx) as f64;
+            let z = (chunk_z + dz) as f64;
+            push_line(verts, x, y_min, z, x, y_max, z, RED);
+        }
+    }
+
+    // Vertical lines along chunk edges (blue) - every block along edges
+    for d in 1..16 {
+        let x0 = chunk_x as f64;
+        let x1 = (chunk_x + 16) as f64;
+        let z0 = chunk_z as f64;
+        let z1 = (chunk_z + 16) as f64;
+        let p = (chunk_x + d) as f64;
+        let q = (chunk_z + d) as f64;
+        push_line(verts, p, y_min, z0, p, y_max, z0, BLUE);
+        push_line(verts, p, y_min, z1, p, y_max, z1, BLUE);
+        push_line(verts, x0, y_min, q, x0, y_max, q, BLUE);
+        push_line(verts, x1, y_min, q, x1, y_max, q, BLUE);
+    }
+
+    // Horizontal lines at section boundaries (yellow)
+    for section in 0..=((max_y - min_y) / 16) {
+        let y = (min_y + section * 16) as f64;
+        let x0 = chunk_x as f64;
+        let x1 = (chunk_x + 16) as f64;
+        let z0 = chunk_z as f64;
+        let z1 = (chunk_z + 16) as f64;
+        push_line(verts, x0, y, z0, x1, y, z0, YELLOW);
+        push_line(verts, x0, y, z1, x1, y, z1, YELLOW);
+        push_line(verts, x0, y, z0, x0, y, z1, YELLOW);
+        push_line(verts, x1, y, z0, x1, y, z1, YELLOW);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn border_vertices_reuse_storage_without_changing_the_drawn_grid() {
+        let mut verts = Vec::new();
+        let pivot = glam::DVec3::new(32.5, 0.0, -0.5);
+        let eye = glam::DVec3::new(33.0, 70.0, 0.0);
+        build_border_vertices(&mut verts, pivot, eye, -64, 320);
+        // Four corner lines, 60 edge lines, and four lines per 25 sections.
+        assert_eq!(verts.len(), 328);
+        assert_eq!(verts[0].position, [-1.0, -134.0, -16.0]);
+        assert_eq!(verts[1].position, [-1.0, 250.0, -16.0]);
+        assert_eq!(verts[0].color, RED);
+        assert_eq!(verts[8].color, BLUE);
+        assert_eq!(verts[128].color, YELLOW);
+        let original = bytemuck::cast_slice::<LineVertex, u8>(&verts).to_vec();
+        let storage = verts.as_ptr();
+        build_border_vertices(&mut verts, pivot, eye, -64, 320);
+        assert_eq!(verts.as_ptr(), storage);
+        assert_eq!(bytemuck::cast_slice::<LineVertex, u8>(&verts), original);
+        // When the camera moves, the same storage is overwritten, not appended.
+        build_border_vertices(&mut verts, pivot, eye + glam::DVec3::X, -64, 320);
+        assert_eq!(verts.len(), 328);
+        assert_eq!(verts[0].position, [-2.0, -134.0, -16.0]);
     }
 }
