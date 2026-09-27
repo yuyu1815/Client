@@ -472,6 +472,10 @@ mod tests {
             render_setup_ms: 0.6,
             submit_ms: 0.7,
             draw_ms: 3.0,
+            be_model_ms: 1.25,
+            be_sign_text_ms: 0.75,
+            be_model_draws: 4,
+            be_sign_vertices: 36,
             ..Default::default()
         };
         let phases = UpdatePhases {
@@ -486,11 +490,41 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..WARMUP_FRAMES {
-            assert!(!bench.record_frame(50.0, &timings, 20.0, 25.0, phases, Some(60), false, true, 1, 2));
+            assert!(!bench.record_frame(
+                50.0,
+                &timings,
+                20.0,
+                25.0,
+                phases,
+                Some(60),
+                false,
+                true,
+                1,
+                2
+            ));
         }
-        assert!(!bench.record_frame(100.0, &timings, 30.0, 40.0, phases, Some(60), false, true, 1, 2));
+        assert!(!bench.record_frame(
+            100.0,
+            &timings,
+            30.0,
+            40.0,
+            phases,
+            Some(60),
+            false,
+            true,
+            1,
+            2
+        ));
         let sample = &bench.samples[0];
         assert_eq!(sample.cpu_update_ms, 30.0);
+        assert_eq!(sample.fixed_tick_ms, 1.2);
+        assert_eq!(sample.fixed_tick_count, 2);
+        assert_eq!(sample.be_extract_ms, 1.3);
+        assert_eq!(sample.acquire_ms, 0.3);
+        assert_eq!(sample.present_ms, 0.4);
+        assert_eq!(sample.render_prepare_ms, 0.5);
+        assert_eq!(sample.render_setup_ms, 0.6);
+        assert_eq!(sample.submit_ms, 0.7);
         assert_eq!(sample.render_wall_ms, 40.0);
         assert_eq!(sample.be_model_ms, 1.25);
         assert_eq!(sample.be_sign_text_ms, 0.75);
@@ -586,6 +620,9 @@ fn radius_from_chunk_count(count: u32) -> u32 {
 pub struct UpdatePhases {
     pub update_ms: f32,
     pub cpu_update_ms: f32,
+    pub fixed_tick_ms: f32,
+    pub fixed_tick_count: u32,
+    pub be_extract_ms: f32,
     pub render_wall_ms: f32,
     pub net_decode_ms: f32,
     pub visibility_ms: f32,
