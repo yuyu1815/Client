@@ -6,7 +6,7 @@ fn write_result_json(path: &Path, value: &impl serde::Serialize) -> std::io::Res
     std::fs::write(path, json)
 }
 
-use crate::renderer::RenderTimings;
+use crate::renderer::{BlockEntityModelDrawCounts, RenderTimings};
 
 const DURATION_SECS: f32 = 10.0;
 const WARMUP_FRAMES: u32 = 30;
@@ -50,6 +50,8 @@ pub struct FrameSample {
     pub be_sign_text_ms: f32,
     #[serde(default)]
     pub be_model_draws: u32,
+    #[serde(default)]
+    pub be_model_draws_by_kind: BlockEntityModelDrawCounts,
     #[serde(default)]
     pub be_sign_vertices: u32,
     #[serde(default)]
@@ -122,6 +124,8 @@ pub struct SpikeSample {
     pub be_sign_text_ms: f32,
     #[serde(default)]
     pub be_model_draws: u32,
+    #[serde(default)]
+    pub be_model_draws_by_kind: BlockEntityModelDrawCounts,
     #[serde(default)]
     pub be_sign_vertices: u32,
     #[serde(default)]
@@ -197,6 +201,8 @@ pub struct BenchmarkResult {
     pub peak_chunk_count: u32,
     pub peak_entity_count: u32,
     pub spike_count: u32,
+    #[serde(default)]
+    pub be_model_draws_by_kind: BlockEntityModelDrawCounts,
     pub spikes: Vec<SpikeSample>,
 }
 
@@ -250,6 +256,7 @@ impl Benchmark {
             be_model_ms: timings.be_model_ms,
             be_sign_text_ms: timings.be_sign_text_ms,
             be_model_draws: timings.be_model_draws,
+            be_model_draws_by_kind: timings.be_model_draws_by_kind,
             be_sign_vertices: timings.be_sign_vertices,
             item_entity_draw_ms: timings.item_entity_draw_ms,
             environment_draw_ms: timings.environment_draw_ms,
@@ -290,6 +297,7 @@ impl Benchmark {
                 be_model_ms: sample.be_model_ms,
                 be_sign_text_ms: sample.be_sign_text_ms,
                 be_model_draws: sample.be_model_draws,
+                be_model_draws_by_kind: sample.be_model_draws_by_kind,
                 be_sign_vertices: sample.be_sign_vertices,
                 item_entity_draw_ms: sample.item_entity_draw_ms,
                 environment_draw_ms: sample.environment_draw_ms,
@@ -343,6 +351,19 @@ impl Benchmark {
             .max()
             .unwrap_or(0);
 
+        let mut be_model_draws_by_kind = BlockEntityModelDrawCounts::default();
+        for sample in &self.samples {
+            let frame = sample.be_model_draws_by_kind;
+            be_model_draws_by_kind.chest += frame.chest;
+            be_model_draws_by_kind.trapped_chest += frame.trapped_chest;
+            be_model_draws_by_kind.ender_chest += frame.ender_chest;
+            be_model_draws_by_kind.shulker += frame.shulker;
+            be_model_draws_by_kind.conduit += frame.conduit;
+            be_model_draws_by_kind.copper_golem_statue += frame.copper_golem_statue;
+            be_model_draws_by_kind.skull += frame.skull;
+            be_model_draws_by_kind.other += frame.other;
+            be_model_draws_by_kind.closed_chest_candidate += frame.closed_chest_candidate;
+        }
         let now = iso8601_utc_now();
 
         let result = BenchmarkResult {
@@ -367,6 +388,7 @@ impl Benchmark {
             peak_chunk_count: peak_chunks,
             peak_entity_count: peak_entities,
             spike_count: self.spikes.len() as u32,
+            be_model_draws_by_kind,
             spikes: self.spikes,
         };
 
@@ -475,6 +497,14 @@ mod tests {
             be_model_ms: 1.25,
             be_sign_text_ms: 0.75,
             be_model_draws: 4,
+            be_model_draws_by_kind: BlockEntityModelDrawCounts {
+                chest: 1,
+                trapped_chest: 1,
+                ender_chest: 1,
+                other: 1,
+                closed_chest_candidate: 2,
+                ..Default::default()
+            },
             be_sign_vertices: 36,
             ..Default::default()
         };
@@ -516,6 +546,16 @@ mod tests {
             2
         ));
         let sample = &bench.samples[0];
+        let kind_draws = |counts: BlockEntityModelDrawCounts| {
+            counts.chest
+                + counts.trapped_chest
+                + counts.ender_chest
+                + counts.shulker
+                + counts.conduit
+                + counts.copper_golem_statue
+                + counts.skull
+                + counts.other
+        };
         assert_eq!(sample.cpu_update_ms, 30.0);
         assert_eq!(sample.fixed_tick_ms, 1.2);
         assert_eq!(sample.fixed_tick_count, 2);
@@ -529,6 +569,11 @@ mod tests {
         assert_eq!(sample.be_model_ms, 1.25);
         assert_eq!(sample.be_sign_text_ms, 0.75);
         assert_eq!(sample.be_model_draws, 4);
+        assert_eq!(
+            kind_draws(sample.be_model_draws_by_kind),
+            sample.be_model_draws
+        );
+        assert_eq!(sample.be_model_draws_by_kind.closed_chest_candidate, 2);
         assert_eq!(sample.be_sign_vertices, 36);
         assert_eq!(sample.net_decode_ms, 1.0);
         assert_eq!(sample.visibility_ms, 2.0);
@@ -539,6 +584,13 @@ mod tests {
         assert_eq!(bench.spikes[0].be_model_ms, 1.25);
         assert_eq!(bench.spikes[0].be_sign_text_ms, 0.75);
         assert_eq!(bench.spikes[0].be_model_draws, 4);
+        assert_eq!(kind_draws(bench.spikes[0].be_model_draws_by_kind), 4);
+        assert_eq!(
+            bench.spikes[0]
+                .be_model_draws_by_kind
+                .closed_chest_candidate,
+            2
+        );
         assert_eq!(bench.spikes[0].be_sign_vertices, 36);
         assert_eq!(bench.spikes[0].net_decode_ms, 1.0);
         assert_eq!(bench.spikes[0].visibility_ms, 2.0);

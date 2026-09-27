@@ -184,11 +184,25 @@ pub struct RenderTimings {
     pub be_model_ms: f32,
     pub be_sign_text_ms: f32,
     pub be_model_draws: u32,
+    pub be_model_draws_by_kind: BlockEntityModelDrawCounts,
     pub be_sign_vertices: u32,
     pub item_entity_draw_ms: f32,
     pub environment_draw_ms: f32,
     pub hud_draw_ms: f32,
     pub present_ms: f32,
+}
+
+#[derive(Default, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct BlockEntityModelDrawCounts {
+    pub chest: u32,
+    pub trapped_chest: u32,
+    pub ender_chest: u32,
+    pub shulker: u32,
+    pub conduit: u32,
+    pub copper_golem_statue: u32,
+    pub skull: u32,
+    pub other: u32,
+    pub closed_chest_candidate: u32,
 }
 
 pub struct Renderer {
@@ -2378,7 +2392,7 @@ impl Renderer {
                 }
 
                 let pass_start = benchmark_timing.then(std::time::Instant::now);
-                let (model_ms, sign_text_ms, model_draws, sign_vertices) =
+                let (model_ms, sign_text_ms, model_draws, draws_by_kind, sign_vertices) =
                     self.block_entity_pipeline.draw(
                         &self.ctx.device,
                         cmd,
@@ -2396,6 +2410,7 @@ impl Renderer {
                     self.last_timings.be_model_ms = model_ms;
                     self.last_timings.be_sign_text_ms = sign_text_ms;
                     self.last_timings.be_model_draws = model_draws;
+                    self.last_timings.be_model_draws_by_kind = draws_by_kind;
                     self.last_timings.be_sign_vertices = sign_vertices;
                 }
 

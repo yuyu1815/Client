@@ -20,7 +20,9 @@ use crate::renderer::pipelines::entity_renderer::{
     BlendMode, ModelInput, WHITE_TINT, create_pipeline, fallback_texture,
 };
 use crate::renderer::placed_head_skin::{MAX_ENTRIES as MAX_HEAD_TEXTURES, PlacedHeadSkinCache};
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, block_entity_model, shader, util};
+use crate::renderer::{
+    BlockEntityModelDrawCounts, MAX_FRAMES_IN_FLIGHT, block_entity_model, shader, util,
+};
 use crate::ui::font::GlyphMap;
 use crate::world::block_entity::PlayerHeadProfileSource;
 
@@ -770,9 +772,9 @@ impl BlockEntityPipeline {
         head_skins: &PlacedHeadSkinCache,
         font: Option<(&GlyphMap, [vk::DescriptorImageInfo; 2])>,
         benchmark_timing: bool,
-    ) -> (f32, f32, u32, u32) {
+    ) -> (f32, f32, u32, BlockEntityModelDrawCounts, u32) {
         if items.is_empty() {
-            return (0.0, 0.0, 0, 0);
+            return (0.0, 0.0, 0, BlockEntityModelDrawCounts::default(), 0);
         }
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
@@ -780,6 +782,7 @@ impl BlockEntityPipeline {
         // cmd.draw.
         let model_start = benchmark_timing.then(std::time::Instant::now);
         let mut model_draws = 0;
+        let mut draws_by_kind = BlockEntityModelDrawCounts::default();
         let mut bound_pipeline = self.pipeline;
 
         let mut bound_entry: *const KindEntry = std::ptr::null();
@@ -914,6 +917,29 @@ impl BlockEntityPipeline {
                 cmd.draw(*count, 1, *start, 0);
                 if benchmark_timing {
                     model_draws += 1;
+                    let count = match info.kind {
+                        BlockEntityKind::Chest => &mut draws_by_kind.chest,
+                        BlockEntityKind::TrappedChest => &mut draws_by_kind.trapped_chest,
+                        BlockEntityKind::EnderChest => &mut draws_by_kind.ender_chest,
+                        BlockEntityKind::ShulkerBox => &mut draws_by_kind.shulker,
+                        BlockEntityKind::Conduit => &mut draws_by_kind.conduit,
+                        BlockEntityKind::CopperGolemStatue => {
+                            &mut draws_by_kind.copper_golem_statue
+                        }
+                        BlockEntityKind::Skull => &mut draws_by_kind.skull,
+                        _ => &mut draws_by_kind.other,
+                    };
+                    *count += 1;
+                    if info.lid_open == 0.0
+                        && matches!(
+                            info.kind,
+                            BlockEntityKind::Chest
+                                | BlockEntityKind::TrappedChest
+                                | BlockEntityKind::EnderChest
+                        )
+                    {
+                        draws_by_kind.closed_chest_candidate += 1;
+                    }
                 }
             }
         }
@@ -943,7 +969,7 @@ impl BlockEntityPipeline {
             );
         }
         let sign_ms = sign_start.map_or(0.0, |start| start.elapsed().as_secs_f32() * 1000.0);
-        (model_ms, sign_ms, model_draws, sign_vertices)
+        (model_ms, sign_ms, model_draws, draws_by_kind, sign_vertices)
     }
 
     /// Update a shared set only before its first bind this frame. Updating even
