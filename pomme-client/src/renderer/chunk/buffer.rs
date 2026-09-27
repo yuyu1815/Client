@@ -349,6 +349,22 @@ struct ChunkAlloc {
     sections: Vec<SectionAlloc>,
 }
 
+fn section_upload_time(
+    now: std::time::Instant,
+    was_present: bool,
+    has_chest: bool,
+) -> std::time::Instant {
+    // ponytail: skip first fade for the *entire* chest-bearing section,
+    // including other blocks; split chest draws if that visual matters.
+    // Otherwise the BE would overlap partially transparent new geometry.
+    if was_present || has_chest {
+        now.checked_sub(std::time::Duration::from_secs(2))
+            .unwrap_or(now)
+    } else {
+        now
+    }
+}
+
 fn epoch_accepts(current: Option<u64>, incoming: u64) -> bool {
     incoming >= current.unwrap_or(0)
 }
@@ -1263,13 +1279,11 @@ impl ChunkBufferStore {
                 idx_len: (p.indices.len() + p.water_indices.len()) as u32,
                 vertex_offset: p.vtx_off as i32,
                 vtx_len: p.verts.len() as u32,
-                // A re-meshed section swaps instantly; a freshly revealed one fades in.
-                uploaded_at: if was_present.contains(&p.section_index) {
-                    now.checked_sub(std::time::Duration::from_secs(2))
-                        .unwrap_or(now)
-                } else {
-                    now
-                },
+                uploaded_at: section_upload_time(
+                    now,
+                    was_present.contains(&p.section_index),
+                    !p.emitted_chests.is_empty(),
+                ),
                 epoch: mesh.upload_epoch,
                 emitted_chests: p.emitted_chests.to_vec(),
             });
@@ -1281,7 +1295,7 @@ impl ChunkBufferStore {
             // draw list is keyed to (unset => far, the safe default).
             let revealed = plans
                 .iter()
-                .any(|p| !was_present.contains(&p.section_index));
+                .any(|p| !was_present.contains(&p.section_index) && p.emitted_chests.is_empty());
             if revealed && !self.column_nearby(mesh.pos, self.last_sort_cam) {
                 let dur = std::time::Duration::from_secs_f32(FADE_DURATION_MS / 1000.0);
                 self.fade_until = self.fade_until.max(now + dur);
@@ -1949,6 +1963,28 @@ mod staging_tests {
             epoch,
             emitted_chests: vec![EmittedChest { pos, open }],
         }
+    }
+
+    #[test]
+    fn first_chest_section_skips_fade_but_other_first_sections_keep_it() {
+        let now = std::time::Instant::now();
+        let chest = BlockPos::new(-1, 4, 2);
+        let mut alloc = section(0, chest, false, 1);
+        alloc.uploaded_at = section_upload_time(now, false, true);
+        assert_eq!(
+            ChunkBufferStore::section_visibility(false, &alloc, now),
+            1.0
+        );
+        alloc.uploaded_at = section_upload_time(now, false, false);
+        assert_eq!(
+            ChunkBufferStore::section_visibility(false, &alloc, now),
+            0.0
+        );
+        alloc.uploaded_at = section_upload_time(now, true, false);
+        assert_eq!(
+            ChunkBufferStore::section_visibility(false, &alloc, now),
+            1.0
+        );
     }
 
     #[test]

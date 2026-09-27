@@ -1575,7 +1575,6 @@ impl GameState {
             masks.insert(pos, mask);
         }
         self.vis_tiers = tiers;
-        self.vis_mask = masks.clone();
         self.vis_valid = true;
 
         // With occlusion off, push full masks inside render distance only.
@@ -1586,6 +1585,9 @@ impl GameState {
                 }
             }
         }
+        // This copy must match the draw mask, including the occlusion-off
+        // override and out-of-render-distance zeroes.
+        self.vis_mask = masks.clone();
         renderer.set_chunk_visibility(masks);
     }
 
@@ -1798,6 +1800,12 @@ fn sign_text_in_range(pos: &BlockPos, player_eye: glam::DVec3) -> bool {
     glam::DVec3::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5)
         .distance_squared(player_eye)
         <= 256.0
+}
+
+// Use the same section mask as the chunk draw list. Missing/invalid visibility
+// is not proof of a visible chunk: retain the BE until the next graph update.
+fn chest_section_visible(si: i32, valid: bool, mask: Option<u32>) -> bool {
+    valid && (0..32).contains(&si) && mask.is_some_and(|mask| mask & (1u32 << si) != 0)
 }
 
 fn block_entity_in_frustum(
@@ -4428,6 +4436,23 @@ pub fn update_game(
                         return None;
                     }
                 }
+                // Claim only accepted, still-visible resident geometry. An in-flight
+                // edit keeps the old mesh/pose until its replacement lands; an
+                // upload failure/unload/LOD mesh without chest quads falls back
+                // to the BE. On single -> double, the old half stays until the
+                // section swaps; the new partner is still rendered as a BE.
+                let column = ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16));
+                let si = (pos.y - game.chunk_store.min_y()).div_euclid(16);
+                if be.kind == BlockEntityKind::Chest
+                    && chest_section_visible(
+                        si,
+                        game.vis_valid,
+                        game.vis_mask.get(&column).copied(),
+                    )
+                    && gfx.renderer.resident_chunk_chest_open(pos).is_some()
+                {
+                    return None;
+                }
                 let props = crate::world::block::block_properties(state);
                 let statue =
                     crate::world::block_entity::copper_golem_statue_render_state(id, props);
@@ -4456,8 +4481,8 @@ pub fn update_game(
                     let partner = BlockPos::new(pos.x + dx, pos.y, pos.z + dz);
                     lid_open = lid_open.max(openness_at(&partner));
                 }
-                let copy_sign_text = be.kind == BlockEntityKind::Sign
-                    && sign_text_in_range(pos, sign_text_eye);
+                let copy_sign_text =
+                    be.kind == BlockEntityKind::Sign && sign_text_in_range(pos, sign_text_eye);
                 let sign_front = copy_sign_text.then(|| be.sign_front.clone().unwrap_or_default());
                 let sign_back = copy_sign_text.then(|| be.sign_back.clone().unwrap_or_default());
                 let is_sign = be.kind == BlockEntityKind::Sign;
@@ -5795,8 +5820,31 @@ mod tests {
         use glam::DVec3;
 
         assert!(sign_text_in_range(&BlockPos::new(15, 0, 0), DVec3::ZERO));
-        assert!(sign_text_in_range(&BlockPos::new(16, 0, 0), DVec3::new(0.5, 0.5, 0.5)));
-        assert!(!sign_text_in_range(&BlockPos::new(17, 0, 0), DVec3::new(0.5, 0.5, 0.5)));
+        assert!(sign_text_in_range(
+            &BlockPos::new(16, 0, 0),
+            DVec3::new(0.5, 0.5, 0.5)
+        ));
+        assert!(!sign_text_in_range(
+            &BlockPos::new(17, 0, 0),
+            DVec3::new(0.5, 0.5, 0.5)
+        ));
+    }
+
+    #[test]
+    fn chest_suppression_requires_visible_resident_section() {
+        use azalea_core::position::{BlockPos, ChunkPos};
+
+        use super::chest_section_visible;
+        let col = ChunkPos::new(-2, 1);
+        let pos = BlockPos::new(-31, -49, 16);
+        assert_eq!(col.x, pos.x.div_euclid(16));
+        let si = (pos.y + 64).div_euclid(16);
+        assert_eq!(si, 0);
+        assert!(chest_section_visible(si, true, Some(1)));
+        assert!(!chest_section_visible(si, true, Some(0))); // outside RD / occluded
+        assert!(!chest_section_visible(si, false, Some(1)));
+        assert!(!chest_section_visible(si, true, None));
+        assert!(!chest_section_visible(32, true, Some(u32::MAX)));
     }
 
     #[test]
@@ -6232,15 +6280,24 @@ mod tests {
         bump_loaded_content_generations(&mut generations, &mut next, [col], &loaded);
         assert!(stale_mesh_gen < generations[&col]);
         let mut chunks = crate::world::chunk::ChunkStore::new_with_dimension(2, 16, -64);
-        chunks.light_data.insert((col.x, col.z), std::sync::Arc::new(
-            crate::world::chunk::ChunkLightData {
-                sky_sections: vec![], block_sections: vec![], min_y: -64,
-                has_sky: false, sky_top_section: None,
-            },
-        ));
+        chunks.light_data.insert(
+            (col.x, col.z),
+            std::sync::Arc::new(crate::world::chunk::ChunkLightData {
+                sky_sections: vec![],
+                block_sections: vec![],
+                min_y: -64,
+                has_sky: false,
+                sky_top_section: None,
+            }),
+        );
         assert!(mesh_result_is_stale(
-            &chunks, &generations, &std::collections::HashMap::new(),
-            col, stale_mesh_gen, 0..1, false,
+            &chunks,
+            &generations,
+            &std::collections::HashMap::new(),
+            col,
+            stale_mesh_gen,
+            0..1,
+            false,
         ));
     }
 

@@ -132,13 +132,12 @@ fn unpack_sprite_uv(x: u16) -> f32 {
     x as f32 / TERRAIN_UV_FIXED_SCALE
 }
 
-/// Phase 1 only: CPU conversion for a single normal chest; not called by the
-/// live mesher until chunk upload acceptance can retire its block-entity draw.
+/// Convert a normal single chest to section-local static geometry. The upload
+/// path claims the chest only after its indexed section has been accepted.
 /// `block_pos` is section-local, `yaw` uses the BE pipeline's degrees, and
 /// `region` comes from `uv_map.get_region("entity/chest/normal")` (sprite 0
 /// missing-tile fallback if the pack has no usable PNG). Indices use cutout
 /// for any chest sheet with alpha; the caller must never force opaque draws.
-#[allow(dead_code)]
 fn chest_quads(
     model: &crate::renderer::entity_model::BakedEntityModel,
     block_pos: [f32; 3],
@@ -179,6 +178,14 @@ fn chest_quads(
         }
     }
     (vertices, indices, region.opaque)
+}
+
+fn chest_sheet(uv_map: &AtlasUVMap, lod: u32) -> Option<AtlasRegion> {
+    let region = uv_map.get_region("entity/chest/normal");
+    // A partially translucent custom sheet needs BE alpha blending, not the
+    // chunk cutout pass; binary-alpha sheets remain safe here.
+    (lod == 0 && region.sprite != uv_map.missing_region().sprite && !region.translucent)
+        .then_some(region)
 }
 
 fn section_aabb(verts: &[TerrainVertex]) -> ChunkAABB {
@@ -253,8 +260,7 @@ pub struct SectionMesh {
     /// Translucent (water) indices into the same `vertices`, drawn in a
     /// separate blended pass after opaque geometry.
     pub water_indices: Vec<u32>,
-    /// Only chests with emitted indexed geometry; currently always empty until
-    /// the live chest mesher is connected.
+    /// Only chests with emitted indexed geometry.
     pub emitted_chests: Vec<EmittedChest>,
     /// Probe-only target records; empty unless a trace is armed.
     pub trace: Vec<Value>,
@@ -1001,7 +1007,6 @@ impl MeshDispatcher {
                 })
                 .map(|(block_pos, entity)| (*block_pos, entity.nbt.clone()))
                 .collect(),
-            // No chest quads emitted yet; this is copied before worker dispatch.
             chests: snapshot_chests(chunk_store, animations, pos),
         }
     }
@@ -1301,7 +1306,6 @@ fn lower_current_thread_priority() {
 }
 
 /// Only ordinary single chests; the block state carries facing and type.
-#[allow(dead_code)] // Stage 2: consumed when chunk chest geometry is enabled.
 struct ChestMeshState {
     pos: BlockPos,
     state: BlockState,
@@ -1362,7 +1366,6 @@ struct ChunkStoreSnapshot {
     debug_world: Option<crate::world::block::DebugWorld>,
     trace: Option<MeshTraceConfig>,
     moving_blocks: Vec<(azalea_core::position::BlockPos, simdnbt::owned::NbtCompound)>,
-    #[allow(dead_code)] // Stage 2: immutable chest states for the future mesh path.
     chests: Vec<ChestMeshState>,
 }
 
@@ -2055,6 +2058,65 @@ fn mesh_chunk_snapshot(
         }
     }
 
+    // Chest snapshots are immutable job inputs, but the shared chunk arcs can
+    // change before the worker runs. Never emit a now-different block state.
+    // No normal sheet => leave the BE renderer in charge (not the missing tile).
+    let mut chest_vertices: Vec<Vec<PackedVertex>> = vec![Vec::new(); sinks.len()];
+    let mut emitted: Vec<Vec<EmittedChest>> = vec![Vec::new(); sinks.len()];
+    // The BE pipeline uses a seasonal chest sheet on Dec 24-26. The atlas
+    // currently lists only normal; keep BE rendering rather than substituting
+    // the wrong sheet on those days.
+    if !snapshot.chests.is_empty() {
+        if let Some(region) = chest_sheet(uv_map, lod) {
+            let now = time::OffsetDateTime::now_local()
+                .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+            let christmas = now.month() == time::Month::December && (24..=26).contains(&now.day());
+            if !christmas {
+                let model = crate::renderer::block_entity_model::bake_chest_models().remove(0);
+                for chest in &snapshot.chests {
+                    let si = (chest.pos.y - min_y).div_euclid(16);
+                    if !range.contains(&si)
+                        || snapshot.get_block_state(chest.pos.x, chest.pos.y, chest.pos.z)
+                            != chest.state
+                    {
+                        continue;
+                    }
+                    let origin_y = min_y + si * 16;
+                    let (verts, indices, opaque) = chest_quads(
+                        &model,
+                        [
+                            (chest.pos.x - world_x) as f32,
+                            (chest.pos.y - origin_y) as f32,
+                            (chest.pos.z - world_z) as f32,
+                        ],
+                        chest.yaw,
+                        chest.open,
+                        region,
+                        // The current BE chest shader uses WHITE_TINT without
+                        // local lightmap sampling; match it until both paths
+                        // share the same block-light lookup.
+                        1.0,
+                    );
+                    let sink = &mut sinks[si as usize];
+                    let offset = sink.vertices.len() + chest_vertices[si as usize].len();
+                    if verts.is_empty()
+                        || indices.is_empty()
+                        || offset + verts.len() > u32::MAX as usize
+                    {
+                        continue;
+                    }
+                    let target = sink.indices_for(opaque);
+                    target.extend(indices.into_iter().map(|i| i + offset as u32));
+                    chest_vertices[si as usize].extend(verts);
+                    emitted[si as usize].push(EmittedChest {
+                        pos: chest.pos,
+                        open: chest.open,
+                    });
+                }
+            }
+        }
+    }
+
     // Finalize each non-empty section: concatenate cutout indices after solid
     // (recording the split), take the section-local AABB from the float
     // positions, then quantize so upload is a plain memcpy. Empty in-range
@@ -2069,9 +2131,19 @@ fn mesh_chunk_snapshot(
         }
         let solid_index_count = sink.solid.len() as u32;
         sink.solid.extend_from_slice(&sink.cutout);
-        let aabb = section_aabb(&sink.vertices);
+        let mut aabb = section_aabb(&sink.vertices);
         let mut packed = pool.take_vertices();
         packed.extend(sink.vertices.iter().map(pack_vertex));
+        // Chest corners are already quantized; bounds must include the actual
+        // GPU positions (including a raised lid across the section boundary).
+        for v in &chest_vertices[i] {
+            for axis in 0..3 {
+                let p = v.pos[axis] as f32 / 65535.0 * POS_RANGE - POS_BIAS;
+                aabb.min[axis] = aabb.min[axis].min(p);
+                aabb.max[axis] = aabb.max[axis].max(p);
+            }
+        }
+        packed.append(&mut chest_vertices[i]);
         let mut trace = sink.trace;
         for record in &mut trace {
             let start = record["vertexStart"].as_u64().unwrap_or(0) as usize;
@@ -2106,7 +2178,7 @@ fn mesh_chunk_snapshot(
             indices: sink.solid,
             solid_index_count,
             water_indices: sink.water,
-            emitted_chests: Vec::new(),
+            emitted_chests: std::mem::take(&mut emitted[i]),
             trace,
         });
     }
@@ -3508,7 +3580,10 @@ mod chest_quad_tests {
             crate::renderer::chunk::atlas::atlas_asset_path("entity/chest/normal"),
             "minecraft/textures/entity/chest/normal.png"
         );
-        let missing = AtlasUVMap::test_empty().get_region("entity/chest/normal");
+        let empty = AtlasUVMap::test_empty();
+        assert!(chest_sheet(&empty, 0).is_none()); // absent pack PNG: BE fallback
+        assert!(chest_sheet(&empty, 1).is_none()); // distant LOD: BE fallback
+        let missing = empty.get_region("entity/chest/normal");
         let (fallback_verts, _, fallback_opaque) =
             chest_quads(&model, [0.0; 3], 0.0, false, missing, 1.0);
         assert!(fallback_verts.iter().all(|v| v.sprite == 0));
