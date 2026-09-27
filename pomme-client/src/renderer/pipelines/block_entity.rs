@@ -1428,14 +1428,14 @@ fn push_sign_glyph(
     if gi.pixel_w == 0 || gi.pixel_h == 0 || vertices.len() + 6 > MAX_SIGN_VERTICES {
         return;
     }
-    vertices.extend(
-        sign_glyph_quad(gi, x, y, [color[0], color[1], color[2], 1.0]).map(|mut vertex| {
-            vertex.position = matrix
-                .transform_point3(glam::Vec3::from_array(vertex.position))
-                .to_array();
-            vertex
-        }),
-    );
+    let quad = sign_glyph_quad(gi, x, y, [color[0], color[1], color[2], 1.0]);
+    let corners = [quad[0], quad[1], quad[2], quad[5]].map(|mut vertex| {
+        vertex.position = matrix
+            .transform_point3(glam::Vec3::from_array(vertex.position))
+            .to_array();
+        vertex
+    });
+    vertices.extend([0, 1, 2, 0, 2, 3].map(|index| corners[index]));
 }
 
 /// Font-pixel triangles shared by signs and CPU TextDisplay extraction.
@@ -1735,6 +1735,41 @@ mod sign_text_tests {
                 .iter()
                 .all(|definition| definition.kind != BlockEntityKind::Sign)
         );
+    }
+
+    #[test]
+    fn transformed_sign_glyph_matches_six_vertex_reference_for_both_faces() {
+        let glyph = crate::ui::font::GlyphInfo {
+            atlas_layer: 2,
+            colored: true,
+            atlas_x: 8,
+            atlas_y: 16,
+            pixel_w: 4,
+            pixel_h: 7,
+            draw_w: 4.0,
+            draw_h: 7.0,
+            left: 1.0,
+            top: 2.0,
+            advance: 5.0,
+            bold_offset: 1.0,
+            shadow_offset: 1.0,
+        };
+        let matrix = glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0))
+            * glam::Mat4::from_rotation_y(0.37);
+        for color in [[1.0, 0.5, 0.0], [0.2, 0.4, 0.8]] {
+            let reference: Vec<_> =
+                sign_glyph_quad(&glyph, 10.0, 20.0, [color[0], color[1], color[2], 1.0])
+                    .map(|mut vertex| {
+                        vertex.position = matrix
+                            .transform_point3(glam::Vec3::from_array(vertex.position))
+                            .to_array();
+                        vertex
+                    })
+                    .into();
+            let mut actual = Vec::new();
+            push_sign_glyph(&mut actual, matrix, &glyph, 10.0, 20.0, color);
+            assert_eq!(actual, reference);
+        }
     }
 
     #[test]
