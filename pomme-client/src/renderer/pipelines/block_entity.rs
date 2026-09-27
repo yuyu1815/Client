@@ -161,7 +161,7 @@ fn name_index(table: &[&str], name: &str) -> Option<u32> {
 /// Build a [`PartAnim`] applying chest/shulker lid motion. `openness` is the
 /// raw [0, 1] value; vanilla applies cubic easing so the lid decelerates as it
 /// approaches the open or closed extreme.
-fn lid_anim(kind: BlockEntityKind, openness: f32) -> PartAnim {
+pub(crate) fn lid_anim(kind: BlockEntityKind, openness: f32) -> PartAnim {
     if openness <= 0.0 {
         return PartAnim::default();
     }

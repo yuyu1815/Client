@@ -1191,6 +1191,10 @@ impl Renderer {
         self.camera.frustum_planes()
     }
 
+    pub fn block_entity_frustum_planes(&self) -> [[f32; 4]; 6] {
+        self.camera.block_entity_frustum_planes()
+    }
+
     /// Frustum planes widened by `extra_radians` of FOV, for the tier-1 margin.
     pub fn frustum_planes_dilated(&self, extra_radians: f32) -> [[f32; 4]; 6] {
         self.camera.frustum_planes_dilated(extra_radians)

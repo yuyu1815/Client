@@ -313,6 +313,13 @@ impl Camera {
         Self::planes_from_view_projection(self.culling_view_projection(self.culling_fov()))
     }
 
+    /// The actual world view includes bob/hurt/death transforms; use it for
+    /// CPU block-entity rejection rather than the pre-bob chunk frustum.
+    /// Keep the wider culling FOV so narrowing effects cannot hide geometry.
+    pub fn block_entity_frustum_planes(&self) -> [[f32; 4]; 6] {
+        Self::planes_from_view_projection(self.view_projection_with_fov(self.culling_fov()))
+    }
+
     /// Frustum planes for a FOV widened by `extra_radians` (clamped below
     /// 180°), giving an "about to be seen" margin for occlusion-gated mesh
     /// scheduling.
@@ -662,6 +669,46 @@ mod tests {
             Mat4::IDENTITY,
             "expired hurt timing must not rotate the camera",
         );
+    }
+
+    #[test]
+    fn block_entity_planes_include_rendered_points_with_camera_motion() {
+        let mut camera = Camera::new(16.0 / 9.0);
+        camera.set_render_partial_tick(0.5);
+        camera.set_hurt(6, 35.0, 0.75);
+        camera.set_death_time(10.0);
+        for mode in [
+            CameraMode::FirstPerson,
+            CameraMode::ThirdPersonBack,
+            CameraMode::ThirdPersonFront,
+        ] {
+            camera.mode = mode;
+            camera.set_view_bob(1.25, 0.08, true);
+            let rendered = camera.view_projection();
+            let planes = camera.block_entity_frustum_planes();
+            let eye = camera.third_person_offset();
+            for x in -30..=30 {
+                for y in -15..=15 {
+                    for z in -30..=30 {
+                        let p = Vec3::new(x as f32, y as f32, z as f32) * 0.5;
+                        let clip = rendered * p.extend(1.0);
+                        if clip.w > 0.0
+                            && clip.x.abs() < clip.w * 0.99
+                            && clip.y.abs() < clip.w * 0.99
+                            && clip.z > 0.0
+                            && clip.z < clip.w * 0.99
+                        {
+                            for plane in &planes {
+                                let d = Vec3::from_array([plane[0], plane[1], plane[2]])
+                                    .dot(p - eye)
+                                    + plane[3];
+                                assert!(d >= -0.01, "{p:?} {plane:?}: {d}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -1734,6 +1734,52 @@ fn aabb_in_frustum(mn: &[f32; 3], mx: &[f32; 3], planes: &[[f32; 4]; 6]) -> bool
     true
 }
 
+/// A deliberately loose world-space box for the BE models we own. The 8-block
+/// radius encloses all four statue poses, rotated/double/open chest lids and
+/// locks, rotated/lifted shulker lids, heads (including the hat/wall offset),
+/// conduit and empty sign boards. Half a block is spare for FP plane tests.
+/// Text glyph metrics come from replaceable font assets: without a proven
+/// bound for those metrics, never reject a sign with text (including glow).
+fn sign_has_text(front: Option<&[String; 4]>, back: Option<&[String; 4]>) -> bool {
+    [front, back]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|line| !line.is_empty())
+}
+
+fn block_entity_in_frustum(
+    kind: BlockEntityKind,
+    pos: &BlockPos,
+    has_sign_text: bool,
+    eye: glam::DVec3,
+    planes: &[[f32; 4]; 6],
+) -> bool {
+    if !matches!(
+        kind,
+        BlockEntityKind::Chest
+            | BlockEntityKind::TrappedChest
+            | BlockEntityKind::EnderChest
+            | BlockEntityKind::ShulkerBox
+            | BlockEntityKind::Conduit
+            | BlockEntityKind::Skull
+            | BlockEntityKind::CopperGolemStatue
+            | BlockEntityKind::Sign
+    ) || kind == BlockEntityKind::Sign && has_sign_text
+        || !eye.is_finite()
+        || planes
+            .iter()
+            .any(|p| !p.iter().all(|v| v.is_finite()) || p[..3].iter().all(|v| *v == 0.0))
+    {
+        return true;
+    }
+    let center = glam::DVec3::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5);
+    let delta = (center - eye).as_vec3();
+    let mn = (delta - glam::Vec3::splat(8.5)).to_array();
+    let mx = (delta + glam::Vec3::splat(8.5)).to_array();
+    aabb_in_frustum(&mn, &mx, planes)
+}
+
 pub enum GameUpdateResult {
     None,
     ManualDisconnect,
@@ -4292,6 +4338,10 @@ pub fn update_game(
     let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = if benchmark_running {
         Vec::new()
     } else {
+        let be_frustum = game
+            .position_set
+            .then(|| gfx.renderer.block_entity_frustum_planes());
+        let be_eye = gfx.renderer.camera_render_position();
         game.chunk_store
             .block_entities
             .iter()
@@ -4302,6 +4352,13 @@ pub fn update_game(
                 // confirms; don't render entries whose block is gone.
                 if !crate::world::block_entity::is_block_entity_block(id) {
                     return None;
+                }
+                if let Some(planes) = &be_frustum {
+                    let has_sign_text = be.kind == BlockEntityKind::Sign
+                        && sign_has_text(be.sign_front.as_ref(), be.sign_back.as_ref());
+                    if !block_entity_in_frustum(be.kind, pos, has_sign_text, be_eye, planes) {
+                        return None;
+                    }
                 }
                 let props = crate::world::block::block_properties(state);
                 let statue =
@@ -5650,13 +5707,119 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_server_time, arrow_render_infos, bump_loaded_content_generations,
-        credits_may_advance, death_confirm_escape_allowed, finish_win_credits,
-        finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
+        advance_server_time, arrow_render_infos, block_entity_in_frustum,
+        bump_loaded_content_generations, credits_may_advance, death_confirm_escape_allowed,
+        finish_win_credits, finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
         item_frame_base_position, item_frame_base_rotation, limited_crafting_param,
         mesh_target_mask, section_bit, section_bits, server_tick_runs, show_death_screen_param,
+        sign_has_text,
     };
     use crate::renderer::SkyState;
+
+    #[test]
+    fn block_entity_cull_only_rejects_proven_outside_boxes() {
+        use azalea_core::position::BlockPos;
+        use azalea_registry::builtin::BlockEntityKind as Kind;
+        use glam::DVec3;
+
+        // A half-space x >= 0; an 8.5-radius box touching the boundary draws.
+        let mut planes = [[1.0, 0.0, 0.0, 100_000.0]; 6];
+        planes[0][3] = 0.0;
+        let eye = DVec3::ZERO;
+        let visible = |kind, x, text, planes: &[[f32; 4]; 6]| {
+            block_entity_in_frustum(kind, &BlockPos::new(x, 0, 0), text, eye, planes)
+        };
+        for kind in [
+            Kind::Chest,
+            Kind::TrappedChest,
+            Kind::EnderChest,
+            Kind::ShulkerBox,
+            Kind::CopperGolemStatue,
+            Kind::Skull,
+            Kind::Conduit,
+            Kind::Sign,
+        ] {
+            assert!(!visible(kind, -20, false, &planes), "{kind:?}");
+            assert!(visible(kind, -9, false, &planes), "{kind:?}"); // box touches
+            assert!(visible(kind, 0, false, &planes), "{kind:?}");
+        }
+        let blank = std::array::from_fn(|_| String::new());
+        let mut written = blank.clone();
+        written[0] = "glowing text".into();
+        assert!(!sign_has_text(Some(&blank), Some(&blank)));
+        for (front, back) in [
+            (Some(&written), Some(&blank)),
+            (Some(&blank), Some(&written)),
+        ] {
+            assert!(sign_has_text(front, back)); // either face, including glow
+            assert!(visible(
+                Kind::Sign,
+                -20,
+                sign_has_text(front, back),
+                &planes
+            ));
+        }
+        assert!(visible(Kind::Beacon, -20, false, &planes)); // unknown renderer
+        assert!(visible(Kind::Chest, -20, false, &[[0.0; 4]; 6])); // no frustum
+        assert!(!block_entity_in_frustum(
+            Kind::Chest,
+            &BlockPos::new(-20, 0, 0),
+            false,
+            DVec3::new(-10.0, 0.0, 0.0),
+            &planes
+        ));
+        // Negative positions are camera-relative, not converted to unsigned.
+        assert!(block_entity_in_frustum(
+            Kind::Chest,
+            &BlockPos::new(-20, 0, 0),
+            false,
+            DVec3::new(-30.0, 0.0, 0.0),
+            &planes
+        ));
+    }
+
+    #[test]
+    fn block_entity_radius_encloses_every_baked_pose_and_lid() {
+        use azalea_registry::builtin::BlockEntityKind as Kind;
+        use glam::Vec3;
+
+        use crate::renderer::block_entity_model as models;
+        use crate::renderer::entity_model::{BakedEntityModel, PartAnim};
+
+        let check = |model: &BakedEntityModel, anim: PartAnim| {
+            let transforms = model.compute_part_transforms(&anim);
+            for (i, (start, len)) in model.part_ranges.iter().enumerate() {
+                for v in &model.vertices[*start as usize..(*start + *len) as usize] {
+                    let p = transforms[i].transform_point3(Vec3::from_array(v.position));
+                    // At most two more blocks for the block-centre translation,
+                    // wall-head offset and arbitrary facing/root rotations.
+                    assert!(p.is_finite() && p.length() + 2.0 < 8.5, "part {i}: {p:?}");
+                }
+            }
+        };
+        for model in models::bake_chest_models() {
+            for openness in [0.0, 0.5, 1.0] {
+                check(&model, super::block_entity::lid_anim(Kind::Chest, openness));
+            }
+        }
+        let shulker = models::bake_shulker_box_model();
+        for openness in [0.0, 0.5, 1.0] {
+            check(
+                &shulker,
+                super::block_entity::lid_anim(Kind::ShulkerBox, openness),
+            );
+        }
+        for model in crate::renderer::entity_model::bake_copper_golem_statue_models() {
+            check(&model, PartAnim::default());
+        }
+        for model in [
+            models::bake_conduit_model(),
+            models::bake_player_head_model(),
+            models::bake_sign_model(),
+        ] {
+            check(&model, PartAnim::default());
+        }
+    }
 
     #[test]
     fn spawned_arrows_render_and_follow_packet_transforms() {
