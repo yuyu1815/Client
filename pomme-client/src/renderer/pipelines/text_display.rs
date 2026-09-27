@@ -3,7 +3,7 @@
 //! atlas.
 use glam::{DMat4, DQuat, DVec3, Vec3};
 
-use super::block_entity::{SignVertex, sign_glyph_quad};
+use super::block_entity::sign_text::{SignVertex, sign_glyph_quad};
 use super::menu_overlay::split_text_display_lines;
 use crate::entity::{EntityStore, VehicleState};
 use crate::ui::font::{GlyphInfo, GlyphMap};
