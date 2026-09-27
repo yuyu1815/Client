@@ -190,6 +190,11 @@ fn apply_server_block(
     pos: azalea_core::position::BlockPos,
     state: azalea_block::BlockState,
 ) {
+    // A replacement (including chest -> chest with different properties) must
+    // not inherit the previous BE's open flag when the position is reused.
+    if game.chunk_store.get_block_state(pos.x, pos.y, pos.z) != state {
+        game.block_entity_anim.remove(&pos);
+    }
     crate::world::block_entity::sync_block_entity(&mut game.chunk_store.block_entities, pos, state);
     if game.interaction.update_known_server_state(&pos, state) {
         return;
@@ -365,6 +370,28 @@ fn queue_light_apply(
             ),
             enable,
         });
+}
+
+/// Unlike a block edit, a lid change has no neighboring geometry to dirty.
+fn chest_open_event(
+    chunks: &ChunkStore,
+    animations: &mut crate::world::block_entity_anim::BlockEntityAnimStore,
+    priority_remesh: &mut Vec<(azalea_core::position::ChunkPos, i32)>,
+    pos: azalea_core::position::BlockPos,
+    count: u8,
+) {
+    // Keep the BE animation for all container kinds in this intermediate stage.
+    let eligible = crate::renderer::chunk::mesher::single_chest_state(chunks, pos).is_some();
+    if animations.set_open_count(pos, count) && eligible {
+        let si = (pos.y - chunks.min_y()).div_euclid(16);
+        if (0..chunks.section_count()).contains(&si) {
+            let col =
+                azalea_core::position::ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16));
+            if !priority_remesh.contains(&(col, si)) {
+                priority_remesh.push((col, si));
+            }
+        }
+    }
 }
 
 /// Mirror of vanilla `LevelExtractor.setBlockDirty`: a block at (x,y,z) dirties
@@ -1767,6 +1794,7 @@ impl AppCore {
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
                     game.chunk_store.debug_world =
                         is_debug.then(crate::world::block::DebugWorld::new);
+                    game.block_entity_anim = Default::default();
                     game.light_engine =
                         crate::world::light::LevelLightEngine::new(height, min_y, has_skylight);
                     game.position_set = false;
@@ -1855,7 +1883,9 @@ impl AppCore {
                             pos: (pos.x, pos.z),
                         });
                     game.block_entity_anim.drop_chunk(pos.x, pos.z);
-                    game.content_gen.remove(&pos);
+                    // Retain the generation across unload/reload: an in-flight
+                    // bulk result for the old column must fail the stale check
+                    // even if the replacement chunk loads before it drains.
                     game.meshed.remove(&pos);
                     game.compiled.remove(&pos);
                     game.vis_mask.remove(&pos);
@@ -2690,7 +2720,13 @@ impl AppCore {
                 } => {
                     // Action 1 for chest/shulker = open-viewer count.
                     if action_id == 1 {
-                        game.block_entity_anim.set_open_count(pos, action_parameter);
+                        chest_open_event(
+                            &game.chunk_store,
+                            &mut game.block_entity_anim,
+                            &mut priority_remesh,
+                            pos,
+                            action_parameter,
+                        );
                     }
                 }
                 NetworkEvent::Explosion(explosion) => {
@@ -2862,6 +2898,11 @@ impl AppCore {
                     let min_y = game.chunk_store.min_y();
                     let n = game.chunk_store.section_count();
                     for b in ack_dirty {
+                        if crate::renderer::chunk::mesher::single_chest_state(&game.chunk_store, b)
+                            .is_none()
+                        {
+                            game.block_entity_anim.remove(&b);
+                        }
                         game.light_engine
                             .on_block_dirty(&game.chunk_store, b.x, b.y, b.z);
                         game.bump_loaded_mesh_neighborhoods([
@@ -4561,8 +4602,8 @@ mod tests {
 
     use super::{
         CursorOp, DeathRoute, HeadProfile, PendingPackDownload, Velocity, accepted_player_chat_tag,
-        add_explosion_knockback, apply_passengers, apply_vehicle_teleport, cursor_step,
-        death_route, entity_look_direction, explosion_sound_pitch, load_network_chunk,
+        add_explosion_knockback, apply_passengers, apply_vehicle_teleport, chest_open_event,
+        cursor_step, death_route, entity_look_direction, explosion_sound_pitch, load_network_chunk,
         local_player_motion, pack_download_action, player_command_packet, player_input_state,
         player_ride_state, player_rotation_packet, post_teleport_echo, register_nonliving_spawn,
         resolve_entity_teleport, resolve_head_profile, resolve_rotation,
@@ -4676,6 +4717,80 @@ mod tests {
         update_block_entity(&mut chunks.block_entities, pos, kind, nbt);
         assert_eq!(chunks.block_entities[&pos].nbt.int("later"), Some(1));
         assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn chest_open_event_only_dirties_its_own_section_on_binary_transitions() {
+        use azalea_core::position::{BlockPos, ChunkPos};
+        use azalea_registry::builtin::BlockEntityKind;
+        use simdnbt::owned::NbtCompound;
+
+        use crate::world::block_entity::StoredBlockEntity;
+        use crate::world::block_entity_anim::BlockEntityAnimStore;
+        use crate::world::chunk::ChunkStore;
+
+        crate::world::block::init("26.2");
+        let col = ChunkPos::new(-2, 1);
+        let p = BlockPos::new(-32, -63, 16); // Negative X and section boundary.
+        let state = crate::world::block::state_with_properties(
+            "chest",
+            &[
+                ("facing".into(), "north".into()),
+                ("type".into(), "single".into()),
+                ("waterlogged".into(), "false".into()),
+            ],
+        )
+        .unwrap();
+        let mut data = Vec::new();
+        use azalea_buf::AzBuf;
+        azalea_world::chunk::Section::default()
+            .azalea_write(&mut data)
+            .unwrap();
+        let mut chunks = ChunkStore::new_with_dimension(2, 16, -64);
+        chunks.load_chunk(col, &data, &[]).unwrap();
+        chunks.set_block_state(p.x, p.y, p.z, state);
+        chunks.block_entities.insert(
+            p,
+            StoredBlockEntity::new(BlockEntityKind::Chest, NbtCompound::new()),
+        );
+        let mut anim = BlockEntityAnimStore::default();
+        let mut dirty = Vec::new();
+        chest_open_event(&chunks, &mut anim, &mut dirty, p, 1);
+        assert_eq!(dirty, [(col, 0)]); // No adjacent column/section even at its edge.
+        dirty.clear();
+        for count in [1, 2, 255] {
+            chest_open_event(&chunks, &mut anim, &mut dirty, p, count);
+        }
+        assert!(dirty.is_empty());
+        chest_open_event(&chunks, &mut anim, &mut dirty, p, 0);
+        assert_eq!(dirty, [(col, 0)]);
+        dirty.clear();
+        chest_open_event(&chunks, &mut anim, &mut dirty, p, 0);
+        assert!(dirty.is_empty());
+        // A double chest's event still animates its BE but never dirties mesh.
+        let double = crate::world::block::state_with_properties(
+            "chest",
+            &[
+                ("facing".into(), "north".into()),
+                ("type".into(), "left".into()),
+                ("waterlogged".into(), "false".into()),
+            ],
+        )
+        .unwrap();
+        chunks.set_block_state(p.x, p.y, p.z, double);
+        chest_open_event(&chunks, &mut anim, &mut dirty, p, 1);
+        assert!(dirty.is_empty());
+        // A former chest's late event also cannot enqueue work.
+        chunks.set_block_state(
+            p.x,
+            p.y,
+            p.z,
+            crate::world::block::first_state_of("stone").unwrap(),
+        );
+        chest_open_event(&chunks, &mut anim, &mut dirty, p, 1);
+        assert!(dirty.is_empty());
+        anim.remove(&p);
+        assert!(!anim.is_open(&p));
     }
 
     #[test]

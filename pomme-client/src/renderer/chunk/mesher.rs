@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use azalea_block::BlockState;
-use azalea_core::position::ChunkPos;
+use azalea_core::position::{BlockPos, ChunkPos};
 use pyronyx::vk;
 use serde_json::{Value, json};
 
@@ -15,6 +15,7 @@ use crate::world::block::model::{
     BakedModel, CardinalLighting, Direction, face_positions, face_uvs,
 };
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
+use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk;
 use crate::world::chunk::ChunkStore;
 
@@ -887,6 +888,7 @@ impl MeshDispatcher {
     pub fn enqueue(
         &self,
         chunk_store: &ChunkStore,
+        animations: &BlockEntityAnimStore,
         pos: ChunkPos,
         lod: u32,
         priority: bool,
@@ -910,7 +912,7 @@ impl MeshDispatcher {
             // An edit re-meshes an already-shown chunk (vanilla's "recompile").
             is_recompile: priority,
             enqueued_at,
-            snapshot: self.build_snapshot(chunk_store, pos),
+            snapshot: self.build_snapshot(chunk_store, animations, pos),
             registry: Arc::clone(&self.registry),
             uv_map: Arc::clone(&self.uv_map),
             tx,
@@ -925,12 +927,13 @@ impl MeshDispatcher {
     pub fn mesh_sections_now(
         &self,
         chunk_store: &ChunkStore,
+        animations: &BlockEntityAnimStore,
         pos: ChunkPos,
         sections: std::ops::Range<i32>,
         content_gen: u64,
     ) -> ChunkMeshData {
         let started_at = std::time::Instant::now();
-        let snapshot = self.build_snapshot(chunk_store, pos);
+        let snapshot = self.build_snapshot(chunk_store, animations, pos);
         let mut mesh = mesh_chunk_snapshot(
             &snapshot,
             pos,
@@ -948,7 +951,12 @@ impl MeshDispatcher {
 
     /// Point-in-time snapshot of `pos`'s mesh neighbourhood: chunk arcs plus
     /// shared handles to their light data.
-    fn build_snapshot(&self, chunk_store: &ChunkStore, pos: ChunkPos) -> ChunkStoreSnapshot {
+    fn build_snapshot(
+        &self,
+        chunk_store: &ChunkStore,
+        animations: &BlockEntityAnimStore,
+        pos: ChunkPos,
+    ) -> ChunkStoreSnapshot {
         let chunks_needed = chunk::mesh_neighborhood(pos);
         ChunkStoreSnapshot {
             chunks: chunks_needed
@@ -981,6 +989,8 @@ impl MeshDispatcher {
                 })
                 .map(|(block_pos, entity)| (*block_pos, entity.nbt.clone()))
                 .collect(),
+            // No chest quads emitted yet; this is copied before worker dispatch.
+            chests: snapshot_chests(chunk_store, animations, pos),
         }
     }
 
@@ -1278,6 +1288,52 @@ fn lower_current_thread_priority() {
     // TODO: lower priority on non-Windows (libc::nice / pthread_setschedparam).
 }
 
+/// Only ordinary single chests; the block state carries facing and type.
+#[allow(dead_code)] // Stage 2: consumed when chunk chest geometry is enabled.
+struct ChestMeshState {
+    pos: BlockPos,
+    state: BlockState,
+    yaw: f32,
+    open: bool,
+}
+
+/// Shared by event invalidation and snapshot collection so neither can
+/// accidentally opt in trapped, copper, or double chests.
+pub(crate) fn single_chest_state(store: &ChunkStore, pos: BlockPos) -> Option<BlockState> {
+    use azalea_registry::builtin::BlockEntityKind;
+    if store.block_entities.get(&pos)?.kind != BlockEntityKind::Chest {
+        return None;
+    }
+    let state = store.get_block_state(pos.x, pos.y, pos.z);
+    (crate::world::block::block_id(state) == "chest"
+        && crate::world::block::block_properties(state).get("type") == Some("single"))
+    .then_some(state)
+}
+
+fn snapshot_chests(
+    store: &ChunkStore,
+    animations: &BlockEntityAnimStore,
+    pos: ChunkPos,
+) -> Vec<ChestMeshState> {
+    store
+        .block_entities
+        .keys()
+        .filter(|p| p.x.div_euclid(16) == pos.x && p.z.div_euclid(16) == pos.z)
+        .filter_map(|&p| {
+            let state = single_chest_state(store, p)?;
+            Some(ChestMeshState {
+                pos: p,
+                state,
+                yaw: crate::renderer::pipelines::block_entity::yaw_for_block(
+                    azalea_registry::builtin::BlockEntityKind::Chest,
+                    crate::world::block::block_properties(state),
+                ),
+                open: animations.is_open(&p),
+            })
+        })
+        .collect()
+}
+
 struct ChunkStoreSnapshot {
     chunks: Vec<(
         ChunkPos,
@@ -1294,6 +1350,8 @@ struct ChunkStoreSnapshot {
     debug_world: Option<crate::world::block::DebugWorld>,
     trace: Option<MeshTraceConfig>,
     moving_blocks: Vec<(azalea_core::position::BlockPos, simdnbt::owned::NbtCompound)>,
+    #[allow(dead_code)] // Stage 2: immutable chest states for the future mesh path.
+    chests: Vec<ChestMeshState>,
 }
 
 impl ChunkStoreSnapshot {
@@ -3219,6 +3277,62 @@ pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4
 #[cfg(test)]
 mod chest_quad_tests {
     use super::*;
+
+    #[test]
+    fn single_chest_snapshot_copies_state_and_open_flag_without_other_containers() {
+        use azalea_buf::AzBuf;
+        use azalea_registry::builtin::BlockEntityKind;
+        use simdnbt::owned::NbtCompound;
+
+        crate::world::block::init("26.2");
+        let col = ChunkPos::new(-2, 1);
+        let mut store = ChunkStore::new_with_dimension(2, 16, -64);
+        let mut data = Vec::new();
+        azalea_world::chunk::Section::default()
+            .azalea_write(&mut data)
+            .unwrap();
+        store.load_chunk(col, &data, &[]).unwrap();
+        let chest = crate::world::block::first_state_of("chest").unwrap();
+        let single =
+            moving_state_with_properties(chest, &[("type", "single"), ("facing", "west")]).unwrap();
+        let double = moving_state_with_properties(chest, &[("type", "left")]).unwrap();
+        let trapped = crate::world::block::first_state_of("trapped_chest").unwrap();
+        let positions = [
+            BlockPos::new(-32, -64, 16),
+            BlockPos::new(-31, -64, 16),
+            BlockPos::new(-30, -64, 16),
+        ];
+        for (&pos, &state) in positions.iter().zip([single, double, trapped].iter()) {
+            store.set_block_state(pos.x, pos.y, pos.z, state);
+            store.block_entities.insert(
+                pos,
+                crate::world::block_entity::StoredBlockEntity::new(
+                    if state == trapped {
+                        BlockEntityKind::TrappedChest
+                    } else {
+                        BlockEntityKind::Chest
+                    },
+                    NbtCompound::new(),
+                ),
+            );
+        }
+        let mut anim = BlockEntityAnimStore::default();
+        for &p in &positions {
+            anim.set_open_count(p, 1);
+        }
+        let first = snapshot_chests(&store, &anim, col);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].pos, positions[0]);
+        assert_eq!(first[0].state, single);
+        assert_eq!(first[0].yaw, 90.0);
+        assert!(first[0].open);
+        assert!(snapshot_chests(&store, &anim, ChunkPos::new(-1, 1)).is_empty());
+        anim.set_open_count(positions[0], 0);
+        store.set_block_state(positions[0].x, positions[0].y, positions[0].z, double);
+        assert!(first[0].open); // A dispatched job retains its own captured value.
+        assert_eq!(first[0].state, single);
+        assert!(snapshot_chests(&store, &anim, col).is_empty());
+    }
 
     fn decoded_pos(v: &PackedVertex) -> [f32; 3] {
         v.pos.map(|x| x as f32 / 65535.0 * POS_RANGE - POS_BIAS)

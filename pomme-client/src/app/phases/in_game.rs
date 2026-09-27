@@ -1219,8 +1219,15 @@ impl GameState {
     /// only if the same section is edited again before it lands.
     pub fn enqueue_section_edit(&mut self, col: ChunkPos, si: i32, lod: u32) {
         let g = self.bump_section_gen(col, si..si + 1);
-        self.mesh_dispatcher
-            .enqueue(&self.chunk_store, col, lod, true, g, si..si + 1);
+        self.mesh_dispatcher.enqueue(
+            &self.chunk_store,
+            &self.block_entity_anim,
+            col,
+            lod,
+            true,
+            g,
+            si..si + 1,
+        );
     }
 
     /// Vanilla `compileSync` under `PrioritizeChunkUpdates.PLAYER_AFFECTED`:
@@ -1238,9 +1245,13 @@ impl GameState {
         // sections at drain time; stale bulk results are rejected by the
         // buffer's per-section epoch gate (`ChunkMeshData::upload_epoch`).
         let g = self.bump_section_gen(col, sections.clone());
-        let mesh = self
-            .mesh_dispatcher
-            .mesh_sections_now(&self.chunk_store, col, sections, g);
+        let mesh = self.mesh_dispatcher.mesh_sections_now(
+            &self.chunk_store,
+            &self.block_entity_anim,
+            col,
+            sections,
+            g,
+        );
         self.apply_mesh_upload(renderer, mesh);
     }
 
@@ -1401,9 +1412,13 @@ impl GameState {
         }
         for ((col, si), _) in sections.into_iter().map(|key| (key, ())) {
             let g = self.bump_section_gen(col, si..si + 1);
-            let mesh =
-                self.mesh_dispatcher
-                    .mesh_sections_now(&self.chunk_store, col, si..si + 1, g);
+            let mesh = self.mesh_dispatcher.mesh_sections_now(
+                &self.chunk_store,
+                &self.block_entity_anim,
+                col,
+                si..si + 1,
+                g,
+            );
             self.apply_mesh_upload(renderer, mesh);
         }
     }
@@ -1582,6 +1597,7 @@ impl GameState {
                 for (start, end) in contiguous_runs(to_mesh) {
                     self.mesh_dispatcher.enqueue(
                         &self.chunk_store,
+                        &self.block_entity_anim,
                         pos,
                         lod,
                         false,
@@ -6168,6 +6184,23 @@ mod tests {
         assert_eq!(section_bit(-1), 0);
         assert_eq!(section_bit(32), 0);
         assert_eq!(section_bits(-3..-2), 0);
+    }
+
+    #[test]
+    fn reload_keeps_bulk_generation_above_an_in_flight_old_snapshot() {
+        use azalea_core::position::ChunkPos;
+        let col = ChunkPos::new(-2, 1);
+        let mut generations = std::collections::HashMap::new();
+        let loaded = std::collections::HashSet::from([col]);
+        for _ in 0..4 {
+            bump_loaded_content_generations(&mut generations, [col], &loaded);
+        }
+        let stale_mesh_gen = generations[&col];
+        // Unload no longer removes this entry. A new load bumps it again.
+        bump_loaded_content_generations(&mut generations, [col], &std::collections::HashSet::new());
+        assert_eq!(generations[&col], stale_mesh_gen);
+        bump_loaded_content_generations(&mut generations, [col], &loaded);
+        assert!(stale_mesh_gen < generations[&col]);
     }
 
     #[test]

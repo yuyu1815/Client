@@ -51,9 +51,20 @@ impl BlockEntityAnimStore {
 
     /// Set the open-viewer count for a container. >0 starts opening, 0 starts
     /// closing.
-    pub fn set_open_count(&mut self, pos: BlockPos, count: u8) {
+    /// Returns whether the binary open state changed (not the viewer count).
+    pub fn set_open_count(&mut self, pos: BlockPos, count: u8) -> bool {
         let entry = self.containers.entry(pos).or_default();
+        let changed = entry.opening != (count > 0);
         entry.opening = count > 0;
+        changed
+    }
+
+    pub fn is_open(&self, pos: &BlockPos) -> bool {
+        self.containers.get(pos).is_some_and(|a| a.opening)
+    }
+
+    pub fn remove(&mut self, pos: &BlockPos) {
+        self.containers.remove(pos);
     }
 
     pub fn container(&self, pos: &BlockPos) -> Option<&ContainerAnim> {
