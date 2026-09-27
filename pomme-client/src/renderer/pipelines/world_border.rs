@@ -362,36 +362,35 @@ impl WorldBorderPipeline {
                 bx1 - camx,
             ),
         ];
-        let mut verts = Vec::with_capacity(24);
-        let mut active = 0u32;
+        // At most four sides, six vertices each. Keep this transient mesh on
+        // the stack rather than allocating a Vec every visible border frame.
+        let mut verts = [Vertex {
+            position: [0.0; 3],
+            uv: [0.0; 2],
+            brightness: 0.0,
+        }; 24];
+        let mut count = 0;
         for (side, (a, b, c, e, span, _dist)) in sides.into_iter().enumerate() {
             if !d.sides[side] {
                 continue;
             }
-            active |= 1 << side;
-            let u0 = u;
-            let u1 = u + span;
-            let v0 = v;
-            let v1 = v + 2.0 * far;
-            for (p, t) in [
-                (a, [u0, v1]),
-                (b, [u1, v1]),
-                (c, [u1, v0]),
-                (a, [u0, v1]),
-                (c, [u1, v0]),
-                (e, [u0, v0]),
-            ] {
-                verts.push(Vertex {
-                    position: p,
-                    uv: t,
-                    brightness: d.alpha,
-                });
-            }
+            verts[count..count + 6].copy_from_slice(&border_side_vertices(
+                a,
+                b,
+                c,
+                e,
+                u,
+                u + span,
+                v,
+                v + 2.0 * far,
+                d.alpha,
+            ));
+            count += 6;
         }
-        if verts.is_empty() {
+        if count == 0 {
             return;
         }
-        let bytes = bytemuck::cast_slice(&verts);
+        let bytes = bytemuck::cast_slice(&verts[..count]);
         self.vertex_allocs[frame]
             .as_mut()
             .unwrap()
@@ -412,8 +411,7 @@ impl WorldBorderPipeline {
             &[],
         );
         cmd.bind_vertex_buffers(0, &[self.vertex_buffers[frame]], &[0]);
-        cmd.draw(verts.len() as u32, 1, 0, 0);
-        let _ = active;
+        cmd.draw(count as u32, 1, 0, 0);
     }
     pub fn recreate(&mut self, device: &vk::Device, pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
@@ -446,6 +444,32 @@ impl WorldBorderPipeline {
         device.destroy_descriptor_set_layout(self.camera_layout, None);
         device.destroy_descriptor_set_layout(self.texture_layout, None);
     }
+}
+
+fn border_side_vertices(
+    a: [f32; 3],
+    b: [f32; 3],
+    c: [f32; 3],
+    e: [f32; 3],
+    u0: f32,
+    u1: f32,
+    v0: f32,
+    v1: f32,
+    alpha: f32,
+) -> [Vertex; 6] {
+    [
+        (a, [u0, v1]),
+        (b, [u1, v1]),
+        (c, [u1, v0]),
+        (a, [u0, v1]),
+        (c, [u1, v0]),
+        (e, [u0, v0]),
+    ]
+    .map(|(position, uv)| Vertex {
+        position,
+        uv,
+        brightness: alpha,
+    })
 }
 
 fn create_pipeline(
@@ -581,6 +605,36 @@ fn create_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn border_side_retains_vertex_order_uv_and_alpha() {
+        let vertices = border_side_vertices(
+            [0.0, 1.0, 2.0],
+            [3.0, 4.0, 5.0],
+            [6.0, 7.0, 8.0],
+            [9.0, 10.0, 11.0],
+            0.25,
+            1.25,
+            2.0,
+            4.0,
+            0.75,
+        );
+        let actual: Vec<_> = vertices
+            .iter()
+            .map(|v| (v.position, v.uv, v.brightness))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ([0.0, 1.0, 2.0], [0.25, 4.0], 0.75),
+                ([3.0, 4.0, 5.0], [1.25, 4.0], 0.75),
+                ([6.0, 7.0, 8.0], [1.25, 2.0], 0.75),
+                ([0.0, 1.0, 2.0], [0.25, 4.0], 0.75),
+                ([6.0, 7.0, 8.0], [1.25, 2.0], 0.75),
+                ([9.0, 10.0, 11.0], [0.25, 2.0], 0.75),
+            ]
+        );
+    }
+
     #[test]
     fn extracts_border_status_for_color_variant_selection() {
         let mut border = WorldBorder::default();
