@@ -225,6 +225,15 @@ pub const PACKED_WHITE_SHIFTED: u32 = pack_tint_shifted([1.0, 1.0, 1.0]);
 /// `vertices`) so each section can be uploaded as a self-contained draw with
 /// its own tight AABB, giving per-section cull granularity instead of
 /// per-column.
+/// A chest whose triangles were actually emitted into this section's index
+/// list. Never populate from a block-entity snapshot alone: an upload may be
+/// skipped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EmittedChest {
+    pub pos: BlockPos,
+    pub open: bool,
+}
+
 pub struct SectionMesh {
     /// 0-based section index from the column's min_y; stable identity for
     /// per-section upload/replace.
@@ -244,6 +253,9 @@ pub struct SectionMesh {
     /// Translucent (water) indices into the same `vertices`, drawn in a
     /// separate blended pass after opaque geometry.
     pub water_indices: Vec<u32>,
+    /// Only chests with emitted indexed geometry; currently always empty until
+    /// the live chest mesher is connected.
+    pub emitted_chests: Vec<EmittedChest>,
     /// Probe-only target records; empty unless a trace is armed.
     pub trace: Vec<Value>,
 }
@@ -2094,6 +2106,7 @@ fn mesh_chunk_snapshot(
             indices: sink.solid,
             solid_index_count,
             water_indices: sink.water,
+            emitted_chests: Vec::new(),
             trace,
         });
     }

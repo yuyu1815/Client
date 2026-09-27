@@ -1428,6 +1428,12 @@ impl Renderer {
         )
     }
 
+    /// Pose of a chest whose geometry belongs to an accepted chunk allocation.
+    /// This does not account for section fade or visibility culling.
+    pub fn resident_chunk_chest_open(&self, pos: &azalea_core::position::BlockPos) -> Option<bool> {
+        self.chunk_buffers.resident_chest_open(pos)
+    }
+
     pub fn remove_chunk_mesh(&mut self, pos: &ChunkPos) {
         self.chunk_buffers.remove(pos);
     }

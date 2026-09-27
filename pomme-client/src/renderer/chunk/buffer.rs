@@ -1,13 +1,15 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use azalea_core::position::ChunkPos;
+use azalea_core::position::{BlockPos, ChunkPos};
 use glam::DVec3;
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 use serde_json::json;
 
-use super::mesher::{ChunkAABB, ChunkMeshData, MeshTraceState, PackedVertex, SectionMesh};
+use super::mesher::{
+    ChunkAABB, ChunkMeshData, EmittedChest, MeshTraceState, PackedVertex, SectionMesh,
+};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 const BUCKET_VERTICES: u32 = 32768;
@@ -325,10 +327,82 @@ struct SectionAlloc {
     /// Upload epoch this section's geometry came from; an older upload is
     /// rejected. See [`ChunkMeshData::upload_epoch`].
     epoch: u64,
+    /// Only geometry included in this section's accepted GPU allocation.
+    emitted_chests: Vec<EmittedChest>,
 }
 
 struct ChunkAlloc {
     sections: Vec<SectionAlloc>,
+}
+
+fn epoch_accepts(current: Option<u64>, incoming: u64) -> bool {
+    incoming >= current.unwrap_or(0)
+}
+
+fn forget_column(
+    chunks: &mut HashMap<ChunkPos, ChunkAlloc>,
+    empty_epochs: &mut HashMap<(ChunkPos, i32), u64>,
+    pos: &ChunkPos,
+) -> Option<ChunkAlloc> {
+    empty_epochs.retain(|(chunk, _), _| chunk != pos);
+    chunks.remove(pos)
+}
+
+fn clear_columns(
+    chunks: &mut HashMap<ChunkPos, ChunkAlloc>,
+    empty_epochs: &mut HashMap<(ChunkPos, i32), u64>,
+) {
+    chunks.clear();
+    empty_epochs.clear();
+}
+
+/// Called only after every planned slice has been allocated. Failed plans
+/// must leave the previous resident draw and its pose untouched.
+fn swap_accepted(
+    chunks: &mut HashMap<ChunkPos, ChunkAlloc>,
+    empty_epochs: &mut HashMap<(ChunkPos, i32), u64>,
+    pos: ChunkPos,
+    accepted: &std::collections::HashSet<i32>,
+    planned: &std::collections::HashSet<i32>,
+    epoch: u64,
+) -> Vec<(u32, u32, u32, u32)> {
+    let mut freed = Vec::new();
+    if let Some(entry) = chunks.get_mut(&pos) {
+        entry.sections.retain(|s| {
+            if accepted.contains(&s.section_index) {
+                freed.push((s.vertex_offset as u32, s.vtx_len, s.first_index, s.idx_len));
+                false
+            } else {
+                true
+            }
+        });
+    }
+    for &si in accepted {
+        if planned.contains(&si) {
+            empty_epochs.remove(&(pos, si));
+        } else {
+            empty_epochs.insert((pos, si), epoch);
+        }
+    }
+    if chunks.get(&pos).is_some_and(|c| c.sections.is_empty()) {
+        chunks.remove(&pos);
+    }
+    freed
+}
+
+// Duplicated positions are ambiguous (e.g. a malformed section upload):
+// never claim a unique resident shape unless exactly one draw owns the
+// position.
+fn resident_chest_open<'a>(
+    sections: impl Iterator<Item = &'a SectionAlloc>,
+    pos: &BlockPos,
+) -> Option<bool> {
+    let mut matches = sections
+        .filter(|s| s.index_count > 0)
+        .flat_map(|s| &s.emitted_chests)
+        .filter(|chest| &chest.pos == pos);
+    let open = matches.next()?.open;
+    matches.next().is_none().then_some(open)
 }
 
 pub struct ChunkBufferStore {
@@ -353,6 +427,9 @@ pub struct ChunkBufferStore {
     vtx_free: FreeList,
     idx_free: FreeList,
     chunks: HashMap<ChunkPos, ChunkAlloc>,
+    /// Retain the epoch of accepted empty sections so an older result cannot
+    /// resurrect a section after its allocation has been removed.
+    empty_epochs: HashMap<(ChunkPos, i32), u64>,
     /// Per-column bitmask of occlusion-visible section indices (bit `si`), from
     /// the CPU visibility graph. A column absent here defaults to fully
     /// visible, so freshly-loaded-but-not-yet-graphed columns still draw.
@@ -752,6 +829,7 @@ impl ChunkBufferStore {
             vtx_free,
             idx_free,
             chunks: HashMap::new(),
+            empty_epochs: HashMap::new(),
             chunk_visibility: HashMap::new(),
             cached_meta: Vec::new(),
             meta_dirty: true,
@@ -867,6 +945,7 @@ impl ChunkBufferStore {
             solid_index_count: u32,
             aabb: ChunkAABB,
             origin: [i32; 3],
+            emitted_chests: &'a [EmittedChest],
         }
 
         // Retired slices only reclaim in `begin_frame`; if rendering is paused
@@ -901,34 +980,21 @@ impl ChunkBufferStore {
                         .get(&mesh.pos)
                         .and_then(|c| c.sections.iter().find(|s| s.section_index == *si))
                         .map(|s| s.epoch)
-                        .unwrap_or(0);
-                    mesh.upload_epoch >= stored
+                        .or_else(|| self.empty_epochs.get(&(mesh.pos, *si)).copied());
+                    epoch_accepts(stored, mesh.upload_epoch)
                 })
                 .collect();
 
-            // Retire the slices of every accepted covered section: the re-meshed
-            // ones are re-allocated below, the now-empty ones simply vanish.
-            // Remember which were present so a re-meshed section swaps instantly
-            // while a freshly revealed one still fades in. Rejected sections are
-            // left untouched.
-            let mut freed: Vec<(u32, u32, u32, u32)> = Vec::new();
-            let mut was_present: std::collections::HashSet<i32> = std::collections::HashSet::new();
-            if let Some(entry) = self.chunks.get_mut(&mesh.pos) {
-                entry.sections.retain(|s| {
-                    if accepted.contains(&s.section_index) {
-                        was_present.insert(s.section_index);
-                        freed.push((s.vertex_offset as u32, s.vtx_len, s.first_index, s.idx_len));
-                        false
-                    } else {
-                        true
-                    }
-                });
-            }
-            self.retire_slices(freed.iter().copied());
-            // Sections were removed/replaced, so the draw list must be rebuilt even
-            // if this mesh is skipped below (otherwise it keeps drawing a retired,
-            // soon-reused slice).
-            self.meta_dirty = true;
+            // Keep the old draw (and its chest metadata) until all replacement
+            // allocations succeed. A failed remesh must not silently retire it.
+            let was_present: std::collections::HashSet<i32> = self
+                .chunks
+                .get(&mesh.pos)
+                .into_iter()
+                .flat_map(|c| c.sections.iter())
+                .filter(|s| accepted.contains(&s.section_index))
+                .map(|s| s.section_index)
+                .collect();
 
             let upload_secs: Vec<&SectionMesh> = mesh
                 .sections
@@ -936,16 +1002,7 @@ impl ChunkBufferStore {
                 .filter(|s| accepted.contains(&s.section_index))
                 .collect();
 
-            if upload_secs.is_empty() {
-                // Every accepted section is now empty (freed above); drop the
-                // column if nothing remains.
-                if self
-                    .chunks
-                    .get(&mesh.pos)
-                    .is_some_and(|c| c.sections.is_empty())
-                {
-                    self.chunks.remove(&mesh.pos);
-                }
+            if upload_secs.is_empty() && accepted.is_empty() {
                 continue;
             }
 
@@ -989,6 +1046,7 @@ impl ChunkBufferStore {
                         mesh.min_y + sec.section_index * 16,
                         mesh.pos.z * 16,
                     ],
+                    emitted_chests: &sec.emitted_chests,
                 });
             }
             if pool_full
@@ -1001,16 +1059,28 @@ impl ChunkBufferStore {
                         )
                     }))
             {
-                // Accepted sections were retired above; report them so the next
-                // rescan re-enqueues them instead of permanently losing geometry.
+                // Old draws remain resident; report the failed sections for retry.
                 if !pool_full {
                     self.free_slices(&taken);
                 }
                 needs_remesh.push((mesh.pos, accepted.iter().copied().collect()));
                 continue;
             }
+            // Only now retire accepted old draws. Empty sections get a tombstone
+            // epoch; unsuccessful plans above leave both draws and epochs intact.
+            let planned: std::collections::HashSet<_> =
+                plans.iter().map(|p| p.section_index).collect();
+            let freed = swap_accepted(
+                &mut self.chunks,
+                &mut self.empty_epochs,
+                mesh.pos,
+                &accepted,
+                &planned,
+                mesh.upload_epoch,
+            );
+            self.retire_slices(freed);
+            self.meta_dirty = true;
             if plans.is_empty() {
-                // Nothing to upload (all accepted sections were empty).
                 continue;
             }
 
@@ -1171,6 +1241,7 @@ impl ChunkBufferStore {
                     now
                 },
                 epoch: mesh.upload_epoch,
+                emitted_chests: p.emitted_chests.to_vec(),
             });
 
             // Freshly revealed sections fade in, so extend the fade window the
@@ -1356,8 +1427,16 @@ impl ChunkBufferStore {
         }
     }
 
+    /// The accepted resident draw's chest pose, not the latest CPU snapshot.
+    /// Does not imply the section is currently visible (fade/cull are
+    /// separate).
+    pub fn resident_chest_open(&self, pos: &BlockPos) -> Option<bool> {
+        let chunk = ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16));
+        resident_chest_open(self.chunks.get(&chunk)?.sections.iter(), pos)
+    }
+
     pub fn remove(&mut self, pos: &ChunkPos) {
-        if let Some(alloc) = self.chunks.remove(pos) {
+        if let Some(alloc) = forget_column(&mut self.chunks, &mut self.empty_epochs, pos) {
             self.retire_slices(alloc.sections.iter().map(|sec| {
                 (
                     sec.vertex_offset as u32,
@@ -1371,7 +1450,7 @@ impl ChunkBufferStore {
     }
 
     pub fn clear(&mut self) {
-        self.chunks.clear();
+        clear_columns(&mut self.chunks, &mut self.empty_epochs);
         self.vtx_free.reset();
         self.idx_free.reset();
         self.pending_free.clear();
@@ -1819,6 +1898,112 @@ fn desc_write(
 #[cfg(test)]
 mod staging_tests {
     use super::*;
+
+    fn section(si: i32, pos: BlockPos, open: bool, epoch: u64) -> SectionAlloc {
+        SectionAlloc {
+            section_index: si,
+            aabb: ChunkAABB {
+                min: [0.0; 4],
+                max: [1.0; 4],
+            },
+            origin: [0; 3],
+            first_index: 0,
+            index_count: 6,
+            solid_index_count: 6,
+            water_first_index: 6,
+            water_index_count: 0,
+            idx_len: 6,
+            vertex_offset: 0,
+            vtx_len: 4,
+            uploaded_at: std::time::Instant::now(),
+            epoch,
+            emitted_chests: vec![EmittedChest { pos, open }],
+        }
+    }
+
+    #[test]
+    fn resident_chests_follow_accepted_draws_only() {
+        let chunk = ChunkPos::new(-1, 0);
+        let pos = BlockPos::new(-1, 4, 2);
+        let mut chunks = HashMap::from([(
+            chunk,
+            ChunkAlloc {
+                sections: vec![section(0, pos, false, 8)],
+            },
+        )]);
+        let mut empty = HashMap::new();
+        let query = |chunks: &HashMap<_, ChunkAlloc>| {
+            resident_chest_open(chunks.get(&chunk).unwrap().sections.iter(), &pos)
+        };
+        assert_eq!(query(&chunks), Some(false));
+        chunks.get_mut(&chunk).unwrap().sections[0].index_count = 0;
+        assert_eq!(query(&chunks), None); // no indexed draw, no chest claim
+        chunks.get_mut(&chunk).unwrap().sections[0].index_count = 6;
+        assert!(!epoch_accepts(Some(8), 7)); // stale upload: no swap
+        assert_eq!(query(&chunks), Some(false));
+
+        let mut pool = FreeList::new(4);
+        assert!(pool.alloc(4).is_some());
+        assert!(pool.alloc(4).is_none()); // full pool: no swap
+        assert_eq!(query(&chunks), Some(false));
+
+        let accepted = std::collections::HashSet::from([0]);
+        let planned = std::collections::HashSet::from([0]);
+        assert_eq!(
+            swap_accepted(&mut chunks, &mut empty, chunk, &accepted, &planned, 9).len(),
+            1
+        );
+        chunks
+            .entry(chunk)
+            .or_insert_with(|| ChunkAlloc { sections: vec![] })
+            .sections
+            .push(section(0, pos, true, 9));
+        assert_eq!(query(&chunks), Some(true));
+        // Duplicate claims are ambiguous, not a positive residency result.
+        chunks
+            .get_mut(&chunk)
+            .unwrap()
+            .sections
+            .push(section(1, pos, false, 9));
+        assert_eq!(query(&chunks), None);
+        chunks.get_mut(&chunk).unwrap().sections.pop();
+        chunks.get_mut(&chunk).unwrap().sections[0]
+            .emitted_chests
+            .push(EmittedChest { pos, open: false });
+        assert_eq!(query(&chunks), None); // duplicate within one section too
+        chunks.get_mut(&chunk).unwrap().sections[0]
+            .emitted_chests
+            .pop();
+
+        // Empty acceptance retires the draw and stamps the empty section.
+        assert_eq!(
+            swap_accepted(
+                &mut chunks,
+                &mut empty,
+                chunk,
+                &accepted,
+                &Default::default(),
+                10
+            )
+            .len(),
+            1
+        );
+        assert!(!chunks.contains_key(&chunk));
+        assert_eq!(empty.get(&(chunk, 0)), Some(&10));
+        assert!(!epoch_accepts(empty.get(&(chunk, 0)).copied(), 9));
+        forget_column(&mut chunks, &mut empty, &chunk);
+        assert!(!empty.contains_key(&(chunk, 0))); // unload
+
+        chunks.insert(
+            chunk,
+            ChunkAlloc {
+                sections: vec![section(0, pos, false, 11)],
+            },
+        );
+        empty.insert((chunk, 1), 11);
+        clear_columns(&mut chunks, &mut empty);
+        assert!(chunks.is_empty() && empty.is_empty());
+    }
 
     #[test]
     fn tall_column_larger_than_staging_is_uploaded_in_section_batches() {
