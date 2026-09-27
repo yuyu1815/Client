@@ -1721,7 +1721,7 @@ fn contiguous_runs(mask: u32) -> Vec<(i32, i32)> {
 
 /// Conservative AABB-vs-frustum test (the dominant-corner max-dot used by
 /// `cull.comp`): true unless the box is fully behind some plane.
-fn aabb_in_frustum(mn: &[f32; 3], mx: &[f32; 3], planes: &[[f32; 4]; 6]) -> bool {
+fn aabb_in_frustum(mn: &[f32; 3], mx: &[f32; 3], planes: &[[f32; 4]]) -> bool {
     for p in planes {
         let d = p[0] * if p[0] >= 0.0 { mx[0] } else { mn[0] }
             + p[1] * if p[1] >= 0.0 { mx[1] } else { mn[1] }
@@ -1755,6 +1755,11 @@ fn block_entity_in_frustum(
     eye: glam::DVec3,
     planes: &[[f32; 4]; 6],
 ) -> bool {
+    // Camera::planes_from_view_projection orders left/right, bottom/top,
+    // near, far. The far plane can still belong to the previous frame's RD:
+    // render_world updates it only after BE extraction. GPU projection clips
+    // beyond the current far plane, so only reject against the first five.
+    let planes = &planes[..5];
     if !matches!(
         kind,
         BlockEntityKind::Chest
@@ -5776,6 +5781,38 @@ mod tests {
             DVec3::new(-30.0, 0.0, 0.0),
             &planes
         ));
+    }
+
+    #[test]
+    fn block_entity_cull_ignores_stale_far_but_rejects_behind_camera() {
+        use azalea_core::position::BlockPos;
+        use azalea_registry::builtin::BlockEntityKind as Kind;
+        use glam::DVec3;
+
+        use crate::renderer::camera::Camera;
+
+        let mut camera = Camera::new(16.0 / 9.0); // +Z; initial far is 1000
+        camera.set_render_distance(1);
+        let old_planes = camera.block_entity_frustum_planes();
+        let eye = DVec3::ZERO;
+        let visible = |pos, planes: &[[f32; 4]; 6]| {
+            block_entity_in_frustum(Kind::Chest, &pos, false, eye, planes)
+        };
+        let near = BlockPos::new(0, 0, 300);
+        let distant = BlockPos::new(0, 0, 1500);
+        assert!(visible(near, &old_planes));
+        // Without dropping plane 5, the old RD would reject this before
+        // render_world sets the new RD (32 chunks => far 2048).
+        assert!(!super::aabb_in_frustum(
+            &[-8.0, -8.0, 1492.0],
+            &[9.0, 9.0, 1509.0],
+            &old_planes
+        ));
+        assert!(visible(distant, &old_planes));
+        assert!(!visible(BlockPos::new(0, 0, -300), &old_planes));
+        assert!(!visible(BlockPos::new(1500, 0, 300), &old_planes));
+        camera.set_render_distance(32);
+        assert!(visible(distant, &camera.block_entity_frustum_planes()));
     }
 
     #[test]
