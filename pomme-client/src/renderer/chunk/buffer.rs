@@ -23,6 +23,16 @@ fn staging_section_fits(vertex_bytes: usize, index_bytes: usize, half: usize) ->
     vertex_bytes <= half && index_bytes <= half
 }
 
+fn staging_upload_section_too_large(vertices: usize, indices: usize, half: usize) -> bool {
+    vertices > 0
+        && indices > 0
+        && !staging_section_fits(
+            vertices * VERTEX_SIZE as usize,
+            indices * INDEX_SIZE as usize,
+            half,
+        )
+}
+
 fn staging_needs_flush(
     vertex_used: usize,
     index_used: usize,
@@ -31,6 +41,10 @@ fn staging_needs_flush(
     half: usize,
 ) -> bool {
     vertex_used + vertex_bytes > half || index_used + index_bytes > half
+}
+
+fn retire_on_failed_upload(pool_full: bool, staging_too_large: bool) -> bool {
+    pool_full && !staging_too_large
 }
 const MIN_BUCKETS: u32 = 128;
 const MAX_BUCKETS: u32 = 2048;
@@ -1006,6 +1020,16 @@ impl ChunkBufferStore {
                 continue;
             }
 
+            // Inspect every accepted section before allocating: pool exhaustion
+            // can stop planning before a later section exceeds staging capacity.
+            let staging_too_large = self.use_staging
+                && upload_secs.iter().any(|s| {
+                    staging_upload_section_too_large(
+                        s.vertices.len(),
+                        s.indices.len() + s.water_indices.len(),
+                        staging_half,
+                    )
+                });
             let mut plans: Vec<Plan> = Vec::with_capacity(upload_secs.len());
             // (vtx_off, vtx_len, idx_off, idx_len) taken for this mesh, for
             // rollback if the pool runs out partway through a column.
@@ -1049,17 +1073,8 @@ impl ChunkBufferStore {
                     emitted_chests: &sec.emitted_chests,
                 });
             }
-            if pool_full
-                || (self.use_staging
-                    && plans.iter().any(|p| {
-                        !staging_section_fits(
-                            p.verts.len() * VERTEX_SIZE as usize,
-                            (p.indices.len() + p.water_indices.len()) * INDEX_SIZE as usize,
-                            staging_half,
-                        )
-                    }))
-            {
-                if pool_full {
+            if pool_full || staging_too_large {
+                if retire_on_failed_upload(pool_full, staging_too_large) {
                     // Release old geometry and chest claims; the next remesh can
                     // allocate after the in-flight frame fences reclaim its slices.
                     let freed = swap_accepted(
@@ -1073,8 +1088,9 @@ impl ChunkBufferStore {
                     self.retire_slices(freed);
                     self.meta_dirty = true;
                 } else {
-                    // An oversized staging section cannot be uploaded; keep its
-                    // old draw because freeing pool space would not help.
+                    // An oversized staging section cannot be uploaded even if
+                    // another section exhausted the pool. Roll back every new
+                    // slice and leave all old draws, epochs and chest poses intact.
                     self.free_slices(&taken);
                 }
                 needs_remesh.push((mesh.pos, accepted.iter().copied().collect()));
@@ -2074,6 +2090,75 @@ mod staging_tests {
         let planned = std::collections::HashSet::from([0]);
         swap_accepted(&mut chunks, &mut empty, chunk, &accepted, &planned, 10);
         assert!(!empty.contains_key(&(chunk, 0)));
+    }
+
+    #[test]
+    fn pool_exhaustion_before_oversized_section_keeps_all_old_draws() {
+        let chunk = ChunkPos::new(0, 0);
+        let chest = BlockPos::new(1, 4, 1);
+        let mut vtx = FreeList::new(10);
+        let mut idx = FreeList::new(15);
+        let mut old = section(0, chest, false, 8);
+        old.vertex_offset = vtx.alloc(4).unwrap() as i32;
+        old.first_index = idx.alloc(6).unwrap();
+        let mut other = section(1, chest, true, 8);
+        other.vertex_offset = vtx.alloc(4).unwrap() as i32;
+        other.first_index = idx.alloc(6).unwrap();
+        other.emitted_chests.clear();
+        let mut chunks = HashMap::from([(
+            chunk,
+            ChunkAlloc {
+                sections: vec![old, other],
+            },
+        )]);
+        let mut empty = HashMap::new();
+        let accepted = std::collections::HashSet::from([0, 1]);
+        let incoming = [(2u32, 3u32), (7, 6)]; // second section is too large for staging
+        let half = 6 * VERTEX_SIZE as usize;
+        let staging_too_large = incoming
+            .iter()
+            .any(|&(v, i)| staging_upload_section_too_large(v as usize, i as usize, half));
+        assert!(staging_too_large);
+        let mut taken = Vec::new();
+        let mut pool_full = false;
+        for (v, i) in incoming {
+            let Some(vo) = vtx.alloc(v) else {
+                pool_full = true;
+                break;
+            };
+            let Some(io) = idx.alloc(i) else {
+                vtx.free_region(vo, v);
+                pool_full = true;
+                break;
+            };
+            taken.push((vo, v, io, i));
+        }
+        assert!(pool_full);
+        assert_eq!(taken.len(), 1); // planning stopped before inspecting section 1
+        if retire_on_failed_upload(pool_full, staging_too_large) {
+            swap_accepted(
+                &mut chunks,
+                &mut empty,
+                chunk,
+                &accepted,
+                &Default::default(),
+                9,
+            );
+        } else {
+            for (vo, vl, io, il) in taken {
+                vtx.free_region(vo, vl);
+                idx.free_region(io, il);
+            }
+        }
+        assert_eq!(chunks[&chunk].sections.len(), 2);
+        assert!(chunks[&chunk].sections.iter().all(|s| s.epoch == 8));
+        assert_eq!(
+            resident_chest_open(chunks[&chunk].sections.iter(), &chest),
+            Some(false)
+        );
+        assert!(empty.is_empty());
+        assert_eq!((vtx.alloc(2), idx.alloc(3)), (Some(8), Some(12)));
+        assert!(retire_on_failed_upload(true, false)); // pool-only retry still retires
     }
 
     #[test]
