@@ -4331,10 +4331,8 @@ pub fn update_game(
                     lid_open = lid_open.max(openness_at(&partner));
                 }
                 let is_sign = be.kind == BlockEntityKind::Sign;
-                let sign_front =
-                    is_sign.then(|| crate::world::block_entity::sign_lines(&be.nbt, true));
-                let sign_back =
-                    is_sign.then(|| crate::world::block_entity::sign_lines(&be.nbt, false));
+                let sign_front = is_sign.then(|| be.sign_front.clone().unwrap_or_default());
+                let sign_back = is_sign.then(|| be.sign_back.clone().unwrap_or_default());
                 let ((sign_front_color, sign_front_glowing), (sign_back_color, sign_back_glowing)) =
                     if is_sign {
                         sign_render_style(&be.nbt)

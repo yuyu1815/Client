@@ -288,7 +288,7 @@ fn load_network_chunk(
     for (pos, kind, nbt) in block_entities {
         chunks.block_entities.insert(
             pos,
-            crate::world::block_entity::StoredBlockEntity { kind, nbt },
+            crate::world::block_entity::StoredBlockEntity::new(kind, nbt),
         );
     }
     Ok(())
@@ -333,7 +333,7 @@ fn update_block_entity(
     if let Some(existing) = block_entities.get_mut(&pos)
         && existing.kind == kind
     {
-        existing.nbt = nbt;
+        existing.update_nbt(nbt);
         return true;
     }
     false
@@ -4699,10 +4699,7 @@ mod tests {
         for pos in [stale, neighbor] {
             chunks.block_entities.insert(
                 pos,
-                StoredBlockEntity {
-                    kind: BlockEntityKind::Chest,
-                    nbt: NbtCompound::new(),
-                },
+                StoredBlockEntity::new(BlockEntityKind::Chest, NbtCompound::new()),
             );
             animations.set_open_count(pos, 1);
         }
@@ -5273,10 +5270,10 @@ mod tests {
         let pos = azalea_core::position::BlockPos::new(1, 2, 3);
         let mut entries = std::collections::HashMap::from([(
             pos,
-            crate::world::block_entity::StoredBlockEntity {
-                kind: azalea_registry::builtin::BlockEntityKind::Chest,
-                nbt: simdnbt::owned::NbtCompound::default(),
-            },
+            crate::world::block_entity::StoredBlockEntity::new(
+                azalea_registry::builtin::BlockEntityKind::Chest,
+                simdnbt::owned::NbtCompound::default(),
+            ),
         )]);
 
         update_block_entity(

@@ -11,6 +11,26 @@ pub struct StoredBlockEntity {
     pub kind: BlockEntityKind,
     #[allow(dead_code)]
     pub nbt: NbtCompound,
+    pub sign_front: Option<[String; 4]>,
+    pub sign_back: Option<[String; 4]>,
+}
+
+impl StoredBlockEntity {
+    pub fn new(kind: BlockEntityKind, nbt: NbtCompound) -> Self {
+        let is_sign = kind == BlockEntityKind::Sign;
+        Self {
+            kind,
+            sign_front: is_sign.then(|| sign_lines(&nbt, true)),
+            sign_back: is_sign.then(|| sign_lines(&nbt, false)),
+            nbt,
+        }
+    }
+
+    pub fn update_nbt(&mut self, nbt: NbtCompound) {
+        self.sign_front = (self.kind == BlockEntityKind::Sign).then(|| sign_lines(&nbt, true));
+        self.sign_back = (self.kind == BlockEntityKind::Sign).then(|| sign_lines(&nbt, false));
+        self.nbt = nbt;
+    }
 }
 
 /// Stable, non-URL identity for a player-head texture source.
@@ -256,13 +276,7 @@ pub fn sync_block_entity(
     let id = crate::world::block::block_id(state);
     if let Some(kind) = rendered_kind(id) {
         if map.get(&pos).is_none_or(|e| e.kind != kind) {
-            map.insert(
-                pos,
-                StoredBlockEntity {
-                    kind,
-                    nbt: NbtCompound::default(),
-                },
-            );
+            map.insert(pos, StoredBlockEntity::new(kind, NbtCompound::default()));
         }
     } else if !is_block_entity_block(id) || map.get(&pos).is_some_and(|e| is_rendered(e.kind)) {
         // A synthesized entry is also stale when the block swaps directly to a
@@ -466,6 +480,53 @@ mod tests {
         assert!(!valid_profile_id("not-a-uuid"));
         assert!(valid_profile_name("Player_1"));
         assert!(!valid_profile_name("../player"));
+    }
+
+    #[test]
+    fn stored_sign_text_matches_parser_and_refreshes_on_nbt_update() {
+        use simdnbt::owned::NbtList;
+
+        let mut face = NbtCompound::new();
+        face.insert(
+            "messages",
+            NbtList::String(vec![
+                "{\"text\":\"one\"}".into(),
+                "raw fallback".into(),
+                "\"three\"".into(),
+                "\"four\"".into(),
+                "\"ignored fifth line\"".into(),
+            ]),
+        );
+        let mut nbt = NbtCompound::new();
+        nbt.insert("front_text", face);
+        let mut entity = StoredBlockEntity::new(BlockEntityKind::Sign, nbt);
+        assert_eq!(
+            entity.sign_front.as_ref().unwrap(),
+            &[
+                "one".to_owned(),
+                "raw fallback".to_owned(),
+                "three".to_owned(),
+                "four".to_owned()
+            ]
+        );
+        assert_eq!(
+            entity.sign_front.as_ref().unwrap(),
+            &sign_lines(&entity.nbt, true)
+        );
+
+        entity.update_nbt(NbtCompound::new());
+        assert_eq!(
+            entity.sign_front.as_ref().unwrap(),
+            &[String::new(), String::new(), String::new(), String::new()]
+        );
+        assert_eq!(
+            entity.sign_front.as_ref().unwrap(),
+            &sign_lines(&entity.nbt, true)
+        );
+        assert_eq!(
+            entity.sign_back.as_ref().unwrap(),
+            &sign_lines(&entity.nbt, false)
+        );
     }
 
     #[test]
