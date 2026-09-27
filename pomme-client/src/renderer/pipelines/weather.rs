@@ -512,16 +512,13 @@ fn column_seed(x: i32, z: i32) -> i64 {
     (a ^ b) as i64
 }
 
-fn column_tick_offset(x: i32, z: i32) -> i32 {
-    let (a, b) = column_hash_parts(x, z);
-    a.wrapping_add(b) & 0xFF
-}
-
 /// Vanilla `createRainColumnInstance`: V scrolls downward at `3 + rand` speed.
 fn rain_uv(game_time: u64, partial: f32, x: i32, z: i32) -> (f32, f32) {
     let wrapped = (game_time & 0x1FFFF) as f32;
-    let tick_offset = column_tick_offset(x, z) as f32;
-    let mut rng = JavaRandom::new(column_seed(x, z));
+    // Both seed and tick offset use the same column hash halves.
+    let (a, b) = column_hash_parts(x, z);
+    let tick_offset = (a.wrapping_add(b) & 0xFF) as f32;
+    let mut rng = JavaRandom::new((a ^ b) as i64);
     let speed = 3.0 + rng.next_float();
     let texture_offset = -((wrapped + tick_offset) + partial) / 32.0 * speed;
     (0.0, texture_offset % 32.0)
@@ -739,7 +736,7 @@ fn create_pipeline(
 
 #[cfg(test)]
 mod precipitation_tests {
-    use super::{Precip, WeatherVertex, batch_weather_vertices, precipitation_for};
+    use super::{Precip, WeatherVertex, batch_weather_vertices, precipitation_for, rain_uv};
     use crate::renderer::chunk::mesher::BiomeClimate;
 
     #[test]
@@ -771,6 +768,24 @@ mod precipitation_tests {
                 assert_eq!(current, previous);
             }
             capacities = Some(current);
+        }
+    }
+
+    #[test]
+    fn rain_uv_matches_independent_seed_and_tick_hashes() {
+        for (x, z) in [(0, 0), (-10, 15), (1024, -512), (i32::MIN, i32::MAX)] {
+            for (game_time, partial) in [(0, 0.0), (131071, 0.5), (u64::MAX, 0.99)] {
+                let (a, b) = super::column_hash_parts(x, z);
+                let mut rng = super::JavaRandom::new((a ^ b) as i64);
+                let (tick_a, tick_b) = super::column_hash_parts(x, z);
+                let expected = -(((game_time & 0x1FFFF) as f32
+                    + (tick_a.wrapping_add(tick_b) & 0xFF) as f32)
+                    + partial)
+                    / 32.0
+                    * (3.0 + rng.next_float())
+                    % 32.0;
+                assert_eq!(rain_uv(game_time, partial, x, z), (0.0, expected));
+            }
         }
     }
 
