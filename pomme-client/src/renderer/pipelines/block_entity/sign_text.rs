@@ -81,6 +81,7 @@ pub(super) fn draw_sign_text(
     cmd: vk::CommandBuffer,
     anchor: glam::DVec3,
     eye: glam::DVec3,
+    player_eye: glam::DVec3,
     items: &[BlockEntityRenderInfo],
     glyphs: &GlyphMap,
     textures: [vk::DescriptorImageInfo; 2],
@@ -100,7 +101,7 @@ pub(super) fn draw_sign_text(
             info.pos.y as f64 + 0.5,
             info.pos.z as f64 + 0.5,
         );
-        if !sign_text_in_range(center, eye) {
+        if !sign_text_in_range(center, player_eye) {
             continue;
         }
         for (front, lines, dye, glowing) in [
@@ -219,11 +220,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sign_text_range_includes_boundary_and_excludes_farther_centers() {
-        let eye = glam::DVec3::new(-32.5, 4.5, 7.5);
-        assert!(sign_text_in_range(eye + glam::DVec3::new(16.0, 0.0, 0.0), eye));
-        assert!(!sign_text_in_range(eye + glam::DVec3::new(16.001, 0.0, 0.0), eye));
-        assert!(sign_text_in_range(eye + glam::DVec3::new(0.0, -16.0, 0.0), eye));
+    fn sign_text_range_uses_player_eye_with_third_person_camera_offset() {
+        let player_eye = glam::DVec3::ZERO;
+        let render_eye = glam::DVec3::new(4.0, 0.0, 0.0);
+        let sign_at = |distance| player_eye + glam::DVec3::new(distance, 0.0, 0.0);
+
+        assert!(sign_text_in_range(sign_at(15.0), player_eye));
+        assert!(!sign_text_in_range(sign_at(17.0), player_eye));
+        // Render-camera distance remains independent; it only serves existing
+        // camera-facing / near-glow behavior, not the sign-range cutoff.
+        assert_eq!(sign_at(15.0).distance(render_eye), 11.0);
     }
 
     #[test]

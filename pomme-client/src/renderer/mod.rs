@@ -2374,6 +2374,7 @@ impl Renderer {
                         frame,
                         anchor,
                         eye,
+                        *self.camera.position,
                         block_entities,
                         &self.placed_head_skins,
                         self.menu_pipeline.world_font(),
