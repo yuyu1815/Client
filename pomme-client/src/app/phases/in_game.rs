@@ -394,6 +394,8 @@ pub struct GameState {
     /// `content_gen` outruns what was last enqueued, regardless of visibility,
     /// so an edit to a deferred/hidden column can never be lost.
     pub content_gen: HashMap<ChunkPos, u64>,
+    /// Global ticket; unlike unloaded column entries, never recycled.
+    pub next_content_gen: u64,
     /// What was most recently meshed for each column: the LOD, the column
     /// `content_gen`, and the bitmask of section indices already meshed. The
     /// re-scan meshes only sections newly made visible (or re-meshes all on a
@@ -441,6 +443,7 @@ pub struct GameState {
 
 fn bump_loaded_content_generations(
     content_gen: &mut HashMap<ChunkPos, u64>,
+    next_content_gen: &mut u64,
     centers: impl IntoIterator<Item = ChunkPos>,
     loaded: &HashSet<ChunkPos>,
 ) -> HashSet<ChunkPos> {
@@ -453,9 +456,29 @@ fn bump_loaded_content_generations(
         }
     }
     for pos in &affected {
-        *content_gen.entry(*pos).or_insert(0) += 1;
+        *next_content_gen += 1;
+        content_gen.insert(*pos, *next_content_gen);
     }
     affected
+}
+
+/// Reject unloaded columns even while a worker snapshot keeps the chunk Arc
+/// alive; the weak-backed chunk storage alone cannot answer membership.
+fn mesh_result_is_stale(
+    chunks: &ChunkStore,
+    content_gen: &HashMap<ChunkPos, u64>,
+    section_gen: &HashMap<(ChunkPos, i32), u64>,
+    pos: ChunkPos,
+    generation: u64,
+    mut replaced: std::ops::Range<i32>,
+    edit: bool,
+) -> bool {
+    !chunks.light_data.contains_key(&(pos.x, pos.z))
+        || if edit {
+            replaced.any(|si| section_gen.get(&(pos, si)).copied() != Some(generation))
+        } else {
+            content_gen.get(&pos).copied() != Some(generation)
+        }
 }
 
 /// What a column was last meshed as: LOD, content generation, and the set of
@@ -682,6 +705,7 @@ impl GameState {
             chunk_load_upload: None,
             last_update_phases: crate::benchmark::UpdatePhases::default(),
             content_gen: HashMap::new(),
+            next_content_gen: 0,
             meshed: HashMap::new(),
             vis_mask: HashMap::new(),
             section_gen: HashMap::new(),
@@ -1157,7 +1181,12 @@ impl GameState {
         centers: impl IntoIterator<Item = ChunkPos>,
     ) -> HashSet<ChunkPos> {
         let loaded: HashSet<_> = self.chunk_store.loaded_positions().collect();
-        let affected = bump_loaded_content_generations(&mut self.content_gen, centers, &loaded);
+        let affected = bump_loaded_content_generations(
+            &mut self.content_gen,
+            &mut self.next_content_gen,
+            centers,
+            &loaded,
+        );
         if !affected.is_empty() {
             self.pending_load_rescan = true;
         }
@@ -1285,14 +1314,15 @@ impl GameState {
             // a column nothing cleans up). Edits (priority lane, single section)
             // are keyed per section so editing one section never drops a sibling's
             // in-flight result; bulk loads keep the column key.
-            let stale = self.chunk_store.get_chunk(&mesh.pos).is_none()
-                || if mesh.timing.is_some() {
-                    mesh.replaced.clone().any(|si| {
-                        self.section_gen.get(&(mesh.pos, si)).copied() != Some(mesh.content_gen)
-                    })
-                } else {
-                    mesh.content_gen < self.content_gen.get(&mesh.pos).copied().unwrap_or(0)
-                };
+            let stale = mesh_result_is_stale(
+                &self.chunk_store,
+                &self.content_gen,
+                &self.section_gen,
+                mesh.pos,
+                mesh.content_gen,
+                mesh.replaced.clone(),
+                mesh.timing.is_some(),
+            );
             if stale {
                 self.mesh_dispatcher.recycle(mesh);
                 continue;
@@ -5754,8 +5784,8 @@ mod tests {
         bump_loaded_content_generations, credits_may_advance, death_confirm_escape_allowed,
         finish_win_credits, finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
         item_frame_base_position, item_frame_base_rotation, limited_crafting_param,
-        mesh_target_mask, section_bit, section_bits, server_tick_runs, show_death_screen_param,
-        sign_has_text, sign_text_in_range,
+        mesh_result_is_stale, mesh_target_mask, section_bit, section_bits, server_tick_runs,
+        show_death_screen_param, sign_has_text, sign_text_in_range,
     };
     use crate::renderer::SkyState;
 
@@ -6191,16 +6221,84 @@ mod tests {
         use azalea_core::position::ChunkPos;
         let col = ChunkPos::new(-2, 1);
         let mut generations = std::collections::HashMap::new();
+        let mut next = 0;
         let loaded = std::collections::HashSet::from([col]);
         for _ in 0..4 {
-            bump_loaded_content_generations(&mut generations, [col], &loaded);
+            bump_loaded_content_generations(&mut generations, &mut next, [col], &loaded);
         }
         let stale_mesh_gen = generations[&col];
-        // Unload no longer removes this entry. A new load bumps it again.
-        bump_loaded_content_generations(&mut generations, [col], &std::collections::HashSet::new());
-        assert_eq!(generations[&col], stale_mesh_gen);
-        bump_loaded_content_generations(&mut generations, [col], &loaded);
+        generations.remove(&col); // Unload releases the column entry.
+        assert!(!generations.contains_key(&col));
+        bump_loaded_content_generations(&mut generations, &mut next, [col], &loaded);
         assert!(stale_mesh_gen < generations[&col]);
+        let mut chunks = crate::world::chunk::ChunkStore::new_with_dimension(2, 16, -64);
+        chunks.light_data.insert((col.x, col.z), std::sync::Arc::new(
+            crate::world::chunk::ChunkLightData {
+                sky_sections: vec![], block_sections: vec![], min_y: -64,
+                has_sky: false, sky_top_section: None,
+            },
+        ));
+        assert!(mesh_result_is_stale(
+            &chunks, &generations, &std::collections::HashMap::new(),
+            col, stale_mesh_gen, 0..1, false,
+        ));
+    }
+
+    #[test]
+    fn unloaded_snapshot_arc_cannot_resurrect_bulk_mesh() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use azalea_buf::AzBuf;
+        use azalea_core::position::ChunkPos;
+
+        use crate::world::chunk::{ChunkLightData, ChunkStore};
+
+        let pos = ChunkPos::new(0, 0);
+        let mut chunks = ChunkStore::new_with_dimension(2, 16, -64);
+        let mut data = Vec::new();
+        azalea_world::chunk::Section::default()
+            .azalea_write(&mut data)
+            .unwrap();
+        chunks.load_chunk(pos, &data, &[]).unwrap();
+        chunks.light_data.insert(
+            (0, 0),
+            Arc::new(ChunkLightData {
+                sky_sections: vec![],
+                block_sections: vec![],
+                min_y: -64,
+                has_sky: false,
+                sky_top_section: None,
+            }),
+        );
+        let snapshot = chunks.get_chunk(&pos).unwrap();
+        let mut generations = HashMap::from([(pos, 1)]);
+        let sections = HashMap::new();
+        assert!(!mesh_result_is_stale(
+            &chunks,
+            &generations,
+            &sections,
+            pos,
+            1,
+            0..1,
+            false
+        ));
+        chunks.unload_chunk(&pos);
+        generations.remove(&pos);
+        assert!(
+            chunks.get_chunk(&pos).is_some(),
+            "snapshot keeps weak chunk alive"
+        );
+        assert!(mesh_result_is_stale(
+            &chunks,
+            &generations,
+            &sections,
+            pos,
+            1,
+            0..1,
+            false
+        ));
+        drop(snapshot);
     }
 
     #[test]
@@ -6214,26 +6312,30 @@ mod tests {
             .into_iter()
             .collect();
         let mut generations = HashMap::new();
+        let mut next = 0;
         assert_eq!(
-            bump_loaded_content_generations(&mut generations, [center], &loaded).len(),
+            bump_loaded_content_generations(&mut generations, &mut next, [center], &loaded).len(),
             9
         );
-        assert!(generations.values().all(|&generation| generation == 1));
+        assert_eq!(generations.len(), 9);
 
         let mut after_unload = loaded.clone();
         after_unload.remove(&center);
-        let dirty = bump_loaded_content_generations(&mut generations, [center], &after_unload);
+        let before = generations.clone();
+        generations.remove(&center);
+        let dirty =
+            bump_loaded_content_generations(&mut generations, &mut next, [center], &after_unload);
         assert_eq!(dirty.len(), 8);
-        assert!(!dirty.contains(&center));
-        assert!(dirty.iter().all(|pos| generations[pos] == 2));
+        assert!(!generations.contains_key(&center));
+        assert!(dirty.iter().all(|pos| generations[pos] > before[pos]));
 
-        let dirty = bump_loaded_content_generations(&mut generations, [center], &loaded);
+        let before = generations.clone();
+        let dirty = bump_loaded_content_generations(&mut generations, &mut next, [center], &loaded);
         assert_eq!(dirty.len(), 9);
-        assert_eq!(generations[&center], 2);
         assert!(
             dirty
                 .iter()
-                .all(|pos| generations[pos] == 3 || *pos == center)
+                .all(|pos| generations[pos] > before.get(pos).copied().unwrap_or(0))
         );
     }
 

@@ -190,12 +190,12 @@ fn apply_server_block(
     pos: azalea_core::position::BlockPos,
     state: azalea_block::BlockState,
 ) {
-    // A replacement (including chest -> chest with different properties) must
-    // not inherit the previous BE's open flag when the position is reused.
-    if game.chunk_store.get_block_state(pos.x, pos.y, pos.z) != state {
-        game.block_entity_anim.remove(&pos);
-    }
-    crate::world::block_entity::sync_block_entity(&mut game.chunk_store.block_entities, pos, state);
+    sync_server_be_animation(
+        &mut game.chunk_store,
+        &mut game.block_entity_anim,
+        pos,
+        state,
+    );
     if game.interaction.update_known_server_state(&pos, state) {
         return;
     }
@@ -219,6 +219,32 @@ fn apply_server_block(
         game.chunk_store.min_y(),
         game.chunk_store.section_count(),
     );
+}
+
+fn sync_server_be_animation(
+    chunks: &mut ChunkStore,
+    animations: &mut crate::world::block_entity_anim::BlockEntityAnimStore,
+    pos: azalea_core::position::BlockPos,
+    state: azalea_block::BlockState,
+) {
+    let old_kind = chunks.block_entities.get(&pos).map(|be| be.kind);
+    crate::world::block_entity::sync_block_entity(&mut chunks.block_entities, pos, state);
+    let new_kind = chunks.block_entities.get(&pos).map(|be| be.kind);
+    if new_kind.is_none() || old_kind != new_kind {
+        animations.remove(&pos);
+    }
+}
+
+fn retain_restored_be_animation(
+    chunks: &ChunkStore,
+    animations: &mut crate::world::block_entity_anim::BlockEntityAnimStore,
+    pos: azalea_core::position::BlockPos,
+) {
+    let state = chunks.get_block_state(pos.x, pos.y, pos.z);
+    let kind = crate::world::block_entity::rendered_kind(crate::world::block::block_id(state));
+    if kind.is_none() || chunks.block_entities.get(&pos).map(|be| be.kind) != kind {
+        animations.remove(&pos);
+    }
 }
 
 /// Starts an entity's hurt animation, with a direction for the packets that
@@ -1883,9 +1909,7 @@ impl AppCore {
                             pos: (pos.x, pos.z),
                         });
                     game.block_entity_anim.drop_chunk(pos.x, pos.z);
-                    // Retain the generation across unload/reload: an in-flight
-                    // bulk result for the old column must fail the stale check
-                    // even if the replacement chunk loads before it drains.
+                    game.content_gen.remove(&pos);
                     game.meshed.remove(&pos);
                     game.compiled.remove(&pos);
                     game.vis_mask.remove(&pos);
@@ -2898,11 +2922,12 @@ impl AppCore {
                     let min_y = game.chunk_store.min_y();
                     let n = game.chunk_store.section_count();
                     for b in ack_dirty {
-                        if crate::renderer::chunk::mesher::single_chest_state(&game.chunk_store, b)
-                            .is_none()
-                        {
-                            game.block_entity_anim.remove(&b);
-                        }
+                        // Mesh eligibility is narrower than BE animation.
+                        retain_restored_be_animation(
+                            &game.chunk_store,
+                            &mut game.block_entity_anim,
+                            b,
+                        );
                         game.light_engine
                             .on_block_dirty(&game.chunk_store, b.x, b.y, b.z);
                         game.bump_loaded_mesh_neighborhoods([
@@ -4717,6 +4742,75 @@ mod tests {
         update_block_entity(&mut chunks.block_entities, pos, kind, nbt);
         assert_eq!(chunks.block_entities[&pos].nbt.int("later"), Some(1));
         assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn server_waterlogged_chest_keeps_same_be_animation() {
+        use azalea_core::position::BlockPos;
+
+        use crate::world::block;
+        use crate::world::block_entity_anim::BlockEntityAnimStore;
+        use crate::world::chunk::ChunkStore;
+
+        block::init("26.2");
+        let pos = BlockPos::new(0, -64, 0);
+        let mut chunks = ChunkStore::new_with_dimension(2, 16, -64);
+        let mut animations = BlockEntityAnimStore::default();
+        let chest = |waterlogged: &str| {
+            block::state_with_properties(
+                "chest",
+                &[
+                    ("facing".into(), "north".into()),
+                    ("type".into(), "single".into()),
+                    ("waterlogged".into(), waterlogged.into()),
+                ],
+            )
+            .unwrap()
+        };
+        super::sync_server_be_animation(&mut chunks, &mut animations, pos, chest("false"));
+        animations.set_open_count(pos, 1);
+        super::sync_server_be_animation(&mut chunks, &mut animations, pos, chest("true"));
+        assert!(animations.is_open(&pos));
+        super::sync_server_be_animation(
+            &mut chunks,
+            &mut animations,
+            pos,
+            block::first_state_of("stone").unwrap(),
+        );
+        assert!(!animations.is_open(&pos));
+    }
+
+    #[test]
+    fn restored_shulker_keeps_animation_even_when_not_single_chest_mesh() {
+        use azalea_core::position::{BlockPos, ChunkPos};
+
+        use crate::world::block;
+        use crate::world::block_entity_anim::BlockEntityAnimStore;
+        use crate::world::chunk::ChunkStore;
+
+        block::init("26.2");
+        let pos = BlockPos::new(0, -64, 0);
+        let mut chunks = ChunkStore::new_with_dimension(2, 16, -64);
+        chunks
+            .load_chunk(ChunkPos::new(0, 0), &empty_chunk_section(), &[])
+            .unwrap();
+        let state = block::first_state_of("shulker_box").unwrap();
+        super::sync_server_be_animation(
+            &mut chunks,
+            &mut BlockEntityAnimStore::default(),
+            pos,
+            state,
+        );
+        let mut animations = BlockEntityAnimStore::default();
+        animations.set_open_count(pos, 1);
+        // ACK reverts a predicted AIR block to the verified shulker state.
+        chunks.set_block_state(pos.x, pos.y, pos.z, state);
+        assert!(crate::renderer::chunk::mesher::single_chest_state(&chunks, pos).is_none());
+        super::retain_restored_be_animation(&chunks, &mut animations, pos);
+        assert!(animations.is_open(&pos));
+        chunks.set_block_state(pos.x, pos.y, pos.z, block::first_state_of("stone").unwrap());
+        super::retain_restored_be_animation(&chunks, &mut animations, pos);
+        assert!(!animations.is_open(&pos));
     }
 
     #[test]
