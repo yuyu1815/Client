@@ -363,6 +363,12 @@ impl Benchmark {
             be_model_draws_by_kind.skull += frame.skull;
             be_model_draws_by_kind.other += frame.other;
             be_model_draws_by_kind.closed_chest_candidate += frame.closed_chest_candidate;
+            be_model_draws_by_kind.chest_instances += frame.chest_instances;
+            be_model_draws_by_kind.chest_batched += frame.chest_batched;
+            be_model_draws_by_kind.chest_batch_draws += frame.chest_batch_draws;
+            be_model_draws_by_kind.chest_overlap_rejected += frame.chest_overlap_rejected;
+            be_model_draws_by_kind.chest_run_boundary += frame.chest_run_boundary;
+            be_model_draws_by_kind.chest_capacity_rejected += frame.chest_capacity_rejected;
         }
         let now = iso8601_utc_now();
 
@@ -503,6 +509,12 @@ mod tests {
                 ender_chest: 1,
                 other: 1,
                 closed_chest_candidate: 2,
+                chest_instances: 4,
+                chest_batched: 2,
+                chest_batch_draws: 1,
+                chest_overlap_rejected: 1,
+                chest_run_boundary: 1,
+                chest_capacity_rejected: 0,
                 ..Default::default()
             },
             be_sign_vertices: 36,
@@ -574,6 +586,8 @@ mod tests {
             sample.be_model_draws
         );
         assert_eq!(sample.be_model_draws_by_kind.closed_chest_candidate, 2);
+        assert_eq!(sample.be_model_draws_by_kind.chest_instances, 4);
+        assert_eq!(sample.be_model_draws_by_kind.chest_batched, 2);
         assert_eq!(sample.be_sign_vertices, 36);
         assert_eq!(sample.net_decode_ms, 1.0);
         assert_eq!(sample.visibility_ms, 2.0);
@@ -591,6 +605,7 @@ mod tests {
                 .closed_chest_candidate,
             2
         );
+        assert_eq!(bench.spikes[0].be_model_draws_by_kind.chest_batch_draws, 1);
         assert_eq!(bench.spikes[0].be_sign_vertices, 36);
         assert_eq!(bench.spikes[0].net_decode_ms, 1.0);
         assert_eq!(bench.spikes[0].visibility_ms, 2.0);

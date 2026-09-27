@@ -385,7 +385,7 @@ fn chest_instance(matrix: glam::Mat4) -> ChestInstance {
 }
 
 fn chest_instances(
-    items: &[BlockEntityRenderInfo],
+    items: &[&BlockEntityRenderInfo],
     model: &BakedEntityModel,
     anchor: glam::DVec3,
 ) -> Vec<ChestInstance> {
@@ -402,25 +402,104 @@ fn chest_instances(
     data
 }
 
-// Only reorder opaque parts across disjoint blocks in a consecutive, identical
-// texture/geometry run. Leave adjacent cells (including double-chest seams),
-// duplicate positions and every other kind in their original draw order.
-fn chest_run(items: &[BlockEntityRenderInfo], start: usize, max_items: usize) -> usize {
-    let first = &items[start];
-    if first.kind != BlockEntityKind::Chest || first.lid_open != 0.0 || max_items < 2 {
+fn closed_chest(info: &BlockEntityRenderInfo) -> bool {
+    info.kind == BlockEntityKind::Chest && info.lid_open == 0.0
+}
+
+// Baked closed single chest: body/lid x,z=[1,15]/16; lock x=[7,9]/16,
+// z=[15,16]/16; y=[0,14]/16. Only cardinal yaw has these exact bounds.
+// Double halves may touch at a seam and are deliberately not relaxed.
+fn chests_disjoint(a: &BlockEntityRenderInfo, b: &BlockEntityRenderInfo) -> bool {
+    let dx = i64::from(a.pos.x) - i64::from(b.pos.x);
+    let dy = i64::from(a.pos.y) - i64::from(b.pos.y);
+    let dz = i64::from(a.pos.z) - i64::from(b.pos.z);
+    if dx.abs() > 1 || dy.abs() > 1 || dz.abs() > 1 {
+        return true;
+    }
+    if dy != 0 {
+        return true; // closed height 14/16, so different block levels have a gap
+    }
+    if a.variant % 3 != 0 || b.variant % 3 != 0 {
+        return false;
+    }
+    let bounds = |yaw: f32| match yaw {
+        0.0 => Some(((1, 15), (1, 16))),
+        90.0 => Some(((0, 15), (1, 15))),
+        180.0 => Some(((1, 15), (0, 15))),
+        270.0 => Some(((1, 16), (1, 15))),
+        _ => None,
+    };
+    let (Some((ax, az)), Some((bx, bz))) = (bounds(a.yaw), bounds(b.yaw)) else {
+        return false;
+    };
+    let apart =
+        |a: (i64, i64), b: (i64, i64), delta: i64| a.1 < b.0 - delta * 16 || b.1 - delta * 16 < a.0;
+    apart(ax, bx, dx) || apart(az, bz, dz)
+}
+
+// Every window is pairwise disjoint. Never sort across an intersecting chest,
+// animated lid or other BE (notably translucent heads).
+struct ChestOrder<'a> {
+    items: Vec<&'a BlockEntityRenderInfo>,
+    windows: Vec<usize>,
+}
+
+impl<'a> std::ops::Deref for ChestOrder<'a> {
+    type Target = [&'a BlockEntityRenderInfo];
+    fn deref(&self) -> &Self::Target {
+        &self.items
+    }
+}
+
+fn chest_order<'a>(items: &'a [BlockEntityRenderInfo]) -> ChestOrder<'a> {
+    let mut order = ChestOrder {
+        items: Vec::with_capacity(items.len()),
+        windows: Vec::with_capacity(items.len()),
+    };
+    let mut start = 0;
+    while start < items.len() {
+        if !closed_chest(&items[start]) {
+            order.items.push(&items[start]);
+            order.windows.push(start);
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < items.len()
+            && closed_chest(&items[end])
+            && items[start..end]
+                .iter()
+                .all(|other| chests_disjoint(other, &items[end]))
+        {
+            end += 1;
+        }
+        let mut window: Vec<_> = items[start..end].iter().collect();
+        window.sort_by_key(|info| info.variant); // stable within a variant
+        order
+            .windows
+            .extend(std::iter::repeat_n(start, window.len()));
+        order.items.extend(window);
+        start = end;
+    }
+    order
+}
+
+// Only reorder opaque parts across disjoint blocks in a consecutive,
+// identical texture/geometry run. Otherwise use the old draw path.
+fn chest_run(items: &ChestOrder<'_>, start: usize, max_items: usize) -> usize {
+    let first = items[start];
+    if !closed_chest(first) || max_items < 2 {
         return 0;
     }
     let mut end = start + 1;
     while end < items.len() && end - start < max_items {
-        let next = &items[end];
-        if next.kind != BlockEntityKind::Chest
-            || next.lid_open != 0.0
+        let next = items[end];
+        if items.windows[end] != items.windows[start]
+            || !closed_chest(next)
             || next.variant != first.variant
-            || items[start..end].iter().any(|other| {
-                (i64::from(other.pos.x) - i64::from(next.pos.x)).abs() <= 1
-                    && (i64::from(other.pos.y) - i64::from(next.pos.y)).abs() <= 1
-                    && (i64::from(other.pos.z) - i64::from(next.pos.z)).abs() <= 1
-            })
+            || items[start..end]
+                .iter()
+                .any(|other| !chests_disjoint(other, next))
         {
             break;
         }
@@ -886,8 +965,12 @@ impl BlockEntityPipeline {
         let mut bound_entry: *const KindEntry = std::ptr::null();
         let mut bound_set: vk::DescriptorSet = vk::DescriptorSet::null();
 
-        let mut iter = items.iter().enumerate();
+        let order = chest_order(items);
+        let mut iter = order.iter().copied().enumerate();
         while let Some((index, info)) = iter.next() {
+            if benchmark_timing && info.kind == BlockEntityKind::Chest {
+                draws_by_kind.chest_instances += 1;
+            }
             let free = MAX_CHEST_INSTANCES.saturating_sub(self.chest_frames[frame].used);
             let run = if info.kind == BlockEntityKind::Chest
                 && info.lid_open == 0.0
@@ -900,7 +983,7 @@ impl BlockEntityPipeline {
                     .iter()
                     .filter(|(_, count)| *count > 0)
                     .count();
-                chest_run(items, index, if parts == 0 { 0 } else { free / parts })
+                chest_run(&order, index, if parts == 0 { 0 } else { free / parts })
             } else {
                 0
             };
@@ -925,12 +1008,16 @@ impl BlockEntityPipeline {
                     let tex =
                         &entry.textures[(info.variant as usize).min(entry.textures.len() - 1)];
                     let first = self.chest_frames[frame].used;
-                    let data = chest_instances(&items[index..index + run], model, anchor);
+                    let data = chest_instances(&order[index..index + run], model, anchor);
                     let bytes = bytemuck::cast_slice::<ChestInstance, u8>(&data);
                     let offset = first * size_of::<ChestInstance>();
                     allocation.mapped_slice_mut().unwrap()[offset..offset + bytes.len()]
                         .copy_from_slice(bytes);
                     self.chest_frames[frame].used += data.len();
+                    if benchmark_timing {
+                        draws_by_kind.chest_instances += (run - 1) as u32;
+                        draws_by_kind.chest_batched += run as u32;
+                    }
                     cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.chest_pipeline);
                     cmd.bind_vertex_buffers(0, &[entry.vertex_buffer, *buffer], &[0, 0]);
                     cmd.bind_descriptor_sets(
@@ -951,6 +1038,7 @@ impl BlockEntityPipeline {
                             model_draws += 1;
                             draws_by_kind.chest += 1;
                             draws_by_kind.closed_chest_candidate += 1;
+                            draws_by_kind.chest_batch_draws += 1;
                         }
                     }
                     bound_pipeline = self.chest_pipeline;
@@ -960,6 +1048,19 @@ impl BlockEntityPipeline {
                         iter.next();
                     }
                     continue;
+                }
+            }
+            if benchmark_timing && closed_chest(info) {
+                let next = order.get(index + 1).copied();
+                // Three baked parts per chest; a batch needs at least two.
+                if self.chest_frames[frame].unavailable || free < 6 {
+                    draws_by_kind.chest_capacity_rejected += 1;
+                } else if next.is_some_and(|other| {
+                    closed_chest(other) && order.windows[index] != order.windows[index + 1]
+                }) {
+                    draws_by_kind.chest_overlap_rejected += 1;
+                } else {
+                    draws_by_kind.chest_run_boundary += 1;
                 }
             }
             let is_statue = info.kind == BlockEntityKind::CopperGolemStatue;
@@ -1739,11 +1840,14 @@ mod sign_text_tests {
         let anchor = glam::DVec3::new(1.25, 60.0, -12.5);
         let model = &block_entity_model::bake_chest_models()[0];
         let poses = model.compute_part_transforms(&PartAnim::default());
-        let data = chest_instances(&items, model, anchor);
+        let data = chest_instances(&items.iter().collect::<Vec<_>>(), model, anchor);
         let parts = model.part_ranges.iter().filter(|(_, n)| *n > 0).count();
         assert_eq!(parts, 3);
         assert_eq!(data.len(), parts * items.len());
-        assert_eq!(chest_run(&items, 0, MAX_CHEST_INSTANCES / 3), 3);
+        assert_eq!(
+            chest_run(&chest_order(&items), 0, MAX_CHEST_INSTANCES / 3),
+            3
+        );
         // Old path: translation(center) * rotation(-yaw) * translation(-half)
         // then the static per-part pivot. Its 112-byte push block must match
         // each instanced vertex attribute exactly (including tint/overlay/UV).
@@ -1794,19 +1898,17 @@ mod sign_text_tests {
                 let mut item = chest(7, variant);
                 item.yaw = yaw;
                 let pos = item.pos;
-                let data = chest_instances(std::slice::from_ref(&item), &model, anchor);
+                let data = chest_instances(&[&item], &model, anchor);
                 let poses = model.compute_part_transforms(&PartAnim::default());
                 let mut instance_index = 0;
                 for (part, (_, count)) in model.part_ranges.iter().enumerate() {
                     if *count == 0 {
                         continue;
                     }
-                    let center = (glam::DVec3::new(
-                        pos.x as f64 + 0.5,
-                        pos.y as f64,
-                        pos.z as f64 + 0.5,
-                    ) - anchor)
-                        .as_vec3();
+                    let center =
+                        (glam::DVec3::new(pos.x as f64 + 0.5, pos.y as f64, pos.z as f64 + 0.5)
+                            - anchor)
+                            .as_vec3();
                     let old = glam::Mat4::from_translation(center)
                         * glam::Mat4::from_rotation_y((-yaw).to_radians())
                         * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5))
@@ -1814,8 +1916,7 @@ mod sign_text_tests {
                     let mut push = [0u8; 112];
                     push[..64].copy_from_slice(bytemuck::cast_slice(&old.to_cols_array()));
                     push[64..80].copy_from_slice(bytemuck::cast_slice(&WHITE_TINT));
-                    push[80..96]
-                        .copy_from_slice(bytemuck::cast_slice(&[0.0f32, 0.0, 0.0, 1.0]));
+                    push[80..96].copy_from_slice(bytemuck::cast_slice(&[0.0f32, 0.0, 0.0, 1.0]));
                     // Remaining 16 bytes are the old zero UV parameters.
                     assert_eq!(bytemuck::bytes_of(&data[instance_index]), &push);
                     instance_index += 1;
@@ -1831,9 +1932,17 @@ mod sign_text_tests {
         let items = [chest(0, 0), chest(3, 0), chest(6, 0), chest(9, 0)];
         let anchor = glam::DVec3::ZERO;
         let batch_len = 2;
-        let first_batch = chest_instances(&items[..batch_len], model, anchor);
+        let first_batch = chest_instances(
+            &items[..batch_len].iter().collect::<Vec<_>>(),
+            model,
+            anchor,
+        );
         let second_batch_start = first_batch.len();
-        let second_batch = chest_instances(&items[batch_len..], model, anchor);
+        let second_batch = chest_instances(
+            &items[batch_len..].iter().collect::<Vec<_>>(),
+            model,
+            anchor,
+        );
         let combined = [&first_batch[..], &second_batch[..]].concat();
         let mut part_first = 0;
         for (part, (_, count)) in model.part_ranges.iter().enumerate() {
@@ -1867,7 +1976,7 @@ mod sign_text_tests {
             let mut iter = items.iter().enumerate();
             let (index, info) = iter.next().unwrap();
             let run = if !unavailable {
-                chest_run(&items, index, free / parts)
+                chest_run(&chest_order(&items), index, free / parts)
             } else {
                 0
             };
@@ -1875,24 +1984,118 @@ mod sign_text_tests {
             assert_eq!(iter.next().unwrap().1.pos, items[1].pos);
             assert_eq!(info.pos, items[0].pos);
         }
-        assert_eq!(chest_run(&items, 0, (parts * 2 - 1) / parts), 0);
+        assert_eq!(
+            chest_run(&chest_order(&items), 0, (parts * 2 - 1) / parts),
+            0
+        );
     }
 
     #[test]
     fn chest_run_preserves_animated_mixed_and_capacity_fallbacks() {
         let mut items = [chest(0, 0), chest(3, 0), chest(6, 1), chest(9, 1)];
-        assert_eq!(chest_run(&items, 0, 2), 2);
-        assert_eq!(chest_run(&items, 2, 2), 2);
-        assert_eq!(chest_run(&items, 0, 1), 0); // capacity: draw old path
+        assert_eq!(chest_run(&chest_order(&items), 0, 2), 2);
+        assert_eq!(chest_run(&chest_order(&items), 2, 2), 2);
+        assert_eq!(chest_run(&chest_order(&items), 0, 1), 0); // capacity: draw old path
         items[1].lid_open = 0.5;
-        assert_eq!(chest_run(&items, 0, 4), 0);
-        assert_eq!(chest_run(&items, 1, 4), 0);
+        assert_eq!(chest_run(&chest_order(&items), 0, 4), 0);
+        assert_eq!(chest_run(&chest_order(&items), 1, 4), 0);
         items[1].lid_open = 0.0;
-        items[1].pos = BlockPos::new(1, 64, -9); // shared seam
-        assert_eq!(chest_run(&items, 0, 4), 0);
+        items[1].pos = BlockPos::new(1, 64, -9); // single has a gap: safe
+        assert_eq!(chest_run(&chest_order(&items), 0, 4), 2);
         items[1].pos = BlockPos::new(3, 64, -9);
         items[1].kind = BlockEntityKind::TrappedChest;
-        assert_eq!(chest_run(&items, 0, 4), 0);
+        assert_eq!(chest_run(&chest_order(&items), 0, 4), 0);
+    }
+
+    #[test]
+    fn single_chest_baked_bounds_support_adjacent_gap_rule() {
+        let model = &block_entity_model::bake_chest_models()[0];
+        let poses = model.compute_part_transforms(&PartAnim::default());
+        for (yaw, expected) in [
+            (0.0, [1.0, 15.0, 1.0, 16.0]),
+            (90.0, [0.0, 15.0, 1.0, 15.0]),
+            (180.0, [1.0, 15.0, 0.0, 15.0]),
+            (270.0, [1.0, 16.0, 1.0, 15.0]),
+        ] {
+            let mut info = chest(0, 0);
+            info.pos = BlockPos::new(0, 0, 0);
+            info.yaw = yaw;
+            let mut lo = glam::Vec3::splat(f32::INFINITY);
+            let mut hi = glam::Vec3::splat(f32::NEG_INFINITY);
+            for (part, &(start, count)) in model.part_ranges.iter().enumerate() {
+                let transform = chest_matrix(&info, glam::DVec3::ZERO) * poses[part];
+                for vertex in &model.vertices[start as usize..(start + count) as usize] {
+                    let point = transform.transform_point3(glam::Vec3::from_array(vertex.position));
+                    lo = lo.min(point);
+                    hi = hi.max(point);
+                }
+            }
+            for (actual, bound) in [lo.x, hi.x, lo.z, hi.z].into_iter().zip(expected) {
+                assert!(
+                    (actual * 16.0 - bound).abs() < 0.0001,
+                    "{yaw}: {actual} vs {bound}"
+                );
+            }
+            assert!(lo.y.abs() < 0.0001);
+            assert!((hi.y * 16.0 - 14.0).abs() < 0.0001);
+        }
+    }
+
+    #[test]
+    fn chest_buckets_only_cross_proven_disjoint_closed_chests() {
+        let items = [chest(0, 0), chest(3, 3), chest(6, 0), chest(9, 3)];
+        let order = chest_order(&items);
+        assert_eq!(
+            order.iter().map(|c| c.variant).collect::<Vec<_>>(),
+            [0, 0, 3, 3]
+        );
+        assert_eq!(chest_run(&order, 0, 2), 2);
+        assert_eq!(chest_run(&order, 2, 2), 2);
+        assert_eq!(chest_run(&order, 0, 1), 0); // full frame slot: no skip
+
+        let mut adjacent = [chest(0, 0), chest(1, 3), chest(2, 0)];
+        // Facing west: x extents [0,15]/16 for the first; facing west
+        // on the next cell starts at 16/16, strictly separated.
+        assert!(chests_disjoint(&adjacent[0], &adjacent[1]));
+        assert_eq!(chest_run(&chest_order(&adjacent), 0, 3), 2);
+        adjacent[0].yaw = 270.0; // lock reaches the shared x boundary
+        adjacent[1].yaw = 90.0; // the other body starts at that boundary
+        assert!(!chests_disjoint(&adjacent[0], &adjacent[1]));
+        assert_eq!(chest_order(&adjacent)[0].variant, 0);
+        assert_eq!(chest_order(&adjacent)[1].variant, 0);
+        assert_eq!(chest_run(&chest_order(&adjacent), 0, 3), 0);
+        adjacent[1].pos = adjacent[0].pos; // duplicate must not be batched
+        adjacent[1].variant = 0;
+        assert!(!chests_disjoint(&adjacent[0], &adjacent[1]));
+        assert_eq!(chest_run(&chest_order(&adjacent), 0, 3), 0);
+        adjacent[1].pos = BlockPos::new(1, 64, -9);
+        adjacent[0].variant = 1; // double-left seam: never relax
+        adjacent[1].variant = 2; // double-right still drawn separately
+        assert!(!chests_disjoint(&adjacent[0], &adjacent[1]));
+        let order = chest_order(&adjacent);
+        assert_eq!(order.iter().map(|c| c.pos.x).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(order.len(), 3);
+        adjacent[1].variant = 1;
+        assert_eq!(chest_run(&chest_order(&adjacent), 0, 3), 0);
+
+        let mut mixed = [chest(0, 0), chest(3, 3), chest(6, 0)];
+        mixed[1].kind = BlockEntityKind::Skull;
+        assert_eq!(
+            chest_order(&mixed)
+                .iter()
+                .map(|c| c.pos.x)
+                .collect::<Vec<_>>(),
+            [0, 3, 6]
+        );
+        mixed[1].kind = BlockEntityKind::Chest;
+        mixed[1].lid_open = 0.5;
+        assert_eq!(
+            chest_order(&mixed)
+                .iter()
+                .map(|c| c.pos.x)
+                .collect::<Vec<_>>(),
+            [0, 3, 6]
+        );
     }
 
     #[test]

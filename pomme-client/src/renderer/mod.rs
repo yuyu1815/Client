@@ -203,6 +203,20 @@ pub struct BlockEntityModelDrawCounts {
     pub skull: u32,
     pub other: u32,
     pub closed_chest_candidate: u32,
+    /// Logical chest items, not per-part GPU instances. Per-frame in samples;
+    /// the benchmark result sums across sampled frames.
+    #[serde(default)]
+    pub chest_instances: u32,
+    #[serde(default)]
+    pub chest_batched: u32,
+    #[serde(default)]
+    pub chest_batch_draws: u32,
+    #[serde(default)]
+    pub chest_overlap_rejected: u32,
+    #[serde(default)]
+    pub chest_run_boundary: u32,
+    #[serde(default)]
+    pub chest_capacity_rejected: u32,
 }
 
 pub struct Renderer {
