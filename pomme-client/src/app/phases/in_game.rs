@@ -2586,7 +2586,12 @@ pub fn update_game(
 
     // Menus never pause the simulation; tick_physics substitutes neutral input.
     core.tick_accumulator += dt;
+    let fixed_tick_start = game.benchmark.is_some().then(std::time::Instant::now);
+    let mut fixed_tick_count = 0;
     while core.tick_accumulator >= TICK_RATE {
+        if fixed_tick_start.is_some() {
+            fixed_tick_count += 1;
+        }
         game.tick_count = game.tick_count.wrapping_add(1);
         if game
             .item_activation
@@ -2680,6 +2685,10 @@ pub fn update_game(
         AppCore::send_client_tick_end(connection);
         core.tick_accumulator -= TICK_RATE;
     }
+    game.last_update_phases.fixed_tick_count = fixed_tick_count;
+    game.last_update_phases.fixed_tick_ms = fixed_tick_start
+        .map(|start| start.elapsed().as_secs_f32() * 1000.0)
+        .unwrap_or_default();
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.
@@ -4340,6 +4349,7 @@ pub fn update_game(
         )
     };
 
+    let be_extract_start = game.benchmark.is_some().then(std::time::Instant::now);
     let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = if benchmark_running {
         Vec::new()
     } else {
@@ -4428,6 +4438,9 @@ pub fn update_game(
             })
             .collect()
     };
+    game.last_update_phases.be_extract_ms = be_extract_start
+        .map(|start| start.elapsed().as_secs_f32() * 1000.0)
+        .unwrap_or_default();
 
     let weather_columns = if benchmark_running {
         Vec::new()

@@ -25,6 +25,16 @@ fn iso8601_utc_now() -> String {
 pub struct FrameSample {
     pub frame_ms: f32,
     pub fence_ms: f32,
+    #[serde(default)]
+    pub acquire_ms: f32,
+    #[serde(default)]
+    pub present_ms: f32,
+    #[serde(default)]
+    pub render_prepare_ms: f32,
+    #[serde(default)]
+    pub render_setup_ms: f32,
+    #[serde(default)]
+    pub submit_ms: f32,
     pub cull_ms: f32,
     /// CPU time spent recording render commands; excludes GPU execution.
     pub draw_ms: f32,
@@ -50,6 +60,12 @@ pub struct FrameSample {
     pub hud_draw_ms: f32,
     #[serde(default)]
     pub cpu_update_ms: f32,
+    #[serde(default)]
+    pub fixed_tick_ms: f32,
+    #[serde(default)]
+    pub fixed_tick_count: u32,
+    #[serde(default)]
+    pub be_extract_ms: f32,
     #[serde(default)]
     pub render_wall_ms: f32,
     #[serde(default)]
@@ -81,6 +97,16 @@ pub struct SpikeSample {
     pub frame_index: u32,
     pub frame_ms: f32,
     pub fence_ms: f32,
+    #[serde(default)]
+    pub acquire_ms: f32,
+    #[serde(default)]
+    pub present_ms: f32,
+    #[serde(default)]
+    pub render_prepare_ms: f32,
+    #[serde(default)]
+    pub render_setup_ms: f32,
+    #[serde(default)]
+    pub submit_ms: f32,
     pub cull_ms: f32,
     /// CPU time spent recording render commands; excludes GPU execution.
     pub draw_ms: f32,
@@ -106,6 +132,12 @@ pub struct SpikeSample {
     pub hud_draw_ms: f32,
     #[serde(default)]
     pub cpu_update_ms: f32,
+    #[serde(default)]
+    pub fixed_tick_ms: f32,
+    #[serde(default)]
+    pub fixed_tick_count: u32,
+    #[serde(default)]
+    pub be_extract_ms: f32,
     #[serde(default)]
     pub render_wall_ms: f32,
     #[serde(default)]
@@ -205,6 +237,11 @@ impl Benchmark {
         let sample = FrameSample {
             frame_ms,
             fence_ms: timings.fence_ms,
+            acquire_ms: timings.acquire_ms,
+            present_ms: timings.present_ms,
+            render_prepare_ms: timings.render_prepare_ms,
+            render_setup_ms: timings.render_setup_ms,
+            submit_ms: timings.submit_ms,
             cull_ms: timings.cull_ms,
             draw_ms: timings.draw_ms,
             chunk_draw_ms: timings.chunk_draw_ms,
@@ -218,6 +255,9 @@ impl Benchmark {
             environment_draw_ms: timings.environment_draw_ms,
             hud_draw_ms: timings.hud_draw_ms,
             cpu_update_ms,
+            fixed_tick_ms: phases.fixed_tick_ms,
+            fixed_tick_count: phases.fixed_tick_count,
+            be_extract_ms: phases.be_extract_ms,
             render_wall_ms,
             net_decode_ms: phases.net_decode_ms,
             visibility_ms: phases.visibility_ms,
@@ -237,6 +277,11 @@ impl Benchmark {
                 frame_index: self.samples.len() as u32,
                 frame_ms: sample.frame_ms,
                 fence_ms: sample.fence_ms,
+                acquire_ms: sample.acquire_ms,
+                present_ms: sample.present_ms,
+                render_prepare_ms: sample.render_prepare_ms,
+                render_setup_ms: sample.render_setup_ms,
+                submit_ms: sample.submit_ms,
                 cull_ms: sample.cull_ms,
                 draw_ms: sample.draw_ms,
                 chunk_draw_ms: sample.chunk_draw_ms,
@@ -250,6 +295,9 @@ impl Benchmark {
                 environment_draw_ms: sample.environment_draw_ms,
                 hud_draw_ms: sample.hud_draw_ms,
                 cpu_update_ms: sample.cpu_update_ms,
+                fixed_tick_ms: sample.fixed_tick_ms,
+                fixed_tick_count: sample.fixed_tick_count,
+                be_extract_ms: sample.be_extract_ms,
                 render_wall_ms: sample.render_wall_ms,
                 net_decode_ms: sample.net_decode_ms,
                 visibility_ms: sample.visibility_ms,
@@ -368,6 +416,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(legacy.chunk_draw_ms, 0.0);
+        assert_eq!(legacy.acquire_ms, 0.0);
+        assert_eq!(legacy.present_ms, 0.0);
+        assert_eq!(legacy.fixed_tick_ms, 0.0);
+        assert_eq!(legacy.fixed_tick_count, 0);
+        assert_eq!(legacy.be_extract_ms, 0.0);
         assert_eq!(legacy.entity_draw_ms, 0.0);
         assert_eq!(legacy.block_entity_draw_ms, 0.0);
         assert_eq!(legacy.be_model_ms, 0.0);
@@ -390,6 +443,11 @@ mod tests {
             r#"{"frame_index":0,"frame_ms":93.53,"fence_ms":0.008,"cull_ms":0.0,"draw_ms":0.0,"chunk_count":1,"entity_count":2}"#,
         )
         .unwrap();
+        assert_eq!(legacy_spike.acquire_ms, 0.0);
+        assert_eq!(legacy_spike.present_ms, 0.0);
+        assert_eq!(legacy_spike.fixed_tick_ms, 0.0);
+        assert_eq!(legacy_spike.fixed_tick_count, 0);
+        assert_eq!(legacy_spike.be_extract_ms, 0.0);
         assert_eq!(legacy_spike.be_model_ms, 0.0);
         assert_eq!(legacy_spike.be_sign_text_ms, 0.0);
         assert_eq!(legacy_spike.be_model_draws, 0);
@@ -408,10 +466,18 @@ mod tests {
 
         let mut bench = Benchmark::new("test", 1280, 720, 8);
         let timings = RenderTimings {
+            acquire_ms: 0.3,
+            present_ms: 0.4,
+            render_prepare_ms: 0.5,
+            render_setup_ms: 0.6,
+            submit_ms: 0.7,
             draw_ms: 3.0,
             ..Default::default()
         };
         let phases = UpdatePhases {
+            fixed_tick_ms: 1.2,
+            fixed_tick_count: 2,
+            be_extract_ms: 1.3,
             net_decode_ms: 1.0,
             visibility_ms: 2.0,
             rescan_ms: 3.0,

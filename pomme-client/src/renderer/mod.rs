@@ -170,6 +170,9 @@ pub struct RenderTimings {
     pub frame_ms: f32,
     pub fence_ms: f32,
     pub acquire_ms: f32,
+    pub render_prepare_ms: f32,
+    pub render_setup_ms: f32,
+    pub submit_ms: f32,
     pub cull_ms: f32,
     /// CPU time to record render commands; does not measure GPU execution.
     pub draw_ms: f32,
@@ -1536,6 +1539,7 @@ impl Renderer {
         // Reset before any fallible/early-return path (e.g. OutOfDate acquire),
         // so timings always belong to this render attempt.
         self.last_timings = RenderTimings::default();
+        let prepare_start = benchmark_timing.then(std::time::Instant::now);
         // CPU completions were drained by update_placed_head_skins before this
         // call. Upload before recording so newly ready heads switch this frame.
         self.block_entity_pipeline.update_player_head_textures(
@@ -1627,6 +1631,9 @@ impl Renderer {
                 info
             })
             .collect();
+        if let Some(start) = prepare_start {
+            self.last_timings.render_prepare_ms = start.elapsed().as_secs_f32() * 1000.0;
+        }
         self.render_frame(
             window,
             hide_cursor,
@@ -2034,6 +2041,7 @@ impl Renderer {
         let image_index = image.value;
         let acquire_ms = t_acquire.elapsed().as_secs_f32() * 1000.0;
 
+        let setup_start = benchmark_timing.then(std::time::Instant::now);
         let render_finished = self.render_finished_per_image[image_index as usize];
 
         if let RenderMode::World {
@@ -2270,6 +2278,9 @@ impl Renderer {
         let sh = self.swapchain.extent.height as f32;
 
         let frame_start = std::time::Instant::now();
+        if let Some(start) = setup_start {
+            self.last_timings.render_setup_ms = start.elapsed().as_secs_f32() * 1000.0;
+        }
 
         match &mode {
             RenderMode::World {
@@ -2870,7 +2881,11 @@ impl Renderer {
             ..Default::default()
         };
 
+        let submit_start = benchmark_timing.then(std::time::Instant::now);
         self.ctx.graphics_queue.submit(&[submit_info], fence)?;
+        if let Some(start) = submit_start {
+            self.last_timings.submit_ms = start.elapsed().as_secs_f32() * 1000.0;
+        }
 
         let present_info = vk::PresentInfoKHR {
             wait_semaphore_count: 1,
