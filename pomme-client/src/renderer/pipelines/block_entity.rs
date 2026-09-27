@@ -766,12 +766,17 @@ impl BlockEntityPipeline {
         items: &[BlockEntityRenderInfo],
         head_skins: &PlacedHeadSkinCache,
         font: Option<(&GlyphMap, [vk::DescriptorImageInfo; 2])>,
-    ) {
+        benchmark_timing: bool,
+    ) -> (f32, f32, u32, u32) {
         if items.is_empty() {
-            return;
+            return (0.0, 0.0, 0, 0);
         }
 
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.pipeline);
+        // Model interval: per-item model/part processing through the final model
+        // cmd.draw.
+        let model_start = benchmark_timing.then(std::time::Instant::now);
+        let mut model_draws = 0;
         let mut bound_pipeline = self.pipeline;
 
         let mut bound_entry: *const KindEntry = std::ptr::null();
@@ -904,10 +909,18 @@ impl BlockEntityPipeline {
                     &bytes,
                 );
                 cmd.draw(*count, 1, *start, 0);
+                if benchmark_timing {
+                    model_draws += 1;
+                }
             }
         }
+        let model_ms = model_start.map_or(0.0, |start| start.elapsed().as_secs_f32() * 1000.0);
+        // Sign interval: glyph generation, mapped-buffer copy, bindings and sign
+        // cmd.draw.
+        let sign_start = benchmark_timing.then(std::time::Instant::now);
+        let mut sign_vertices = 0;
         if let Some((glyphs, textures)) = font {
-            sign_text::draw_sign_text(
+            sign_vertices = sign_text::draw_sign_text(
                 device,
                 cmd,
                 anchor,
@@ -924,6 +937,8 @@ impl BlockEntityPipeline {
                 &mut self.text_sets_ready[frame],
             );
         }
+        let sign_ms = sign_start.map_or(0.0, |start| start.elapsed().as_secs_f32() * 1000.0);
+        (model_ms, sign_ms, model_draws, sign_vertices)
     }
 
     /// Update a shared set only before its first bind this frame. Updating even

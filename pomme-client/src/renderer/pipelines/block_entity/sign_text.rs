@@ -82,7 +82,7 @@ pub(super) fn draw_sign_text(
     buffer: vk::Buffer,
     allocation: &mut Allocation,
     text_sets_ready: &mut bool,
-) {
+) -> u32 {
     let mut vertices = Vec::new();
     for info in items.iter().filter(|i| i.kind == BlockEntityKind::Sign) {
         for (front, lines, dye, glowing) in [
@@ -178,7 +178,7 @@ pub(super) fn draw_sign_text(
         }
     }
     if vertices.is_empty() {
-        return;
+        return 0;
     }
     let len = vertices.len().min(MAX_SIGN_VERTICES);
     let len = len - len % 6;
@@ -199,6 +199,7 @@ pub(super) fn draw_sign_text(
     );
     cmd.bind_vertex_buffers(0, &[buffer], &[0]);
     cmd.draw(len as u32, 1, 0, 0);
+    len as u32
 }
 
 #[cfg(test)]

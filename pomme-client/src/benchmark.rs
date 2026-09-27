@@ -35,6 +35,14 @@ pub struct FrameSample {
     #[serde(default)]
     pub block_entity_draw_ms: f32,
     #[serde(default)]
+    pub be_model_ms: f32,
+    #[serde(default)]
+    pub be_sign_text_ms: f32,
+    #[serde(default)]
+    pub be_model_draws: u32,
+    #[serde(default)]
+    pub be_sign_vertices: u32,
+    #[serde(default)]
     pub item_entity_draw_ms: f32,
     #[serde(default)]
     pub environment_draw_ms: f32,
@@ -82,6 +90,14 @@ pub struct SpikeSample {
     pub entity_draw_ms: f32,
     #[serde(default)]
     pub block_entity_draw_ms: f32,
+    #[serde(default)]
+    pub be_model_ms: f32,
+    #[serde(default)]
+    pub be_sign_text_ms: f32,
+    #[serde(default)]
+    pub be_model_draws: u32,
+    #[serde(default)]
+    pub be_sign_vertices: u32,
     #[serde(default)]
     pub item_entity_draw_ms: f32,
     #[serde(default)]
@@ -194,6 +210,10 @@ impl Benchmark {
             chunk_draw_ms: timings.chunk_draw_ms,
             entity_draw_ms: timings.entity_draw_ms,
             block_entity_draw_ms: timings.block_entity_draw_ms,
+            be_model_ms: timings.be_model_ms,
+            be_sign_text_ms: timings.be_sign_text_ms,
+            be_model_draws: timings.be_model_draws,
+            be_sign_vertices: timings.be_sign_vertices,
             item_entity_draw_ms: timings.item_entity_draw_ms,
             environment_draw_ms: timings.environment_draw_ms,
             hud_draw_ms: timings.hud_draw_ms,
@@ -222,6 +242,10 @@ impl Benchmark {
                 chunk_draw_ms: sample.chunk_draw_ms,
                 entity_draw_ms: sample.entity_draw_ms,
                 block_entity_draw_ms: sample.block_entity_draw_ms,
+                be_model_ms: sample.be_model_ms,
+                be_sign_text_ms: sample.be_sign_text_ms,
+                be_model_draws: sample.be_model_draws,
+                be_sign_vertices: sample.be_sign_vertices,
                 item_entity_draw_ms: sample.item_entity_draw_ms,
                 environment_draw_ms: sample.environment_draw_ms,
                 hud_draw_ms: sample.hud_draw_ms,
@@ -346,6 +370,10 @@ mod tests {
         assert_eq!(legacy.chunk_draw_ms, 0.0);
         assert_eq!(legacy.entity_draw_ms, 0.0);
         assert_eq!(legacy.block_entity_draw_ms, 0.0);
+        assert_eq!(legacy.be_model_ms, 0.0);
+        assert_eq!(legacy.be_sign_text_ms, 0.0);
+        assert_eq!(legacy.be_model_draws, 0);
+        assert_eq!(legacy.be_sign_vertices, 0);
         assert_eq!(legacy.item_entity_draw_ms, 0.0);
         assert_eq!(legacy.environment_draw_ms, 0.0);
         assert_eq!(legacy.hud_draw_ms, 0.0);
@@ -362,6 +390,10 @@ mod tests {
             r#"{"frame_index":0,"frame_ms":93.53,"fence_ms":0.008,"cull_ms":0.0,"draw_ms":0.0,"chunk_count":1,"entity_count":2}"#,
         )
         .unwrap();
+        assert_eq!(legacy_spike.be_model_ms, 0.0);
+        assert_eq!(legacy_spike.be_sign_text_ms, 0.0);
+        assert_eq!(legacy_spike.be_model_draws, 0);
+        assert_eq!(legacy_spike.be_sign_vertices, 0);
         assert_eq!(legacy_spike.net_decode_ms, 0.0);
         assert_eq!(legacy_spike.visibility_ms, 0.0);
         assert_eq!(legacy_spike.rescan_ms, 0.0);
@@ -394,12 +426,20 @@ mod tests {
         let sample = &bench.samples[0];
         assert_eq!(sample.cpu_update_ms, 30.0);
         assert_eq!(sample.render_wall_ms, 40.0);
+        assert_eq!(sample.be_model_ms, 1.25);
+        assert_eq!(sample.be_sign_text_ms, 0.75);
+        assert_eq!(sample.be_model_draws, 4);
+        assert_eq!(sample.be_sign_vertices, 36);
         assert_eq!(sample.net_decode_ms, 1.0);
         assert_eq!(sample.visibility_ms, 2.0);
         assert_eq!(sample.rescan_ms, 3.0);
         assert_eq!(sample.mesh_drain_ms, 4.0);
         assert_eq!(sample.upload_ms, 5.0);
         assert_eq!(sample.unaccounted_ms, 30.0);
+        assert_eq!(bench.spikes[0].be_model_ms, 1.25);
+        assert_eq!(bench.spikes[0].be_sign_text_ms, 0.75);
+        assert_eq!(bench.spikes[0].be_model_draws, 4);
+        assert_eq!(bench.spikes[0].be_sign_vertices, 36);
         assert_eq!(bench.spikes[0].net_decode_ms, 1.0);
         assert_eq!(bench.spikes[0].visibility_ms, 2.0);
         assert_eq!(bench.spikes[0].rescan_ms, 3.0);

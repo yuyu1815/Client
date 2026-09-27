@@ -178,6 +178,10 @@ pub struct RenderTimings {
     pub chunk_draw_ms: f32,
     pub entity_draw_ms: f32,
     pub block_entity_draw_ms: f32,
+    pub be_model_ms: f32,
+    pub be_sign_text_ms: f32,
+    pub be_model_draws: u32,
+    pub be_sign_vertices: u32,
     pub item_entity_draw_ms: f32,
     pub environment_draw_ms: f32,
     pub hud_draw_ms: f32,
@@ -2363,18 +2367,24 @@ impl Renderer {
                 }
 
                 let pass_start = benchmark_timing.then(std::time::Instant::now);
-                self.block_entity_pipeline.draw(
-                    &self.ctx.device,
-                    cmd,
-                    frame,
-                    anchor,
-                    eye,
-                    block_entities,
-                    &self.placed_head_skins,
-                    self.menu_pipeline.world_font(),
-                );
+                let (model_ms, sign_text_ms, model_draws, sign_vertices) =
+                    self.block_entity_pipeline.draw(
+                        &self.ctx.device,
+                        cmd,
+                        frame,
+                        anchor,
+                        eye,
+                        block_entities,
+                        &self.placed_head_skins,
+                        self.menu_pipeline.world_font(),
+                        benchmark_timing,
+                    );
                 if let Some(start) = pass_start {
                     self.last_timings.block_entity_draw_ms = start.elapsed().as_secs_f32() * 1000.0;
+                    self.last_timings.be_model_ms = model_ms;
+                    self.last_timings.be_sign_text_ms = sign_text_ms;
+                    self.last_timings.be_model_draws = model_draws;
+                    self.last_timings.be_sign_vertices = sign_vertices;
                 }
 
                 let pass_start = benchmark_timing.then(std::time::Instant::now);
