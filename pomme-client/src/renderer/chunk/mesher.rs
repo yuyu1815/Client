@@ -180,7 +180,15 @@ fn chest_quads(
     (vertices, indices, region.opaque)
 }
 
-fn chest_sheet(uv_map: &AtlasUVMap, lod: u32, variant: usize) -> Option<AtlasRegion> {
+fn chest_sheet(
+    uv_map: &AtlasUVMap,
+    lod: u32,
+    variant: usize,
+    christmas: bool,
+) -> Option<AtlasRegion> {
+    if christmas {
+        return None; // BE owns the seasonal sheet, not the normal-only chunk atlas.
+    }
     let name = [
         "entity/chest/normal",
         "entity/chest/normal_left",
@@ -820,6 +828,7 @@ pub struct MeshDispatcher {
     dry_foliage_colormap: Arc<Colormap>,
     biome_climate: Arc<HashMap<u32, BiomeClimate>>,
     trace_state: MeshTraceState,
+    christmas_chests: bool,
     /// The dimension's face-shade table; a dimension change builds a new
     /// dispatcher.
     cardinal_lighting: CardinalLighting,
@@ -837,6 +846,7 @@ impl MeshDispatcher {
         biome_climate: Arc<HashMap<u32, BiomeClimate>>,
         cardinal_lighting: CardinalLighting,
         trace_state: MeshTraceState,
+        christmas_chests: bool,
     ) -> Self {
         // Bulk results are bounded for back-pressure; edit results use the
         // unbounded priority channel so they never queue behind the load backlog.
@@ -879,6 +889,7 @@ impl MeshDispatcher {
             dry_foliage_colormap: Arc::new(dry_foliage_colormap),
             biome_climate,
             trace_state,
+            christmas_chests,
             cardinal_lighting,
             pool: Arc::new(BufferPool::new(1024)),
         }
@@ -941,6 +952,7 @@ impl MeshDispatcher {
             uv_map: Arc::clone(&self.uv_map),
             tx,
             pool: Arc::clone(&self.pool),
+            christmas_chests: self.christmas_chests,
         });
     }
 
@@ -966,6 +978,7 @@ impl MeshDispatcher {
             0,
             sections,
             &self.pool,
+            self.christmas_chests,
         );
         mesh.content_gen = content_gen;
         mesh.upload_epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1061,6 +1074,7 @@ struct PendingJob {
     uv_map: Arc<AtlasUVMap>,
     tx: crossbeam_channel::Sender<ChunkMeshData>,
     pool: Arc<BufferPool>,
+    christmas_chests: bool,
 }
 
 impl PendingJob {
@@ -1078,6 +1092,7 @@ impl PendingJob {
             self.lod,
             self.sections,
             &self.pool,
+            self.christmas_chests,
         );
         let meshed_at = std::time::Instant::now();
         mesh.content_gen = self.content_gen;
@@ -1787,6 +1802,7 @@ fn mesh_chunk_snapshot(
     lod: u32,
     sections_to_mesh: std::ops::Range<i32>,
     pool: &BufferPool,
+    christmas_chests: bool,
 ) -> ChunkMeshData {
     let mut logged_missing: std::collections::HashSet<&'static str> =
         std::collections::HashSet::new();
@@ -2112,61 +2128,49 @@ fn mesh_chunk_snapshot(
     // No normal sheet => leave the BE renderer in charge (not the missing tile).
     let mut chest_vertices: Vec<Vec<PackedVertex>> = vec![Vec::new(); sinks.len()];
     let mut emitted: Vec<Vec<EmittedChest>> = vec![Vec::new(); sinks.len()];
-    // The BE pipeline uses a seasonal chest sheet on Dec 24-26. The atlas
-    // currently lists only normal; keep BE rendering rather than substituting
-    // the wrong sheet on those days.
-    if !snapshot.chests.is_empty() && lod == 0 {
-        let now =
-            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-        let christmas = now.month() == time::Month::December && (24..=26).contains(&now.day());
-        if !christmas {
-            let models = crate::renderer::block_entity_model::bake_chest_models();
-            for chest in &snapshot.chests {
-                let Some(region) = chest_sheet(uv_map, lod, chest.variant) else {
-                    continue;
-                };
-                let si = (chest.pos.y - min_y).div_euclid(16);
-                if !range.contains(&si)
-                    || snapshot.get_block_state(chest.pos.x, chest.pos.y, chest.pos.z)
-                        != chest.state
-                    || chest
-                        .partner
-                        .is_some_and(|(p, state)| snapshot.get_block_state(p.x, p.y, p.z) != state)
-                {
-                    continue;
-                }
-                let origin_y = min_y + si * 16;
-                let (verts, indices, opaque) = chest_quads(
-                    &models[chest.variant],
-                    [
-                        (chest.pos.x - world_x) as f32,
-                        (chest.pos.y - origin_y) as f32,
-                        (chest.pos.z - world_z) as f32,
-                    ],
-                    chest.yaw,
-                    chest.open,
-                    region,
-                    // The current BE chest shader uses WHITE_TINT without
-                    // local lightmap sampling; match it until both paths
-                    // share the same block-light lookup.
-                    1.0,
-                );
-                let sink = &mut sinks[si as usize];
-                let offset = sink.vertices.len() + chest_vertices[si as usize].len();
-                if verts.is_empty()
-                    || indices.is_empty()
-                    || offset + verts.len() > u32::MAX as usize
-                {
-                    continue;
-                }
-                let target = sink.indices_for(opaque);
-                target.extend(indices.into_iter().map(|i| i + offset as u32));
-                chest_vertices[si as usize].extend(verts);
-                emitted[si as usize].push(EmittedChest {
-                    pos: chest.pos,
-                    open: chest.open,
-                });
+    if !snapshot.chests.is_empty() && lod == 0 && !christmas_chests {
+        let models = crate::renderer::block_entity_model::bake_chest_models();
+        for chest in &snapshot.chests {
+            let Some(region) = chest_sheet(uv_map, lod, chest.variant, christmas_chests) else {
+                continue;
+            };
+            let si = (chest.pos.y - min_y).div_euclid(16);
+            if !range.contains(&si)
+                || snapshot.get_block_state(chest.pos.x, chest.pos.y, chest.pos.z) != chest.state
+                || chest
+                    .partner
+                    .is_some_and(|(p, state)| snapshot.get_block_state(p.x, p.y, p.z) != state)
+            {
+                continue;
             }
+            let origin_y = min_y + si * 16;
+            let (verts, indices, opaque) = chest_quads(
+                &models[chest.variant],
+                [
+                    (chest.pos.x - world_x) as f32,
+                    (chest.pos.y - origin_y) as f32,
+                    (chest.pos.z - world_z) as f32,
+                ],
+                chest.yaw,
+                chest.open,
+                region,
+                // The current BE chest shader uses WHITE_TINT without
+                // local lightmap sampling; match it until both paths
+                // share the same block-light lookup.
+                1.0,
+            );
+            let sink = &mut sinks[si as usize];
+            let offset = sink.vertices.len() + chest_vertices[si as usize].len();
+            if verts.is_empty() || indices.is_empty() || offset + verts.len() > u32::MAX as usize {
+                continue;
+            }
+            let target = sink.indices_for(opaque);
+            target.extend(indices.into_iter().map(|i| i + offset as u32));
+            chest_vertices[si as usize].extend(verts);
+            emitted[si as usize].push(EmittedChest {
+                pos: chest.pos,
+                open: chest.open,
+            });
         }
     }
 
@@ -3614,9 +3618,9 @@ mod chest_quad_tests {
         }
         let empty = AtlasUVMap::test_empty();
         for variant in [1, 2] {
-            assert!(chest_sheet(&empty, 0, variant).is_none());
+            assert!(chest_sheet(&empty, 0, variant, false).is_none());
         }
-        assert!(chest_sheet(&empty, 0, 3).is_none());
+        assert!(chest_sheet(&empty, 0, 3, false).is_none());
         assert_eq!(
             crate::renderer::chunk::atlas::atlas_asset_path("entity/chest/normal_left"),
             "minecraft/textures/entity/chest/normal_left.png"
@@ -3625,6 +3629,44 @@ mod chest_quad_tests {
             crate::renderer::chunk::atlas::atlas_asset_path("entity/chest/normal_right"),
             "minecraft/textures/entity/chest/normal_right.png"
         );
+    }
+
+    #[test]
+    fn session_chest_policy_survives_midnight_and_pack_reload() {
+        let names = [
+            "entity/chest/normal",
+            "entity/chest/normal_left",
+            "entity/chest/normal_right",
+        ];
+        let mut original = AtlasUVMap::test_empty();
+        // A pack reload replaces UVs but not the BE pipeline or its date flag.
+        let mut reloaded = AtlasUVMap::test_empty();
+        for (variant, name) in names.into_iter().enumerate() {
+            for (atlas, sprite) in [(&mut original, variant + 1), (&mut reloaded, variant + 4)] {
+                atlas.test_insert_region(
+                    name,
+                    AtlasRegion {
+                        sprite: sprite as u16,
+                        ..atlas.missing_region()
+                    },
+                );
+            }
+        }
+        for (atlas, base) in [(&original, 1), (&reloaded, 4)] {
+            for variant in 0..3 {
+                assert_eq!(
+                    chest_sheet(atlas, 0, variant, false).unwrap().sprite,
+                    (base + variant) as u16
+                );
+                assert!(chest_sheet(atlas, 0, variant, true).is_none());
+            }
+        }
+        let empty_pack = AtlasUVMap::test_empty();
+        assert!(chest_sheet(&empty_pack, 0, 0, false).is_none());
+        // Keep the session flag even if the clock changes from Dec 23 to 24,
+        // or Dec 26 to 27; BE selection is frozen at the same instant.
+        let christmas_session = true;
+        assert!(chest_sheet(&reloaded, 0, 0, christmas_session).is_none());
     }
 
     fn decoded_pos(v: &PackedVertex) -> [f32; 3] {
@@ -3789,8 +3831,8 @@ mod chest_quad_tests {
             "minecraft/textures/entity/chest/normal.png"
         );
         let empty = AtlasUVMap::test_empty();
-        assert!(chest_sheet(&empty, 0, 0).is_none()); // absent pack PNG: BE fallback
-        assert!(chest_sheet(&empty, 1, 0).is_none()); // distant LOD: BE fallback
+        assert!(chest_sheet(&empty, 0, 0, false).is_none()); // absent pack PNG: BE fallback
+        assert!(chest_sheet(&empty, 1, 0, false).is_none()); // distant LOD: BE fallback
         let missing = empty.get_region("entity/chest/normal");
         let (fallback_verts, _, fallback_opaque) =
             chest_quads(&model, [0.0; 3], 0.0, false, missing, 1.0);

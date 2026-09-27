@@ -291,13 +291,16 @@ pub fn yaw_for_block(kind: BlockEntityKind, props: &crate::world::block::PropMap
 /// date), decided once at renderer construction. The check runs before the
 /// trapped-chest one there, so trapped chests turn christmas too; ender and
 /// copper chests never do.
-fn is_christmas() -> bool {
+pub(crate) fn is_christmas() -> bool {
     let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-    now.month() == time::Month::December && (24..=26).contains(&now.day())
+    christmas_on(now.month(), now.day())
 }
 
-fn kind_definitions() -> Vec<KindDef> {
-    let xmas = is_christmas();
+fn christmas_on(month: time::Month, day: u8) -> bool {
+    month == time::Month::December && (24..=26).contains(&day)
+}
+
+fn kind_definitions(xmas: bool) -> Vec<KindDef> {
     let chest_models = block_entity_model::bake_chest_models();
     // Ender chests have no double form; only the single model applies.
     let ender_models = vec![chest_models[0].clone()];
@@ -576,6 +579,7 @@ impl BlockEntityPipeline {
         allocator: &Arc<Mutex<Allocator>>,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
+        christmas_chests: bool,
     ) -> Self {
         let camera_layout = util::create_descriptor_set_layout(
             device,
@@ -645,7 +649,7 @@ impl BlockEntityPipeline {
             )
             .expect("placed head texture pool");
 
-        let defs = kind_definitions();
+        let defs = kind_definitions(christmas_chests);
         let tex_count = defs
             .iter()
             .map(|d| d.tex_variants.len() as u32)
@@ -2241,9 +2245,48 @@ mod sign_text_tests {
     }
 
     #[test]
+    fn chest_texture_policy_is_frozen_for_renderer_session() {
+        for (day, seasonal) in [(23, false), (24, true), (26, true), (27, false)] {
+            assert_eq!(christmas_on(time::Month::December, day), seasonal);
+            let defs = kind_definitions(seasonal);
+            for kind in [BlockEntityKind::Chest, BlockEntityKind::TrappedChest] {
+                let textures = defs
+                    .iter()
+                    .find(|def| def.kind == kind)
+                    .unwrap()
+                    .tex_variants;
+                assert_eq!(
+                    textures,
+                    if seasonal {
+                        CHEST_XMAS_TEXTURES
+                    } else if kind == BlockEntityKind::Chest {
+                        CHEST_TEXTURES
+                    } else {
+                        TRAPPED_CHEST_TEXTURES
+                    }
+                );
+            }
+        }
+        assert!(!christmas_on(time::Month::November, 25));
+        // Midnight doesn't reselect the already-built BE textures in either direction.
+        let before_christmas = christmas_on(time::Month::December, 23);
+        assert!(christmas_on(time::Month::December, 24));
+        assert_eq!(
+            kind_definitions(before_christmas)[0].tex_variants,
+            CHEST_TEXTURES
+        );
+        let session = christmas_on(time::Month::December, 26);
+        assert!(!christmas_on(time::Month::December, 27));
+        assert_eq!(
+            kind_definitions(session)[0].tex_variants,
+            CHEST_XMAS_TEXTURES
+        );
+    }
+
+    #[test]
     fn conduit_and_player_head_have_idle_geometry_and_textures() {
         for kind in [BlockEntityKind::Conduit, BlockEntityKind::Skull] {
-            let definition = kind_definitions()
+            let definition = kind_definitions(false)
                 .into_iter()
                 .find(|d| d.kind == kind)
                 .unwrap();
@@ -2255,7 +2298,7 @@ mod sign_text_tests {
     #[test]
     fn sign_board_geometry_is_not_drawn_as_block_entity_geometry() {
         assert!(
-            kind_definitions()
+            kind_definitions(false)
                 .iter()
                 .all(|definition| definition.kind != BlockEntityKind::Sign)
         );

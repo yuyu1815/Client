@@ -260,6 +260,8 @@ pub struct Renderer {
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
     block_entity_pipeline: BlockEntityPipeline,
+    /// Frozen alongside the BE chest textures for this renderer session.
+    christmas_chests: bool,
     placed_head_skins: placed_head_skin::PlacedHeadSkinCache,
     chunk_buffers: ChunkBufferStore,
     mesh_trace: MeshTraceState,
@@ -516,6 +518,7 @@ impl Renderer {
             asset_index,
         );
 
+        let christmas_chests = pipelines::block_entity::is_christmas();
         let block_entity_pipeline = BlockEntityPipeline::new(
             &ctx.device,
             ctx.graphics_queue,
@@ -524,6 +527,7 @@ impl Renderer {
             &ctx.allocator,
             jar_assets_dir,
             asset_index,
+            christmas_chests,
         );
 
         let chunk_border_pipeline = pipelines::chunk_borders::ChunkBorderPipeline::new(
@@ -645,6 +649,7 @@ impl Renderer {
             book_preview,
             entity_renderer,
             block_entity_pipeline,
+            christmas_chests,
             placed_head_skins,
             chunk_border_pipeline,
             world_border_pipeline,
@@ -1491,6 +1496,7 @@ impl Renderer {
             biome_climate,
             cardinal_light.table(),
             self.mesh_trace.clone(),
+            self.christmas_chests,
         )
     }
 

@@ -67,6 +67,11 @@ impl AtlasUVMap {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_insert_region(&mut self, name: &str, region: AtlasRegion) {
+        self.regions.insert(name.to_owned(), region);
+    }
+
     pub fn get_region(&self, name: &str) -> AtlasRegion {
         self.regions.get(name).copied().unwrap_or(self.missing)
     }
