@@ -41,6 +41,17 @@ struct ParticleVertex {
     color: u32,
 }
 
+fn particle_billboard_axes(right: Vec3, up: Vec3, rotation: [f32; 4]) -> (Vec3, Vec3) {
+    // Most particle kinds carry the identity rotation. Avoid two quaternion-vector
+    // products per quad in that case; rotated particles keep the original path.
+    if rotation == Quat::IDENTITY.to_array() {
+        (right, up)
+    } else {
+        let rotation = Quat::from_array(rotation);
+        (rotation * right, rotation * up)
+    }
+}
+
 fn particle_corner_position(
     center: Vec3,
     right: Vec3,
@@ -257,9 +268,7 @@ impl ParticlePipeline {
                     return;
                 }
                 let center = Vec3::from(quad.pos);
-                let rotation = Quat::from_array(quad.rotation);
-                let rotated_right = rotation * right;
-                let rotated_up = rotation * up;
+                let (rotated_right, rotated_up) = particle_billboard_axes(right, up, quad.rotation);
                 let corner = |nx: f32, ny: f32, u: f32, v: f32| ParticleVertex {
                     position: particle_corner_position(
                         center,
@@ -353,7 +362,42 @@ impl ParticlePipeline {
 mod tests {
     use glam::{Quat, Vec3};
 
-    use super::particle_corner_position;
+    use super::{particle_billboard_axes, particle_corner_position};
+
+    #[test]
+    fn unrotated_particle_axes_match_the_original_quaternion_path() {
+        for (right, up) in [
+            (Vec3::X, Vec3::Y),
+            (Vec3::new(0.25, -0.8, 0.54), Vec3::new(-0.9, 0.1, 0.3)),
+        ] {
+            for rotation in [Quat::IDENTITY, Quat::from_rotation_z(0.6)] {
+                let (actual_right, actual_up) =
+                    particle_billboard_axes(right, up, rotation.to_array());
+                assert_eq!(actual_right, rotation * right);
+                assert_eq!(actual_up, rotation * up);
+                for (nx, ny) in [(1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                    assert_eq!(
+                        particle_corner_position(
+                            Vec3::new(2.0, 3.0, -4.0),
+                            actual_right,
+                            actual_up,
+                            nx,
+                            ny,
+                            0.5
+                        ),
+                        particle_corner_position(
+                            Vec3::new(2.0, 3.0, -4.0),
+                            rotation * right,
+                            rotation * up,
+                            nx,
+                            ny,
+                            0.5
+                        )
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn particle_quad_size_is_the_vertex_half_extent() {
