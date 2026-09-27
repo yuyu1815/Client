@@ -44,6 +44,16 @@ pub struct FrameSample {
     pub cpu_update_ms: f32,
     #[serde(default)]
     pub render_wall_ms: f32,
+    #[serde(default)]
+    pub net_decode_ms: f32,
+    #[serde(default)]
+    pub visibility_ms: f32,
+    #[serde(default)]
+    pub rescan_ms: f32,
+    #[serde(default)]
+    pub mesh_drain_ms: f32,
+    #[serde(default)]
+    pub upload_ms: f32,
     /// Frame-time residual, including work and waits not covered by the other
     /// phases.
     #[serde(alias = "frame_wait_ms", default)]
@@ -82,6 +92,16 @@ pub struct SpikeSample {
     pub cpu_update_ms: f32,
     #[serde(default)]
     pub render_wall_ms: f32,
+    #[serde(default)]
+    pub net_decode_ms: f32,
+    #[serde(default)]
+    pub visibility_ms: f32,
+    #[serde(default)]
+    pub rescan_ms: f32,
+    #[serde(default)]
+    pub mesh_drain_ms: f32,
+    #[serde(default)]
+    pub upload_ms: f32,
     /// Frame-time residual, including work and waits not covered by the other
     /// phases.
     #[serde(alias = "frame_wait_ms", default)]
@@ -151,6 +171,7 @@ impl Benchmark {
         timings: &RenderTimings,
         cpu_update_ms: f32,
         render_wall_ms: f32,
+        phases: UpdatePhases,
         effective_fps_limit: Option<u32>,
         window_occluded: bool,
         vsync: bool,
@@ -178,6 +199,11 @@ impl Benchmark {
             hud_draw_ms: timings.hud_draw_ms,
             cpu_update_ms,
             render_wall_ms,
+            net_decode_ms: phases.net_decode_ms,
+            visibility_ms: phases.visibility_ms,
+            rescan_ms: phases.rescan_ms,
+            mesh_drain_ms: phases.mesh_drain_ms,
+            upload_ms: phases.upload_ms,
             unaccounted_ms: frame_ms - cpu_update_ms - render_wall_ms,
             effective_fps_limit,
             window_occluded,
@@ -201,6 +227,11 @@ impl Benchmark {
                 hud_draw_ms: sample.hud_draw_ms,
                 cpu_update_ms: sample.cpu_update_ms,
                 render_wall_ms: sample.render_wall_ms,
+                net_decode_ms: sample.net_decode_ms,
+                visibility_ms: sample.visibility_ms,
+                rescan_ms: sample.rescan_ms,
+                mesh_drain_ms: sample.mesh_drain_ms,
+                upload_ms: sample.upload_ms,
                 unaccounted_ms: sample.unaccounted_ms,
                 effective_fps_limit: sample.effective_fps_limit,
                 window_occluded: sample.window_occluded,
@@ -319,8 +350,23 @@ mod tests {
         assert_eq!(legacy.environment_draw_ms, 0.0);
         assert_eq!(legacy.hud_draw_ms, 0.0);
         assert_eq!(legacy.cpu_update_ms, 0.0);
+        assert_eq!(legacy.net_decode_ms, 0.0);
+        assert_eq!(legacy.visibility_ms, 0.0);
+        assert_eq!(legacy.rescan_ms, 0.0);
+        assert_eq!(legacy.mesh_drain_ms, 0.0);
+        assert_eq!(legacy.upload_ms, 0.0);
         assert_eq!(legacy.unaccounted_ms, 0.0);
         assert_eq!(legacy.effective_fps_limit, None);
+
+        let legacy_spike: SpikeSample = serde_json::from_str(
+            r#"{"frame_index":0,"frame_ms":93.53,"fence_ms":0.008,"cull_ms":0.0,"draw_ms":0.0,"chunk_count":1,"entity_count":2}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy_spike.net_decode_ms, 0.0);
+        assert_eq!(legacy_spike.visibility_ms, 0.0);
+        assert_eq!(legacy_spike.rescan_ms, 0.0);
+        assert_eq!(legacy_spike.mesh_drain_ms, 0.0);
+        assert_eq!(legacy_spike.upload_ms, 0.0);
 
         let old_wait_key: FrameSample = serde_json::from_str(
             r#"{"frame_ms":93.53,"fence_ms":0.008,"cull_ms":0.0,"draw_ms":0.0,"frame_wait_ms":12.5,"chunk_count":1,"entity_count":2}"#,
@@ -333,17 +379,40 @@ mod tests {
             draw_ms: 3.0,
             ..Default::default()
         };
+        let phases = UpdatePhases {
+            net_decode_ms: 1.0,
+            visibility_ms: 2.0,
+            rescan_ms: 3.0,
+            mesh_drain_ms: 4.0,
+            upload_ms: 5.0,
+            ..Default::default()
+        };
         for _ in 0..WARMUP_FRAMES {
-            assert!(!bench.record_frame(50.0, &timings, 20.0, 25.0, Some(60), false, true, 1, 2));
+            assert!(!bench.record_frame(50.0, &timings, 20.0, 25.0, phases, Some(60), false, true, 1, 2));
         }
-        assert!(!bench.record_frame(100.0, &timings, 30.0, 40.0, Some(60), false, true, 1, 2));
+        assert!(!bench.record_frame(100.0, &timings, 30.0, 40.0, phases, Some(60), false, true, 1, 2));
         let sample = &bench.samples[0];
         assert_eq!(sample.cpu_update_ms, 30.0);
         assert_eq!(sample.render_wall_ms, 40.0);
+        assert_eq!(sample.net_decode_ms, 1.0);
+        assert_eq!(sample.visibility_ms, 2.0);
+        assert_eq!(sample.rescan_ms, 3.0);
+        assert_eq!(sample.mesh_drain_ms, 4.0);
+        assert_eq!(sample.upload_ms, 5.0);
         assert_eq!(sample.unaccounted_ms, 30.0);
+        assert_eq!(bench.spikes[0].net_decode_ms, 1.0);
+        assert_eq!(bench.spikes[0].visibility_ms, 2.0);
+        assert_eq!(bench.spikes[0].rescan_ms, 3.0);
+        assert_eq!(bench.spikes[0].mesh_drain_ms, 4.0);
+        assert_eq!(bench.spikes[0].upload_ms, 5.0);
         assert_eq!(bench.spikes[0].unaccounted_ms, 30.0);
         let json = serde_json::to_value(sample).unwrap();
         assert_eq!(json["unaccounted_ms"], 30.0);
+        assert_eq!(json["net_decode_ms"], 1.0);
+        assert_eq!(json["visibility_ms"], 2.0);
+        assert_eq!(json["rescan_ms"], 3.0);
+        assert_eq!(json["mesh_drain_ms"], 4.0);
+        assert_eq!(json["upload_ms"], 5.0);
         assert!(json.get("frame_wait_ms").is_none());
         assert_eq!(sample.effective_fps_limit, Some(60));
         assert!(sample.vsync);

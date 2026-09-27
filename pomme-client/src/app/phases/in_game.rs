@@ -3278,6 +3278,7 @@ pub fn update_game(
             gfx.renderer.last_timings(),
             prev_phases.cpu_update_ms,
             prev_phases.render_wall_ms,
+            prev_phases,
             benchmark_fps_limit,
             window_occluded,
             core.menu.vsync,
