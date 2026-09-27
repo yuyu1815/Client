@@ -356,8 +356,8 @@ fn clear_columns(
     empty_epochs.clear();
 }
 
-/// Called only after every planned slice has been allocated. Failed plans
-/// must leave the previous resident draw and its pose untouched.
+/// Retire accepted resident sections (also used on pool exhaustion to make
+/// room after the frame fences); empty sections receive a tombstone epoch.
 fn swap_accepted(
     chunks: &mut HashMap<ChunkPos, ChunkAlloc>,
     empty_epochs: &mut HashMap<(ChunkPos, i32), u64>,
@@ -985,8 +985,8 @@ impl ChunkBufferStore {
                 })
                 .collect();
 
-            // Keep the old draw (and its chest metadata) until all replacement
-            // allocations succeed. A failed remesh must not silently retire it.
+            // Track replacement fade; on pool exhaustion old draws are retired
+            // after failed allocations so their slices can be reclaimed.
             let was_present: std::collections::HashSet<i32> = self
                 .chunks
                 .get(&mesh.pos)
@@ -1059,15 +1059,29 @@ impl ChunkBufferStore {
                         )
                     }))
             {
-                // Old draws remain resident; report the failed sections for retry.
-                if !pool_full {
+                if pool_full {
+                    // Release old geometry and chest claims; the next remesh can
+                    // allocate after the in-flight frame fences reclaim its slices.
+                    let freed = swap_accepted(
+                        &mut self.chunks,
+                        &mut self.empty_epochs,
+                        mesh.pos,
+                        &accepted,
+                        &Default::default(),
+                        mesh.upload_epoch,
+                    );
+                    self.retire_slices(freed);
+                    self.meta_dirty = true;
+                } else {
+                    // An oversized staging section cannot be uploaded; keep its
+                    // old draw because freeing pool space would not help.
                     self.free_slices(&taken);
                 }
                 needs_remesh.push((mesh.pos, accepted.iter().copied().collect()));
                 continue;
             }
-            // Only now retire accepted old draws. Empty sections get a tombstone
-            // epoch; unsuccessful plans above leave both draws and epochs intact.
+            // On success, retire accepted old draws. Empty sections get a
+            // tombstone epoch; staging-size failures leave old draws intact.
             let planned: std::collections::HashSet<_> =
                 plans.iter().map(|p| p.section_index).collect();
             let freed = swap_accepted(
@@ -2003,6 +2017,63 @@ mod staging_tests {
         empty.insert((chunk, 1), 11);
         clear_columns(&mut chunks, &mut empty);
         assert!(chunks.is_empty() && empty.is_empty());
+    }
+
+    #[test]
+    fn full_pools_replace_after_retired_section_passes_frame_fences() {
+        let chunk = ChunkPos::new(0, 0);
+        let chest = BlockPos::new(1, 4, 1);
+        let mut vtx = FreeList::new(8);
+        let mut idx = FreeList::new(12);
+        let (a_v, a_i) = (vtx.alloc(4).unwrap(), idx.alloc(6).unwrap());
+        let (b_v, b_i) = (vtx.alloc(4).unwrap(), idx.alloc(6).unwrap());
+        let mut a = section(0, chest, false, 8);
+        a.vertex_offset = a_v as i32;
+        a.first_index = a_i;
+        let mut b = section(1, chest, true, 8);
+        b.vertex_offset = b_v as i32;
+        b.first_index = b_i;
+        b.emitted_chests.clear();
+        let mut chunks = HashMap::from([(
+            chunk,
+            ChunkAlloc {
+                sections: vec![a, b],
+            },
+        )]);
+        let mut empty = HashMap::new();
+        let accepted = std::collections::HashSet::from([0]);
+        // The same-size replacement cannot fit while A and B occupy both pools.
+        assert_eq!((vtx.alloc(4), idx.alloc(6)), (None, None));
+        let freed = swap_accepted(
+            &mut chunks,
+            &mut empty,
+            chunk,
+            &accepted,
+            &Default::default(),
+            9,
+        );
+        assert_eq!(freed, vec![(a_v, 4, a_i, 6)]);
+        assert_eq!(chunks[&chunk].sections.len(), 1); // B remains resident
+        assert_eq!(
+            resident_chest_open(chunks[&chunk].sections.iter(), &chest),
+            None
+        );
+        assert!(!epoch_accepts(empty.get(&(chunk, 0)).copied(), 8));
+        let mut pending = VecDeque::from([(MAX_FRAMES_IN_FLIGHT as u64, freed[0])]);
+        for frame in 1..MAX_FRAMES_IN_FLIGHT as u64 {
+            assert!(pending.front().unwrap().0 > frame);
+            assert_eq!((vtx.alloc(4), idx.alloc(6)), (None, None));
+        }
+        let (_, (vo, vl, io, il)) = pending.pop_front().unwrap();
+        vtx.free_region(vo, vl);
+        idx.free_region(io, il);
+        assert_eq!((vtx.alloc(4), idx.alloc(6)), (Some(a_v), Some(a_i)));
+        assert!(pending.is_empty());
+        // An accepted retry replaces the tombstone, never resurrecting an
+        // older result or the retired chest pose.
+        let planned = std::collections::HashSet::from([0]);
+        swap_accepted(&mut chunks, &mut empty, chunk, &accepted, &planned, 10);
+        assert!(!empty.contains_key(&(chunk, 0)));
     }
 
     #[test]
