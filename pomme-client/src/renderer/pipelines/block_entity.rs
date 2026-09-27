@@ -1780,6 +1780,105 @@ mod sign_text_tests {
     }
 
     #[test]
+    fn double_chest_instances_match_old_draws_with_rebased_ranges() {
+        let anchor = glam::DVec3::new(128.25, 60.0, -12.5);
+        let baked = block_entity_model::bake_chest_models();
+        for (variant, model_index) in [(4, 1), (5, 2)] {
+            let mut model = baked[model_index].clone();
+            // KindEntry rebases each model's part ranges into the shared vertex buffer.
+            for (start, _) in &mut model.part_ranges {
+                *start += 10_000;
+            }
+            assert!(model.part_ranges.iter().all(|(start, _)| *start >= 10_000));
+            for yaw in [0.0, 180.0, 270.0] {
+                let mut item = chest(7, variant);
+                item.yaw = yaw;
+                let pos = item.pos;
+                let data = chest_instances(std::slice::from_ref(&item), &model, anchor);
+                let poses = model.compute_part_transforms(&PartAnim::default());
+                let mut instance_index = 0;
+                for (part, (_, count)) in model.part_ranges.iter().enumerate() {
+                    if *count == 0 {
+                        continue;
+                    }
+                    let center = (glam::DVec3::new(
+                        pos.x as f64 + 0.5,
+                        pos.y as f64,
+                        pos.z as f64 + 0.5,
+                    ) - anchor)
+                        .as_vec3();
+                    let old = glam::Mat4::from_translation(center)
+                        * glam::Mat4::from_rotation_y((-yaw).to_radians())
+                        * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5))
+                        * poses[part];
+                    let mut push = [0u8; 112];
+                    push[..64].copy_from_slice(bytemuck::cast_slice(&old.to_cols_array()));
+                    push[64..80].copy_from_slice(bytemuck::cast_slice(&WHITE_TINT));
+                    push[80..96]
+                        .copy_from_slice(bytemuck::cast_slice(&[0.0f32, 0.0, 0.0, 1.0]));
+                    // Remaining 16 bytes are the old zero UV parameters.
+                    assert_eq!(bytemuck::bytes_of(&data[instance_index]), &push);
+                    instance_index += 1;
+                }
+                assert_eq!(instance_index, data.len());
+            }
+        }
+    }
+
+    #[test]
+    fn chest_batch_first_instances_address_their_own_payload() {
+        let model = &block_entity_model::bake_chest_models()[0];
+        let items = [chest(0, 0), chest(3, 0), chest(6, 0), chest(9, 0)];
+        let anchor = glam::DVec3::ZERO;
+        let batch_len = 2;
+        let first_batch = chest_instances(&items[..batch_len], model, anchor);
+        let second_batch_start = first_batch.len();
+        let second_batch = chest_instances(&items[batch_len..], model, anchor);
+        let combined = [&first_batch[..], &second_batch[..]].concat();
+        let mut part_first = 0;
+        for (part, (_, count)) in model.part_ranges.iter().enumerate() {
+            if *count == 0 {
+                continue;
+            }
+            // Mirrors the draw loop's `firstInstance += run` for each part.
+            let second_batch_first_instance = second_batch_start + part * batch_len;
+            assert_eq!(second_batch_first_instance, second_batch_start + part_first);
+            assert_eq!(
+                bytemuck::cast_slice::<_, u8>(
+                    &combined[second_batch_first_instance..second_batch_first_instance + batch_len]
+                ),
+                bytemuck::cast_slice::<_, u8>(
+                    &second_batch[part * batch_len..(part + 1) * batch_len]
+                )
+            );
+            part_first += batch_len;
+        }
+    }
+
+    #[test]
+    fn chest_run_fallback_predicate_preserves_items_when_unavailable_or_full() {
+        let items = [chest(0, 0), chest(3, 0), chest(6, 0)];
+        let parts = block_entity_model::bake_chest_models()[0]
+            .part_ranges
+            .iter()
+            .filter(|(_, count)| *count > 0)
+            .count();
+        for (free, unavailable) in [(parts, false), (MAX_CHEST_INSTANCES, true)] {
+            let mut iter = items.iter().enumerate();
+            let (index, info) = iter.next().unwrap();
+            let run = if !unavailable {
+                chest_run(&items, index, free / parts)
+            } else {
+                0
+            };
+            assert_eq!(run, 0); // Caller takes the old per-part path without skipping.
+            assert_eq!(iter.next().unwrap().1.pos, items[1].pos);
+            assert_eq!(info.pos, items[0].pos);
+        }
+        assert_eq!(chest_run(&items, 0, (parts * 2 - 1) / parts), 0);
+    }
+
+    #[test]
     fn chest_run_preserves_animated_mixed_and_capacity_fallbacks() {
         let mut items = [chest(0, 0), chest(3, 0), chest(6, 1), chest(9, 1)];
         assert_eq!(chest_run(&items, 0, 2), 2);
