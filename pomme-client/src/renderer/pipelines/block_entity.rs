@@ -1056,18 +1056,7 @@ impl BlockEntityPipeline {
         if self.text_sets_ready[frame] {
             return;
         }
-        let writes: Vec<_> = textures
-            .iter()
-            .enumerate()
-            .map(|(binding, image)| vk::WriteDescriptorSet {
-                dst_set: self.text_sets[frame],
-                dst_binding: binding as u32,
-                descriptor_type: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 1,
-                image_info: image,
-                ..Default::default()
-            })
-            .collect();
+        let writes = world_font_writes(self.text_sets[frame], &textures);
         device.update_descriptor_sets(&writes, &[]);
         self.text_sets_ready[frame] = true;
     }
@@ -1644,9 +1633,60 @@ fn create_sign_pipeline(
     result
 }
 
+// Two atlas bindings are fixed; keep their writes on the stack per frame.
+fn world_font_writes(
+    set: vk::DescriptorSet,
+    textures: &[vk::DescriptorImageInfo; 2],
+) -> [vk::WriteDescriptorSet<'_>; 2] {
+    std::array::from_fn(|binding| vk::WriteDescriptorSet {
+        dst_set: set,
+        dst_binding: binding as u32,
+        descriptor_type: vk::DescriptorType::CombinedImageSampler,
+        descriptor_count: 1,
+        image_info: &textures[binding],
+        ..Default::default()
+    })
+}
+
 #[cfg(test)]
 mod sign_text_tests {
     use super::*;
+
+    #[test]
+    fn world_font_bindings_match_previous_descriptor_writes() {
+        let textures = [
+            vk::DescriptorImageInfo {
+                image_layout: vk::ImageLayout::General,
+                ..Default::default()
+            },
+            vk::DescriptorImageInfo {
+                image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+                ..Default::default()
+            },
+        ];
+        let set = vk::DescriptorSet::null();
+        let writes = world_font_writes(set, &textures);
+        let previous: Vec<_> = textures
+            .iter()
+            .enumerate()
+            .map(|(binding, image)| vk::WriteDescriptorSet {
+                dst_set: set,
+                dst_binding: binding as u32,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                descriptor_count: 1,
+                image_info: image,
+                ..Default::default()
+            })
+            .collect();
+        for (write, old) in writes.iter().zip(&previous) {
+            assert_eq!(write.dst_set, old.dst_set);
+            assert_eq!(write.dst_binding, old.dst_binding);
+            assert_eq!(write.descriptor_type, old.descriptor_type);
+            assert_eq!(write.descriptor_count, old.descriptor_count);
+            assert_eq!(write.image_info, old.image_info);
+            assert_eq!(write.image_info, &textures[write.dst_binding as usize]);
+        }
+    }
 
     #[test]
     fn text_display_depth_and_shader_policy_does_not_change_signs() {
