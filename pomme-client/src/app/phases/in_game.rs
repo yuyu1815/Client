@@ -1748,6 +1748,12 @@ fn sign_has_text(front: Option<&[String; 4]>, back: Option<&[String; 4]>) -> boo
         .any(|line| !line.is_empty())
 }
 
+fn sign_text_in_range(pos: &BlockPos, player_eye: glam::DVec3) -> bool {
+    glam::DVec3::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5)
+        .distance_squared(player_eye)
+        <= 256.0
+}
+
 fn block_entity_in_frustum(
     kind: BlockEntityKind,
     pos: &BlockPos,
@@ -4357,6 +4363,7 @@ pub fn update_game(
             .position_set
             .then(|| gfx.renderer.block_entity_frustum_planes());
         let be_eye = gfx.renderer.camera_render_position();
+        let sign_text_eye = *gfx.renderer.camera_pivot_position();
         game.chunk_store
             .block_entities
             .iter()
@@ -4403,9 +4410,11 @@ pub fn update_game(
                     let partner = BlockPos::new(pos.x + dx, pos.y, pos.z + dz);
                     lid_open = lid_open.max(openness_at(&partner));
                 }
+                let copy_sign_text = be.kind == BlockEntityKind::Sign
+                    && sign_text_in_range(pos, sign_text_eye);
+                let sign_front = copy_sign_text.then(|| be.sign_front.clone().unwrap_or_default());
+                let sign_back = copy_sign_text.then(|| be.sign_back.clone().unwrap_or_default());
                 let is_sign = be.kind == BlockEntityKind::Sign;
-                let sign_front = is_sign.then(|| be.sign_front.clone().unwrap_or_default());
-                let sign_back = is_sign.then(|| be.sign_back.clone().unwrap_or_default());
                 let ((sign_front_color, sign_front_glowing), (sign_back_color, sign_back_glowing)) =
                     if is_sign {
                         sign_render_style(&be.nbt)
@@ -5730,9 +5739,19 @@ mod tests {
         finish_win_credits, finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
         item_frame_base_position, item_frame_base_rotation, limited_crafting_param,
         mesh_target_mask, section_bit, section_bits, server_tick_runs, show_death_screen_param,
-        sign_has_text,
+        sign_has_text, sign_text_in_range,
     };
     use crate::renderer::SkyState;
+
+    #[test]
+    fn sign_text_copy_range_matches_draw_distance() {
+        use azalea_core::position::BlockPos;
+        use glam::DVec3;
+
+        assert!(sign_text_in_range(&BlockPos::new(15, 0, 0), DVec3::ZERO));
+        assert!(sign_text_in_range(&BlockPos::new(16, 0, 0), DVec3::new(0.5, 0.5, 0.5)));
+        assert!(!sign_text_in_range(&BlockPos::new(17, 0, 0), DVec3::new(0.5, 0.5, 0.5)));
+    }
 
     #[test]
     fn block_entity_cull_only_rejects_proven_outside_boxes() {
