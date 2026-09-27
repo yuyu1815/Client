@@ -353,6 +353,9 @@ fn kind_definitions() -> Vec<KindDef> {
 
 // An exhausted slot falls back to push-constant draws.
 const MAX_CHEST_INSTANCES: usize = 16384;
+// Bound the pairwise disjointness checks, including chest_run, independently
+// of frame capacity. Separate windows retain their original draw order.
+const MAX_CHEST_WINDOW: usize = 64;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -409,7 +412,14 @@ fn closed_chest(info: &BlockEntityRenderInfo) -> bool {
 // Baked closed single chest: body/lid x,z=[1,15]/16; lock x=[7,9]/16,
 // z=[15,16]/16; y=[0,14]/16. Only cardinal yaw has these exact bounds.
 // Double halves may touch at a seam and are deliberately not relaxed.
+#[cfg(test)]
+thread_local! {
+    static CHEST_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn chests_disjoint(a: &BlockEntityRenderInfo, b: &BlockEntityRenderInfo) -> bool {
+    #[cfg(test)]
+    CHEST_COMPARISONS.with(|count| count.set(count.get() + 1));
     let dx = i64::from(a.pos.x) - i64::from(b.pos.x);
     let dy = i64::from(a.pos.y) - i64::from(b.pos.y);
     let dz = i64::from(a.pos.z) - i64::from(b.pos.z);
@@ -466,6 +476,7 @@ fn chest_order<'a>(items: &'a [BlockEntityRenderInfo]) -> ChestOrder<'a> {
         }
         let mut end = start + 1;
         while end < items.len()
+            && end - start < MAX_CHEST_WINDOW
             && closed_chest(&items[end])
             && items[start..end]
                 .iter()
@@ -2096,6 +2107,73 @@ mod sign_text_tests {
                 .collect::<Vec<_>>(),
             [0, 3, 6]
         );
+    }
+
+    #[test]
+    fn chest_windows_bound_comparisons_and_keep_every_item() {
+        // Alternating textures used to form one 5k-item window (12.5M
+        // pair checks before bucketing). Include a larger 10k case too.
+        for count in [5_000, 10_000] {
+            let items: Vec<_> = (0..count)
+                .map(|i| chest(i as i32 * 3, (i % 2) as u32 * 3))
+                .collect();
+            CHEST_COMPARISONS.with(|counter| counter.set(0));
+            let order = chest_order(&items);
+            assert_eq!(order.len(), count);
+            let mut drawn = Vec::with_capacity(count);
+            let mut index = 0;
+            let mut batches = 0;
+            while index < order.len() {
+                // Simulate the caller: only skip items after a successful batch.
+                let run = chest_run(&order, index, MAX_CHEST_INSTANCES / 3);
+                let consumed = run.max(1); // run=0 uses the old draw path
+                batches += usize::from(run > 0);
+                drawn.extend(order[index..index + consumed].iter().map(|c| c.pos.x));
+                index += consumed;
+            }
+            drawn.sort_unstable();
+            assert_eq!(drawn, (0..count).map(|i| i as i32 * 3).collect::<Vec<_>>());
+            assert_eq!(batches, count.div_ceil(MAX_CHEST_WINDOW) * 2);
+            assert!(
+                order
+                    .windows
+                    .chunks(MAX_CHEST_WINDOW)
+                    .all(|chunk| { chunk.iter().all(|&window| window == chunk[0]) })
+            );
+            let comparisons = CHEST_COMPARISONS.with(|counter| counter.get());
+            assert!(
+                comparisons <= count * (MAX_CHEST_WINDOW - 1),
+                "{count} chests: {comparisons} comparisons"
+            );
+        }
+    }
+
+    #[test]
+    fn chest_window_boundary_preserves_order_and_fallbacks() {
+        let mut items: Vec<_> = (0..MAX_CHEST_WINDOW + 5)
+            .map(|i| chest(i as i32 * 3, 0))
+            .collect();
+        // Even across the cap, no run may consume a chest from the next window.
+        let order = chest_order(&items);
+        assert_eq!(order.windows[MAX_CHEST_WINDOW - 1], 0);
+        assert_eq!(order.windows[MAX_CHEST_WINDOW], MAX_CHEST_WINDOW);
+        assert_eq!(chest_run(&order, MAX_CHEST_WINDOW - 1, 10), 0);
+        assert_eq!(chest_run(&order, MAX_CHEST_WINDOW, 1), 0);
+        // Duplicates, doubles, open chests, and heads must remain at their
+        // original barriers, even when a preceding window fills the cap.
+        items[MAX_CHEST_WINDOW].pos = items[MAX_CHEST_WINDOW - 1].pos;
+        items[MAX_CHEST_WINDOW + 1].variant = 1;
+        items[MAX_CHEST_WINDOW + 1].pos = items[MAX_CHEST_WINDOW].pos;
+        items[MAX_CHEST_WINDOW + 2].lid_open = 0.5;
+        items[MAX_CHEST_WINDOW + 3].kind = BlockEntityKind::Skull;
+        let order = chest_order(&items);
+        for i in MAX_CHEST_WINDOW - 1..=MAX_CHEST_WINDOW + 3 {
+            assert!(std::ptr::eq(order[i], &items[i]));
+        }
+        for i in MAX_CHEST_WINDOW..=MAX_CHEST_WINDOW + 3 {
+            assert_eq!(chest_run(&order, i, 10), 0);
+        }
+        assert_eq!(order.len(), items.len());
     }
 
     #[test]
