@@ -367,9 +367,10 @@ impl Renderer {
                 crate::particle::ENCHANTED_HIT_SPRITE,
                 "water_flow",
                 "lava_flow",
-                // Phase 1: sprite only; the live BE chest draw stays enabled.
                 // Missing/invalid pack PNG resolves to atlas sprite 0.
                 "entity/chest/normal",
+                "entity/chest/normal_left",
+                "entity/chest/normal_right",
             ])
             .collect();
         let atlas = TextureAtlas::build(
@@ -1781,6 +1782,8 @@ impl Renderer {
                 "water_flow",
                 "lava_flow",
                 "entity/chest/normal",
+                "entity/chest/normal_left",
+                "entity/chest/normal_right",
             ])
             .collect();
         self.atlas = TextureAtlas::build(

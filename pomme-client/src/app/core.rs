@@ -398,7 +398,7 @@ fn queue_light_apply(
         });
 }
 
-/// Unlike a block edit, a lid change has no neighboring geometry to dirty.
+/// A double lid change affects both halves, including across column edges.
 fn chest_open_event(
     chunks: &ChunkStore,
     animations: &mut crate::world::block_entity_anim::BlockEntityAnimStore,
@@ -406,15 +406,20 @@ fn chest_open_event(
     pos: azalea_core::position::BlockPos,
     count: u8,
 ) {
-    // Keep the BE animation for all container kinds in this intermediate stage.
-    let eligible = crate::renderer::chunk::mesher::single_chest_state(chunks, pos).is_some();
-    if animations.set_open_count(pos, count) && eligible {
-        let si = (pos.y - chunks.min_y()).div_euclid(16);
-        if (0..chunks.section_count()).contains(&si) {
-            let col =
-                azalea_core::position::ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16));
-            if !priority_remesh.contains(&(col, si)) {
-                priority_remesh.push((col, si));
+    let partner = crate::renderer::chunk::mesher::chest_mesh_partner(chunks, pos);
+    if animations.set_open_count(pos, count) {
+        if let Some(partner) = partner {
+            let si = (pos.y - chunks.min_y()).div_euclid(16);
+            if (0..chunks.section_count()).contains(&si) {
+                for p in [Some(pos), partner].into_iter().flatten() {
+                    let col = azalea_core::position::ChunkPos::new(
+                        p.x.div_euclid(16),
+                        p.z.div_euclid(16),
+                    );
+                    if !priority_remesh.contains(&(col, si)) {
+                        priority_remesh.push((col, si));
+                    }
+                }
             }
         }
     }
@@ -4861,7 +4866,7 @@ mod tests {
         dirty.clear();
         chest_open_event(&chunks, &mut anim, &mut dirty, p, 0);
         assert!(dirty.is_empty());
-        // A double chest's event still animates its BE but never dirties mesh.
+        // An orphan double still animates its BE but never dirties mesh.
         let double = crate::world::block::state_with_properties(
             "chest",
             &[
@@ -4874,6 +4879,39 @@ mod tests {
         chunks.set_block_state(p.x, p.y, p.z, double);
         chest_open_event(&chunks, &mut anim, &mut dirty, p, 1);
         assert!(dirty.is_empty());
+        // Right half at negative X edge: its left partner is in column -3.
+        let partner = BlockPos::new(p.x - 1, p.y, p.z);
+        let right = crate::world::block::state_with_properties(
+            "chest",
+            &[
+                ("facing".into(), "north".into()),
+                ("type".into(), "right".into()),
+                ("waterlogged".into(), "false".into()),
+            ],
+        )
+        .unwrap();
+        chunks.load_chunk(ChunkPos::new(-3, 1), &data, &[]).unwrap();
+        chunks.set_block_state(p.x, p.y, p.z, right);
+        chunks.set_block_state(partner.x, partner.y, partner.z, double);
+        chunks.block_entities.insert(
+            partner,
+            StoredBlockEntity::new(BlockEntityKind::Chest, NbtCompound::new()),
+        );
+        anim.set_open_count(p, 0);
+        chest_open_event(&chunks, &mut anim, &mut dirty, p, 1);
+        assert_eq!(dirty, [(col, 0), (ChunkPos::new(-3, 1), 0)]);
+        dirty.clear();
+        chest_open_event(&chunks, &mut anim, &mut dirty, partner, 1);
+        assert_eq!(dirty, [(ChunkPos::new(-3, 1), 0), (col, 0)]);
+        dirty.clear();
+        chest_open_event(&chunks, &mut anim, &mut dirty, p, 2);
+        assert!(dirty.is_empty()); // non-binary viewer count change
+        chest_open_event(&chunks, &mut anim, &mut dirty, partner, 0);
+        assert_eq!(dirty, [(ChunkPos::new(-3, 1), 0), (col, 0)]);
+        dirty.clear();
+        chunks.unload_chunk(&ChunkPos::new(-3, 1));
+        chest_open_event(&chunks, &mut anim, &mut dirty, p, 0);
+        assert!(dirty.is_empty()); // orphan fallback after unload
         // A former chest's late event also cannot enqueue work.
         chunks.set_block_state(
             p.x,

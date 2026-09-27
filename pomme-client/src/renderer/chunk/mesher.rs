@@ -132,10 +132,10 @@ fn unpack_sprite_uv(x: u16) -> f32 {
     x as f32 / TERRAIN_UV_FIXED_SCALE
 }
 
-/// Convert a normal single chest to section-local static geometry. The upload
+/// Convert an ordinary chest half to section-local static geometry. The upload
 /// path claims the chest only after its indexed section has been accepted.
 /// `block_pos` is section-local, `yaw` uses the BE pipeline's degrees, and
-/// `region` comes from `uv_map.get_region("entity/chest/normal")` (sprite 0
+/// `region` comes from the matching entity chest sheet (sprite 0
 /// missing-tile fallback if the pack has no usable PNG). Indices use cutout
 /// for any chest sheet with alpha; the caller must never force opaque draws.
 fn chest_quads(
@@ -180,8 +180,14 @@ fn chest_quads(
     (vertices, indices, region.opaque)
 }
 
-fn chest_sheet(uv_map: &AtlasUVMap, lod: u32) -> Option<AtlasRegion> {
-    let region = uv_map.get_region("entity/chest/normal");
+fn chest_sheet(uv_map: &AtlasUVMap, lod: u32, variant: usize) -> Option<AtlasRegion> {
+    let name = [
+        "entity/chest/normal",
+        "entity/chest/normal_left",
+        "entity/chest/normal_right",
+    ]
+    .get(variant)?;
+    let region = uv_map.get_region(name);
     // A partially translucent custom sheet needs BE alpha blending, not the
     // chunk cutout pass; binary-alpha sheets remain safe here.
     (lod == 0 && region.sprite != uv_map.missing_region().sprite && !region.translucent)
@@ -1305,25 +1311,65 @@ fn lower_current_thread_priority() {
     // TODO: lower priority on non-Windows (libc::nice / pthread_setschedparam).
 }
 
-/// Only ordinary single chests; the block state carries facing and type.
+/// Each half owns its own geometry and accepted-residency claim.
 struct ChestMeshState {
     pos: BlockPos,
     state: BlockState,
+    partner: Option<(BlockPos, BlockState)>,
+    variant: usize,
     yaw: f32,
     open: bool,
 }
 
-/// Shared by event invalidation and snapshot collection so neither can
-/// accidentally opt in trapped, copper, or double chests.
-pub(crate) fn single_chest_state(store: &ChunkStore, pos: BlockPos) -> Option<BlockState> {
+/// Shared by event invalidation and snapshot collection. An orphan/mismatched
+/// double half keeps BE rendering; never infer a partner from unloaded AIR.
+fn chest_mesh_state(
+    store: &ChunkStore,
+    pos: BlockPos,
+) -> Option<(BlockState, usize, Option<(BlockPos, BlockState)>)> {
     use azalea_registry::builtin::BlockEntityKind;
-    if store.block_entities.get(&pos)?.kind != BlockEntityKind::Chest {
+    let column = ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16));
+    if store.get_chunk(&column).is_none()
+        || store.block_entities.get(&pos)?.kind != BlockEntityKind::Chest
+    {
         return None;
     }
     let state = store.get_block_state(pos.x, pos.y, pos.z);
-    (crate::world::block::block_id(state) == "chest"
-        && crate::world::block::block_properties(state).get("type") == Some("single"))
-    .then_some(state)
+    if crate::world::block::block_id(state) != "chest" {
+        return None;
+    }
+    let props = crate::world::block::block_properties(state);
+    let (variant, opposite) = match props.get("type")? {
+        "single" => return Some((state, 0, None)),
+        "left" => (1, "right"),
+        "right" => (2, "left"),
+        _ => return None,
+    };
+    let facing = props.get("facing")?;
+    let (dx, dz) =
+        crate::renderer::pipelines::block_entity::chest_partner_offset(facing, props.get("type")?)?;
+    let partner = BlockPos::new(pos.x + dx, pos.y, pos.z + dz);
+    let partner_col = ChunkPos::new(partner.x.div_euclid(16), partner.z.div_euclid(16));
+    if store.get_chunk(&partner_col).is_none()
+        || store.block_entities.get(&partner)?.kind != BlockEntityKind::Chest
+    {
+        return None;
+    }
+    let other = store.get_block_state(partner.x, partner.y, partner.z);
+    let other_props = crate::world::block::block_properties(other);
+    (crate::world::block::block_id(other) == "chest"
+        && other_props.get("facing") == Some(facing)
+        && other_props.get("type") == Some(opposite))
+    .then_some((state, variant, Some((partner, other))))
+}
+
+#[cfg(test)]
+pub(crate) fn single_chest_state(store: &ChunkStore, pos: BlockPos) -> Option<BlockState> {
+    chest_mesh_state(store, pos).and_then(|(state, variant, _)| (variant == 0).then_some(state))
+}
+
+pub(crate) fn chest_mesh_partner(store: &ChunkStore, pos: BlockPos) -> Option<Option<BlockPos>> {
+    chest_mesh_state(store, pos).map(|(_, _, partner)| partner.map(|(p, _)| p))
 }
 
 fn snapshot_chests(
@@ -1336,15 +1382,18 @@ fn snapshot_chests(
         .keys()
         .filter(|p| p.x.div_euclid(16) == pos.x && p.z.div_euclid(16) == pos.z)
         .filter_map(|&p| {
-            let state = single_chest_state(store, p)?;
+            let (state, variant, partner) = chest_mesh_state(store, p)?;
             Some(ChestMeshState {
                 pos: p,
                 state,
+                partner,
+                variant,
                 yaw: crate::renderer::pipelines::block_entity::yaw_for_block(
                     azalea_registry::builtin::BlockEntityKind::Chest,
                     crate::world::block::block_properties(state),
                 ),
-                open: animations.is_open(&p),
+                open: animations.is_open(&p)
+                    || partner.is_some_and(|(other, _)| animations.is_open(&other)),
             })
         })
         .collect()
@@ -2066,53 +2115,57 @@ fn mesh_chunk_snapshot(
     // The BE pipeline uses a seasonal chest sheet on Dec 24-26. The atlas
     // currently lists only normal; keep BE rendering rather than substituting
     // the wrong sheet on those days.
-    if !snapshot.chests.is_empty() {
-        if let Some(region) = chest_sheet(uv_map, lod) {
-            let now = time::OffsetDateTime::now_local()
-                .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-            let christmas = now.month() == time::Month::December && (24..=26).contains(&now.day());
-            if !christmas {
-                let model = crate::renderer::block_entity_model::bake_chest_models().remove(0);
-                for chest in &snapshot.chests {
-                    let si = (chest.pos.y - min_y).div_euclid(16);
-                    if !range.contains(&si)
-                        || snapshot.get_block_state(chest.pos.x, chest.pos.y, chest.pos.z)
-                            != chest.state
-                    {
-                        continue;
-                    }
-                    let origin_y = min_y + si * 16;
-                    let (verts, indices, opaque) = chest_quads(
-                        &model,
-                        [
-                            (chest.pos.x - world_x) as f32,
-                            (chest.pos.y - origin_y) as f32,
-                            (chest.pos.z - world_z) as f32,
-                        ],
-                        chest.yaw,
-                        chest.open,
-                        region,
-                        // The current BE chest shader uses WHITE_TINT without
-                        // local lightmap sampling; match it until both paths
-                        // share the same block-light lookup.
-                        1.0,
-                    );
-                    let sink = &mut sinks[si as usize];
-                    let offset = sink.vertices.len() + chest_vertices[si as usize].len();
-                    if verts.is_empty()
-                        || indices.is_empty()
-                        || offset + verts.len() > u32::MAX as usize
-                    {
-                        continue;
-                    }
-                    let target = sink.indices_for(opaque);
-                    target.extend(indices.into_iter().map(|i| i + offset as u32));
-                    chest_vertices[si as usize].extend(verts);
-                    emitted[si as usize].push(EmittedChest {
-                        pos: chest.pos,
-                        open: chest.open,
-                    });
+    if !snapshot.chests.is_empty() && lod == 0 {
+        let now =
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        let christmas = now.month() == time::Month::December && (24..=26).contains(&now.day());
+        if !christmas {
+            let models = crate::renderer::block_entity_model::bake_chest_models();
+            for chest in &snapshot.chests {
+                let Some(region) = chest_sheet(uv_map, lod, chest.variant) else {
+                    continue;
+                };
+                let si = (chest.pos.y - min_y).div_euclid(16);
+                if !range.contains(&si)
+                    || snapshot.get_block_state(chest.pos.x, chest.pos.y, chest.pos.z)
+                        != chest.state
+                    || chest
+                        .partner
+                        .is_some_and(|(p, state)| snapshot.get_block_state(p.x, p.y, p.z) != state)
+                {
+                    continue;
                 }
+                let origin_y = min_y + si * 16;
+                let (verts, indices, opaque) = chest_quads(
+                    &models[chest.variant],
+                    [
+                        (chest.pos.x - world_x) as f32,
+                        (chest.pos.y - origin_y) as f32,
+                        (chest.pos.z - world_z) as f32,
+                    ],
+                    chest.yaw,
+                    chest.open,
+                    region,
+                    // The current BE chest shader uses WHITE_TINT without
+                    // local lightmap sampling; match it until both paths
+                    // share the same block-light lookup.
+                    1.0,
+                );
+                let sink = &mut sinks[si as usize];
+                let offset = sink.vertices.len() + chest_vertices[si as usize].len();
+                if verts.is_empty()
+                    || indices.is_empty()
+                    || offset + verts.len() > u32::MAX as usize
+                {
+                    continue;
+                }
+                let target = sink.indices_for(opaque);
+                target.extend(indices.into_iter().map(|i| i + offset as u32));
+                chest_vertices[si as usize].extend(verts);
+                emitted[si as usize].push(EmittedChest {
+                    pos: chest.pos,
+                    open: chest.open,
+                });
             }
         }
     }
@@ -3419,6 +3472,161 @@ mod chest_quad_tests {
         assert!(snapshot_chests(&store, &anim, col).is_empty());
     }
 
+    #[test]
+    fn double_chest_snapshots_require_reciprocal_loaded_matching_halves() {
+        use azalea_buf::AzBuf;
+        use azalea_registry::builtin::BlockEntityKind;
+        use simdnbt::owned::NbtCompound;
+
+        crate::world::block::init("26.2");
+        let mut data = Vec::new();
+        azalea_world::chunk::Section::default()
+            .azalea_write(&mut data)
+            .unwrap();
+        let mut store = ChunkStore::new_with_dimension(2, 16, -64);
+        for x in [-1, 0, 1] {
+            for z in [-1, 0, 1] {
+                store.load_chunk(ChunkPos::new(x, z), &data, &[]).unwrap();
+            }
+        }
+        let mut animations = BlockEntityAnimStore::default();
+        // Include both positive and negative boundaries in both axes.
+        for (facing, left, right) in [
+            ("north", BlockPos::new(-1, -64, 0), BlockPos::new(0, -64, 0)),
+            (
+                "south",
+                BlockPos::new(16, -64, 15),
+                BlockPos::new(15, -64, 15),
+            ),
+            ("east", BlockPos::new(0, -64, -1), BlockPos::new(0, -64, 0)),
+            (
+                "west",
+                BlockPos::new(15, -64, 16),
+                BlockPos::new(15, -64, 15),
+            ),
+        ] {
+            for (a, b) in [(left, right), (right, left)] {
+                let ty = if a == left { "left" } else { "right" };
+                let opposite = if ty == "left" { "right" } else { "left" };
+                let state = moving_state_with_properties(
+                    crate::world::block::first_state_of("chest").unwrap(),
+                    &[("facing", facing), ("type", ty)],
+                )
+                .unwrap();
+                let other = moving_state_with_properties(state, &[("type", opposite)]).unwrap();
+                store.set_block_state(a.x, a.y, a.z, state);
+                store.set_block_state(b.x, b.y, b.z, other);
+                for p in [a, b] {
+                    store.block_entities.insert(
+                        p,
+                        crate::world::block_entity::StoredBlockEntity::new(
+                            BlockEntityKind::Chest,
+                            NbtCompound::new(),
+                        ),
+                    );
+                }
+                animations.set_open_count(b, 1);
+                let col = ChunkPos::new(a.x.div_euclid(16), a.z.div_euclid(16));
+                let found = snapshot_chests(&store, &animations, col)
+                    .into_iter()
+                    .find(|c| c.pos == a)
+                    .unwrap();
+                assert_eq!(found.variant, if ty == "left" { 1 } else { 2 });
+                assert_eq!(found.partner, Some((b, other)));
+                assert!(found.open);
+                assert_eq!(
+                    found.yaw,
+                    crate::renderer::pipelines::block_entity::yaw_for_block(
+                        BlockEntityKind::Chest,
+                        crate::world::block::block_properties(state)
+                    )
+                );
+                animations.set_open_count(b, 0);
+                assert!(found.open); // snapshot pose cannot change in flight
+                assert!(
+                    !snapshot_chests(&store, &animations, col)
+                        .into_iter()
+                        .find(|c| c.pos == a)
+                        .unwrap()
+                        .open
+                );
+                store.set_block_state(b.x, b.y, b.z, state); // same type is not reciprocal
+                assert!(chest_mesh_partner(&store, a).is_none());
+                store.set_block_state(b.x, b.y, b.z, other);
+                let wrong_facing = moving_state_with_properties(
+                    other,
+                    &[("facing", if facing == "north" { "south" } else { "north" })],
+                )
+                .unwrap();
+                store.set_block_state(b.x, b.y, b.z, wrong_facing);
+                assert!(chest_mesh_partner(&store, a).is_none());
+                store.set_block_state(b.x, b.y, b.z, other);
+                store.block_entities.remove(&b);
+                assert!(chest_mesh_partner(&store, a).is_none());
+                store.block_entities.insert(
+                    b,
+                    crate::world::block_entity::StoredBlockEntity::new(
+                        BlockEntityKind::Chest,
+                        NbtCompound::new(),
+                    ),
+                );
+                let bcol = ChunkPos::new(b.x.div_euclid(16), b.z.div_euclid(16));
+                if bcol != col {
+                    store.unload_chunk(&bcol);
+                    assert!(chest_mesh_partner(&store, a).is_none());
+                    store.load_chunk(bcol, &data, &[]).unwrap();
+                    // Reload has no partner BE: BE fallback until it arrives.
+                    assert!(chest_mesh_partner(&store, a).is_none());
+                }
+                for p in [a, b] {
+                    store.block_entities.remove(&p);
+                }
+                store.set_block_state(a.x, a.y, a.z, BlockState::AIR);
+                store.set_block_state(b.x, b.y, b.z, BlockState::AIR);
+            }
+        }
+    }
+
+    #[test]
+    fn double_quads_use_the_matching_half_model_and_sheet() {
+        let models = crate::renderer::block_entity_model::bake_chest_models();
+        let region = AtlasRegion {
+            sprite: 37,
+            opaque: false,
+            ..AtlasUVMap::test_empty().missing_region()
+        };
+        for (variant, expected_faces) in [(1, 15), (2, 15)] {
+            for open in [false, true] {
+                for yaw in [0.0, 90.0, 180.0, 270.0] {
+                    let (vertices, indices, opaque) =
+                        chest_quads(&models[variant], [0.0; 3], yaw, open, region, 1.0);
+                    assert_eq!(vertices.len(), expected_faces * 4);
+                    assert_eq!(indices.len(), expected_faces * 6);
+                    assert!(!opaque);
+                    assert!(vertices.iter().all(|v| v.sprite == region.sprite));
+                    let max_y = vertices
+                        .iter()
+                        .map(|v| decoded_pos(v)[1])
+                        .fold(0.0f32, f32::max);
+                    assert!((max_y - if open { 1.5 } else { 0.875 }).abs() < 0.0002);
+                }
+            }
+        }
+        let empty = AtlasUVMap::test_empty();
+        for variant in [1, 2] {
+            assert!(chest_sheet(&empty, 0, variant).is_none());
+        }
+        assert!(chest_sheet(&empty, 0, 3).is_none());
+        assert_eq!(
+            crate::renderer::chunk::atlas::atlas_asset_path("entity/chest/normal_left"),
+            "minecraft/textures/entity/chest/normal_left.png"
+        );
+        assert_eq!(
+            crate::renderer::chunk::atlas::atlas_asset_path("entity/chest/normal_right"),
+            "minecraft/textures/entity/chest/normal_right.png"
+        );
+    }
+
     fn decoded_pos(v: &PackedVertex) -> [f32; 3] {
         v.pos.map(|x| x as f32 / 65535.0 * POS_RANGE - POS_BIAS)
     }
@@ -3581,8 +3789,8 @@ mod chest_quad_tests {
             "minecraft/textures/entity/chest/normal.png"
         );
         let empty = AtlasUVMap::test_empty();
-        assert!(chest_sheet(&empty, 0).is_none()); // absent pack PNG: BE fallback
-        assert!(chest_sheet(&empty, 1).is_none()); // distant LOD: BE fallback
+        assert!(chest_sheet(&empty, 0, 0).is_none()); // absent pack PNG: BE fallback
+        assert!(chest_sheet(&empty, 1, 0).is_none()); // distant LOD: BE fallback
         let missing = empty.get_region("entity/chest/normal");
         let (fallback_verts, _, fallback_opaque) =
             chest_quads(&model, [0.0; 3], 0.0, false, missing, 1.0);

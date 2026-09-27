@@ -2072,6 +2072,67 @@ mod staging_tests {
     }
 
     #[test]
+    fn double_halves_claim_residency_independently_across_out_of_order_uploads() {
+        let (left_col, right_col) = (ChunkPos::new(-1, 0), ChunkPos::new(0, 0));
+        let (left, right) = (BlockPos::new(-1, 4, 2), BlockPos::new(0, 4, 2));
+        let mut chunks = HashMap::from([
+            (
+                left_col,
+                ChunkAlloc {
+                    sections: vec![section(0, left, false, 8)],
+                },
+            ),
+            (
+                right_col,
+                ChunkAlloc {
+                    sections: vec![section(0, right, false, 8)],
+                },
+            ),
+        ]);
+        let mut empty = HashMap::new();
+        let query = |chunks: &HashMap<ChunkPos, ChunkAlloc>, col, pos| {
+            chunks
+                .get(&col)
+                .and_then(|c| resident_chest_open(c.sections.iter(), &pos))
+        };
+        let accepted = std::collections::HashSet::from([0]);
+        // Only the left's newer upload lands; the right is still its old pose.
+        swap_accepted(&mut chunks, &mut empty, left_col, &accepted, &accepted, 10);
+        chunks
+            .entry(left_col)
+            .or_insert_with(|| ChunkAlloc { sections: vec![] })
+            .sections
+            .push(section(0, left, true, 10));
+        assert_eq!(query(&chunks, left_col, left), Some(true));
+        assert_eq!(query(&chunks, right_col, right), Some(false));
+        assert!(!epoch_accepts(Some(10), 9)); // stale left upload cannot roll pose back
+        // Pool refusal does not claim the waiting right half (or suppress its BE).
+        let mut pool = FreeList::new(4);
+        assert!(pool.alloc(4).is_some());
+        assert!(pool.alloc(1).is_none());
+        swap_accepted(
+            &mut chunks,
+            &mut empty,
+            right_col,
+            &accepted,
+            &Default::default(),
+            11,
+        );
+        assert_eq!(query(&chunks, right_col, right), None);
+        assert_eq!(query(&chunks, left_col, left), Some(true));
+        swap_accepted(&mut chunks, &mut empty, right_col, &accepted, &accepted, 12);
+        chunks
+            .entry(right_col)
+            .or_insert_with(|| ChunkAlloc { sections: vec![] })
+            .sections
+            .push(section(0, right, true, 12));
+        assert_eq!(query(&chunks, right_col, right), Some(true));
+        forget_column(&mut chunks, &mut empty, &left_col);
+        assert_eq!(query(&chunks, left_col, left), None);
+        assert_eq!(query(&chunks, right_col, right), Some(true));
+    }
+
+    #[test]
     fn full_pools_replace_after_retired_section_passes_frame_fences() {
         let chunk = ChunkPos::new(0, 0);
         let chest = BlockPos::new(1, 4, 1);

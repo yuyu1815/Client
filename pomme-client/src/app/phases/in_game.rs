@@ -4439,8 +4439,8 @@ pub fn update_game(
                 // Claim only accepted, still-visible resident geometry. An in-flight
                 // edit keeps the old mesh/pose until its replacement lands; an
                 // upload failure/unload/LOD mesh without chest quads falls back
-                // to the BE. On single -> double, the old half stays until the
-                // section swaps; the new partner is still rendered as a BE.
+                // to the BE. A double half is suppressed only when its own
+                // indexed geometry is resident, regardless of its partner.
                 let column = ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16));
                 let si = (pos.y - game.chunk_store.min_y()).div_euclid(16);
                 if be.kind == BlockEntityKind::Chest
