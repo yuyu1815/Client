@@ -173,6 +173,14 @@ pub struct RenderTimings {
     pub cull_ms: f32,
     /// CPU time to record render commands; does not measure GPU execution.
     pub draw_ms: f32,
+    /// Per-pass CPU command-recording time, collected only during FPS
+    /// benchmarks.
+    pub chunk_draw_ms: f32,
+    pub entity_draw_ms: f32,
+    pub block_entity_draw_ms: f32,
+    pub item_entity_draw_ms: f32,
+    pub environment_draw_ms: f32,
+    pub hud_draw_ms: f32,
     pub present_ms: f32,
 }
 
@@ -1515,6 +1523,7 @@ impl Renderer {
         map_quads: &[MapQuadDraw],
         eyes_in_water: bool,
         item_activation: Option<ItemActivationDraw<'_>>,
+        benchmark_timing: bool,
     ) -> Result<(), RendererError> {
         // Reset before any fallible/early-return path (e.g. OutOfDate acquire),
         // so timings always belong to this render attempt.
@@ -1640,6 +1649,7 @@ impl Renderer {
                 eyes_in_water,
             },
             item_activation,
+            benchmark_timing,
         )
     }
 
@@ -1664,6 +1674,7 @@ impl Renderer {
                 show_skin,
             },
             None,
+            false,
         );
         if result.is_ok() && !self.startup_menu_presented {
             self.startup_menu_presented = true;
@@ -1970,6 +1981,7 @@ impl Renderer {
         clear_color: [f32; 4],
         mode: RenderMode<'_>,
         item_activation: Option<ItemActivationDraw<'_>>,
+        benchmark_timing: bool,
     ) -> Result<(), RendererError> {
         let mut mode = mode;
         if self.swapchain_dirty {
@@ -2293,10 +2305,14 @@ impl Renderer {
                 let t_cull = std::time::Instant::now();
                 // Solid (no discard) first so it lays down depth and early-Z lets
                 // the front-to-back order reject occluded fragments; cutout after.
+                let pass_start = benchmark_timing.then(std::time::Instant::now);
                 self.chunk_pipeline.bind(cmd, frame, false);
                 self.chunk_buffers.draw_indirect(cmd, frame, false);
                 self.chunk_pipeline.bind(cmd, frame, true);
                 self.chunk_buffers.draw_indirect(cmd, frame, true);
+                if let Some(start) = pass_start {
+                    self.last_timings.chunk_draw_ms = start.elapsed().as_secs_f32() * 1000.0;
+                }
                 let cull_ms = t_cull.elapsed().as_secs_f32() * 1000.0;
 
                 let anchor = self.camera.anchor();
@@ -2328,6 +2344,7 @@ impl Renderer {
                 // times 64, scaled by the effective view distance (default
                 // entityDistanceScaling = 1).
                 let entity_view_scale = (*render_distance as f32 / 8.0).clamp(1.0, 2.5);
+                let pass_start = benchmark_timing.then(std::time::Instant::now);
                 self.entity_renderer.draw(
                     cmd,
                     frame,
@@ -2337,7 +2354,11 @@ impl Renderer {
                     eye,
                     entity_view_scale,
                 );
+                if let Some(start) = pass_start {
+                    self.last_timings.entity_draw_ms = start.elapsed().as_secs_f32() * 1000.0;
+                }
 
+                let pass_start = benchmark_timing.then(std::time::Instant::now);
                 self.block_entity_pipeline.draw(
                     &self.ctx.device,
                     cmd,
@@ -2348,8 +2369,15 @@ impl Renderer {
                     &self.placed_head_skins,
                     self.menu_pipeline.world_font(),
                 );
+                if let Some(start) = pass_start {
+                    self.last_timings.block_entity_draw_ms = start.elapsed().as_secs_f32() * 1000.0;
+                }
 
+                let pass_start = benchmark_timing.then(std::time::Instant::now);
                 self.item_entity_pipeline.draw(cmd, frame, item_entities);
+                if let Some(start) = pass_start {
+                    self.last_timings.item_entity_draw_ms = start.elapsed().as_secs_f32() * 1000.0;
+                }
                 for map_quad in *map_quads {
                     if let Some(texture) = self.map_texture_store.get(map_quad.map_id) {
                         self.map_quad_pipeline.draw(
@@ -2369,6 +2397,7 @@ impl Renderer {
                 // lets water blend over particles behind it (vanilla draws
                 // particles after all translucents into a depth-sharing
                 // target).
+                let pass_start = benchmark_timing.then(std::time::Instant::now);
                 self.particle_pipeline
                     .update_and_draw(cmd, frame, &self.camera, particles);
 
@@ -2396,6 +2425,9 @@ impl Renderer {
                 // terrain) but before the depth clear for the hand pass.
                 self.weather_pipeline
                     .update_and_draw(cmd, frame, &self.camera, sky, weather);
+                if let Some(start) = pass_start {
+                    self.last_timings.environment_draw_ms = start.elapsed().as_secs_f32() * 1000.0;
+                }
 
                 if let Some((border, partial_tick)) = self.world_border_state {
                     let camera_pos =
@@ -2533,6 +2565,7 @@ impl Renderer {
                         None
                     }
                 });
+                let pass_start = benchmark_timing.then(std::time::Instant::now);
                 if activation_draw.is_none() {
                     self.menu_pipeline.draw_from(
                         &self.ctx.device,
@@ -2565,6 +2598,9 @@ impl Renderer {
                         "provenance": "actual MenuElement::Vignette present in the submitted world overlay command buffer; this records element input/draw path, not GPU fragment color"
                     })
                 });
+                if let Some(start) = pass_start {
+                    self.last_timings.hud_draw_ms = start.elapsed().as_secs_f32() * 1000.0;
+                }
                 if let Some(trace) = self.gui_item_draw_trace.as_mut() {
                     let mut drawn = Vec::new();
                     for element in overlay {

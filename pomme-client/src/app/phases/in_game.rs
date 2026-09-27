@@ -4485,6 +4485,7 @@ pub fn update_game(
         game.item_activation
             .as_ref()
             .and_then(|activation| activation.draw(partial_tick)),
+        game.benchmark.is_some(),
     ) {
         tracing::error!("Render error: {e}");
     }

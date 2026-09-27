@@ -29,6 +29,18 @@ pub struct FrameSample {
     /// CPU time spent recording render commands; excludes GPU execution.
     pub draw_ms: f32,
     #[serde(default)]
+    pub chunk_draw_ms: f32,
+    #[serde(default)]
+    pub entity_draw_ms: f32,
+    #[serde(default)]
+    pub block_entity_draw_ms: f32,
+    #[serde(default)]
+    pub item_entity_draw_ms: f32,
+    #[serde(default)]
+    pub environment_draw_ms: f32,
+    #[serde(default)]
+    pub hud_draw_ms: f32,
+    #[serde(default)]
     pub cpu_update_ms: f32,
     #[serde(default)]
     pub render_wall_ms: f32,
@@ -54,6 +66,18 @@ pub struct SpikeSample {
     pub cull_ms: f32,
     /// CPU time spent recording render commands; excludes GPU execution.
     pub draw_ms: f32,
+    #[serde(default)]
+    pub chunk_draw_ms: f32,
+    #[serde(default)]
+    pub entity_draw_ms: f32,
+    #[serde(default)]
+    pub block_entity_draw_ms: f32,
+    #[serde(default)]
+    pub item_entity_draw_ms: f32,
+    #[serde(default)]
+    pub environment_draw_ms: f32,
+    #[serde(default)]
+    pub hud_draw_ms: f32,
     #[serde(default)]
     pub cpu_update_ms: f32,
     #[serde(default)]
@@ -146,6 +170,12 @@ impl Benchmark {
             fence_ms: timings.fence_ms,
             cull_ms: timings.cull_ms,
             draw_ms: timings.draw_ms,
+            chunk_draw_ms: timings.chunk_draw_ms,
+            entity_draw_ms: timings.entity_draw_ms,
+            block_entity_draw_ms: timings.block_entity_draw_ms,
+            item_entity_draw_ms: timings.item_entity_draw_ms,
+            environment_draw_ms: timings.environment_draw_ms,
+            hud_draw_ms: timings.hud_draw_ms,
             cpu_update_ms,
             render_wall_ms,
             unaccounted_ms: frame_ms - cpu_update_ms - render_wall_ms,
@@ -163,6 +193,12 @@ impl Benchmark {
                 fence_ms: sample.fence_ms,
                 cull_ms: sample.cull_ms,
                 draw_ms: sample.draw_ms,
+                chunk_draw_ms: sample.chunk_draw_ms,
+                entity_draw_ms: sample.entity_draw_ms,
+                block_entity_draw_ms: sample.block_entity_draw_ms,
+                item_entity_draw_ms: sample.item_entity_draw_ms,
+                environment_draw_ms: sample.environment_draw_ms,
+                hud_draw_ms: sample.hud_draw_ms,
                 cpu_update_ms: sample.cpu_update_ms,
                 render_wall_ms: sample.render_wall_ms,
                 unaccounted_ms: sample.unaccounted_ms,
@@ -276,6 +312,12 @@ mod tests {
             r#"{"frame_ms":93.53,"fence_ms":0.008,"cull_ms":0.0,"draw_ms":0.0,"chunk_count":1,"entity_count":2}"#,
         )
         .unwrap();
+        assert_eq!(legacy.chunk_draw_ms, 0.0);
+        assert_eq!(legacy.entity_draw_ms, 0.0);
+        assert_eq!(legacy.block_entity_draw_ms, 0.0);
+        assert_eq!(legacy.item_entity_draw_ms, 0.0);
+        assert_eq!(legacy.environment_draw_ms, 0.0);
+        assert_eq!(legacy.hud_draw_ms, 0.0);
         assert_eq!(legacy.cpu_update_ms, 0.0);
         assert_eq!(legacy.unaccounted_ms, 0.0);
         assert_eq!(legacy.effective_fps_limit, None);
