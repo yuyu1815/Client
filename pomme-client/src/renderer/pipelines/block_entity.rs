@@ -351,6 +351,91 @@ fn kind_definitions() -> Vec<KindDef> {
     ]
 }
 
+// An exhausted slot falls back to push-constant draws.
+const MAX_CHEST_INSTANCES: usize = 16384;
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ChestInstance {
+    model: [[f32; 4]; 4],
+    tint: [f32; 4],
+    overlay_color: [f32; 4],
+    uv_params: [f32; 4],
+}
+
+fn chest_matrix(info: &BlockEntityRenderInfo, anchor: glam::DVec3) -> glam::Mat4 {
+    let center = (glam::DVec3::new(
+        info.pos.x as f64 + 0.5,
+        info.pos.y as f64,
+        info.pos.z as f64 + 0.5,
+    ) - anchor)
+        .as_vec3();
+    glam::Mat4::from_translation(center)
+        * glam::Mat4::from_rotation_y((-info.yaw).to_radians())
+        * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5))
+}
+
+fn chest_instance(matrix: glam::Mat4) -> ChestInstance {
+    ChestInstance {
+        model: matrix.to_cols_array_2d(),
+        tint: WHITE_TINT,
+        overlay_color: [0.0, 0.0, 0.0, 1.0],
+        uv_params: [0.0; 4],
+    }
+}
+
+fn chest_instances(
+    items: &[BlockEntityRenderInfo],
+    model: &BakedEntityModel,
+    anchor: glam::DVec3,
+) -> Vec<ChestInstance> {
+    let poses = model.compute_part_transforms(&PartAnim::default());
+    let mut data = Vec::with_capacity(items.len() * model.part_ranges.len());
+    for (part, (_, count)) in model.part_ranges.iter().enumerate() {
+        if *count == 0 {
+            continue;
+        }
+        for chest in items {
+            data.push(chest_instance(chest_matrix(chest, anchor) * poses[part]));
+        }
+    }
+    data
+}
+
+// Only reorder opaque parts across disjoint blocks in a consecutive, identical
+// texture/geometry run. Leave adjacent cells (including double-chest seams),
+// duplicate positions and every other kind in their original draw order.
+fn chest_run(items: &[BlockEntityRenderInfo], start: usize, max_items: usize) -> usize {
+    let first = &items[start];
+    if first.kind != BlockEntityKind::Chest || first.lid_open != 0.0 || max_items < 2 {
+        return 0;
+    }
+    let mut end = start + 1;
+    while end < items.len() && end - start < max_items {
+        let next = &items[end];
+        if next.kind != BlockEntityKind::Chest
+            || next.lid_open != 0.0
+            || next.variant != first.variant
+            || items[start..end].iter().any(|other| {
+                (i64::from(other.pos.x) - i64::from(next.pos.x)).abs() <= 1
+                    && (i64::from(other.pos.y) - i64::from(next.pos.y)).abs() <= 1
+                    && (i64::from(other.pos.z) - i64::from(next.pos.z)).abs() <= 1
+            })
+        {
+            break;
+        }
+        end += 1;
+    }
+    if end - start >= 2 { end - start } else { 0 }
+}
+
+#[derive(Default)]
+struct ChestFrame {
+    buffer: Option<(vk::Buffer, Allocation)>,
+    used: usize,
+    unavailable: bool,
+}
+
 /// Mapped storage belongs to one fence slot, never to an extraction worker.
 #[derive(Default)]
 struct TextDisplayFrame {
@@ -363,6 +448,8 @@ struct TextDisplayFrame {
 
 pub struct BlockEntityPipeline {
     pipeline: vk::Pipeline,
+    chest_pipeline: vk::Pipeline,
+    chest_frames: [ChestFrame; MAX_FRAMES_IN_FLIGHT],
     player_head_pipeline: vk::Pipeline,
     player_head_pool: vk::DescriptorPool,
     player_head_textures: HashMap<PlayerHeadProfileSource, TextureSlot>,
@@ -434,6 +521,14 @@ impl BlockEntityPipeline {
             pipeline_layout,
             BlendMode::Opaque,
             ModelInput::PushConstant,
+        );
+
+        let chest_pipeline = create_pipeline(
+            device,
+            render_pass,
+            pipeline_layout,
+            BlendMode::Opaque,
+            ModelInput::Instanced,
         );
 
         let player_head_pipeline = create_pipeline(
@@ -660,6 +755,8 @@ impl BlockEntityPipeline {
             text_allocations,
             sign_vertices: Vec::new(),
             pipeline,
+            chest_pipeline,
+            chest_frames: std::array::from_fn(|_| ChestFrame::default()),
             player_head_pipeline,
             player_head_pool,
             player_head_textures: HashMap::new(),
@@ -772,6 +869,7 @@ impl BlockEntityPipeline {
         head_skins: &PlacedHeadSkinCache,
         font: Option<(&GlyphMap, [vk::DescriptorImageInfo; 2])>,
         benchmark_timing: bool,
+        allocator: &Arc<Mutex<Allocator>>,
     ) -> (f32, f32, u32, BlockEntityModelDrawCounts, u32) {
         if items.is_empty() {
             return (0.0, 0.0, 0, BlockEntityModelDrawCounts::default(), 0);
@@ -788,7 +886,82 @@ impl BlockEntityPipeline {
         let mut bound_entry: *const KindEntry = std::ptr::null();
         let mut bound_set: vk::DescriptorSet = vk::DescriptorSet::null();
 
-        for info in items {
+        let mut iter = items.iter().enumerate();
+        while let Some((index, info)) = iter.next() {
+            let free = MAX_CHEST_INSTANCES.saturating_sub(self.chest_frames[frame].used);
+            let run = if info.kind == BlockEntityKind::Chest
+                && info.lid_open == 0.0
+                && !self.chest_frames[frame].unavailable
+            {
+                let entry = &self.entries[&BlockEntityKind::Chest];
+                let model = &entry.models[info.variant as usize % entry.models.len()];
+                let parts = model
+                    .part_ranges
+                    .iter()
+                    .filter(|(_, count)| *count > 0)
+                    .count();
+                chest_run(items, index, if parts == 0 { 0 } else { free / parts })
+            } else {
+                0
+            };
+            if run > 0 {
+                // Allocation is fallible. Never consume a run until its entire
+                // instance payload has been safely written to this fence slot.
+                if self.chest_frames[frame].buffer.is_none() {
+                    match util::try_create_mapped_buffer(
+                        device,
+                        allocator,
+                        &vec![0; MAX_CHEST_INSTANCES * size_of::<ChestInstance>()],
+                        vk::BufferUsageFlags::VertexBuffer,
+                        "closed_chest_instances",
+                    ) {
+                        Ok(buffer) => self.chest_frames[frame].buffer = Some(buffer),
+                        Err(_) => self.chest_frames[frame].unavailable = true,
+                    }
+                }
+                if let Some((buffer, allocation)) = &mut self.chest_frames[frame].buffer {
+                    let entry = &self.entries[&BlockEntityKind::Chest];
+                    let model = &entry.models[info.variant as usize % entry.models.len()];
+                    let tex =
+                        &entry.textures[(info.variant as usize).min(entry.textures.len() - 1)];
+                    let first = self.chest_frames[frame].used;
+                    let data = chest_instances(&items[index..index + run], model, anchor);
+                    let bytes = bytemuck::cast_slice::<ChestInstance, u8>(&data);
+                    let offset = first * size_of::<ChestInstance>();
+                    allocation.mapped_slice_mut().unwrap()[offset..offset + bytes.len()]
+                        .copy_from_slice(bytes);
+                    self.chest_frames[frame].used += data.len();
+                    cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.chest_pipeline);
+                    cmd.bind_vertex_buffers(0, &[entry.vertex_buffer, *buffer], &[0, 0]);
+                    cmd.bind_descriptor_sets(
+                        vk::PipelineBindPoint::Graphics,
+                        self.pipeline_layout,
+                        0,
+                        &[self.camera_sets[frame], tex.set],
+                        &[],
+                    );
+                    let mut part_first = first as u32;
+                    for &(start, count) in &model.part_ranges {
+                        if count == 0 {
+                            continue;
+                        }
+                        cmd.draw(count, run as u32, start, part_first);
+                        part_first += run as u32;
+                        if benchmark_timing {
+                            model_draws += 1;
+                            draws_by_kind.chest += 1;
+                            draws_by_kind.closed_chest_candidate += 1;
+                        }
+                    }
+                    bound_pipeline = self.chest_pipeline;
+                    bound_entry = std::ptr::null();
+                    bound_set = vk::DescriptorSet::null();
+                    for _ in 1..run {
+                        iter.next();
+                    }
+                    continue;
+                }
+            }
             let is_statue = info.kind == BlockEntityKind::CopperGolemStatue;
             let entry = if is_statue {
                 &self.copper_golem_statue
@@ -868,11 +1041,7 @@ impl BlockEntityPipeline {
                     glam::Mat4::from_translation(block_center)
                         * glam::Mat4::from_rotation_y((-info.yaw - 180.0).to_radians())
                 }
-                ModelConvention::BlockYUp => {
-                    glam::Mat4::from_translation(block_center)
-                        * glam::Mat4::from_rotation_y((-info.yaw).to_radians())
-                        * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5))
-                }
+                ModelConvention::BlockYUp => chest_matrix(info, anchor),
             };
 
             let mut model_mat = model_mat;
@@ -1004,6 +1173,8 @@ impl BlockEntityPipeline {
             alloc.free(allocation).ok();
         }
         slot.used = 0;
+        self.chest_frames[frame].used = 0;
+        self.chest_frames[frame].unavailable = false;
         self.text_sets_ready[frame] = false;
     }
 
@@ -1077,6 +1248,14 @@ impl BlockEntityPipeline {
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.chest_pipeline, None);
+        self.chest_pipeline = create_pipeline(
+            device,
+            render_pass,
+            self.pipeline_layout,
+            BlendMode::Opaque,
+            ModelInput::Instanced,
+        );
         device.destroy_pipeline(self.player_head_pipeline, None);
         self.player_head_pipeline = create_pipeline(
             device,
@@ -1110,6 +1289,12 @@ impl BlockEntityPipeline {
         device.destroy_descriptor_pool(self.player_head_pool, None);
         device.destroy_pipeline(self.player_head_pipeline, None);
         let mut alloc = allocator.lock().unwrap();
+        for slot in &mut self.chest_frames {
+            if let Some((buffer, allocation)) = slot.buffer.take() {
+                device.destroy_buffer(buffer, None);
+                alloc.free(allocation).ok();
+            }
+        }
         for slot in &mut self.display_frames {
             for (buffer, allocation) in slot.buffer.take().into_iter().chain(slot.retired.drain(..))
             {
@@ -1159,6 +1344,7 @@ impl BlockEntityPipeline {
         drop(alloc);
 
         device.destroy_pipeline(self.pipeline, None);
+        device.destroy_pipeline(self.chest_pipeline, None);
         device.destroy_pipeline(self.text_pipeline, None);
         device.destroy_pipeline_layout(self.text_layout, None);
         device.destroy_descriptor_pool(self.text_pool, None);
@@ -1526,6 +1712,89 @@ fn world_font_writes(
 #[cfg(test)]
 mod sign_text_tests {
     use super::*;
+
+    fn chest(x: i32, variant: u32) -> BlockEntityRenderInfo {
+        BlockEntityRenderInfo {
+            pos: BlockPos::new(x, 64, -9),
+            player_head_profile_source: None,
+            kind: BlockEntityKind::Chest,
+            statue_pose: None,
+            yaw: 90.0,
+            variant,
+            lid_open: 0.0,
+            sign_front: None,
+            sign_back: None,
+            sign_front_color: [0.0; 3],
+            sign_front_glowing: false,
+            sign_back_color: [0.0; 3],
+            sign_back_glowing: false,
+            sign_wall: false,
+            sign_light: 0.0,
+        }
+    }
+
+    #[test]
+    fn closed_chest_instances_match_push_constants_and_part_draws() {
+        let items = [chest(2, 0), chest(5, 0), chest(8, 0)];
+        let anchor = glam::DVec3::new(1.25, 60.0, -12.5);
+        let model = &block_entity_model::bake_chest_models()[0];
+        let poses = model.compute_part_transforms(&PartAnim::default());
+        let data = chest_instances(&items, model, anchor);
+        let parts = model.part_ranges.iter().filter(|(_, n)| *n > 0).count();
+        assert_eq!(parts, 3);
+        assert_eq!(data.len(), parts * items.len());
+        assert_eq!(chest_run(&items, 0, MAX_CHEST_INSTANCES / 3), 3);
+        // Old path: translation(center) * rotation(-yaw) * translation(-half)
+        // then the static per-part pivot. Its 112-byte push block must match
+        // each instanced vertex attribute exactly (including tint/overlay/UV).
+        for (part, pose) in poses.iter().enumerate() {
+            for (i, info) in items.iter().enumerate() {
+                let center = (glam::DVec3::new(
+                    info.pos.x as f64 + 0.5,
+                    info.pos.y as f64,
+                    info.pos.z as f64 + 0.5,
+                ) - anchor)
+                    .as_vec3();
+                let old = glam::Mat4::from_translation(center)
+                    * glam::Mat4::from_rotation_y((-info.yaw).to_radians())
+                    * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5))
+                    * *pose;
+                let instance = &data[part * items.len() + i];
+                let mut push = [0u8; 112];
+                push[..64].copy_from_slice(bytemuck::cast_slice(&old.to_cols_array()));
+                push[64..80].copy_from_slice(bytemuck::cast_slice(&WHITE_TINT));
+                push[80..96].copy_from_slice(bytemuck::cast_slice(&[0.0f32, 0.0, 0.0, 1.0]));
+                assert_eq!(bytemuck::bytes_of(instance), &push);
+            }
+        }
+        // Per-part vertex counts are unchanged; only the number of calls drops.
+        let old_vertices: u32 = model
+            .part_ranges
+            .iter()
+            .map(|(_, n)| n * items.len() as u32)
+            .sum();
+        let instanced_vertices: u32 = model.part_ranges.iter().map(|(_, n)| n * 3).sum();
+        assert_eq!(old_vertices, instanced_vertices);
+        assert_eq!(parts * items.len(), 9);
+        assert_eq!(parts, 3);
+    }
+
+    #[test]
+    fn chest_run_preserves_animated_mixed_and_capacity_fallbacks() {
+        let mut items = [chest(0, 0), chest(3, 0), chest(6, 1), chest(9, 1)];
+        assert_eq!(chest_run(&items, 0, 2), 2);
+        assert_eq!(chest_run(&items, 2, 2), 2);
+        assert_eq!(chest_run(&items, 0, 1), 0); // capacity: draw old path
+        items[1].lid_open = 0.5;
+        assert_eq!(chest_run(&items, 0, 4), 0);
+        assert_eq!(chest_run(&items, 1, 4), 0);
+        items[1].lid_open = 0.0;
+        items[1].pos = BlockPos::new(1, 64, -9); // shared seam
+        assert_eq!(chest_run(&items, 0, 4), 0);
+        items[1].pos = BlockPos::new(3, 64, -9);
+        items[1].kind = BlockEntityKind::TrappedChest;
+        assert_eq!(chest_run(&items, 0, 4), 0);
+    }
 
     #[test]
     fn world_font_bindings_match_previous_descriptor_writes() {

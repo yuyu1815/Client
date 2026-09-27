@@ -2404,6 +2404,7 @@ impl Renderer {
                         &self.placed_head_skins,
                         self.menu_pipeline.world_font(),
                         benchmark_timing,
+                        &self.ctx.allocator,
                     );
                 if let Some(start) = pass_start {
                     self.last_timings.block_entity_draw_ms = start.elapsed().as_secs_f32() * 1000.0;

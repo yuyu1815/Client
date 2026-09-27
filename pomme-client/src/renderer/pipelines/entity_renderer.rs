@@ -2670,9 +2670,9 @@ fn create_pipelines(
     ]
 }
 
-/// Source of a draw's model matrix: mobs are GPU-instanced (binding 1, a perf
-/// divergence from vanilla); block entities keep vanilla's per-draw
-/// push-constant transform (binding 0 only).
+/// Source of a draw's model matrix: mobs and closed normal chests can use
+/// instance attributes (binding 1); other block entities use per-draw push
+/// constants (binding 0 only).
 pub(super) enum ModelInput {
     Instanced,
     PushConstant,
