@@ -3311,6 +3311,7 @@ mod terrain_uv_tests {
     fn flow_neighbor_height_uses_below_only_for_empty_neighbor() {
         use crate::world::block::{Fluid, FluidKind};
 
+        crate::world::block::init("26.2");
         let water = Fluid {
             kind: FluidKind::Water,
             amount: 8,

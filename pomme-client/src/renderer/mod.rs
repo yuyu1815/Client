@@ -171,6 +171,7 @@ pub struct RenderTimings {
     pub fence_ms: f32,
     pub acquire_ms: f32,
     pub cull_ms: f32,
+    /// CPU time to record render commands; does not measure GPU execution.
     pub draw_ms: f32,
     pub present_ms: f32,
 }
@@ -1515,6 +1516,9 @@ impl Renderer {
         eyes_in_water: bool,
         item_activation: Option<ItemActivationDraw<'_>>,
     ) -> Result<(), RendererError> {
+        // Reset before any fallible/early-return path (e.g. OutOfDate acquire),
+        // so timings always belong to this render attempt.
+        self.last_timings = RenderTimings::default();
         // CPU completions were drained by update_placed_head_skins before this
         // call. Upload before recording so newly ready heads switch this frame.
         self.block_entity_pipeline.update_player_head_textures(
@@ -2320,9 +2324,10 @@ impl Renderer {
                 }
 
                 let ent_frustum = self.camera.frustum_planes();
-                // Entities aren't sent beyond the server's tracking range; a
-                // generous render-distance cap just trims anything stray.
-                let ent_cull_dist = (*render_distance * 16) as f32 + 16.0;
+                // Vanilla EntityRenderer uses the bounding box's average size
+                // times 64, scaled by the effective view distance (default
+                // entityDistanceScaling = 1).
+                let entity_view_scale = (*render_distance as f32 / 8.0).clamp(1.0, 2.5);
                 self.entity_renderer.draw(
                     cmd,
                     frame,
@@ -2330,7 +2335,7 @@ impl Renderer {
                     &ent_frustum,
                     anchor,
                     eye,
-                    ent_cull_dist,
+                    entity_view_scale,
                 );
 
                 self.block_entity_pipeline.draw(
@@ -2801,6 +2806,7 @@ impl Renderer {
         self.gui_item_atlas.end_frame();
 
         cmd.end()?;
+        self.last_timings.draw_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
 
         let submit_info = vk::SubmitInfo {
             wait_semaphore_count: 1,

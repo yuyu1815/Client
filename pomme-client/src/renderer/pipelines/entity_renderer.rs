@@ -720,6 +720,27 @@ fn mob_definitions() -> Vec<MobDef> {
 
     vec![
         MobDef {
+            kind: EntityKind::Arrow,
+            anim: AnimationType::Static,
+            adult: vec![
+                VariantDef {
+                    model: entity_model::bake_arrow_model(),
+                    tex_variants: &[&["minecraft/textures/entity/projectiles/arrow.png"]],
+                    tex_size: 32,
+                    overlay_kind: OverlayKind::OpaqueCulled,
+                },
+                VariantDef {
+                    model: entity_model::bake_arrow_model(),
+                    tex_variants: &[&["minecraft/textures/entity/projectiles/arrow_spectral.png"]],
+                    tex_size: 32,
+                    overlay_kind: OverlayKind::OpaqueCulled,
+                },
+            ],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
             kind: EntityKind::Pig,
             anim: AnimationType::Quadruped,
             adult: vec![opaque(entity_model::bake_pig_model(), PIG_ADULT_TEX, 64)],
@@ -1785,6 +1806,14 @@ impl EntityRenderer {
     /// The translation is anchor-relative, subtracted in f64 (see
     /// `Camera::anchor`).
     fn entity_matrix(info: &EntityRenderInfo, anchor: glam::DVec3) -> glam::Mat4 {
+        if info.entity_kind == EntityKind::Arrow {
+            // ArrowModel's arrowhead is at x=-12; the entity-model root flip
+            // points it along +X. Match vanilla ArrowRenderer's yRot - 90.
+            return glam::Mat4::from_translation((*info.position - anchor).as_vec3())
+                * glam::Mat4::from_rotation_y((info.body_y_rot_deg - 90.0).to_radians())
+                * glam::Mat4::from_rotation_z(info.head_x_rot_deg.to_radians())
+                * glam::Mat4::from_scale(glam::Vec3::splat(0.9));
+        }
         let mut body_y_rot_deg = info.body_y_rot_deg;
         if info.is_converting {
             // Vanilla `setupRotations` isShaking: a per-tick body-yaw jitter.
@@ -1823,7 +1852,7 @@ impl EntityRenderer {
         frustum: &[[f32; 4]; 6],
         anchor: glam::DVec3,
         eye: glam::DVec3,
-        cull_dist: f32,
+        entity_view_scale: f32,
     ) {
         if entities.is_empty() {
             return;
@@ -1840,7 +1869,7 @@ impl EntityRenderer {
                 let Some(entry) = self.mobs.get(&info.entity_kind) else {
                     continue;
                 };
-                if !info.skip_cull && !entity_visible(info, frustum, eye, cull_dist) {
+                if !info.skip_cull && !entity_visible(info, frustum, eye, entity_view_scale) {
                     continue;
                 }
                 let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
@@ -2332,7 +2361,7 @@ fn entity_visible(
     info: &EntityRenderInfo,
     frustum: &[[f32; 4]; 6],
     eye: glam::DVec3,
-    cull_dist: f32,
+    entity_view_scale: f32,
 ) -> bool {
     let (w, h) = entity_bounds(info.entity_kind, info.is_baby);
     // A body transform (slime size/squish) can grow the entity well past its
@@ -2354,7 +2383,15 @@ fn entity_visible(
     q.y += h * 0.5 * scale;
     // Distance-cull with the radius as margin so an oversized entity stays
     // visible while any of its body is in range.
-    let max_dist = cull_dist + radius;
+    // Slime's body transform includes its size and an inverse X/Y squish;
+    // the cube root of its determinant recovers size without the squish.
+    let distance_scale = if info.entity_kind == EntityKind::Slime {
+        info.body_transform
+            .map_or(1.0, |m| m.determinant().abs().cbrt() / 0.999)
+    } else {
+        1.0
+    };
+    let max_dist = ((2.0 * w + h) / 3.0 * distance_scale * 64.0) * entity_view_scale + radius;
     if q.length_squared() > max_dist * max_dist {
         return false;
     }
@@ -2823,6 +2860,51 @@ pub(super) fn create_pipeline(
 mod tests {
 
     #[test]
+    fn arrow_tip_points_along_protocol_yaw() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::{DVec3, Vec3};
+
+        use super::{EntityRenderInfo, EntityRenderer};
+        use crate::renderer::entity_model::{PartAnim, bake_arrow_model};
+
+        let model = bake_arrow_model();
+        assert_eq!(model.part_ranges.len(), 3);
+        assert!(model.part_ranges.iter().all(|&(_, count)| count > 0));
+        let cross = model.compute_part_transforms(&PartAnim::default())[1];
+        // On the +Z quad, U=0 maps to x=+4: the arrowhead is at this end.
+        let tip = Vec3::new(4.0 / 16.0, 0.0, 0.0);
+        for (yaw, axis) in [(0.0, -Vec3::Z), (90.0, -Vec3::X)] {
+            let info = EntityRenderInfo {
+                entity_kind: EntityKind::Arrow,
+                body_y_rot_deg: yaw,
+                ..Default::default()
+            };
+            let point =
+                (EntityRenderer::entity_matrix(&info, DVec3::ZERO) * cross).transform_point3(tip);
+            assert!(
+                point.dot(axis) > 0.1,
+                "yaw {yaw} must point along {axis:?}: {point:?}"
+            );
+        }
+        let info = EntityRenderInfo {
+            entity_kind: EntityKind::Arrow,
+            head_x_rot_deg: 30.0,
+            ..Default::default()
+        };
+        let point =
+            (EntityRenderer::entity_matrix(&info, DVec3::ZERO) * cross).transform_point3(tip);
+        assert!(
+            point.y < 0.0,
+            "positive vanilla pitch points downward: {point:?}"
+        );
+
+        let arrows = super::mob_definitions();
+        let arrow = arrows.iter().find(|d| d.kind == EntityKind::Arrow).unwrap();
+        assert_eq!(arrow.adult.len(), 2);
+        assert!(arrow.adult[1].tex_variants[0][0].ends_with("arrow_spectral.png"));
+    }
+
+    #[test]
     fn death_fall_matches_vanilla_boundaries_and_flip_overrides() {
         use azalea_registry::builtin::EntityKind;
 
@@ -2854,6 +2936,29 @@ mod tests {
                 "Vanilla SquidRenderer bypasses LivingEntityRenderer.setupRotations for {kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn slime_distance_uses_size_even_when_squished() {
+        use azalea_registry::builtin::EntityKind;
+
+        use super::{EntityRenderInfo, entity_visible};
+        use crate::entity::components::Position;
+
+        let frustum = [[0.0, 0.0, 0.0, 1000.0]; 6];
+        let mut slime = EntityRenderInfo {
+            entity_kind: EntityKind::Slime,
+            position: Position::new(100.0, 0.0, 0.0),
+            ..Default::default()
+        };
+        assert!(!entity_visible(&slime, &frustum, glam::DVec3::ZERO, 1.0));
+        // Size 4, with X/Z halved and Y doubled by squish (0.999 shell shrink).
+        slime.body_transform = Some(glam::Mat4::from_scale(
+            glam::Vec3::new(2.0, 8.0, 2.0) * 0.999,
+        ));
+        assert!(entity_visible(&slime, &frustum, glam::DVec3::ZERO, 1.0));
+        slime.position = Position::new(145.0, 0.0, 0.0);
+        assert!(!entity_visible(&slime, &frustum, glam::DVec3::ZERO, 1.0));
     }
 
     /// Bakes every mob model; `generate_cube_vertices`' UV seam

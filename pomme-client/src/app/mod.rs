@@ -815,6 +815,8 @@ impl ApplicationHandler for App {
                     (0.0, 0.0)
                 };
 
+                let benchmark_fps_limit = self.effective_framerate_limit();
+                let window_occluded = self.occluded;
                 let core = &mut self.core;
 
                 let should_apply_cursor_grab =
@@ -984,7 +986,16 @@ impl ApplicationHandler for App {
                     } => {
                         let update_result = match world.as_mut().map(World::poll) {
                             Some(Err(reason)) => GameUpdateResult::Disconnected { reason },
-                            _ => update_game(core, dt, raw_dt, &mut gfx, &connection, &mut game),
+                            _ => update_game(
+                                core,
+                                dt,
+                                raw_dt,
+                                &mut gfx,
+                                &connection,
+                                &mut game,
+                                benchmark_fps_limit,
+                                window_occluded,
+                            ),
                         };
 
                         match update_result {

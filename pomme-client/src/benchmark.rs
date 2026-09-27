@@ -1,6 +1,11 @@
 use std::path::Path;
 use std::time::Instant;
 
+fn write_result_json(path: &Path, value: &impl serde::Serialize) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(value).map_err(std::io::Error::other)?;
+    std::fs::write(path, json)
+}
+
 use crate::renderer::RenderTimings;
 
 const DURATION_SECS: f32 = 10.0;
@@ -16,23 +21,53 @@ fn iso8601_utc_now() -> String {
         .unwrap_or_default()
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct FrameSample {
     pub frame_ms: f32,
     pub fence_ms: f32,
     pub cull_ms: f32,
+    /// CPU time spent recording render commands; excludes GPU execution.
     pub draw_ms: f32,
+    #[serde(default)]
+    pub cpu_update_ms: f32,
+    #[serde(default)]
+    pub render_wall_ms: f32,
+    /// Frame-time residual, including work and waits not covered by the other
+    /// phases.
+    #[serde(alias = "frame_wait_ms", default)]
+    pub unaccounted_ms: f32,
+    #[serde(default)]
+    pub effective_fps_limit: Option<u32>,
+    #[serde(default)]
+    pub window_occluded: bool,
+    #[serde(default)]
+    pub vsync: bool,
     pub chunk_count: u32,
     pub entity_count: u32,
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SpikeSample {
     pub frame_index: u32,
     pub frame_ms: f32,
     pub fence_ms: f32,
     pub cull_ms: f32,
+    /// CPU time spent recording render commands; excludes GPU execution.
     pub draw_ms: f32,
+    #[serde(default)]
+    pub cpu_update_ms: f32,
+    #[serde(default)]
+    pub render_wall_ms: f32,
+    /// Frame-time residual, including work and waits not covered by the other
+    /// phases.
+    #[serde(alias = "frame_wait_ms", default)]
+    pub unaccounted_ms: f32,
+    #[serde(default)]
+    pub effective_fps_limit: Option<u32>,
+    #[serde(default)]
+    pub window_occluded: bool,
+    #[serde(default)]
+    pub vsync: bool,
     pub chunk_count: u32,
     pub entity_count: u32,
 }
@@ -90,6 +125,11 @@ impl Benchmark {
         &mut self,
         frame_ms: f32,
         timings: &RenderTimings,
+        cpu_update_ms: f32,
+        render_wall_ms: f32,
+        effective_fps_limit: Option<u32>,
+        window_occluded: bool,
+        vsync: bool,
         chunk_count: u32,
         entity_count: u32,
     ) -> bool {
@@ -106,6 +146,12 @@ impl Benchmark {
             fence_ms: timings.fence_ms,
             cull_ms: timings.cull_ms,
             draw_ms: timings.draw_ms,
+            cpu_update_ms,
+            render_wall_ms,
+            unaccounted_ms: frame_ms - cpu_update_ms - render_wall_ms,
+            effective_fps_limit,
+            window_occluded,
+            vsync,
             chunk_count,
             entity_count,
         };
@@ -117,6 +163,12 @@ impl Benchmark {
                 fence_ms: sample.fence_ms,
                 cull_ms: sample.cull_ms,
                 draw_ms: sample.draw_ms,
+                cpu_update_ms: sample.cpu_update_ms,
+                render_wall_ms: sample.render_wall_ms,
+                unaccounted_ms: sample.unaccounted_ms,
+                effective_fps_limit: sample.effective_fps_limit,
+                window_occluded: sample.window_occluded,
+                vsync: sample.vsync,
                 chunk_count: sample.chunk_count,
                 entity_count: sample.entity_count,
             });
@@ -180,9 +232,11 @@ impl Benchmark {
         };
 
         let path = game_dir.join("benchmark.json");
-        if let Ok(json) = serde_json::to_string_pretty(&result) {
-            let _ = std::fs::write(&path, json);
-            tracing::info!("Benchmark saved to {}", path.display());
+        match write_result_json(&path, &result) {
+            Ok(()) => tracing::info!("Benchmark saved to {}", path.display()),
+            Err(error) => {
+                tracing::error!("Failed to save benchmark to {}: {error}", path.display())
+            }
         }
 
         result
@@ -193,6 +247,64 @@ impl Benchmark {
             return 0.0;
         }
         (self.start.elapsed().as_secs_f32() / DURATION_SECS).min(1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn result_json_write_reports_success_and_io_failure() {
+        let dir = std::env::temp_dir().join(format!("pomme-benchmark-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("benchmark.json");
+        write_result_json(&path, &serde_json::json!({"avg_fps": 120.0})).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["avg_fps"],
+            120.0
+        );
+        assert!(
+            write_result_json(&dir.join("missing/benchmark.json"), &serde_json::json!({})).is_err()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn frame_sample_timing_and_legacy_defaults() {
+        let legacy: FrameSample = serde_json::from_str(
+            r#"{"frame_ms":93.53,"fence_ms":0.008,"cull_ms":0.0,"draw_ms":0.0,"chunk_count":1,"entity_count":2}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.cpu_update_ms, 0.0);
+        assert_eq!(legacy.unaccounted_ms, 0.0);
+        assert_eq!(legacy.effective_fps_limit, None);
+
+        let old_wait_key: FrameSample = serde_json::from_str(
+            r#"{"frame_ms":93.53,"fence_ms":0.008,"cull_ms":0.0,"draw_ms":0.0,"frame_wait_ms":12.5,"chunk_count":1,"entity_count":2}"#,
+        )
+        .unwrap();
+        assert_eq!(old_wait_key.unaccounted_ms, 12.5);
+
+        let mut bench = Benchmark::new("test", 1280, 720, 8);
+        let timings = RenderTimings {
+            draw_ms: 3.0,
+            ..Default::default()
+        };
+        for _ in 0..WARMUP_FRAMES {
+            assert!(!bench.record_frame(50.0, &timings, 20.0, 25.0, Some(60), false, true, 1, 2));
+        }
+        assert!(!bench.record_frame(100.0, &timings, 30.0, 40.0, Some(60), false, true, 1, 2));
+        let sample = &bench.samples[0];
+        assert_eq!(sample.cpu_update_ms, 30.0);
+        assert_eq!(sample.render_wall_ms, 40.0);
+        assert_eq!(sample.unaccounted_ms, 30.0);
+        assert_eq!(bench.spikes[0].unaccounted_ms, 30.0);
+        let json = serde_json::to_value(sample).unwrap();
+        assert_eq!(json["unaccounted_ms"], 30.0);
+        assert!(json.get("frame_wait_ms").is_none());
+        assert_eq!(sample.effective_fps_limit, Some(60));
+        assert!(sample.vsync);
     }
 }
 
@@ -256,6 +368,8 @@ fn radius_from_chunk_count(count: u32) -> u32 {
 #[derive(Clone, Copy, Default, serde::Serialize)]
 pub struct UpdatePhases {
     pub update_ms: f32,
+    pub cpu_update_ms: f32,
+    pub render_wall_ms: f32,
     pub net_decode_ms: f32,
     pub visibility_ms: f32,
     pub rescan_ms: f32,
@@ -350,9 +464,12 @@ pub struct ChunkLoadResult {
 impl ChunkLoadResult {
     pub fn save(&self, game_dir: &Path) {
         let path = game_dir.join("chunk_load.json");
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
-            tracing::info!("Chunk load result saved to {}", path.display());
+        match write_result_json(&path, self) {
+            Ok(()) => tracing::info!("Chunk load result saved to {}", path.display()),
+            Err(error) => tracing::error!(
+                "Failed to save chunk load result to {}: {error}",
+                path.display()
+            ),
         }
     }
 }

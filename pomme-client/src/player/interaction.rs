@@ -129,6 +129,7 @@ pub struct InteractionState {
     destroy_delay: u32,
     miss_time: u32,
     use_delay: u32,
+    pending_writable_book: Option<InteractionHand>,
     using_item: Option<ActiveUse>,
     using_bow: bool,
     swinging: bool,
@@ -165,6 +166,7 @@ impl InteractionState {
             destroy_delay: 0,
             miss_time: 0,
             use_delay: 0,
+            pending_writable_book: None,
             using_item: None,
             using_bow: false,
             swinging: false,
@@ -895,6 +897,10 @@ impl InteractionState {
         hit_block
     }
 
+    pub fn take_writable_book_open(&mut self) -> Option<InteractionHand> {
+        self.pending_writable_book.take()
+    }
+
     /// Vanilla `MultiPlayerGameMode.useItem` + `Consumable.startConsuming`:
     /// sends `ServerboundUseItem` for any held item (the server decides what
     /// it does; pearls and snowballs work through this too) and begins the
@@ -930,6 +936,13 @@ impl InteractionState {
 
         if hand_on_cooldown {
             return ItemUseResult::Fail;
+        }
+        // LocalPlayer.openItemGui opens writable books immediately; the server
+        // sends OpenBook only for written books with content.
+        if stack.kind == ItemKind::WritableBook
+            && stack_component::<azalea_inventory::components::WritableBookContent>(stack).is_some()
+        {
+            self.pending_writable_book = Some(hand);
         }
         if stack.kind == ItemKind::Bow && !creative && !has_projectile {
             return ItemUseResult::Fail;
@@ -1708,8 +1721,10 @@ fn should_try_offhand(
 /// `UseEffects` is present on every item and `Tool` only controls mining;
 /// neither starts a use in vanilla `Item.use` (a stick must PASS).
 fn main_hand_use_succeeds(stack: &ItemStackData) -> bool {
-    stack.kind == ItemKind::Bow
-        || stack_component::<Consumable>(stack).is_some()
+    matches!(
+        stack.kind,
+        ItemKind::Bow | ItemKind::WritableBook | ItemKind::WrittenBook
+    ) || stack_component::<Consumable>(stack).is_some()
         || stack_component::<BlocksAttacks>(stack).is_some()
         || stack_component::<KineticWeapon>(stack).is_some()
 }
@@ -2326,6 +2341,59 @@ mod tests {
             ),
             BlockRegistry::test_empty(),
         )
+    }
+
+    #[test]
+    fn books_use_item_open_locally_only_for_writable_content() {
+        use crate::net::sender::Outbound;
+        let (chunks, mut audio, _, mut particles, registry) = headless_use_fixture();
+        let biome_climate = HashMap::new();
+        let mut effects = BreakEffects {
+            particles: &mut particles,
+            registry: &registry,
+            biome_climate: &biome_climate,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        for (kind, cooldown, expected_open) in [
+            (
+                ItemKind::WritableBook,
+                false,
+                Some(InteractionHand::MainHand),
+            ),
+            (ItemKind::WritableBook, true, None),
+            (ItemKind::WrittenBook, false, None),
+        ] {
+            let mut state = InteractionState::new();
+            let stack = ItemStackData::new(kind, 1);
+            assert!(
+                state.use_item(
+                    &sender,
+                    &mut audio,
+                    &chunks,
+                    dvec3(0.5, 64.0, 0.5),
+                    dvec3(0.5, 65.62, 0.5),
+                    LookDirection::default(),
+                    Some(&stack),
+                    20,
+                    false,
+                    InteractionHand::MainHand,
+                    cooldown,
+                    false,
+                    &mut effects,
+                ) == if cooldown {
+                    ItemUseResult::Fail
+                } else {
+                    ItemUseResult::Success
+                },
+            );
+            assert!(
+                matches!(rx.try_recv(), Ok(Outbound::Packet(packet)) if matches!(*packet, ServerboundGamePacket::UseItem(_)))
+            );
+            assert_eq!(state.take_writable_book_open(), expected_open);
+            assert_eq!(state.take_writable_book_open(), None);
+        }
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

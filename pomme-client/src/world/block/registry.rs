@@ -89,6 +89,13 @@ pub struct BlockRegistry {
     placeable_blocks: HashMap<&'static str, BlockState>,
 }
 
+fn baked_choices_satisfy(
+    choices: &[WeightedBakedModel],
+    predicate: impl Fn(&BakedModel) -> bool,
+) -> bool {
+    !choices.is_empty() && choices.iter().all(|choice| predicate(&choice.model))
+}
+
 impl BlockRegistry {
     #[cfg(test)]
     pub(crate) fn test_empty() -> Self {
@@ -390,18 +397,23 @@ impl BlockRegistry {
         if super::is_air(state) {
             return false;
         }
-        self.get_baked_model(state).map(f).unwrap_or(false)
+        self.get_baked_alternatives(state)
+            .is_some_and(|choices| baked_choices_satisfy(choices, f))
     }
 
     pub fn is_opaque_full_cube(&self, state: BlockState) -> bool {
         self.baked_model_flag(state, |m| m.is_full_cube)
     }
 
-    /// Whether `state` culls a neighbor's adjacent face. Unlike
-    /// [`Self::is_opaque_full_cube`], non-occluding blocks like leaves return
-    /// false even though they bake as full cubes.
+    /// Whether `state` culls a neighbor's adjacent face. Callers do not always
+    /// have the block position, so only cull when every weighted alternative
+    /// occludes; choosing the first model here can erase faces at positions
+    /// where `get_baked_model_at` selects a non-occluding alternative.
     pub fn occludes_neighbor(&self, state: BlockState) -> bool {
-        self.baked_model_flag(state, |m| m.occludes)
+        if super::is_air(state) {
+            return false;
+        }
+        self.baked_model_flag(state, |model| model.occludes)
     }
 
     pub fn texture_names(&self) -> impl Iterator<Item = &str> + '_ {
@@ -474,6 +486,51 @@ fn constraints_match<'a>(
 fn load_cache(path: &Path) -> Option<HashMap<String, FaceTextures>> {
     let data = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&data).ok()
+}
+
+#[cfg(test)]
+mod weighted_occlusion_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_occlusion_alternatives_never_hide_a_neighbor_face() {
+        let choices = vec![
+            WeightedBakedModel {
+                weight: 1,
+                model: BakedModel {
+                    quads: Vec::new(),
+                    ambient_occlusion: true,
+                    is_full_cube: true,
+                    occludes: true,
+                },
+            },
+            WeightedBakedModel {
+                weight: 1,
+                model: BakedModel {
+                    quads: Vec::new(),
+                    ambient_occlusion: true,
+                    is_full_cube: false,
+                    occludes: false,
+                },
+            },
+        ];
+        let non_occluding_position = (0..1000)
+            .find(|&x| {
+                model::choose_baked_model(&choices, model::model_seed_for_position(x, 0, 0))
+                    .is_some_and(|selected| !selected.occludes)
+            })
+            .expect("weighted selection reaches the non-occluding alternative");
+        assert!(
+            model::choose_baked_model(
+                &choices,
+                model::model_seed_for_position(non_occluding_position, 0, 0)
+            )
+            .is_some_and(|selected| !selected.occludes)
+        );
+        assert!(!baked_choices_satisfy(&choices, |model| model.occludes));
+        assert!(!baked_choices_satisfy(&choices, |model| model.is_full_cube));
+        assert!(baked_choices_satisfy(&choices[..1], |model| model.occludes));
+    }
 }
 
 #[cfg(test)]

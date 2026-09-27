@@ -1088,43 +1088,7 @@ pub fn bake_item_models(
                 )
             }
         );
-        let mut model = bake_chest_item_model();
-        // Replace chest's two cuboids with a closed shulker base and lid.
-        model.quads.clear();
-        let shade = vanilla_gui_face_shades(CHEST_GUI_ROTATION_DEG);
-        add_chest_cube(
-            &mut model.quads,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-            0.5,
-            1.0,
-            0.0,
-            28.0,
-            16.0,
-            8.0,
-            16.0,
-            &texture,
-            shade,
-        );
-        add_chest_cube(
-            &mut model.quads,
-            0.0,
-            0.5,
-            0.0,
-            1.0,
-            1.0,
-            1.0,
-            0.0,
-            0.0,
-            16.0,
-            12.0,
-            16.0,
-            &texture,
-            shade,
-        );
-        item_models.insert(item_name.clone(), model);
+        item_models.insert(item_name.clone(), bake_shulker_item_model(&texture));
         ground_transforms.insert(item_name, default_block_ground_transform());
     }
 
@@ -1325,6 +1289,52 @@ pub(crate) fn bake_player_head_item_model(transform: Mat4) -> BakedModel {
         }
     }
     // template_skull's GUI rotation is (30,45,0), not block/block's 225 Y.
+    apply_gui_lambert(&mut quads, CHEST_GUI_ROTATION_DEG);
+    BakedModel {
+        quads,
+        ambient_occlusion: true,
+        is_full_cube: false,
+        occludes: false,
+    }
+}
+
+/// Bake the special item through the same vanilla cube unwrap as the placed
+/// model. The closed lid overlaps the base by four model units.
+fn bake_shulker_item_model(texture: &str) -> BakedModel {
+    use crate::renderer::entity_model::{ModelCube, cube_faces};
+
+    let mut quads = Vec::with_capacity(12);
+    for (y, height, tex_v) in [(-8.0, 8.0, 28), (-16.0, 12.0, 0)] {
+        let cube = ModelCube {
+            origin: Vec3::new(-8.0, y, -8.0),
+            size: Vec3::new(16.0, height, 16.0),
+            tex_offset: (0, tex_v),
+            deformation: 0.0,
+            mirror: false,
+        };
+        for (mut positions, [u0, v0, u1, v1]) in cube_faces(&cube, true) {
+            // ModelPart uses Y-down; cube_faces flips Y into item space.
+            // Reverse the winding to keep outward normals after that reflection.
+            positions.reverse();
+            quads.push(BakedQuad {
+                positions: positions.map(|[x, y, z]| [x + 0.5, y, z + 0.5]),
+                uvs: [
+                    [u1 / 64.0, v1 / 64.0],
+                    [u0 / 64.0, v1 / 64.0],
+                    [u0 / 64.0, v0 / 64.0],
+                    [u1 / 64.0, v0 / 64.0],
+                ],
+                texture: texture.to_string(),
+                ambient_occlusion: true,
+                cullface: None,
+                tint_index: None,
+                tint: Tint::None,
+                item_tint: ItemTint::Untinted,
+                shade_light: 1.0,
+                shade_face: None,
+            });
+        }
+    }
     apply_gui_lambert(&mut quads, CHEST_GUI_ROTATION_DEG);
     BakedModel {
         quads,
@@ -2747,6 +2757,42 @@ fn determine_tint_for_index(block_name: &str, tint_index: Option<i32>) -> Tint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shulker_item_matches_vanilla_closed_box_uv_and_overlap() {
+        let model = bake_shulker_item_model("entity/shulker/shulker_red");
+        assert_eq!(model.quads.len(), 12);
+        assert!(
+            model
+                .quads
+                .iter()
+                .all(|q| q.texture == "entity/shulker/shulker_red")
+        );
+        // ModelPart.Cube's base is Y=16..24 and the closed lid Y=8..20
+        // (Y-down, pivot 24): the lid overlaps the base by four pixels.
+        let bounds = |quads: &[BakedQuad]| {
+            let ys = quads.iter().flat_map(|q| q.positions.iter().map(|p| p[1]));
+            (
+                ys.clone().reduce(f32::min).unwrap(),
+                ys.reduce(f32::max).unwrap(),
+            )
+        };
+        assert_eq!(bounds(&model.quads[..6]), (0.0, 0.5));
+        assert_eq!(bounds(&model.quads[6..]), (0.25, 1.0));
+        // Vanilla ModelPart.Cube DOWN polygon (top in item Y-up space):
+        // u=16..32, v=28..44 for base. No chest-helper half-texel inset.
+        assert_eq!(
+            model.quads[2].uvs,
+            [
+                [32.0 / 64.0, 44.0 / 64.0],
+                [16.0 / 64.0, 44.0 / 64.0],
+                [16.0 / 64.0, 28.0 / 64.0],
+                [32.0 / 64.0, 28.0 / 64.0],
+            ]
+        );
+        let p = model.quads[2].positions.map(Vec3::from_array);
+        assert!((p[1] - p[0]).cross(p[2] - p[0]).y > 0.0);
+    }
 
     #[test]
     fn model_ambient_occlusion_json_defaults_true_and_preserves_false() {

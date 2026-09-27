@@ -235,6 +235,51 @@ pub fn bake_model(parts: Vec<EntityPart>, tex_w: u32, tex_h: u32) -> BakedEntity
     BakedEntityModel::new(parts, vertices, part_ranges)
 }
 
+/// 26.2 ArrowModel: two 16x4 crossed planes and the 5x5 fletching plane.
+/// Root pivots at the projectile origin rather than the mob ground plane.
+pub fn bake_arrow_model() -> BakedEntityModel {
+    let plane = ModelCube {
+        origin: Vec3::new(-12.0, -2.0, 0.0),
+        size: Vec3::new(16.0, 4.0, 0.0),
+        tex_offset: (0, 0),
+        deformation: 0.0,
+        mirror: false,
+    };
+    let mut model = bake_model(
+        vec![
+            EntityPart {
+                name: "back".into(),
+                offset: Vec3::new(-11.0, MODEL_REBASE_Y, 0.0),
+                default_rotation: Vec3::new(std::f32::consts::FRAC_PI_4, 0.0, 0.0),
+                cubes: vec![ModelCube {
+                    origin: Vec3::new(0.0, -2.5, -2.5),
+                    size: Vec3::new(0.0, 5.0, 5.0),
+                    ..plane
+                }],
+                parent: None,
+            },
+            EntityPart {
+                name: "cross_1".into(),
+                offset: Vec3::new(0.0, MODEL_REBASE_Y, 0.0),
+                default_rotation: Vec3::new(std::f32::consts::FRAC_PI_4, 0.0, 0.0),
+                cubes: vec![plane],
+                parent: None,
+            },
+            EntityPart {
+                name: "cross_2".into(),
+                offset: Vec3::new(0.0, MODEL_REBASE_Y, 0.0),
+                default_rotation: Vec3::new(3.0 * std::f32::consts::FRAC_PI_4, 0.0, 0.0),
+                cubes: vec![plane],
+                parent: None,
+            },
+        ],
+        32,
+        32,
+    );
+    model.part_scales[0] = 0.8;
+    model
+}
+
 pub fn bake_pig_model() -> BakedEntityModel {
     let mut parts = vec![
         EntityPart {

@@ -198,16 +198,10 @@ pub fn push_results_overlay(
         });
     }
 
-    // Debug builds produce unrepresentative timings, so don't let them be shared.
-    let debug_build = crate::benchmark::is_debug_build();
-    let (label, enabled) = if debug_build {
-        ("Upload disabled (debug build)", false)
-    } else {
-        match upload {
-            Some(UploadStatus::Uploading) => ("Uploading...", false),
-            Some(UploadStatus::Done { .. }) => ("Copy link again", true),
-            _ => ("Upload & copy link", true),
-        }
+    let (label, enabled) = match upload {
+        Some(UploadStatus::Uploading) => ("Uploading...", false),
+        Some(UploadStatus::Done { .. }) => ("Copy link again", true),
+        _ => ("Upload & copy link", true),
     };
     let btn_w = 180.0 * gs;
     let btn_h = BTN_H * gs;
@@ -218,9 +212,6 @@ pub fn push_results_overlay(
     );
 
     if clicked && hit_test(cursor, [btn_x, btn_y, btn_w, btn_h]) {
-        if debug_build {
-            return ResultAction::None;
-        }
         return match upload {
             Some(UploadStatus::Uploading) => ResultAction::None,
             Some(UploadStatus::Done { .. }) => ResultAction::Recopy,

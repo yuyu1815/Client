@@ -932,6 +932,10 @@ impl ItemEntityPipeline {
         if items.is_empty() {
             return;
         }
+        // The trace is diagnostic only; do not query the process environment
+        // for every visible item in both render passes.
+        let trace_target = std::env::var_os("POMME_ITEM_ENTITY_TRACE")
+            .and_then(|_| std::env::var("POMME_DROP_TARGET_UUID").ok());
 
         for (pipeline, translucent) in [(self.cutout, false), (self.translucent, true)] {
             let mut bound = false;
@@ -960,10 +964,8 @@ impl ItemEntityPipeline {
                     item.nether_lighting,
                 );
                 cmd.draw(mesh.vertex_count, 1, 0, 0);
-                if std::env::var_os("POMME_ITEM_ENTITY_TRACE").is_some()
-                    && let Some(uuid) = item.entity_uuid
-                    && std::env::var("POMME_DROP_TARGET_UUID")
-                        .is_ok_and(|target| target == uuid.to_string())
+                if let Some(uuid) = item.entity_uuid
+                    && matches_trace_target(trace_target.as_deref(), uuid)
                 {
                     self.last_draw_trace = Some(serde_json::json!({
                         "status": "submitted",
@@ -1747,9 +1749,30 @@ fn create_pipeline_impl(
     pipeline
 }
 
+fn matches_trace_target(target: Option<&str>, uuid: uuid::Uuid) -> bool {
+    target.is_some_and(|target| target == uuid.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_trace_selection_matches_per_item_lookup() {
+        let id = uuid::Uuid::nil();
+        for enabled in [false, true] {
+            for target in [
+                None,
+                Some(""),
+                Some("other"),
+                Some("00000000-0000-0000-0000-000000000000"),
+            ] {
+                let cached = enabled.then_some(target).flatten();
+                let old = enabled && target.is_some_and(|s| s == id.to_string());
+                assert_eq!(matches_trace_target(cached, id), old);
+            }
+        }
+    }
 
     fn unit_region() -> AtlasRegion {
         AtlasRegion {

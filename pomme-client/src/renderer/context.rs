@@ -14,6 +14,24 @@ use winit::window::Window;
 
 use super::MAX_FRAMES_IN_FLIGHT;
 
+// pyronyx calls vkGetInstanceProcAddr but only links vulkan-1.lib when
+// VULKAN_SDK is set. Link the Windows loader DLL directly so the installed
+// Vulkan runtime suffices (no SDK import library is needed).
+#[cfg(target_os = "windows")]
+#[cfg_attr(
+    target_arch = "x86",
+    link(
+        name = "vulkan-1",
+        kind = "raw-dylib",
+        import_name_type = "undecorated"
+    )
+)]
+#[cfg_attr(not(target_arch = "x86"), link(name = "vulkan-1", kind = "raw-dylib"))]
+unsafe extern "system" {
+    #[allow(dead_code)] // The symbol is called from pyronyx, not this crate.
+    fn vkGetInstanceProcAddr(instance: *mut std::ffi::c_void, name: *const c_char) -> *const ();
+}
+
 #[derive(Error, Debug)]
 pub enum ContextError {
     #[error("Vulkan error: {0}")]

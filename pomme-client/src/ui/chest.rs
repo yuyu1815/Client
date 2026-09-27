@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use azalea_inventory::ItemStack;
 
-use super::common::SLOT_STRIDE;
+use super::common::{SLOT_STRIDE, push_tooltip_lines};
 use super::container::{
     ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_backdrop, push_clipped_sprite,
     push_cursor_stack, push_panel, resolve_gesture,
@@ -33,6 +33,7 @@ pub fn build_chest(
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
     gs: f32,
+    advanced_tooltips: bool,
 ) -> ContainerResult {
     let rows_h = rows as f32 * SLOT_STRIDE;
     let panel = push_backdrop(elements, screen_w, screen_h, gs, 176.0, 114.0 + rows_h);
@@ -68,6 +69,9 @@ pub fn build_chest(
         cursor_item,
         drag,
         last_click,
+        screen_w,
+        screen_h,
+        advanced_tooltips,
     )
 }
 
@@ -84,6 +88,7 @@ pub fn build_shulker_box(
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
     gs: f32,
+    advanced_tooltips: bool,
 ) -> ContainerResult {
     let panel = push_panel(
         elements,
@@ -107,6 +112,9 @@ pub fn build_shulker_box(
         cursor_item,
         drag,
         last_click,
+        screen_w,
+        screen_h,
+        advanced_tooltips,
     )
 }
 
@@ -124,6 +132,9 @@ fn build_contents(
     cursor_item: &ItemStack,
     drag: &mut Option<DragState>,
     last_click: &mut Option<(u16, Instant)>,
+    screen_w: f32,
+    screen_h: f32,
+    advanced_tooltips: bool,
 ) -> ContainerResult {
     let mut ctx = SlotCtx::new(elements, panel, cursor, kind, slots, cursor_item, drag);
 
@@ -146,6 +157,16 @@ fn build_contents(
 
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
     push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
+    if cursor_item.is_empty()
+        && let Some(item) = hovered.and_then(|slot| slots.get(slot as usize))
+        && let Some(item) = item.as_present()
+        && let Ok(value) = serde_json::to_value(item)
+    {
+        let lines = crate::ui::chat::item_tooltip_lines(&value, None, advanced_tooltips);
+        if !lines.is_empty() {
+            push_tooltip_lines(elements, cursor, screen_w, screen_h, panel.scale, lines);
+        }
+    }
 
     let (ops, clicked_outside) = resolve_gesture(
         input,

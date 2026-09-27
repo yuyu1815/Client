@@ -16,6 +16,20 @@ const VERTEX_SIZE: u64 = size_of::<PackedVertex>() as u64;
 const INDEX_SIZE: u64 = size_of::<u32>() as u64;
 const BYTES_PER_BUCKET: u64 =
     BUCKET_VERTICES as u64 * VERTEX_SIZE + BUCKET_INDICES as u64 * INDEX_SIZE;
+
+fn staging_section_fits(vertex_bytes: usize, index_bytes: usize, half: usize) -> bool {
+    vertex_bytes <= half && index_bytes <= half
+}
+
+fn staging_needs_flush(
+    vertex_used: usize,
+    index_used: usize,
+    vertex_bytes: usize,
+    index_bytes: usize,
+    half: usize,
+) -> bool {
+    vertex_used + vertex_bytes > half || index_used + index_bytes > half
+}
 const MIN_BUCKETS: u32 = 128;
 const MAX_BUCKETS: u32 = 2048;
 const VRAM_BUDGET_FRACTION: f64 = 0.25;
@@ -935,29 +949,6 @@ impl ChunkBufferStore {
                 continue;
             }
 
-            if self.use_staging {
-                // Verts and indices share the staging buffer (two halves). A chunk
-                // too large for one half is skipped rather than overflowing the
-                // buffer. This is permanent, so it's not reported for retry.
-                let v_bytes: usize = upload_secs
-                    .iter()
-                    .map(|s| s.vertices.len() * VERTEX_SIZE as usize)
-                    .sum();
-                let i_bytes: usize = upload_secs
-                    .iter()
-                    .map(|s| (s.indices.len() + s.water_indices.len()) * INDEX_SIZE as usize)
-                    .sum();
-                if v_bytes > staging_half || i_bytes > staging_half {
-                    tracing::warn!(
-                        "Chunk {:?} too large for staging ({} v / {} i bytes), skipping",
-                        mesh.pos,
-                        v_bytes,
-                        i_bytes,
-                    );
-                    continue;
-                }
-            }
-
             let mut plans: Vec<Plan> = Vec::with_capacity(upload_secs.len());
             // (vtx_off, vtx_len, idx_off, idx_len) taken for this mesh, for
             // rollback if the pool runs out partway through a column.
@@ -1000,9 +991,21 @@ impl ChunkBufferStore {
                     ],
                 });
             }
-            if pool_full {
-                // The accepted sections were retired above; report them so the
-                // next rescan re-enqueues them.
+            if pool_full
+                || (self.use_staging
+                    && plans.iter().any(|p| {
+                        !staging_section_fits(
+                            p.verts.len() * VERTEX_SIZE as usize,
+                            (p.indices.len() + p.water_indices.len()) * INDEX_SIZE as usize,
+                            staging_half,
+                        )
+                    }))
+            {
+                // Accepted sections were retired above; report them so the next
+                // rescan re-enqueues them instead of permanently losing geometry.
+                if !pool_full {
+                    self.free_slices(&taken);
+                }
                 needs_remesh.push((mesh.pos, accepted.iter().copied().collect()));
                 continue;
             }
@@ -1012,27 +1015,22 @@ impl ChunkBufferStore {
             }
 
             if self.use_staging {
-                let mv: usize = plans
-                    .iter()
-                    .map(|p| p.verts.len() * VERTEX_SIZE as usize)
-                    .sum();
-                let mi: usize = plans
-                    .iter()
-                    .map(|p| (p.indices.len() + p.water_indices.len()) * INDEX_SIZE as usize)
-                    .sum();
-                // This mesh alone fits a half (checked above), so a flush always
-                // makes room: submit the pending transfer and reset the cursors.
-                if stg_v + mv > staging_half || stg_i + mi > staging_half {
-                    self.flush_transfer(device, queue, &copy_v, &copy_i);
-                    copy_v.clear();
-                    copy_i.clear();
-                    stg_v = 0;
-                    stg_i = 0;
-                }
-                let buf = self.staging_alloc.mapped_slice_mut().unwrap();
                 for p in &plans {
-                    write_verts(buf, stg_v, p.verts);
                     let vbytes = p.verts.len() * VERTEX_SIZE as usize;
+                    let opaque: &[u8] = bytemuck::cast_slice(p.indices);
+                    let water: &[u8] = bytemuck::cast_slice(p.water_indices);
+                    let ibytes = opaque.len() + water.len();
+                    // Flush between sections, not chunks: a tall column can exceed
+                    // staging capacity while each section still fits.
+                    if staging_needs_flush(stg_v, stg_i, vbytes, ibytes, staging_half) {
+                        self.flush_transfer(device, queue, &copy_v, &copy_i);
+                        copy_v.clear();
+                        copy_i.clear();
+                        stg_v = 0;
+                        stg_i = 0;
+                    }
+                    let buf = self.staging_alloc.mapped_slice_mut().unwrap();
+                    write_verts(buf, stg_v, p.verts);
                     copy_v.push(vk::BufferCopy {
                         src_offset: stg_v as u64,
                         dst_offset: p.vtx_off as u64 * VERTEX_SIZE,
@@ -1040,18 +1038,15 @@ impl ChunkBufferStore {
                     });
                     stg_v += vbytes;
 
-                    let opaque: &[u8] = bytemuck::cast_slice(p.indices);
-                    let water: &[u8] = bytemuck::cast_slice(p.water_indices);
                     let off = staging_half + stg_i;
                     buf[off..off + opaque.len()].copy_from_slice(opaque);
-                    buf[off + opaque.len()..off + opaque.len() + water.len()]
-                        .copy_from_slice(water);
+                    buf[off + opaque.len()..off + ibytes].copy_from_slice(water);
                     copy_i.push(vk::BufferCopy {
                         src_offset: off as u64,
                         dst_offset: p.idx_off as u64 * INDEX_SIZE,
-                        size: (opaque.len() + water.len()) as u64,
+                        size: ibytes as u64,
                     });
-                    stg_i += opaque.len() + water.len();
+                    stg_i += ibytes;
                 }
             } else {
                 {
@@ -1819,4 +1814,35 @@ fn desc_write(
     };
 
     (info, write)
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+
+    #[test]
+    fn tall_column_larger_than_staging_is_uploaded_in_section_batches() {
+        let half = 100;
+        let sections = [(60, 60), (60, 60), (60, 60)];
+        assert!(
+            sections
+                .iter()
+                .all(|&(v, i)| staging_section_fits(v, i, half))
+        );
+        assert!(sections.iter().map(|s| s.0).sum::<usize>() > half);
+        assert!(sections.iter().map(|s| s.1).sum::<usize>() > half);
+
+        let (mut vertex_used, mut index_used, mut flushes) = (0, 0, 0);
+        for (vertex_bytes, index_bytes) in sections {
+            if staging_needs_flush(vertex_used, index_used, vertex_bytes, index_bytes, half) {
+                flushes += 1;
+                vertex_used = 0;
+                index_used = 0;
+            }
+            vertex_used += vertex_bytes;
+            index_used += index_bytes;
+        }
+        assert_eq!(flushes, 2);
+        assert_eq!((vertex_used, index_used), (60, 60));
+    }
 }

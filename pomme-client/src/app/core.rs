@@ -294,6 +294,32 @@ fn load_network_chunk(
     Ok(())
 }
 
+fn writable_book_editor(
+    data: &azalea_inventory::ItemStackData,
+    slot: u32,
+) -> Option<crate::ui::book::BookEditState> {
+    use azalea_inventory::components::WritableBookContent;
+    use azalea_registry::builtin::ItemKind;
+    if data.kind != ItemKind::WritableBook {
+        return None;
+    }
+    let content = data
+        .component_patch
+        .get::<WritableBookContent>()
+        .cloned()
+        .or_else(|| {
+            azalea_inventory::default_components::get_default_component::<WritableBookContent>(
+                data.kind,
+            )
+        })?;
+    Some(crate::ui::book::BookEditState::new(
+        slot,
+        content.pages.into_iter().map(|page| page.raw).collect(),
+        String::new(),
+        String::new(),
+    ))
+}
+
 fn update_block_entity(
     block_entities: &mut HashMap<
         azalea_core::position::BlockPos,
@@ -2263,7 +2289,7 @@ impl AppCore {
                 }
                 NetworkEvent::OpenBook { hand } => {
                     use azalea_inventory::ItemStack;
-                    use azalea_inventory::components::{WritableBookContent, WrittenBookContent};
+                    use azalea_inventory::components::WrittenBookContent;
                     use azalea_protocol::packets::game::s_interact::InteractionHand;
                     use azalea_registry::builtin::ItemKind;
 
@@ -2305,28 +2331,12 @@ impl AppCore {
                                 }
                             }
                             ItemKind::WritableBook => {
-                                let pages = data
-                                    .component_patch
-                                    .get::<WritableBookContent>()
-                                    .cloned()
-                                    .or_else(|| {
-                                        azalea_inventory::default_components::get_default_component::<
-                                            WritableBookContent,
-                                        >(data.kind)
-                                    })
-                                    .map(|book| {
-                                        book.pages.into_iter().map(|page| page.raw).collect()
-                                    })
-                                    .unwrap_or_default();
                                 game.paused = false;
                                 game.book_view = None;
-                                game.book_edit = Some(crate::ui::book::BookEditState::new(
-                                    edit_slot,
-                                    pages,
-                                    String::new(),
-                                    String::new(),
-                                ));
-                                self.apply_cursor_grab(window, Some(game));
+                                game.book_edit = writable_book_editor(data, edit_slot);
+                                if game.book_edit.is_some() {
+                                    self.apply_cursor_grab(window, Some(game));
+                                }
                             }
                             _ => {}
                         }
@@ -3835,7 +3845,7 @@ impl AppCore {
         game.last_update_phases.visibility_ms = ms(t_vis);
 
         let t_rescan = std::time::Instant::now();
-        game.rescan_mesh_jobs(player_chunk, self.menu.chunk_detail);
+        game.rescan_mesh_jobs(renderer, player_chunk, self.menu.chunk_detail);
         game.last_update_phases.rescan_ms = ms(t_rescan);
 
         disconnect_reason
@@ -3910,6 +3920,7 @@ impl AppCore {
         &mut self,
         renderer: &mut Renderer,
         connection: &ConnectionHandle,
+        window: &Window,
         game: &mut GameState,
     ) {
         if game.death_screen_open {
@@ -4270,6 +4281,28 @@ impl AppCore {
                 biome_climate: &game.biome_climate,
             },
         );
+        if let Some(hand) = game.interaction.take_writable_book_open() {
+            use azalea_inventory::ItemStack;
+            use azalea_protocol::packets::game::s_interact::InteractionHand;
+            let (stack, slot) = match hand {
+                InteractionHand::MainHand => (
+                    game.player.inventory.slot(
+                        crate::player::inventory::HOTBAR_START
+                            + input.selected_slot().min(8) as usize,
+                    ),
+                    input.selected_slot().min(8) as u32,
+                ),
+                InteractionHand::OffHand => (game.player.inventory.slot(45), 40),
+            };
+            if let ItemStack::Present(data) = stack {
+                if let Some(editor) = writable_book_editor(data, slot) {
+                    game.paused = false;
+                    game.book_view = None;
+                    game.book_edit = Some(editor);
+                    self.apply_cursor_grab(window, Some(game));
+                }
+            }
+        }
         if !dirty.is_empty() {
             let min_y = game.chunk_store.min_y();
             let n = game.chunk_store.section_count();
@@ -4543,6 +4576,20 @@ mod tests {
     use crate::player::valid_player_name;
     use crate::resource_pack::ResourcePackManager;
     use crate::ui::chat::ChatMessageTag;
+
+    #[test]
+    fn writable_book_editor_accepts_default_content_without_open_packet() {
+        use azalea_inventory::ItemStackData;
+        use azalea_registry::builtin::ItemKind;
+
+        let book = ItemStackData::new(ItemKind::WritableBook, 1);
+        let editor = super::writable_book_editor(&book, 3).expect("default writable content");
+        assert_eq!(editor.slot, 3);
+        assert_eq!(editor.pages, [""]);
+        assert!(
+            super::writable_book_editor(&ItemStackData::new(ItemKind::WrittenBook, 1), 3).is_none()
+        );
+    }
 
     fn empty_chunk_section() -> Vec<u8> {
         use azalea_buf::AzBuf;
