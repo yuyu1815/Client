@@ -44,6 +44,13 @@ struct Vertex {
 const INITIAL_VERTEX_CAPACITY: usize = 16384;
 const VERTEX_SIZE: usize = size_of::<Vertex>();
 
+fn take_vertex_staging(staging: &mut Vec<Vertex>, hint: usize) -> Vec<Vertex> {
+    let mut vertices = std::mem::take(staging);
+    vertices.clear();
+    vertices.reserve(hint);
+    vertices
+}
+
 fn grown_vertex_capacity(current: usize, required: usize) -> usize {
     let mut capacity = current.max(1);
     while capacity < required {
@@ -251,6 +258,7 @@ pub struct MenuOverlayPipeline {
     vertex_buffers: Vec<vk::Buffer>,
     vertex_allocations: Vec<Option<Allocation>>,
     vertex_capacities: Vec<usize>,
+    vertices: Vec<Vertex>,
     /// Replaced buffers remain alive until the fence for their frame slot
     /// signals.
     retired_vertex_buffers: Vec<(usize, vk::Buffer, Allocation)>,
@@ -638,6 +646,7 @@ impl MenuOverlayPipeline {
             vertex_buffers,
             vertex_allocations,
             vertex_capacities: vec![INITIAL_VERTEX_CAPACITY; crate::renderer::MAX_FRAMES_IN_FLIGHT],
+            vertices: Vec::new(),
             retired_vertex_buffers: Vec::new(),
             atlas,
             favicon_image,
@@ -827,7 +836,7 @@ impl MenuOverlayPipeline {
             .unwrap()[..8]
             .copy_from_slice(bytemuck::cast_slice(&globals));
 
-        let mut vertices: Vec<Vertex> = Vec::with_capacity(elements.len() * 24);
+        let mut vertices = take_vertex_staging(&mut self.vertices, elements.len() * 24);
         // Moved out so the element loop can record into it while `self` is
         // borrowed for the glyph and atlas sources; it keeps its allocation.
         let mut drawn_objects = std::mem::take(&mut self.drawn_inline_objects);
@@ -1629,6 +1638,7 @@ impl MenuOverlayPipeline {
         );
 
         if draw_ops.is_empty() {
+            self.vertices = vertices;
             return vertex_base;
         }
 
@@ -1730,6 +1740,7 @@ impl MenuOverlayPipeline {
             cmd.draw(count as u32, 1, vertex_base + op.start, 0);
         }
         cmd.set_scissor(0, &[default_scissor]);
+        self.vertices = vertices;
         vertex_base + written as u32
     }
 
@@ -5320,6 +5331,32 @@ mod tests {
             [region.u0, region.v0, region.u1, region.v1],
             [0.2, 0.3, 0.6, 0.7]
         );
+    }
+
+    #[test]
+    fn vertex_staging_reuses_storage_without_leaking_previous_draw() {
+        let expected = [Vertex {
+            pos: [1.0, 2.0],
+            ..bytemuck::Zeroable::zeroed()
+        }];
+        let mut staging = Vec::new();
+        let mut previous_ptr = None;
+        for count in [1, 0, 1] {
+            let mut vertices = take_vertex_staging(&mut staging, 24);
+            assert!(vertices.is_empty());
+            let ptr = vertices.as_ptr();
+            if let Some(previous) = previous_ptr {
+                assert_eq!(ptr, previous);
+            }
+            previous_ptr = Some(ptr);
+            vertices.extend_from_slice(&expected[..count]);
+            assert_eq!(
+                bytemuck::cast_slice::<_, u8>(&vertices),
+                bytemuck::cast_slice::<_, u8>(&expected[..count])
+            );
+            staging = vertices;
+            assert_eq!(staging.as_ptr(), ptr);
+        }
     }
 
     #[test]
