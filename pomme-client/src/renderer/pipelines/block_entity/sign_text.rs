@@ -6,6 +6,11 @@ use super::BlockEntityRenderInfo;
 use crate::ui::font::{GLYPH_ATLAS_SIZE, GlyphMap};
 
 pub(super) const MAX_SIGN_VERTICES: usize = 65536;
+const SIGN_TEXT_RENDER_DISTANCE: f32 = 16.0;
+
+fn sign_text_in_range(center: glam::DVec3, eye: glam::DVec3) -> bool {
+    center.distance_squared(eye) <= f64::from(SIGN_TEXT_RENDER_DISTANCE).powi(2)
+}
 
 fn reset_sign_vertices(vertices: &mut Vec<SignVertex>) {
     vertices.clear();
@@ -90,6 +95,14 @@ pub(super) fn draw_sign_text(
 ) -> u32 {
     reset_sign_vertices(vertices);
     for info in items.iter().filter(|i| i.kind == BlockEntityKind::Sign) {
+        let center = glam::DVec3::new(
+            info.pos.x as f64 + 0.5,
+            info.pos.y as f64 + 0.5,
+            info.pos.z as f64 + 0.5,
+        );
+        if !sign_text_in_range(center, eye) {
+            continue;
+        }
         for (front, lines, dye, glowing) in [
             (
                 true,
@@ -133,13 +146,7 @@ pub(super) fn draw_sign_text(
             } else {
                 dark.map(|c| c * info.sign_light)
             };
-            let near = (glam::DVec3::new(
-                info.pos.x as f64 + 0.5,
-                info.pos.y as f64 + 0.5,
-                info.pos.z as f64 + 0.5,
-            ) - eye)
-                .length_squared()
-                < 256.0;
+            let near = center.distance_squared(eye) < 256.0;
             let outline = glowing && (black || near);
             for (row, line) in lines.iter().enumerate() {
                 // Vanilla SignBlockEntity: 90 px line width, 10 px height.
@@ -210,6 +217,14 @@ pub(super) fn draw_sign_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_text_range_includes_boundary_and_excludes_farther_centers() {
+        let eye = glam::DVec3::new(-32.5, 4.5, 7.5);
+        assert!(sign_text_in_range(eye + glam::DVec3::new(16.0, 0.0, 0.0), eye));
+        assert!(!sign_text_in_range(eye + glam::DVec3::new(16.001, 0.0, 0.0), eye));
+        assert!(sign_text_in_range(eye + glam::DVec3::new(0.0, -16.0, 0.0), eye));
+    }
 
     #[test]
     fn transformed_sign_glyph_matches_six_vertex_reference_for_both_faces() {
