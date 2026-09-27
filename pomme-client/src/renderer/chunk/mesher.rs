@@ -131,6 +131,55 @@ fn unpack_sprite_uv(x: u16) -> f32 {
     x as f32 / TERRAIN_UV_FIXED_SCALE
 }
 
+/// Phase 1 only: CPU conversion for a single normal chest; not called by the
+/// live mesher until chunk upload acceptance can retire its block-entity draw.
+/// `block_pos` is section-local, `yaw` uses the BE pipeline's degrees, and
+/// `region` comes from `uv_map.get_region("entity/chest/normal")` (sprite 0
+/// missing-tile fallback if the pack has no usable PNG). Indices use cutout
+/// for any chest sheet with alpha; the caller must never force opaque draws.
+#[allow(dead_code)]
+fn chest_quads(
+    model: &crate::renderer::entity_model::BakedEntityModel,
+    block_pos: [f32; 3],
+    yaw: f32,
+    open: bool,
+    region: AtlasRegion,
+    light: f32,
+) -> (Vec<PackedVertex>, Vec<u32>, bool) {
+    use azalea_registry::builtin::BlockEntityKind;
+    use glam::{Mat4, Vec3};
+
+    let anim = crate::renderer::pipelines::block_entity::lid_anim(
+        BlockEntityKind::Chest,
+        if open { 1.0 } else { 0.0 },
+    );
+    let poses = model.compute_part_transforms(&anim);
+    let center = Vec3::from_array(block_pos) + Vec3::new(0.5, 0.0, 0.5);
+    let base = Mat4::from_translation(center)
+        * Mat4::from_rotation_y((-yaw).to_radians())
+        * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5));
+    let mut vertices = Vec::with_capacity(model.vertices.len() / 6 * 4);
+    let mut indices = Vec::with_capacity(model.vertices.len());
+    for (part, &(start, count)) in model.part_ranges.iter().enumerate() {
+        let transform = base * poses[part];
+        for face in model.vertices[start as usize..(start + count) as usize].chunks_exact(6) {
+            let first = vertices.len() as u32;
+            for &corner in &[0, 1, 2, 5] {
+                let vertex = &face[corner];
+                let point = transform.transform_point3(Vec3::from_array(vertex.position));
+                vertices.push(pack_vertex(&TerrainVertex {
+                    position: point.to_array(),
+                    sprite_uv: vertex.tex_coords.map(|uv| uv as f32 / 65535.0),
+                    sprite: region.sprite,
+                    light_tint: pack_light_tint(light, PACKED_WHITE_SHIFTED),
+                }));
+            }
+            indices.extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
+        }
+    }
+    (vertices, indices, region.opaque)
+}
+
 fn section_aabb(verts: &[TerrainVertex]) -> ChunkAABB {
     let mut mn = [f32::MAX; 3];
     let mut mx = [f32::MIN; 3];
@@ -3165,6 +3214,179 @@ pub(crate) fn cube_face_geometry(dir: Direction) -> ([[f32; 3]; 4], [[f32; 2]; 4
         face_positions(dir, from, to),
         face_uvs(dir, from, to, None, None, false, 0, 0),
     )
+}
+
+#[cfg(test)]
+mod chest_quad_tests {
+    use super::*;
+
+    fn decoded_pos(v: &PackedVertex) -> [f32; 3] {
+        v.pos.map(|x| x as f32 / 65535.0 * POS_RANGE - POS_BIAS)
+    }
+
+    #[test]
+    fn closed_and_open_quads_match_single_chest_at_all_four_yaws() {
+        let model = crate::renderer::block_entity_model::bake_chest_models().remove(0);
+        let region = AtlasRegion {
+            sprite: 37,
+            pixel_rect: [80, 96, 64, 64],
+            opaque: false,
+            ..AtlasUVMap::test_empty().missing_region()
+        };
+        assert_eq!(
+            model
+                .parts
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["bottom", "lid", "lock"]
+        );
+        let mut closed: Option<Vec<[f32; 3]>> = None;
+        for open in [false, true] {
+            for yaw in [0.0, 90.0, 180.0, 270.0] {
+                let (verts, indices, opaque) =
+                    chest_quads(&model, [2.0, 3.0, 4.0], yaw, open, region, 0.4);
+                assert_eq!(verts.len(), 72); // 3 six-face cubes, four corners/face
+                assert_eq!(indices.len(), 108);
+                assert!(!opaque); // alpha sheet stays in the cutout pass
+                // Vanilla single bottom's -Z face: (15, 0, 1) pixels and
+                // (28, 33) texels of the 64x64 normal sheet.
+                if yaw == 0.0 {
+                    let p = decoded_pos(&verts[0]);
+                    for (actual, expected) in
+                        p.into_iter()
+                            .zip([2.0 + 15.0 / 16.0, 3.0, 4.0 + 1.0 / 16.0])
+                    {
+                        assert!((actual - expected).abs() < 0.0002);
+                    }
+                    for (actual, expected) in verts[0]
+                        .uv
+                        .into_iter()
+                        .map(unpack_sprite_uv)
+                        .zip([28.0 / 64.0, 33.0 / 64.0])
+                    {
+                        assert!((actual - expected).abs() < 0.5 / TERRAIN_UV_FIXED_SCALE);
+                    }
+                    let top = verts
+                        .iter()
+                        .map(|v| decoded_pos(v)[1])
+                        .fold(0.0f32, f32::max);
+                    let expected = 3.0 + if open { 24.0 / 16.0 } else { 14.0 / 16.0 };
+                    assert!((top - expected).abs() < 0.0002, "open={open}: {top}");
+                }
+                for (i, face) in model.vertices.chunks_exact(6).enumerate() {
+                    assert_eq!(
+                        &indices[i * 6..i * 6 + 6],
+                        &[
+                            i as u32 * 4,
+                            i as u32 * 4 + 1,
+                            i as u32 * 4 + 2,
+                            i as u32 * 4,
+                            i as u32 * 4 + 2,
+                            i as u32 * 4 + 3
+                        ]
+                    );
+                    for (corner, &src) in [0, 1, 2, 5].iter().enumerate() {
+                        let v = &verts[i * 4 + corner];
+                        assert_eq!(v.sprite, 37);
+                        assert_eq!(
+                            v.light_tint,
+                            pack_light_tint(0.4, PACKED_WHITE_SHIFTED).to_le_bytes()
+                        );
+                        for axis in 0..2 {
+                            let uv = unpack_sprite_uv(v.uv[axis]);
+                            let expected = face[src].tex_coords[axis] as f32 / 65535.0;
+                            assert!(
+                                (uv - expected).abs() <= 0.5 / TERRAIN_UV_FIXED_SCALE + 0.00001,
+                                "face={i} corner={corner} uv={uv} expected={expected}"
+                            );
+                        }
+                    }
+                }
+                // Compare every quad corner with the existing BE baker's independent
+                // part transforms, rotating about the block center by -yaw.
+                let anim = crate::renderer::pipelines::block_entity::lid_anim(
+                    azalea_registry::builtin::BlockEntityKind::Chest,
+                    if open { 1.0 } else { 0.0 },
+                );
+                let poses = model.compute_part_transforms(&anim);
+                let mut face_idx = 0;
+                for (part, &(start, count)) in model.part_ranges.iter().enumerate() {
+                    for face in
+                        model.vertices[start as usize..(start + count) as usize].chunks_exact(6)
+                    {
+                        for (corner, src) in [0, 1, 2, 5].into_iter().enumerate() {
+                            let p = poses[part]
+                                .transform_point3(glam::Vec3::from_array(face[src].position));
+                            let (x, z) = match yaw as u32 {
+                                0 => (p.x, p.z),
+                                90 => (1.0 - p.z, p.x),
+                                180 => (1.0 - p.x, 1.0 - p.z),
+                                _ => (p.z, 1.0 - p.x),
+                            };
+                            let got = decoded_pos(&verts[face_idx * 4 + corner]);
+                            for (actual, expected) in
+                                got.into_iter().zip([x + 2.0, p.y + 3.0, z + 4.0])
+                            {
+                                assert!(
+                                    (actual - expected).abs() < 0.0002,
+                                    "open={open} yaw={yaw} part={part} face={face_idx}"
+                                );
+                            }
+                        }
+                        face_idx += 1;
+                    }
+                }
+                if yaw == 0.0 {
+                    if open {
+                        let old = closed.as_ref().unwrap();
+                        assert_eq!(
+                            &verts[..24].iter().map(decoded_pos).collect::<Vec<_>>(),
+                            old
+                        );
+                        assert_ne!(verts[24].pos, verts[24 + 4].pos); // open lid is not flat
+                        assert!(
+                            verts
+                                .iter()
+                                .map(|v| decoded_pos(v)[1])
+                                .fold(0.0f32, f32::max)
+                                > 4.0
+                        ); // lock swings above block
+                    } else {
+                        closed = Some(verts[..24].iter().map(decoded_pos).collect::<Vec<_>>());
+                        assert!(
+                            verts
+                                .iter()
+                                .map(|v| decoded_pos(v)[1])
+                                .fold(0.0f32, f32::max)
+                                < 4.0
+                        );
+                    }
+                }
+            }
+        }
+        let (_, _, opaque) = chest_quads(
+            &model,
+            [0.0; 3],
+            0.0,
+            false,
+            AtlasRegion {
+                opaque: true,
+                ..region
+            },
+            1.0,
+        );
+        assert!(opaque);
+        assert_eq!(
+            crate::renderer::chunk::atlas::atlas_asset_path("entity/chest/normal"),
+            "minecraft/textures/entity/chest/normal.png"
+        );
+        let missing = AtlasUVMap::test_empty().get_region("entity/chest/normal");
+        let (fallback_verts, _, fallback_opaque) =
+            chest_quads(&model, [0.0; 3], 0.0, false, missing, 1.0);
+        assert!(fallback_verts.iter().all(|v| v.sprite == 0));
+        assert!(!fallback_opaque);
+    }
 }
 
 #[cfg(test)]
