@@ -6,6 +6,10 @@ use super::BlockEntityRenderInfo;
 use crate::ui::font::{GLYPH_ATLAS_SIZE, GlyphMap};
 
 pub(super) const MAX_SIGN_VERTICES: usize = 65536;
+
+fn reset_sign_vertices(vertices: &mut Vec<SignVertex>) {
+    vertices.clear();
+}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct SignVertex {
@@ -82,8 +86,9 @@ pub(super) fn draw_sign_text(
     buffer: vk::Buffer,
     allocation: &mut Allocation,
     text_sets_ready: &mut bool,
+    vertices: &mut Vec<SignVertex>,
 ) -> u32 {
-    let mut vertices = Vec::new();
+    reset_sign_vertices(vertices);
     for info in items.iter().filter(|i| i.kind == BlockEntityKind::Sign) {
         for (front, lines, dye, glowing) in [
             (
@@ -159,7 +164,7 @@ pub(super) fn draw_sign_text(
                             for dx in -1..=1 {
                                 if dx != 0 || dy != 0 {
                                     push_sign_glyph(
-                                        &mut vertices,
+                                        vertices,
                                         matrix,
                                         gi,
                                         *x - width / 2.0 + dx as f32 * 0.5,
@@ -172,7 +177,7 @@ pub(super) fn draw_sign_text(
                     }
                 }
                 for (x, gi) in &chars {
-                    push_sign_glyph(&mut vertices, matrix, gi, *x - width / 2.0, y, color);
+                    push_sign_glyph(vertices, matrix, gi, *x - width / 2.0, y, color);
                 }
             }
         }
@@ -239,6 +244,43 @@ mod tests {
             push_sign_glyph(&mut actual, matrix, &glyph, 10.0, 20.0, color);
             assert_eq!(actual, reference);
         }
+    }
+
+    #[test]
+    fn reusable_sign_vertices_preserve_order_and_limit() {
+        let glyph = crate::ui::font::GlyphInfo {
+            atlas_layer: 2,
+            colored: true,
+            atlas_x: 8,
+            atlas_y: 16,
+            pixel_w: 4,
+            pixel_h: 7,
+            draw_w: 4.0,
+            draw_h: 7.0,
+            left: 1.0,
+            top: 2.0,
+            advance: 5.0,
+            bold_offset: 1.0,
+            shadow_offset: 1.0,
+        };
+        let matrix = glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0));
+        let mut vertices = Vec::new();
+        for x in [10.0, 20.0] {
+            reset_sign_vertices(&mut vertices);
+            push_sign_glyph(&mut vertices, matrix, &glyph, x, 30.0, [1.0, 0.5, 0.0]);
+            let first = vertices.clone();
+            reset_sign_vertices(&mut vertices);
+            push_sign_glyph(&mut vertices, matrix, &glyph, x, 30.0, [1.0, 0.5, 0.0]);
+            assert_eq!(vertices, first);
+            assert_eq!(vertices.len(), 6);
+        }
+
+        reset_sign_vertices(&mut vertices);
+        for _ in 0..(MAX_SIGN_VERTICES / 6 + 1) {
+            push_sign_glyph(&mut vertices, matrix, &glyph, 0.0, 0.0, [1.0; 3]);
+        }
+        assert_eq!(vertices.len(), MAX_SIGN_VERTICES - MAX_SIGN_VERTICES % 6);
+        assert_eq!(vertices.len(), 65532);
     }
 
     #[test]

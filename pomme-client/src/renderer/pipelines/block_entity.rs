@@ -384,6 +384,7 @@ pub struct BlockEntityPipeline {
     text_sets: Vec<vk::DescriptorSet>,
     text_buffers: Vec<vk::Buffer>,
     text_allocations: Vec<Allocation>,
+    sign_vertices: Vec<SignVertex>,
 }
 
 impl BlockEntityPipeline {
@@ -655,6 +656,7 @@ impl BlockEntityPipeline {
             text_sets,
             text_buffers,
             text_allocations,
+            sign_vertices: Vec::new(),
             pipeline,
             player_head_pipeline,
             player_head_pool,
@@ -935,6 +937,7 @@ impl BlockEntityPipeline {
                 self.text_buffers[frame],
                 &mut self.text_allocations[frame],
                 &mut self.text_sets_ready[frame],
+                &mut self.sign_vertices,
             );
         }
         let sign_ms = sign_start.map_or(0.0, |start| start.elapsed().as_secs_f32() * 1000.0);
