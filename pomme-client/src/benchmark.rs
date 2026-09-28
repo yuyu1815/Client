@@ -65,6 +65,14 @@ pub struct FrameSample {
     #[serde(default)]
     pub light_update_ms: f32,
     #[serde(default)]
+    pub light_engine_ms: f32,
+    #[serde(default)]
+    pub light_mesh_ms: f32,
+    #[serde(default)]
+    pub light_tasks_processed: usize,
+    #[serde(default)]
+    pub light_tasks_pending: usize,
+    #[serde(default)]
     pub ui_extract_ms: f32,
     #[serde(default)]
     pub scene_extract_ms: f32,
@@ -144,6 +152,14 @@ pub struct SpikeSample {
     pub cpu_update_ms: f32,
     #[serde(default)]
     pub light_update_ms: f32,
+    #[serde(default)]
+    pub light_engine_ms: f32,
+    #[serde(default)]
+    pub light_mesh_ms: f32,
+    #[serde(default)]
+    pub light_tasks_processed: usize,
+    #[serde(default)]
+    pub light_tasks_pending: usize,
     #[serde(default)]
     pub ui_extract_ms: f32,
     #[serde(default)]
@@ -277,6 +293,10 @@ impl Benchmark {
             hud_draw_ms: timings.hud_draw_ms,
             cpu_update_ms,
             light_update_ms: phases.light_update_ms,
+            light_engine_ms: phases.light_engine_ms,
+            light_mesh_ms: phases.light_mesh_ms,
+            light_tasks_processed: phases.light_tasks_processed,
+            light_tasks_pending: phases.light_tasks_pending,
             ui_extract_ms: phases.ui_extract_ms,
             scene_extract_ms: phases.scene_extract_ms,
             fixed_tick_ms: phases.fixed_tick_ms,
@@ -321,6 +341,10 @@ impl Benchmark {
                 hud_draw_ms: sample.hud_draw_ms,
                 cpu_update_ms: sample.cpu_update_ms,
                 light_update_ms: sample.light_update_ms,
+                light_engine_ms: sample.light_engine_ms,
+                light_mesh_ms: sample.light_mesh_ms,
+                light_tasks_processed: sample.light_tasks_processed,
+                light_tasks_pending: sample.light_tasks_pending,
                 ui_extract_ms: sample.ui_extract_ms,
                 scene_extract_ms: sample.scene_extract_ms,
                 fixed_tick_ms: sample.fixed_tick_ms,
@@ -494,6 +518,10 @@ mod tests {
         assert_eq!(legacy.hud_draw_ms, 0.0);
         assert_eq!(legacy.cpu_update_ms, 0.0);
         assert_eq!(legacy.light_update_ms, 0.0);
+        assert_eq!(legacy.light_engine_ms, 0.0);
+        assert_eq!(legacy.light_mesh_ms, 0.0);
+        assert_eq!(legacy.light_tasks_processed, 0);
+        assert_eq!(legacy.light_tasks_pending, 0);
         assert_eq!(legacy.ui_extract_ms, 0.0);
         assert_eq!(legacy.scene_extract_ms, 0.0);
         assert_eq!(legacy.net_decode_ms, 0.0);
@@ -513,6 +541,10 @@ mod tests {
         assert_eq!(legacy_spike.fixed_tick_ms, 0.0);
         assert_eq!(legacy_spike.fixed_tick_count, 0);
         assert_eq!(legacy_spike.light_update_ms, 0.0);
+        assert_eq!(legacy_spike.light_engine_ms, 0.0);
+        assert_eq!(legacy_spike.light_mesh_ms, 0.0);
+        assert_eq!(legacy_spike.light_tasks_processed, 0);
+        assert_eq!(legacy_spike.light_tasks_pending, 0);
         assert_eq!(legacy_spike.ui_extract_ms, 0.0);
         assert_eq!(legacy_spike.scene_extract_ms, 0.0);
         assert_eq!(legacy_spike.be_extract_ms, 0.0);
@@ -562,6 +594,10 @@ mod tests {
         };
         let phases = UpdatePhases {
             light_update_ms: 3.0,
+            light_engine_ms: 1.25,
+            light_mesh_ms: 1.75,
+            light_tasks_processed: 4,
+            light_tasks_pending: 6,
             ui_extract_ms: 4.0,
             scene_extract_ms: 5.0,
             fixed_tick_ms: 1.2,
@@ -613,6 +649,13 @@ mod tests {
         };
         assert_eq!(sample.cpu_update_ms, 30.0);
         assert_eq!(sample.light_update_ms, 3.0);
+        assert_eq!(sample.light_engine_ms, 1.25);
+        assert_eq!(sample.light_mesh_ms, 1.75);
+        assert_eq!(sample.light_tasks_processed, 4);
+        assert_eq!(sample.light_tasks_pending, 6);
+        assert!(sample.light_engine_ms >= 0.0);
+        assert!(sample.light_mesh_ms >= 0.0);
+        assert!(sample.light_tasks_processed <= 10);
         assert_eq!(sample.ui_extract_ms, 4.0);
         assert_eq!(sample.scene_extract_ms, 5.0);
         assert!(sample.light_update_ms >= 0.0);
@@ -645,6 +688,10 @@ mod tests {
         assert_eq!(sample.upload_ms, 5.0);
         assert_eq!(sample.unaccounted_ms, 30.0);
         assert_eq!(bench.spikes[0].light_update_ms, 3.0);
+        assert_eq!(bench.spikes[0].light_engine_ms, 1.25);
+        assert_eq!(bench.spikes[0].light_mesh_ms, 1.75);
+        assert_eq!(bench.spikes[0].light_tasks_processed, 4);
+        assert_eq!(bench.spikes[0].light_tasks_pending, 6);
         assert_eq!(bench.spikes[0].ui_extract_ms, 4.0);
         assert_eq!(bench.spikes[0].scene_extract_ms, 5.0);
         assert_eq!(bench.spikes[0].be_model_ms, 1.25);
@@ -668,6 +715,10 @@ mod tests {
         let json = serde_json::to_value(sample).unwrap();
         assert_eq!(json["unaccounted_ms"], 30.0);
         assert_eq!(json["light_update_ms"], 3.0);
+        assert_eq!(json["light_engine_ms"], 1.25);
+        assert_eq!(json["light_mesh_ms"], 1.75);
+        assert_eq!(json["light_tasks_processed"], 4);
+        assert_eq!(json["light_tasks_pending"], 6);
         assert_eq!(json["ui_extract_ms"], 4.0);
         assert_eq!(json["scene_extract_ms"], 5.0);
         assert_eq!(json["net_decode_ms"], 1.0);
@@ -743,6 +794,12 @@ pub struct UpdatePhases {
     pub update_ms: f32,
     pub cpu_update_ms: f32,
     pub light_update_ms: f32,
+    /// Overlaps `light_update_ms`; time in `poll_and_run` only.
+    pub light_engine_ms: f32,
+    /// Overlaps `light_update_ms`; time in dirty remesh enqueue only.
+    pub light_mesh_ms: f32,
+    pub light_tasks_processed: usize,
+    pub light_tasks_pending: usize,
     pub ui_extract_ms: f32,
     pub scene_extract_ms: f32,
     pub fixed_tick_ms: f32,

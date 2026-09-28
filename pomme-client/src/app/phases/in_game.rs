@@ -1208,38 +1208,61 @@ impl GameState {
     /// content-gen path like chunk loads (the visibility rescan enqueues
     /// them tier-gated), individual lit sections remesh on the priority lane.
     pub fn update_light(&mut self, chunk_detail: u32) {
+        let measuring = self.benchmark.is_some();
+        let pending_before = measuring.then(|| self.light_engine.pending_light_tasks());
         let mut dirty = crate::world::light::LightDirty::default();
+        let engine_start = measuring.then(std::time::Instant::now);
         self.light_engine
             .poll_and_run(&mut self.chunk_store, &mut dirty);
-        if dirty.columns.is_empty() && dirty.sections.is_empty() {
-            return;
-        }
-        let bumped = self.bump_loaded_mesh_neighborhoods(
-            dirty
-                .columns
-                .iter()
-                .copied()
-                .map(|(x, z)| ChunkPos::new(x, z)),
-        );
-        let player_chunk = self.player_chunk();
-        let min_section_y = self.chunk_store.min_y() >> 4;
-        let section_count = self.chunk_store.section_count();
-        for key in &dirty.sections {
-            let si = key.y - min_section_y;
-            let col = ChunkPos::new(key.x, key.z);
-            // Padding/out-of-range sections have no mesh; columns already
-            // bumped above remesh wholesale anyway.
-            if si < 0 || si >= section_count || bumped.contains(&col) {
-                continue;
-            }
-            if self.chunk_store.get_chunk(&col).is_none() {
-                continue;
-            }
-            self.enqueue_section_edit(
-                col,
-                si,
-                crate::app::core::chunk_lod(col, player_chunk, chunk_detail),
+        self.last_update_phases.light_engine_ms = engine_start
+            .map(|start| start.elapsed().as_secs_f32() * 1000.0)
+            .unwrap_or_default();
+
+        if !dirty.columns.is_empty() || !dirty.sections.is_empty() {
+            let mesh_start = measuring.then(std::time::Instant::now);
+            let bumped = self.bump_loaded_mesh_neighborhoods(
+                dirty
+                    .columns
+                    .iter()
+                    .copied()
+                    .map(|(x, z)| ChunkPos::new(x, z)),
             );
+            let player_chunk = self.player_chunk();
+            let min_section_y = self.chunk_store.min_y() >> 4;
+            let section_count = self.chunk_store.section_count();
+            for key in &dirty.sections {
+                let si = key.y - min_section_y;
+                let col = ChunkPos::new(key.x, key.z);
+                // Padding/out-of-range sections have no mesh; columns already
+                // bumped above remesh wholesale anyway.
+                if si < 0 || si >= section_count || bumped.contains(&col) {
+                    continue;
+                }
+                if self.chunk_store.get_chunk(&col).is_none() {
+                    continue;
+                }
+                self.enqueue_section_edit(
+                    col,
+                    si,
+                    crate::app::core::chunk_lod(col, player_chunk, chunk_detail),
+                );
+            }
+            self.last_update_phases.light_mesh_ms = mesh_start
+                .map(|start| start.elapsed().as_secs_f32() * 1000.0)
+                .unwrap_or_default();
+        } else {
+            self.last_update_phases.light_mesh_ms = 0.0;
+        }
+
+        // `update_light` is synchronous and neither poll-and-run nor remesh enqueue
+        // inserts light tasks, so the pending-count delta is the processed count.
+        if let Some(before) = pending_before {
+            let after = self.light_engine.pending_light_tasks();
+            self.last_update_phases.light_tasks_processed = before.saturating_sub(after);
+            self.last_update_phases.light_tasks_pending = after;
+        } else {
+            self.last_update_phases.light_tasks_processed = 0;
+            self.last_update_phases.light_tasks_pending = 0;
         }
     }
 
