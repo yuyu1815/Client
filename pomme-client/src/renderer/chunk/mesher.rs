@@ -815,6 +815,31 @@ impl BufferPool {
     }
 }
 
+#[cfg(test)]
+mod buffer_pool_tests {
+    use super::BufferPool;
+
+    #[test]
+    fn index_buffers_recycle_cleared_and_independently() {
+        let pool = BufferPool::new(2);
+        let mut solid = pool.take_indices();
+        let mut water = pool.take_indices();
+        solid.extend([1, 2, 3]);
+        water.extend([4, 5, 6]);
+        assert_ne!(solid.as_ptr(), water.as_ptr());
+        let capacity = solid.capacity();
+        pool.recycle_indices(solid);
+        pool.recycle_indices(water);
+
+        let reused_solid = pool.take_indices();
+        let reused_water = pool.take_indices();
+        assert!(reused_solid.is_empty());
+        assert!(reused_water.is_empty());
+        assert_eq!(reused_solid.capacity(), capacity);
+        assert_ne!(reused_solid.as_ptr(), reused_water.as_ptr());
+    }
+}
+
 pub struct MeshDispatcher {
     result_rx: crossbeam_channel::Receiver<ChunkMeshData>,
     result_tx: crossbeam_channel::Sender<ChunkMeshData>,
@@ -903,10 +928,7 @@ impl MeshDispatcher {
     /// Return an uploaded (or stale) mesh's section buffers to the pool for
     /// reuse.
     pub fn recycle(&self, mesh: ChunkMeshData) {
-        for sec in mesh.sections {
-            self.pool.recycle_vertices(sec.vertices);
-            self.pool.recycle_indices(sec.indices);
-        }
+        recycle_mesh_buffers(&self.pool, mesh);
     }
 
     pub fn set_biome_climate(&mut self, climate: Arc<HashMap<u32, BiomeClimate>>) {
@@ -1111,7 +1133,18 @@ impl PendingJob {
                 meshed_at,
             });
         }
-        let _ = self.tx.send(mesh);
+        if let Err(err) = self.tx.send(mesh) {
+            // The result receiver may disappear during cancellation/shutdown.
+            recycle_mesh_buffers(&self.pool, err.0);
+        }
+    }
+}
+
+fn recycle_mesh_buffers(pool: &BufferPool, mesh: ChunkMeshData) {
+    for sec in mesh.sections {
+        pool.recycle_vertices(sec.vertices);
+        pool.recycle_indices(sec.indices);
+        pool.recycle_indices(sec.water_indices);
     }
 }
 
@@ -1834,6 +1867,7 @@ fn mesh_chunk_snapshot(
         let sink = &mut sinks[si as usize];
         sink.vertices = pool.take_scratch();
         sink.solid = pool.take_indices();
+        sink.water = pool.take_indices();
     }
 
     // The type map is a state->id map, so it only needs the meshed span (+1-block
@@ -2189,6 +2223,7 @@ fn mesh_chunk_snapshot(
         if sink.solid.is_empty() && sink.cutout.is_empty() && sink.water.is_empty() {
             pool.recycle_scratch(sink.vertices);
             pool.recycle_indices(sink.solid);
+            pool.recycle_indices(sink.water);
             continue;
         }
         let solid_index_count = sink.solid.len() as u32;
