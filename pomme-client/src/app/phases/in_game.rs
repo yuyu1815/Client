@@ -2752,7 +2752,11 @@ pub fn update_game(
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.
+    let light_update_start = game.benchmark.is_some().then(std::time::Instant::now);
     game.update_light(core.menu.chunk_detail);
+    game.last_update_phases.light_update_ms = light_update_start
+        .map(|start| start.elapsed().as_secs_f32() * 1000.0)
+        .unwrap_or_default();
 
     // F1 (vanilla keyToggleGui); only while no screen or chat is open.
     if core.input.key_just_pressed(winit::keyboard::KeyCode::F1) && game.input_live() {
@@ -2938,6 +2942,7 @@ pub fn update_game(
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
     let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
+    let ui_extract_start = game.benchmark.is_some().then(std::time::Instant::now);
 
     let mut elements: Vec<MenuElement> = Vec::new();
 
@@ -4146,11 +4151,16 @@ pub fn update_game(
         (pos, stage, state)
     });
 
+    game.last_update_phases.ui_extract_ms = ui_extract_start
+        .map(|start| start.elapsed().as_secs_f32() * 1000.0)
+        .unwrap_or_default();
+
     let probe_peer_filter = core
         .probe
         .as_ref()
         .and_then(|probe| probe.peer_filter())
         .cloned();
+    let scene_extract_start = game.benchmark.is_some().then(std::time::Instant::now);
     let mut entity_renders: Vec<EntityRenderInfo> = if benchmark_running {
         Vec::new()
     } else {
@@ -4409,6 +4419,10 @@ pub fn update_game(
         )
     };
 
+    let scene_extract_first_ms = scene_extract_start
+        .map(|start| start.elapsed().as_secs_f32() * 1000.0)
+        .unwrap_or_default();
+
     let be_extract_start = game.benchmark.is_some().then(std::time::Instant::now);
     let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = if benchmark_running {
         Vec::new()
@@ -4522,6 +4536,7 @@ pub fn update_game(
         .map(|start| start.elapsed().as_secs_f32() * 1000.0)
         .unwrap_or_default();
 
+    let scene_extract_second_start = game.benchmark.is_some().then(std::time::Instant::now);
     let weather_columns = if benchmark_running {
         Vec::new()
     } else {
@@ -4570,6 +4585,11 @@ pub fn update_game(
             held_item(game.player.inventory.offhand()),
         )
     };
+    game.last_update_phases.scene_extract_ms = scene_extract_first_ms
+        + scene_extract_second_start
+            .map(|start| start.elapsed().as_secs_f32() * 1000.0)
+            .unwrap_or_default();
+
     // Last element pushed: vanilla draws the saving indicator on its own
     // stratum above screens, with the GUI hidden (F1) included.
     if !benchmark_running && core.menu.show_autosave_indicator {

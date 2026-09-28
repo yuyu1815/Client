@@ -63,6 +63,12 @@ pub struct FrameSample {
     #[serde(default)]
     pub cpu_update_ms: f32,
     #[serde(default)]
+    pub light_update_ms: f32,
+    #[serde(default)]
+    pub ui_extract_ms: f32,
+    #[serde(default)]
+    pub scene_extract_ms: f32,
+    #[serde(default)]
     pub fixed_tick_ms: f32,
     #[serde(default)]
     pub fixed_tick_count: u32,
@@ -136,6 +142,12 @@ pub struct SpikeSample {
     pub hud_draw_ms: f32,
     #[serde(default)]
     pub cpu_update_ms: f32,
+    #[serde(default)]
+    pub light_update_ms: f32,
+    #[serde(default)]
+    pub ui_extract_ms: f32,
+    #[serde(default)]
+    pub scene_extract_ms: f32,
     #[serde(default)]
     pub fixed_tick_ms: f32,
     #[serde(default)]
@@ -264,6 +276,9 @@ impl Benchmark {
             environment_draw_ms: timings.environment_draw_ms,
             hud_draw_ms: timings.hud_draw_ms,
             cpu_update_ms,
+            light_update_ms: phases.light_update_ms,
+            ui_extract_ms: phases.ui_extract_ms,
+            scene_extract_ms: phases.scene_extract_ms,
             fixed_tick_ms: phases.fixed_tick_ms,
             fixed_tick_count: phases.fixed_tick_count,
             be_extract_ms: phases.be_extract_ms,
@@ -305,6 +320,9 @@ impl Benchmark {
                 environment_draw_ms: sample.environment_draw_ms,
                 hud_draw_ms: sample.hud_draw_ms,
                 cpu_update_ms: sample.cpu_update_ms,
+                light_update_ms: sample.light_update_ms,
+                ui_extract_ms: sample.ui_extract_ms,
+                scene_extract_ms: sample.scene_extract_ms,
                 fixed_tick_ms: sample.fixed_tick_ms,
                 fixed_tick_count: sample.fixed_tick_count,
                 be_extract_ms: sample.be_extract_ms,
@@ -475,6 +493,9 @@ mod tests {
         assert_eq!(legacy.environment_draw_ms, 0.0);
         assert_eq!(legacy.hud_draw_ms, 0.0);
         assert_eq!(legacy.cpu_update_ms, 0.0);
+        assert_eq!(legacy.light_update_ms, 0.0);
+        assert_eq!(legacy.ui_extract_ms, 0.0);
+        assert_eq!(legacy.scene_extract_ms, 0.0);
         assert_eq!(legacy.net_decode_ms, 0.0);
         assert_eq!(legacy.visibility_ms, 0.0);
         assert_eq!(legacy.rescan_ms, 0.0);
@@ -491,6 +512,9 @@ mod tests {
         assert_eq!(legacy_spike.present_ms, 0.0);
         assert_eq!(legacy_spike.fixed_tick_ms, 0.0);
         assert_eq!(legacy_spike.fixed_tick_count, 0);
+        assert_eq!(legacy_spike.light_update_ms, 0.0);
+        assert_eq!(legacy_spike.ui_extract_ms, 0.0);
+        assert_eq!(legacy_spike.scene_extract_ms, 0.0);
         assert_eq!(legacy_spike.be_extract_ms, 0.0);
         assert_eq!(legacy_spike.be_model_ms, 0.0);
         assert_eq!(legacy_spike.be_sign_text_ms, 0.0);
@@ -537,6 +561,9 @@ mod tests {
             ..Default::default()
         };
         let phases = UpdatePhases {
+            light_update_ms: 3.0,
+            ui_extract_ms: 4.0,
+            scene_extract_ms: 5.0,
             fixed_tick_ms: 1.2,
             fixed_tick_count: 2,
             be_extract_ms: 1.3,
@@ -585,6 +612,12 @@ mod tests {
                 + counts.other
         };
         assert_eq!(sample.cpu_update_ms, 30.0);
+        assert_eq!(sample.light_update_ms, 3.0);
+        assert_eq!(sample.ui_extract_ms, 4.0);
+        assert_eq!(sample.scene_extract_ms, 5.0);
+        assert!(sample.light_update_ms >= 0.0);
+        assert!(sample.ui_extract_ms >= 0.0);
+        assert!(sample.scene_extract_ms >= 0.0);
         assert_eq!(sample.fixed_tick_ms, 1.2);
         assert_eq!(sample.fixed_tick_count, 2);
         assert_eq!(sample.be_extract_ms, 1.3);
@@ -611,6 +644,9 @@ mod tests {
         assert_eq!(sample.mesh_drain_ms, 4.0);
         assert_eq!(sample.upload_ms, 5.0);
         assert_eq!(sample.unaccounted_ms, 30.0);
+        assert_eq!(bench.spikes[0].light_update_ms, 3.0);
+        assert_eq!(bench.spikes[0].ui_extract_ms, 4.0);
+        assert_eq!(bench.spikes[0].scene_extract_ms, 5.0);
         assert_eq!(bench.spikes[0].be_model_ms, 1.25);
         assert_eq!(bench.spikes[0].be_sign_text_ms, 0.75);
         assert_eq!(bench.spikes[0].be_model_draws, 4);
@@ -631,6 +667,9 @@ mod tests {
         assert_eq!(bench.spikes[0].unaccounted_ms, 30.0);
         let json = serde_json::to_value(sample).unwrap();
         assert_eq!(json["unaccounted_ms"], 30.0);
+        assert_eq!(json["light_update_ms"], 3.0);
+        assert_eq!(json["ui_extract_ms"], 4.0);
+        assert_eq!(json["scene_extract_ms"], 5.0);
         assert_eq!(json["net_decode_ms"], 1.0);
         assert_eq!(json["visibility_ms"], 2.0);
         assert_eq!(json["rescan_ms"], 3.0);
@@ -703,6 +742,9 @@ fn radius_from_chunk_count(count: u32) -> u32 {
 pub struct UpdatePhases {
     pub update_ms: f32,
     pub cpu_update_ms: f32,
+    pub light_update_ms: f32,
+    pub ui_extract_ms: f32,
+    pub scene_extract_ms: f32,
     pub fixed_tick_ms: f32,
     pub fixed_tick_count: u32,
     pub be_extract_ms: f32,
