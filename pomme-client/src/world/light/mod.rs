@@ -18,7 +18,7 @@ mod sources;
 mod storage;
 mod world;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use azalea_block::BlockState;
@@ -160,7 +160,12 @@ pub(crate) struct LevelLightEngine {
     /// `None` in dimensions without skylight (vanilla constructs the sky
     /// engine only when `dimensionType().hasSkyLight()`).
     sky: Option<SkyLightEngine>,
-    tasks: VecDeque<LightTask>,
+    tasks: VecDeque<(LightTask, u64)>,
+    /// Only columns with queued applies need an epoch; remove entries when
+    /// their last apply drains, including after an unload.
+    epochs: HashMap<(i32, i32), (u64, usize)>,
+    pending_removals: HashMap<(i32, i32), usize>,
+    incoming_tasks: usize,
     /// Lowest block section y (`min_y >> 4`); light sections span one extra
     /// section below and above.
     min_section_y: i32,
@@ -173,6 +178,9 @@ impl LevelLightEngine {
             block: BlockLightEngine::new(),
             sky: has_sky.then(SkyLightEngine::new),
             tasks: VecDeque::new(),
+            epochs: HashMap::new(),
+            pending_removals: HashMap::new(),
+            incoming_tasks: 0,
             min_section_y: min_y >> 4,
             section_count: (height / 16) as i32,
         }
@@ -199,7 +207,29 @@ impl LevelLightEngine {
     }
 
     pub fn queue_task(&mut self, task: LightTask) {
-        self.tasks.push_back(task);
+        let epoch = match &task {
+            LightTask::ApplyLight { pos, .. } => {
+                let (epoch, pending) = self.epochs.entry(*pos).or_default();
+                *pending += 1;
+                *epoch
+            }
+            LightTask::Remove { pos } => {
+                *self.pending_removals.entry(*pos).or_default() += 1;
+                0 // Always run removals in FIFO order.
+            }
+        };
+        self.tasks.push_back((task, epoch));
+        self.incoming_tasks += 1;
+    }
+
+    pub fn pending_light_tasks(&self) -> usize {
+        self.tasks.len()
+    }
+
+    fn advance_epoch(&mut self, pos: (i32, i32)) {
+        if let Some((epoch, _)) = self.epochs.get_mut(&pos) {
+            *epoch = epoch.wrapping_add(1);
+        }
     }
 
     /// Vanilla `LevelChunk.setBlockState`'s light lines: section empty-status
@@ -262,27 +292,35 @@ impl LevelLightEngine {
     /// engine already stores (border sections lit by loaded neighbors), so
     /// later publishes only need to touch changed sections.
     pub fn on_chunk_loaded(&mut self, store: &mut ChunkStore, pos: (i32, i32)) {
+        self.advance_epoch(pos);
         let count = self.light_section_count();
         let min_section_y = self.min_section_y;
         let key_at = |index: usize| SectionKey::new(pos.0, min_section_y - 1 + index as i32, pos.1);
         let mut sky_sections = vec![None; count];
         let mut block_sections = vec![None; count];
-        for (index, slot) in block_sections.iter_mut().enumerate() {
-            *slot = self
-                .block
-                .storage
-                .layer(key_at(index))
-                .map(DataLayer::to_bytes);
+        // An earlier load may already have published its light. Do not copy
+        // those layers into the replacement chunk before its queued Remove runs.
+        let pending_remove = self.pending_removals.contains_key(&pos);
+        if !pending_remove {
+            for (index, slot) in block_sections.iter_mut().enumerate() {
+                *slot = self
+                    .block
+                    .storage
+                    .layer(key_at(index))
+                    .map(DataLayer::to_bytes);
+            }
         }
         let mut sky_top_section = None;
         if let Some(sky) = &mut self.sky {
-            for (index, slot) in sky_sections.iter_mut().enumerate() {
-                *slot = sky.storage.layer(key_at(index)).map(DataLayer::to_bytes);
+            if !pending_remove {
+                for (index, slot) in sky_sections.iter_mut().enumerate() {
+                    *slot = sky.storage.layer(key_at(index)).map(DataLayer::to_bytes);
+                }
+                sky_top_section = sky
+                    .sky
+                    .column_top(pos)
+                    .map(|top| top - (self.min_section_y - 1));
             }
-            sky_top_section = sky
-                .sky
-                .column_top(pos)
-                .map(|top| top - (self.min_section_y - 1));
             if let Some(chunk) =
                 store.get_chunk(&azalea_core::position::ChunkPos::new(pos.0, pos.1))
             {
@@ -308,6 +346,7 @@ impl LevelLightEngine {
     /// vanish when it drops. The stored light tears down via
     /// [`LightTask::Remove`].
     pub fn on_chunk_unloaded(&mut self, pos: (i32, i32)) {
+        self.advance_epoch(pos);
         if let Some(sky) = &mut self.sky {
             sky.sources.remove(&pos);
         }
@@ -319,13 +358,44 @@ impl LevelLightEngine {
         // Vanilla drains the entire backlog at >=1000; that cliff makes one
         // frame do arbitrarily many packet applies and dirty mesh requests.
         // Keep vanilla's smaller-queue quota, but carry excess into next frame.
+        // ponytail: at most 100 tasks/frame; if incoming stays above 100/frame,
+        // use measured rates to add adaptive draining or network backpressure.
         let size = self.tasks.len();
         let quota = (size / 10).max(10).min(100);
         for _ in 0..quota {
-            let Some(task) = self.tasks.pop_front() else {
+            let Some((task, epoch)) = self.tasks.pop_front() else {
                 break;
             };
+            match &task {
+                LightTask::ApplyLight { pos, .. } => {
+                    let entry = self.epochs.get_mut(pos).expect("queued apply has epoch");
+                    let current = entry.0 == epoch;
+                    entry.1 -= 1;
+                    if entry.1 == 0 {
+                        self.epochs.remove(pos);
+                    }
+                    if !current {
+                        continue; // Chunk was unloaded/reloaded before this frame.
+                    }
+                }
+                LightTask::Remove { pos } => {
+                    let count = self.pending_removals.get_mut(pos).expect("queued removal");
+                    *count -= 1;
+                    if *count == 0 {
+                        self.pending_removals.remove(pos);
+                    }
+                }
+            }
             self.apply_task(task, store, out);
+        }
+        let incoming = std::mem::take(&mut self.incoming_tasks);
+        if size > 0 || incoming > 0 {
+            tracing::debug!(
+                incoming,
+                processed = size - self.tasks.len(),
+                pending = self.pending_light_tasks(),
+                "Light packet tasks"
+            );
         }
         // ponytail: this bounds packet tasks, not block/sky propagation (each
         // engine still drains its node/wave queues). If profiling shows a single
@@ -424,6 +494,7 @@ impl LevelLightEngine {
         Self::publish(
             &mut self.block.storage,
             None,
+            &self.pending_removals,
             store,
             LayerKind::Block,
             min_section_y,
@@ -442,6 +513,7 @@ impl LevelLightEngine {
             Self::publish(
                 &mut sky.storage,
                 Some(&sky.sky),
+                &self.pending_removals,
                 store,
                 LayerKind::Sky,
                 min_section_y,
@@ -461,6 +533,7 @@ impl LevelLightEngine {
     fn publish(
         storage: &mut StorageCore,
         sky: Option<&sky::SkyStorage>,
+        pending_removals: &HashMap<(i32, i32), usize>,
         store: &mut ChunkStore,
         layer: LayerKind,
         min_section_y: i32,
@@ -470,6 +543,11 @@ impl LevelLightEngine {
         let count = (section_count + 2) as usize;
         let changed: Vec<SectionKey> = storage.changed_sections.drain().collect();
         for key in changed {
+            // Neighbor propagation can touch an old section while its queued
+            // removal is still deferred; never republish it into the new chunk.
+            if pending_removals.contains_key(&key.column()) {
+                continue;
+            }
             // Columns without chunk data have no ChunkLightData; their layers
             // republish via on_chunk_loaded when the chunk arrives.
             let Some(column) = store.light_data.get_mut(&key.column()) else {
@@ -572,7 +650,10 @@ mod tests {
         }
         engine.poll_and_run(&mut store, &mut LightDirty::default());
         assert_eq!(engine.tasks.len(), 900); // floor(999 / 10) = 99
-        engine.tasks.clear();
+        while !engine.tasks.is_empty() {
+            engine.poll_and_run(&mut store, &mut LightDirty::default());
+        }
+        assert!(engine.epochs.is_empty());
         for i in 0..11 {
             engine.queue_task(empty_light_task((i, 1)));
         }
@@ -596,13 +677,6 @@ mod tests {
             store.load_chunk(pos, &bytes, &[]).unwrap();
             store.set_block_state(0, 0, 0, find_state("stone", &[]));
             engine.on_chunk_loaded(&mut store, (0, 0));
-            // The chunk was unloaded and reloaded before this frame's light
-            // drain; queued removal must stay between the two light applies.
-            store.unload_chunk(&pos);
-            engine.on_chunk_unloaded((0, 0));
-            store.load_chunk(pos, &bytes, &[]).unwrap();
-            store.set_block_state(0, 0, 0, find_state("stone", &[]));
-            engine.on_chunk_loaded(&mut store, (0, 0));
             (engine, store)
         }
         fn packet(value: u8, enable: bool) -> LightTask {
@@ -619,55 +693,184 @@ mod tests {
 
         let _world = TestWorld::new();
         let (mut bounded, mut store) = loaded();
-        let (mut all_at_once, mut reference_store) = loaded();
-        for engine in [&mut bounded, &mut all_at_once] {
-            for i in 0..99 {
-                engine.queue_task(empty_light_task((i, 1)));
-            }
-            engine.queue_task(packet(0x11, true));
-            engine.queue_task(LightTask::Remove { pos: (0, 0) });
-            engine.queue_task(packet(0x22, true));
-            for i in 99..1000 {
-                engine.queue_task(empty_light_task((i, 1)));
-            }
+        for i in 0..99 {
+            bounded.queue_task(empty_light_task((i, 1)));
+        }
+        bounded.queue_task(packet(0x11, true)); // 100th: old load
+        let pos = ChunkPos::new(0, 0);
+        store.unload_chunk(&pos);
+        bounded.on_chunk_unloaded((0, 0));
+        bounded.queue_task(LightTask::Remove { pos: (0, 0) }); // 101st
+        let mut bytes = Vec::new();
+        azalea_world::chunk::Section::default()
+            .azalea_write(&mut bytes)
+            .unwrap();
+        store.load_chunk(pos, &bytes, &[]).unwrap();
+        store.set_block_state(0, 0, 0, find_state("stone", &[]));
+        bounded.on_chunk_loaded(&mut store, (0, 0));
+        bounded.queue_task(packet(0x22, true)); // 102nd: new load
+        for i in 99..1000 {
+            bounded.queue_task(empty_light_task((i, 1)));
         }
         let mut dirty = LightDirty::default();
         bounded.poll_and_run(&mut store, &mut dirty);
-        assert_eq!(bounded.tasks.len(), 903);
+        assert_eq!(bounded.pending_light_tasks(), 903);
         assert!(matches!(
             bounded.tasks.front(),
-            Some(LightTask::Remove { pos: (0, 0) })
+            Some((LightTask::Remove { pos: (0, 0) }, _))
         ));
-        assert_eq!(dirty.columns, vec![(0, 0)]);
+        assert!(
+            dirty.columns.is_empty(),
+            "old load must not request a remesh"
+        );
+        assert!(store.light_data[&(0, 0)].block_sections[1].is_none());
+        assert_eq!(store.get_block_light(0, 0, 0), 0);
 
-        // A newer packet arrives while old work is deferred: it must not
-        // leapfrog the queued unload/reload pair.
+        // A newer standalone update must not leapfrog the deferred removal.
         bounded.queue_task(packet(0x33, false));
-        all_at_once.queue_task(packet(0x33, false));
-        let mut expected = LightDirty::default();
-        while let Some(task) = all_at_once.tasks.pop_front() {
-            all_at_once.apply_task(task, &mut reference_store, &mut expected);
-        }
-        all_at_once.run_light_updates(&mut reference_store, &mut expected);
         while !bounded.tasks.is_empty() {
             let mut frame = LightDirty::default();
             bounded.poll_and_run(&mut store, &mut frame);
             dirty.sections.extend(frame.sections);
             dirty.columns.extend(frame.columns);
         }
-        assert_eq!(dirty.columns, vec![(0, 0), (0, 0)]);
-        assert_eq!(dirty.columns, expected.columns);
+        assert_eq!(dirty.columns, vec![(0, 0)]);
         assert!(!dirty.sections.is_empty());
-        assert_eq!(dirty.sections, expected.sections);
-        assert_eq!(
-            bounded.light_on_in_column((0, 0)),
-            all_at_once.light_on_in_column((0, 0))
-        );
+        assert!(bounded.light_on_in_column((0, 0)));
         assert_eq!(store.get_block_light(0, 0, 0), 3);
-        assert_eq!(
-            store.light_data[&(0, 0)].block_sections,
-            reference_store.light_data[&(0, 0)].block_sections
-        );
+        assert_eq!(bounded.pending_light_tasks(), 0);
+        assert!(bounded.epochs.is_empty());
+    }
+
+    #[test]
+    fn reloaded_chunk_does_not_copy_light_published_before_unload() {
+        use azalea_buf::AzBuf;
+        use azalea_core::position::ChunkPos;
+
+        let _world = TestWorld::new();
+        let mut engine = LevelLightEngine::new(16, 0, false);
+        let mut store = ChunkStore::new_with_dimension(2, 16, 0);
+        let pos = ChunkPos::new(0, 0);
+        let mut bytes = Vec::new();
+        azalea_world::chunk::Section::default()
+            .azalea_write(&mut bytes)
+            .unwrap();
+        store.load_chunk(pos, &bytes, &[]).unwrap();
+        store.set_block_state(0, 0, 0, find_state("stone", &[]));
+        engine.on_chunk_loaded(&mut store, (0, 0));
+        engine.queue_task(LightTask::ApplyLight {
+            pos: (0, 0),
+            sky: vec![],
+            block: vec![
+                SectionEntry::Skip,
+                SectionEntry::Data(Box::new([0x11; LAYER_BYTES])),
+            ],
+            enable: true,
+        });
+        engine.poll_and_run(&mut store, &mut LightDirty::default());
+        assert_eq!(store.get_block_light(0, 0, 0), 1);
+        store.unload_chunk(&pos);
+        engine.on_chunk_unloaded((0, 0));
+        for i in 0..1000 {
+            engine.queue_task(empty_light_task((i, 1)));
+        }
+        engine.queue_task(LightTask::Remove { pos: (0, 0) });
+        store.load_chunk(pos, &bytes, &[]).unwrap();
+        engine.on_chunk_loaded(&mut store, (0, 0));
+        assert!(store.light_data[&(0, 0)].block_sections[1].is_none());
+        assert_eq!(store.get_block_light(0, 0, 0), 0);
+        // A neighbor may mark the old section dirty before Remove reaches the
+        // queue head. It must not republish the old layer in this frame.
+        engine
+            .block
+            .storage
+            .changed_sections
+            .insert(SectionKey::new(0, 0, 0));
+        engine.poll_and_run(&mut store, &mut LightDirty::default());
+        assert!(store.light_data[&(0, 0)].block_sections[1].is_none());
+        while engine.pending_light_tasks() > 0 {
+            engine.poll_and_run(&mut store, &mut LightDirty::default());
+        }
+        assert!(engine.pending_removals.is_empty());
+        assert!(engine.epochs.is_empty());
+    }
+
+    #[test]
+    fn standalone_updates_across_repeated_unloads_do_not_publish_old_sections() {
+        use azalea_buf::AzBuf;
+        use azalea_core::position::ChunkPos;
+
+        let _world = TestWorld::new();
+        let mut engine = LevelLightEngine::new(32, 0, false);
+        let mut store = ChunkStore::new_with_dimension(2, 32, 0);
+        let pos = ChunkPos::new(0, 0);
+        let mut bytes = Vec::new();
+        for _ in 0..2 {
+            azalea_world::chunk::Section::default()
+                .azalea_write(&mut bytes)
+                .unwrap();
+        }
+        let load = |engine: &mut LevelLightEngine, store: &mut ChunkStore| {
+            store.load_chunk(pos, &bytes, &[]).unwrap();
+            store.set_block_state(0, 0, 0, find_state("stone", &[]));
+            store.set_block_state(0, 16, 0, find_state("stone", &[]));
+            engine.on_chunk_loaded(store, (0, 0));
+        };
+        let update = |value: u8| LightTask::ApplyLight {
+            pos: (0, 0),
+            sky: vec![],
+            block: vec![
+                SectionEntry::Skip,
+                SectionEntry::Data(Box::new([value; LAYER_BYTES])),
+                SectionEntry::Data(Box::new([value; LAYER_BYTES])),
+            ],
+            enable: false,
+        };
+        let unload = |engine: &mut LevelLightEngine, store: &mut ChunkStore| {
+            store.unload_chunk(&pos);
+            engine.on_chunk_unloaded((0, 0));
+            engine.queue_task(LightTask::Remove { pos: (0, 0) });
+        };
+        load(&mut engine, &mut store);
+        for i in 0..99 {
+            engine.queue_task(empty_light_task((i, 1)));
+        }
+        engine.queue_task(update(0x11)); // stale standalone update at boundary
+        unload(&mut engine, &mut store);
+        load(&mut engine, &mut store);
+        engine.queue_task(update(0x22));
+        for i in 99..1000 {
+            engine.queue_task(empty_light_task((i, 1)));
+        }
+        engine.poll_and_run(&mut store, &mut LightDirty::default());
+        assert!(store.light_data[&(0, 0)].block_sections[1].is_none());
+        assert!(store.light_data[&(0, 0)].block_sections[2].is_none());
+        // The second update is still queued when the column is replaced again.
+        unload(&mut engine, &mut store);
+        load(&mut engine, &mut store);
+        // Standalone updates correct a column only after its load task has
+        // enabled the section statuses, as in the real packet flow.
+        engine.queue_task(LightTask::ApplyLight {
+            pos: (0, 0),
+            sky: vec![],
+            block: vec![],
+            enable: true,
+        });
+        engine.queue_task(update(0x44));
+        let mut columns = Vec::new();
+        while engine.pending_light_tasks() > 0 {
+            let mut dirty = LightDirty::default();
+            engine.poll_and_run(&mut store, &mut dirty);
+            columns.extend(dirty.columns);
+        }
+        assert_eq!(columns, vec![(0, 0)]);
+        for index in [1, 2] {
+            assert_eq!(
+                store.light_data[&(0, 0)].block_sections[index].as_deref(),
+                Some(&[0x44; LAYER_BYTES])
+            );
+        }
+        assert!(engine.epochs.is_empty());
     }
 
     #[test]
