@@ -81,9 +81,24 @@ pub struct FrameSample {
     #[serde(default)]
     pub dynamic_atlas_spectator_changed: bool,
     /// CPU wall time around update_face_atlas, including queue waits; not GPU
-    /// execution.
+    /// execution. Contains the subdivision timers below; do not sum them with
+    /// this total (or with dynamic_atlas_ms).
     #[serde(default)]
     pub dynamic_atlas_renderer_ms: f32,
+    /// CPU wall-time for atlas pixel packing (subset of renderer_ms).
+    #[serde(default)]
+    pub dynamic_atlas_pack_cpu_ms: f32,
+    /// CPU wall-time waiting for in-flight use before retiring the old atlas.
+    #[serde(default)]
+    pub dynamic_atlas_retire_wait_ms: f32,
+    /// CPU wall-time for image creation, staging, submit and its internal idle
+    /// wait; not pure GPU execution time (subset of renderer_ms).
+    #[serde(default)]
+    pub dynamic_atlas_upload_submit_wait_ms: f32,
+    /// CPU wall-time updating the atlas descriptor/state (subset of
+    /// renderer_ms).
+    #[serde(default)]
+    pub dynamic_atlas_descriptor_ms: f32,
     #[serde(default)]
     pub pre_ui_other_ms: f32,
     #[serde(default)]
@@ -191,9 +206,24 @@ pub struct SpikeSample {
     #[serde(default)]
     pub dynamic_atlas_spectator_changed: bool,
     /// CPU wall time around update_face_atlas, including queue waits; not GPU
-    /// execution.
+    /// execution. Contains the subdivision timers below; do not sum them with
+    /// this total (or with dynamic_atlas_ms).
     #[serde(default)]
     pub dynamic_atlas_renderer_ms: f32,
+    /// CPU wall-time for atlas pixel packing (subset of renderer_ms).
+    #[serde(default)]
+    pub dynamic_atlas_pack_cpu_ms: f32,
+    /// CPU wall-time waiting for in-flight use before retiring the old atlas.
+    #[serde(default)]
+    pub dynamic_atlas_retire_wait_ms: f32,
+    /// CPU wall-time for image creation, staging, submit and its internal idle
+    /// wait; not pure GPU execution time (subset of renderer_ms).
+    #[serde(default)]
+    pub dynamic_atlas_upload_submit_wait_ms: f32,
+    /// CPU wall-time updating the atlas descriptor/state (subset of
+    /// renderer_ms).
+    #[serde(default)]
+    pub dynamic_atlas_descriptor_ms: f32,
     #[serde(default)]
     pub pre_ui_other_ms: f32,
     #[serde(default)]
@@ -348,6 +378,10 @@ impl Benchmark {
             dynamic_atlas_face_dirty: phases.dynamic_atlas_face_dirty,
             dynamic_atlas_spectator_changed: phases.dynamic_atlas_spectator_changed,
             dynamic_atlas_renderer_ms: phases.dynamic_atlas_renderer_ms,
+            dynamic_atlas_pack_cpu_ms: phases.dynamic_atlas_pack_cpu_ms,
+            dynamic_atlas_retire_wait_ms: phases.dynamic_atlas_retire_wait_ms,
+            dynamic_atlas_upload_submit_wait_ms: phases.dynamic_atlas_upload_submit_wait_ms,
+            dynamic_atlas_descriptor_ms: phases.dynamic_atlas_descriptor_ms,
             pre_ui_other_ms: phases.pre_ui_other_ms,
             light_engine_ms: phases.light_engine_ms,
             light_mesh_ms: phases.light_mesh_ms,
@@ -406,6 +440,10 @@ impl Benchmark {
                 dynamic_atlas_face_dirty: sample.dynamic_atlas_face_dirty,
                 dynamic_atlas_spectator_changed: sample.dynamic_atlas_spectator_changed,
                 dynamic_atlas_renderer_ms: sample.dynamic_atlas_renderer_ms,
+                dynamic_atlas_pack_cpu_ms: sample.dynamic_atlas_pack_cpu_ms,
+                dynamic_atlas_retire_wait_ms: sample.dynamic_atlas_retire_wait_ms,
+                dynamic_atlas_upload_submit_wait_ms: sample.dynamic_atlas_upload_submit_wait_ms,
+                dynamic_atlas_descriptor_ms: sample.dynamic_atlas_descriptor_ms,
                 pre_ui_other_ms: sample.pre_ui_other_ms,
                 light_engine_ms: sample.light_engine_ms,
                 light_mesh_ms: sample.light_mesh_ms,
@@ -602,6 +640,10 @@ mod tests {
         assert!(!legacy.dynamic_atlas_face_dirty);
         assert!(!legacy.dynamic_atlas_spectator_changed);
         assert_eq!(legacy.dynamic_atlas_renderer_ms, 0.0);
+        assert_eq!(legacy.dynamic_atlas_pack_cpu_ms, 0.0);
+        assert_eq!(legacy.dynamic_atlas_retire_wait_ms, 0.0);
+        assert_eq!(legacy.dynamic_atlas_upload_submit_wait_ms, 0.0);
+        assert_eq!(legacy.dynamic_atlas_descriptor_ms, 0.0);
         assert_eq!(legacy.pre_ui_other_ms, 0.0);
         assert_eq!(legacy.light_engine_ms, 0.0);
         assert_eq!(legacy.light_mesh_ms, 0.0);
@@ -633,6 +675,10 @@ mod tests {
         assert!(!legacy_spike.dynamic_atlas_face_dirty);
         assert!(!legacy_spike.dynamic_atlas_spectator_changed);
         assert_eq!(legacy_spike.dynamic_atlas_renderer_ms, 0.0);
+        assert_eq!(legacy_spike.dynamic_atlas_pack_cpu_ms, 0.0);
+        assert_eq!(legacy_spike.dynamic_atlas_retire_wait_ms, 0.0);
+        assert_eq!(legacy_spike.dynamic_atlas_upload_submit_wait_ms, 0.0);
+        assert_eq!(legacy_spike.dynamic_atlas_descriptor_ms, 0.0);
         assert_eq!(legacy_spike.pre_ui_other_ms, 0.0);
         assert_eq!(legacy_spike.light_engine_ms, 0.0);
         assert_eq!(legacy_spike.light_mesh_ms, 0.0);
@@ -701,6 +747,10 @@ mod tests {
             dynamic_atlas_face_dirty: true,
             dynamic_atlas_spectator_changed: true,
             dynamic_atlas_renderer_ms: 0.5,
+            dynamic_atlas_pack_cpu_ms: 0.1,
+            dynamic_atlas_retire_wait_ms: 0.2,
+            dynamic_atlas_upload_submit_wait_ms: 0.15,
+            dynamic_atlas_descriptor_ms: 0.01,
             pre_ui_other_ms: 2.5,
             light_engine_ms: 1.25,
             light_mesh_ms: 1.75,
@@ -766,6 +816,21 @@ mod tests {
         assert_eq!(sample.dynamic_atlas_renderer_ms, 0.5);
         assert_eq!(bench.spikes[0].dynamic_atlas_added_keys, 2);
         assert_eq!(bench.spikes[0].dynamic_atlas_renderer_ms, 0.5);
+        let subphases = |pack, retire, upload, descriptor| {
+            assert_eq!((pack, retire, upload, descriptor), (0.1, 0.2, 0.15, 0.01));
+        };
+        subphases(
+            sample.dynamic_atlas_pack_cpu_ms,
+            sample.dynamic_atlas_retire_wait_ms,
+            sample.dynamic_atlas_upload_submit_wait_ms,
+            sample.dynamic_atlas_descriptor_ms,
+        );
+        subphases(
+            bench.spikes[0].dynamic_atlas_pack_cpu_ms,
+            bench.spikes[0].dynamic_atlas_retire_wait_ms,
+            bench.spikes[0].dynamic_atlas_upload_submit_wait_ms,
+            bench.spikes[0].dynamic_atlas_descriptor_ms,
+        );
         assert_eq!(sample.pre_ui_other_ms, 2.5);
         assert_eq!(sample.light_engine_ms, 1.25);
         assert_eq!(sample.light_mesh_ms, 1.75);
@@ -937,8 +1002,14 @@ pub struct UpdatePhases {
     pub dynamic_atlas_face_dirty: bool,
     pub dynamic_atlas_spectator_changed: bool,
     /// CPU wall time around `update_face_atlas`, including queue waits; not GPU
-    /// execution.
+    /// execution. Contains the four subdivision timers below; do not sum
+    /// them with this total (or with dynamic_atlas_ms).
     pub dynamic_atlas_renderer_ms: f32,
+    pub dynamic_atlas_pack_cpu_ms: f32,
+    pub dynamic_atlas_retire_wait_ms: f32,
+    /// Includes staging and the internal submit + idle wait; not GPU-only time.
+    pub dynamic_atlas_upload_submit_wait_ms: f32,
+    pub dynamic_atlas_descriptor_ms: f32,
     /// Light-update completion to UI extraction start; includes
     /// `dynamic_atlas_ms`.
     pub pre_ui_other_ms: f32,

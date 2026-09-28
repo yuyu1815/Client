@@ -1003,8 +1003,13 @@ pub struct DynamicAtlasSyncStats {
     pub dirty: bool,
     pub face_dirty: bool,
     pub spectator_changed: bool,
-    /// CPU wall time around `update_face_atlas`, including any queue waits.
+    /// CPU wall time around `update_face_atlas`, including the subdivision
+    /// timers below; do not add those timers to this total.
     pub renderer_ms: f32,
+    pub pack_cpu_ms: f32,
+    pub retire_wait_ms: f32,
+    pub upload_submit_wait_ms: f32,
+    pub descriptor_ms: f32,
 }
 
 pub struct AppCore {
@@ -1567,8 +1572,12 @@ impl AppCore {
             if !entries.is_empty() {
                 if benchmark_active {
                     let start = Instant::now();
-                    renderer.update_face_atlas(&entries);
+                    let timings = renderer.update_face_atlas_timed(&entries, true);
                     stats.renderer_ms = start.elapsed().as_secs_f32() * 1000.0;
+                    stats.pack_cpu_ms = timings.pack_cpu_ms;
+                    stats.retire_wait_ms = timings.retire_wait_ms;
+                    stats.upload_submit_wait_ms = timings.upload_submit_wait_ms;
+                    stats.descriptor_ms = timings.descriptor_ms;
                 } else {
                     renderer.update_face_atlas(&entries);
                 }
@@ -4682,6 +4691,10 @@ mod tests {
         assert!(!stats.face_dirty);
         assert!(!stats.spectator_changed);
         assert_eq!(stats.renderer_ms, 0.0);
+        assert_eq!(stats.pack_cpu_ms, 0.0);
+        assert_eq!(stats.retire_wait_ms, 0.0);
+        assert_eq!(stats.upload_submit_wait_ms, 0.0);
+        assert_eq!(stats.descriptor_ms, 0.0);
     }
 
     #[test]

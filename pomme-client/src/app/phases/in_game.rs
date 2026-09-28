@@ -2989,6 +2989,10 @@ pub fn update_game(
     game.last_update_phases.dynamic_atlas_face_dirty = atlas_stats.face_dirty;
     game.last_update_phases.dynamic_atlas_spectator_changed = atlas_stats.spectator_changed;
     game.last_update_phases.dynamic_atlas_renderer_ms = atlas_stats.renderer_ms;
+    game.last_update_phases.dynamic_atlas_pack_cpu_ms = atlas_stats.pack_cpu_ms;
+    game.last_update_phases.dynamic_atlas_retire_wait_ms = atlas_stats.retire_wait_ms;
+    game.last_update_phases.dynamic_atlas_upload_submit_wait_ms = atlas_stats.upload_submit_wait_ms;
+    game.last_update_phases.dynamic_atlas_descriptor_ms = atlas_stats.descriptor_ms;
 
     // The F3+F4 switcher shows the mouse cursor while open.
     let switcher_open = game.game_mode_switcher.is_some();

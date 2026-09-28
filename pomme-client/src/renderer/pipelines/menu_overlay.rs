@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::slice;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
@@ -16,6 +16,17 @@ const FONT_BYTES: &[u8] = include_bytes!("../fonts/Montserrat-Medium.ttf");
 const ICON_FONT_BYTES: &[u8] = include_bytes!("../fonts/fa-solid-900.ttf");
 const ATLAS_SIZE: u32 = 512;
 const RASTER_PX: f32 = 48.0;
+
+/// CPU wall-time subdivisions of one atlas rebuild. The upload phase includes
+/// allocation, staging, command recording, submit, and an internal queue idle
+/// wait; it is not GPU execution time.
+#[derive(Clone, Copy, Default)]
+pub struct FaviconAtlasTimings {
+    pub pack_cpu_ms: f32,
+    pub retire_wait_ms: f32,
+    pub upload_submit_wait_ms: f32,
+    pub descriptor_ms: f32,
+}
 
 pub const ICON_USER: char = '\u{f007}';
 pub const ICON_LINK: char = '\u{f0c1}';
@@ -1785,10 +1796,16 @@ impl MenuOverlayPipeline {
         command_pool: vk::CommandPool,
         allocator: &Arc<Mutex<Allocator>>,
         favicons: &[(String, Vec<u8>, u32)],
-    ) {
+        benchmark_active: bool,
+    ) -> FaviconAtlasTimings {
+        let mut timings = FaviconAtlasTimings::default();
         if favicons.is_empty() {
-            return;
+            return timings;
         }
+        let pack_start = benchmark_active.then(Instant::now);
+        let elapsed_ms = |start: Option<Instant>| {
+            start.map_or(0.0, |start| start.elapsed().as_secs_f32() * 1000.0)
+        };
 
         let icon_size = 64u32;
         let cols = (favicons.len() as f32).sqrt().ceil() as u32;
@@ -1823,7 +1840,10 @@ impl MenuOverlayPipeline {
             regions.insert(addr.clone(), [u0, v0, u1, v1]);
         }
 
+        timings.pack_cpu_ms = elapsed_ms(pack_start);
+        let retire_start = benchmark_active.then(Instant::now);
         queue.wait_idle().unwrap();
+        timings.retire_wait_ms = elapsed_ms(retire_start);
 
         if let Some(alloc) = self.favicon_allocation.take() {
             device.destroy_image_view(self.favicon_view, None);
@@ -1831,6 +1851,7 @@ impl MenuOverlayPipeline {
             allocator.lock().unwrap().free(alloc).ok();
         }
 
+        let upload_start = benchmark_active.then(Instant::now);
         let (image, view, alloc) = util::create_gpu_image_with_format(
             device,
             allocator,
@@ -1852,7 +1873,9 @@ impl MenuOverlayPipeline {
         );
         device.destroy_buffer(staging, None);
         allocator.lock().unwrap().free(staging_alloc).ok();
+        timings.upload_submit_wait_ms = elapsed_ms(upload_start);
 
+        let descriptor_start = benchmark_active.then(Instant::now);
         self.favicon_image = image;
         self.favicon_view = view;
         self.favicon_allocation = Some(alloc);
@@ -1873,6 +1896,8 @@ impl MenuOverlayPipeline {
             ..Default::default()
         };
         device.update_descriptor_sets(&[write], &[]);
+        timings.descriptor_ms = elapsed_ms(descriptor_start);
+        timings
     }
 
     pub fn text_width(&self, text: &str, scale: f32) -> f32 {

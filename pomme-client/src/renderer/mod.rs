@@ -40,7 +40,7 @@ use pipelines::clouds::CloudPipeline;
 use pipelines::entity_renderer::{EntityRenderInfo, EntityRenderer};
 use pipelines::hand::HandPipeline;
 use pipelines::map_quad::MapQuadPipeline;
-use pipelines::menu_overlay::{MenuElement, MenuOverlayPipeline};
+use pipelines::menu_overlay::{FaviconAtlasTimings, MenuElement, MenuOverlayPipeline};
 use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::skin_preview::SkinPreviewPipeline;
@@ -1927,19 +1927,28 @@ impl Renderer {
     }
 
     pub fn update_favicon_atlas(&mut self, favicons: &[(String, Vec<u8>, u32)]) {
-        self.menu_pipeline.update_favicon_atlas(
-            &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
-            favicons,
-        );
+        self.update_face_atlas_timed(favicons, false);
     }
 
     /// Friend faces reuse the favicon atlas — they're never shown on the same
     /// screen as server favicons, so they share one string-keyed RGBA atlas.
     pub fn update_face_atlas(&mut self, faces: &[(String, Vec<u8>, u32)]) {
         self.update_favicon_atlas(faces);
+    }
+
+    pub fn update_face_atlas_timed(
+        &mut self,
+        faces: &[(String, Vec<u8>, u32)],
+        benchmark_active: bool,
+    ) -> FaviconAtlasTimings {
+        self.menu_pipeline.update_favicon_atlas(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            faces,
+            benchmark_active,
+        )
     }
 
     /// The inline objects the menu text drew since the last call.
