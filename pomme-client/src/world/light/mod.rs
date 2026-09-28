@@ -643,6 +643,7 @@ mod tests {
 
     #[test]
     fn small_light_queue_keeps_vanilla_quota() {
+        let _world = TestWorld::new();
         let mut engine = LevelLightEngine::new(16, 0, false);
         let mut store = ChunkStore::new_with_dimension(2, 16, 0);
         for i in 0..999 {
