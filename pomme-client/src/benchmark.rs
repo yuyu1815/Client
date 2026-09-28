@@ -439,8 +439,8 @@ impl Benchmark {
             total_frames: count as u32,
             duration_secs: DURATION_SECS,
             avg_fps: 1000.0 / avg_ms,
-            min_fps: 1000.0 / frame_times[p1_idx],
-            max_fps: 1000.0 / frame_times[p99_idx].max(0.001),
+            min_fps: 1000.0 / frame_times[p99_idx].max(0.001),
+            max_fps: 1000.0 / frame_times[p1_idx].max(0.001),
             avg_frame_ms: avg_ms,
             p1_frame_ms: frame_times[p1_idx],
             p99_frame_ms: frame_times[p99_idx],
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn frame_percentiles_keep_heavy_tail_on_p99_side() {
-        let mut frame_times = vec![10.0; 99];
+        let mut frame_times = vec![10.0_f32; 99];
         frame_times.push(100.0);
         frame_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let count = frame_times.len();
@@ -487,6 +487,11 @@ mod tests {
         let p95 = (count as f32 * 0.95) as usize;
         let p99 = ((count as f32 * 0.99) as usize).min(count - 1);
         assert!(frame_times[p99] > frame_times[p1]);
+        let min_fps = 1000.0 / frame_times[p99].max(0.001);
+        let max_fps = 1000.0 / frame_times[p1].max(0.001);
+        assert!(min_fps <= max_fps);
+        assert_eq!(min_fps, 10.0);
+        assert_eq!(max_fps, 100.0);
         assert_eq!(frame_times[p95], 10.0);
         assert_eq!(frame_times.iter().sum::<f32>() / count as f32, 10.9);
     }
