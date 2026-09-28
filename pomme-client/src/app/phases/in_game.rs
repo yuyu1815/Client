@@ -4553,19 +4553,21 @@ pub fn update_game(
             .block_entities
             .iter()
             .filter_map(|(pos, be)| {
-                let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
-                let id = crate::world::block::block_id(state);
-                // A predicted break leaves a stale entry until the server
-                // confirms; don't render entries whose block is gone.
-                if !crate::world::block_entity::is_block_entity_block(id) {
-                    return None;
-                }
+                // This existing loose box needs only the BE kind/text, not the
+                // block state. Unknown kinds and written signs are never culled.
                 if let Some(planes) = &be_frustum {
                     let has_sign_text = be.kind == BlockEntityKind::Sign
                         && sign_has_text(be.sign_front.as_ref(), be.sign_back.as_ref());
                     if !block_entity_in_frustum(be.kind, pos, has_sign_text, be_eye, planes) {
                         return None;
                     }
+                }
+                let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+                let id = crate::world::block::block_id(state);
+                // A predicted break leaves a stale entry until the server
+                // confirms; don't render entries whose block is gone.
+                if !crate::world::block_entity::is_block_entity_block(id) {
+                    return None;
                 }
                 // Claim only accepted, still-visible resident geometry. An in-flight
                 // edit keeps the old mesh/pose until its replacement lands; an
@@ -6044,6 +6046,66 @@ mod tests {
             &BlockPos::new(-20, 0, 0),
             false,
             DVec3::new(-30.0, 0.0, 0.0),
+            &planes
+        ));
+    }
+
+    #[test]
+    fn block_entity_state_lookup_reorder_keeps_candidates() {
+        use azalea_core::position::BlockPos;
+        use azalea_registry::builtin::BlockEntityKind as Kind;
+        use glam::DVec3;
+
+        // x >= 0, with the existing 8.5-block model margin. None stands
+        // for an unloaded/unknown state (get_block_state returns air).
+        let mut planes = [[1.0, 0.0, 0.0, 100_000.0]; 6];
+        planes[0][3] = 0.0;
+        let eye = DVec3::ZERO;
+        for kind in [Kind::Chest, Kind::Sign, Kind::Beacon, Kind::HangingSign] {
+            for x in [-20, -10, -9, 0] {
+                for text in [false, true] {
+                    for state in [None, Some("air"), Some("chest"), Some("oak_hanging_sign")] {
+                        let pos = BlockPos::new(x, 0, 0);
+                        let in_view = || block_entity_in_frustum(kind, &pos, text, eye, &planes);
+                        let valid_state = || {
+                            crate::world::block_entity::is_block_entity_block(
+                                state.unwrap_or("air"),
+                            )
+                        };
+                        let original = valid_state() && in_view();
+                        let mut reads = 0;
+                        let reordered = in_view() && {
+                            reads += 1;
+                            valid_state()
+                        };
+                        assert_eq!(
+                            original, reordered,
+                            "{kind:?} x={x} text={text} state={state:?}"
+                        );
+                        assert_eq!(reads, usize::from(in_view()));
+                    }
+                }
+            }
+        }
+        assert!(!block_entity_in_frustum(
+            Kind::Chest,
+            &BlockPos::new(-10, 0, 0),
+            false,
+            eye,
+            &planes
+        ));
+        assert!(block_entity_in_frustum(
+            Kind::Chest,
+            &BlockPos::new(-9, 0, 0),
+            false,
+            eye,
+            &planes
+        ));
+        assert!(block_entity_in_frustum(
+            Kind::Sign,
+            &BlockPos::new(-20, 0, 0),
+            true,
+            eye,
             &planes
         ));
     }
