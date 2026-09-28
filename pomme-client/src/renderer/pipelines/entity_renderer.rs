@@ -1853,10 +1853,13 @@ impl EntityRenderer {
         anchor: glam::DVec3,
         eye: glam::DVec3,
         entity_view_scale: f32,
-    ) {
+        benchmark_timing: bool,
+    ) -> (f32, u32) {
         if entities.is_empty() {
-            return;
+            return (0.0, 0);
         }
+        let mut entity_pose_ms = 0.0;
+        let mut entity_pose_count = 0;
 
         // Build the per-frame instance buffer + draw records on the CPU
         // (immutable reads of self.mobs), grouped by variant so each (variant,
@@ -1873,6 +1876,7 @@ impl EntityRenderer {
                     continue;
                 }
                 let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
+                let pose_start = benchmark_timing.then(std::time::Instant::now);
                 let entity_mat = Self::entity_matrix(info, anchor);
                 let anim = self.compute_anim(entry.anim, &variant.model, info);
                 // Shared with every overlay that isn't `own_pivots`.
@@ -1884,9 +1888,13 @@ impl EntityRenderer {
                     anim,
                     part_transforms,
                 });
+                if let Some(start) = pose_start {
+                    entity_pose_ms += start.elapsed().as_secs_f32() * 1000.0;
+                    entity_pose_count += 1;
+                }
             }
             if vis.is_empty() {
-                return;
+                return (entity_pose_ms, entity_pose_count);
             }
 
             // Opaque pass: base model + opaque overlays (sheep wool, villager
@@ -1971,6 +1979,7 @@ impl EntityRenderer {
         self.record_pass(cmd, frame, self.body_translucent_pipeline, &body, count);
         self.record_pass(cmd, frame, self.eyes_pipeline, &eyes, count);
         self.record_pass(cmd, frame, self.swirl_pipeline, &swirl, count);
+        (entity_pose_ms, entity_pose_count)
     }
 
     fn record_pass(

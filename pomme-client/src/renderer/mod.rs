@@ -180,6 +180,8 @@ pub struct RenderTimings {
     /// benchmarks.
     pub chunk_draw_ms: f32,
     pub entity_draw_ms: f32,
+    pub entity_pose_ms: f32,
+    pub entity_pose_count: u32,
     pub block_entity_draw_ms: f32,
     pub be_model_ms: f32,
     pub be_sign_text_ms: f32,
@@ -2417,7 +2419,7 @@ impl Renderer {
                 // entityDistanceScaling = 1).
                 let entity_view_scale = (*render_distance as f32 / 8.0).clamp(1.0, 2.5);
                 let pass_start = benchmark_timing.then(std::time::Instant::now);
-                self.entity_renderer.draw(
+                let (entity_pose_ms, entity_pose_count) = self.entity_renderer.draw(
                     cmd,
                     frame,
                     entities,
@@ -2425,7 +2427,12 @@ impl Renderer {
                     anchor,
                     eye,
                     entity_view_scale,
+                    benchmark_timing,
                 );
+                if benchmark_timing {
+                    self.last_timings.entity_pose_ms = entity_pose_ms;
+                    self.last_timings.entity_pose_count = entity_pose_count;
+                }
                 if let Some(start) = pass_start {
                     self.last_timings.entity_draw_ms = start.elapsed().as_secs_f32() * 1000.0;
                 }

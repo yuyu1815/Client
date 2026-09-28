@@ -43,6 +43,10 @@ pub struct FrameSample {
     #[serde(default)]
     pub entity_draw_ms: f32,
     #[serde(default)]
+    pub entity_pose_ms: f32,
+    #[serde(default)]
+    pub entity_pose_count: u32,
+    #[serde(default)]
     pub block_entity_draw_ms: f32,
     #[serde(default)]
     pub be_model_ms: f32,
@@ -130,6 +134,10 @@ pub struct SpikeSample {
     pub chunk_draw_ms: f32,
     #[serde(default)]
     pub entity_draw_ms: f32,
+    #[serde(default)]
+    pub entity_pose_ms: f32,
+    #[serde(default)]
+    pub entity_pose_count: u32,
     #[serde(default)]
     pub block_entity_draw_ms: f32,
     #[serde(default)]
@@ -282,6 +290,8 @@ impl Benchmark {
             draw_ms: timings.draw_ms,
             chunk_draw_ms: timings.chunk_draw_ms,
             entity_draw_ms: timings.entity_draw_ms,
+            entity_pose_ms: timings.entity_pose_ms,
+            entity_pose_count: timings.entity_pose_count,
             block_entity_draw_ms: timings.block_entity_draw_ms,
             be_model_ms: timings.be_model_ms,
             be_sign_text_ms: timings.be_sign_text_ms,
@@ -330,6 +340,8 @@ impl Benchmark {
                 draw_ms: sample.draw_ms,
                 chunk_draw_ms: sample.chunk_draw_ms,
                 entity_draw_ms: sample.entity_draw_ms,
+                entity_pose_ms: sample.entity_pose_ms,
+                entity_pose_count: sample.entity_pose_count,
                 block_entity_draw_ms: sample.block_entity_draw_ms,
                 be_model_ms: sample.be_model_ms,
                 be_sign_text_ms: sample.be_sign_text_ms,
@@ -508,6 +520,8 @@ mod tests {
         assert_eq!(legacy.fixed_tick_count, 0);
         assert_eq!(legacy.be_extract_ms, 0.0);
         assert_eq!(legacy.entity_draw_ms, 0.0);
+        assert_eq!(legacy.entity_pose_ms, 0.0);
+        assert_eq!(legacy.entity_pose_count, 0);
         assert_eq!(legacy.block_entity_draw_ms, 0.0);
         assert_eq!(legacy.be_model_ms, 0.0);
         assert_eq!(legacy.be_sign_text_ms, 0.0);
@@ -548,6 +562,8 @@ mod tests {
         assert_eq!(legacy_spike.ui_extract_ms, 0.0);
         assert_eq!(legacy_spike.scene_extract_ms, 0.0);
         assert_eq!(legacy_spike.be_extract_ms, 0.0);
+        assert_eq!(legacy_spike.entity_pose_ms, 0.0);
+        assert_eq!(legacy_spike.entity_pose_count, 0);
         assert_eq!(legacy_spike.be_model_ms, 0.0);
         assert_eq!(legacy_spike.be_sign_text_ms, 0.0);
         assert_eq!(legacy_spike.be_model_draws, 0);
@@ -564,6 +580,9 @@ mod tests {
         .unwrap();
         assert_eq!(old_wait_key.unaccounted_ms, 12.5);
 
+        let reset_timings = RenderTimings::default();
+        assert_eq!(reset_timings.entity_pose_ms, 0.0);
+        assert_eq!(reset_timings.entity_pose_count, 0);
         let mut bench = Benchmark::new("test", 1280, 720, 8);
         let timings = RenderTimings {
             acquire_ms: 0.3,
@@ -572,6 +591,8 @@ mod tests {
             render_setup_ms: 0.6,
             submit_ms: 0.7,
             draw_ms: 3.0,
+            entity_pose_ms: 0.25,
+            entity_pose_count: 3,
             be_model_ms: 1.25,
             be_sign_text_ms: 0.75,
             be_model_draws: 4,
@@ -670,6 +691,10 @@ mod tests {
         assert_eq!(sample.render_setup_ms, 0.6);
         assert_eq!(sample.submit_ms, 0.7);
         assert_eq!(sample.render_wall_ms, 40.0);
+        assert_eq!(sample.entity_pose_ms, 0.25);
+        assert_eq!(sample.entity_pose_count, 3);
+        assert_eq!(bench.spikes[0].entity_pose_ms, 0.25);
+        assert_eq!(bench.spikes[0].entity_pose_count, 3);
         assert_eq!(sample.be_model_ms, 1.25);
         assert_eq!(sample.be_sign_text_ms, 0.75);
         assert_eq!(sample.be_model_draws, 4);
@@ -714,6 +739,8 @@ mod tests {
         assert_eq!(bench.spikes[0].unaccounted_ms, 30.0);
         let json = serde_json::to_value(sample).unwrap();
         assert_eq!(json["unaccounted_ms"], 30.0);
+        assert_eq!(json["entity_pose_ms"], 0.25);
+        assert_eq!(json["entity_pose_count"], 3);
         assert_eq!(json["light_update_ms"], 3.0);
         assert_eq!(json["light_engine_ms"], 1.25);
         assert_eq!(json["light_mesh_ms"], 1.75);
