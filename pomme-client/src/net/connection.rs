@@ -1039,6 +1039,8 @@ async fn game_loop(
     let mut chat_types = chat_types_from_registry_holder(&configured.registries);
     let sender = PacketSender::new(outbound_tx);
     let mut batch_size_calculator = super::chunk_batch::ChunkBatchSizeCalculator::default();
+    // ChunkStore also starts with overworld defaults before any DimensionInfo.
+    let mut current_dimension = (384, -64);
     let shared_tree: crate::net::commands::SharedCommandTree =
         std::sync::Arc::new(parking_lot::Mutex::new(None));
 
@@ -1236,20 +1238,40 @@ async fn game_loop(
                         "Server requested transfer; waiting for application reconnect".into(),
                     ));
                 }
-                handle_game_packet(
+                let handler = handle_game_packet(
                     &packet,
                     &sender,
                     event_tx,
                     &configured.registries,
                     &shared_tree,
                     &mut batch_size_calculator,
+                    &mut current_dimension,
                     &mut server_cookies,
-                )
-                .map_err(|error| {
-                    ConnectionError::Disconnected(format!(
-                        "Failed to queue mandatory world event: {error}"
-                    ))
-                })?;
+                );
+                tokio::pin!(handler);
+                // Keep outbound (including app-generated keepalives) flowing while
+                // decoding; inbound is still serialized until the chunk is queued.
+                loop {
+                    tokio::select! {
+                        result = &mut handler => {
+                            result.map_err(|error| ConnectionError::Disconnected(format!(
+                                "Failed to queue mandatory world event: {error}"
+                            )))?;
+                            break;
+                        }
+                        Some(out) = outbound_rx.recv() => {
+                            if let Some(frame) = outbound_frame(out, translation, &mut chat, &shared_tree)? {
+                                write_game_frame(&mut conn.writer, translation, frame).await?;
+                            }
+                        }
+                        Some(key_pair) = key_pair_rx.recv() => {
+                            if let Some(frame) = chat.key_pair_ready(key_pair) {
+                                write_game_frame(&mut conn.writer, translation, frame).await?;
+                            }
+                        }
+                        _ = chat_tick.tick() => chat.tick(),
+                    }
+                }
             }
             Err(e) => skip_malformed_packet(e)?,
         }
@@ -1418,6 +1440,7 @@ mod tests {
         use std::sync::Arc;
         use std::time::Duration;
 
+        use azalea_buf::AzBuf;
         use azalea_protocol::packets::game::c_level_chunk_with_light::{
             BlockEntity, ClientboundLevelChunkPacketData, ClientboundLevelChunkWithLight,
         };
@@ -1432,12 +1455,18 @@ mod tests {
                 .try_send(NetworkEvent::LevelChunksLoadStart)
                 .unwrap();
         }
+        let mut sections = Vec::new();
+        for _ in 0..24 {
+            azalea_world::chunk::Section::default()
+                .azalea_write(&mut sections)
+                .unwrap();
+        }
         peer.write_packet(ClientboundLevelChunkWithLight {
             x: 0,
             z: 0,
             chunk_data: ClientboundLevelChunkPacketData {
                 heightmaps: Vec::new(),
-                data: Arc::new(Vec::new().into_boxed_slice()),
+                data: Arc::new(sections.into_boxed_slice()),
                 block_entities: vec![BlockEntity {
                     packed_xz: 0,
                     y: 0,

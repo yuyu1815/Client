@@ -95,13 +95,14 @@ fn dimension_info(
     }
 }
 
-pub fn handle_game_packet(
+pub async fn handle_game_packet(
     packet: &ClientboundGamePacket,
     sender: &PacketSender,
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
     shared_tree: &SharedCommandTree,
     batch_size_calculator: &mut ChunkBatchSizeCalculator,
+    current_dimension: &mut (u32, i32),
     server_cookies: &mut std::collections::HashMap<
         azalea_registry::identifier::Identifier,
         Vec<u8>,
@@ -111,7 +112,10 @@ pub fn handle_game_packet(
     // rather than continuing with a permanently incomplete world snapshot.
     match packet {
         ClientboundGamePacket::Login(p) => {
+            // With no registry entry the main-thread store keeps its current
+            // height (initially overworld); decode with that same height.
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
+                *current_dimension = (dim.height, dim.min_y);
                 event_tx.try_send(dimension_info(
                     dim,
                     p.common.is_debug,
@@ -177,10 +181,35 @@ pub fn handle_game_packet(
                     (block_pos, be.kind, compound)
                 })
                 .collect();
+            let (height, min_y) = *current_dimension;
+            let data = p.chunk_data.data.clone();
+            let heightmaps = p.chunk_data.heightmaps.clone();
+            // ponytail: one decode in flight per connection (no unbounded workers).
+            // Measure p99 decode/keepalive lag; if inbound keepalive waits >1s,
+            // use a bounded ordered decoder queue (never reorder block updates).
+            let chunk = match tokio::task::spawn_blocking(move || {
+                azalea_world::chunk::Chunk::read_with_dimension_height(
+                    &mut std::io::Cursor::new(data.as_ref().as_ref()),
+                    height,
+                    min_y,
+                    &heightmaps,
+                )
+            })
+            .await
+            {
+                Ok(Ok(chunk)) => chunk,
+                Ok(Err(error)) => {
+                    tracing::warn!(chunk = ?chunk_pos, %error, "Skipping malformed chunk");
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::warn!(chunk = ?chunk_pos, %error, "Skipping failed chunk decode");
+                    return Ok(());
+                }
+            };
             event_tx.try_send(NetworkEvent::ChunkLoaded {
                 pos: chunk_pos,
-                data: p.chunk_data.data.clone(),
-                heightmaps: p.chunk_data.heightmaps.clone(),
+                chunk: Box::new(chunk),
                 light: (&p.light_data).into(),
                 block_entities,
             })?;
@@ -1329,6 +1358,7 @@ pub fn handle_game_packet(
                 keep_attribute_modifiers: p.data_to_keep & 1 != 0,
             })?;
             if let Some((_, dim)) = p.common.dimension_type(registry_holder) {
+                *current_dimension = (dim.height, dim.min_y);
                 event_tx.try_send(dimension_info(
                     dim,
                     p.common.is_debug,
@@ -2130,7 +2160,29 @@ mod tests {
     use parking_lot::Mutex;
     use pomme_protocol::wire;
 
-    use super::*;
+    use super::{handle_game_packet as handle_game_packet_async, *};
+
+    async fn handle_game_packet(
+        packet: &ClientboundGamePacket,
+        sender: &PacketSender,
+        event_tx: &Sender<NetworkEvent>,
+        registries: &RegistryHolder,
+        tree: &SharedCommandTree,
+        batches: &mut ChunkBatchSizeCalculator,
+        cookies: &mut std::collections::HashMap<Identifier, Vec<u8>>,
+    ) -> Result<(), TrySendError<NetworkEvent>> {
+        handle_game_packet_async(
+            packet,
+            sender,
+            event_tx,
+            registries,
+            tree,
+            batches,
+            &mut (384, -64),
+            cookies,
+        )
+        .await
+    }
     use crate::net::sender::Outbound;
 
     fn statue_chunk_packet(nbt: simdnbt::owned::Nbt) -> ClientboundGamePacket {
@@ -2142,7 +2194,15 @@ mod tests {
             z: 1,
             chunk_data: ClientboundLevelChunkPacketData {
                 heightmaps: Vec::new(),
-                data: Arc::new(vec![0; 8].into_boxed_slice()),
+                data: Arc::new({
+                    let mut data = Vec::new();
+                    for _ in 0..24 {
+                        azalea_world::chunk::Section::default()
+                            .azalea_write(&mut data)
+                            .unwrap();
+                    }
+                    data.into_boxed_slice()
+                }),
                 block_entities: vec![BlockEntity {
                     packed_xz: 0xf1,
                     y: (-64i16) as u16,
@@ -2154,7 +2214,7 @@ mod tests {
         })
     }
 
-    fn dispatch_world_packet(
+    async fn dispatch_world_packet(
         packet: &ClientboundGamePacket,
         event_tx: &Sender<NetworkEvent>,
     ) -> Result<(), TrySendError<NetworkEvent>> {
@@ -2168,10 +2228,81 @@ mod tests {
             &mut ChunkBatchSizeCalculator::default(),
             &mut std::collections::HashMap::new(),
         )
+        .await
     }
 
-    #[test]
-    fn last_queue_slot_accepts_chunk_and_empty_statue_nbt_together() {
+    #[tokio::test]
+    async fn malformed_chunk_skips_without_consuming_queue_or_reordering_next_load() {
+        use azalea_protocol::packets::game::c_forget_level_chunk::ClientboundForgetLevelChunk;
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(out_tx);
+        let (tx, rx) = crossbeam_channel::bounded(2);
+        let registries = RegistryHolder::default();
+        let tree = Arc::new(Mutex::new(None));
+        let mut batches = ChunkBatchSizeCalculator::default();
+        let mut cookies = std::collections::HashMap::new();
+        let mut dimension = (16, -64);
+        let mut packet = statue_chunk_packet(simdnbt::owned::Nbt::None);
+        let ClientboundGamePacket::LevelChunkWithLight(ref mut payload) = packet else {
+            unreachable!()
+        };
+        let valid = payload.chunk_data.data.clone();
+        payload.chunk_data.data = Arc::new(Vec::new().into_boxed_slice());
+        handle_game_packet_async(
+            &packet,
+            &sender,
+            &tx,
+            &registries,
+            &tree,
+            &mut batches,
+            &mut dimension,
+            &mut cookies,
+        )
+        .await
+        .unwrap();
+        assert!(rx.is_empty());
+        let ClientboundGamePacket::LevelChunkWithLight(ref mut payload) = packet else {
+            unreachable!()
+        };
+        payload.chunk_data.data = valid;
+        handle_game_packet_async(
+            &packet,
+            &sender,
+            &tx,
+            &registries,
+            &tree,
+            &mut batches,
+            &mut dimension,
+            &mut cookies,
+        )
+        .await
+        .unwrap();
+        handle_game_packet_async(
+            &ClientboundGamePacket::ForgetLevelChunk(ClientboundForgetLevelChunk {
+                pos: ChunkPos::new(-2, 1),
+            }),
+            &sender,
+            &tx,
+            &registries,
+            &tree,
+            &mut batches,
+            &mut dimension,
+            &mut cookies,
+        )
+        .await
+        .unwrap();
+        let NetworkEvent::ChunkLoaded { chunk, .. } = rx.try_recv().unwrap() else {
+            panic!("valid chunk must be published before unload")
+        };
+        assert_eq!(chunk.sections.len(), 1);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::ChunkUnloaded { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn last_queue_slot_accepts_chunk_and_empty_statue_nbt_together() {
         use azalea_registry::builtin::BlockEntityKind;
         use simdnbt::owned::{Nbt, NbtCompound};
 
@@ -2181,7 +2312,9 @@ mod tests {
             for _ in 0..4095 {
                 tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
             }
-            dispatch_world_packet(&statue_chunk_packet(nbt), &tx).unwrap();
+            dispatch_world_packet(&statue_chunk_packet(nbt), &tx)
+                .await
+                .unwrap();
             assert_eq!(rx.len(), 4096);
             for _ in 0..4095 {
                 assert!(matches!(
@@ -2207,8 +2340,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn mandatory_world_packets_fail_on_full_or_disconnected_queue() {
+    #[tokio::test]
+    async fn mandatory_world_packets_fail_on_full_or_disconnected_queue() {
         use azalea_protocol::packets::game::c_block_entity_data::ClientboundBlockEntityData;
         use azalea_protocol::packets::game::c_block_update::ClientboundBlockUpdate;
         use azalea_protocol::packets::game::c_forget_level_chunk::ClientboundForgetLevelChunk;
@@ -2243,7 +2376,7 @@ mod tests {
             for _ in 0..4096 {
                 tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
             }
-            let error = dispatch_world_packet(&packet, &tx).unwrap_err();
+            let error = dispatch_world_packet(&packet, &tx).await.unwrap_err();
             assert!(matches!(error, TrySendError::Full(_)));
             if let TrySendError::Full(NetworkEvent::ChunkLoaded { block_entities, .. }) = error {
                 assert_eq!(block_entities.len(), 1);
@@ -2256,20 +2389,22 @@ mod tests {
             );
             drop(rx);
             assert!(matches!(
-                dispatch_world_packet(&packet, &tx),
+                dispatch_world_packet(&packet, &tx).await,
                 Err(TrySendError::Disconnected(_))
             ));
         }
     }
 
-    #[test]
-    fn chunk_then_standalone_be_and_block_updates_then_unload_stay_fifo() {
+    #[tokio::test]
+    async fn chunk_then_standalone_be_and_block_updates_then_unload_stay_fifo() {
         use azalea_protocol::packets::game::c_block_entity_data::ClientboundBlockEntityData;
         use azalea_protocol::packets::game::c_block_update::ClientboundBlockUpdate;
         use azalea_protocol::packets::game::c_forget_level_chunk::ClientboundForgetLevelChunk;
         let (tx, rx) = crossbeam_channel::bounded(4);
         let pos = BlockPos::new(-17, -64, 17);
-        dispatch_world_packet(&statue_chunk_packet(simdnbt::owned::Nbt::None), &tx).unwrap();
+        dispatch_world_packet(&statue_chunk_packet(simdnbt::owned::Nbt::None), &tx)
+            .await
+            .unwrap();
         dispatch_world_packet(
             &ClientboundGamePacket::BlockEntityData(ClientboundBlockEntityData {
                 pos,
@@ -2278,6 +2413,7 @@ mod tests {
             }),
             &tx,
         )
+        .await
         .unwrap();
         dispatch_world_packet(
             &ClientboundGamePacket::BlockUpdate(ClientboundBlockUpdate {
@@ -2286,6 +2422,7 @@ mod tests {
             }),
             &tx,
         )
+        .await
         .unwrap();
         dispatch_world_packet(
             &ClientboundGamePacket::ForgetLevelChunk(ClientboundForgetLevelChunk {
@@ -2293,6 +2430,7 @@ mod tests {
             }),
             &tx,
         )
+        .await
         .unwrap();
         assert!(matches!(
             rx.try_recv().unwrap(),
@@ -2313,8 +2451,8 @@ mod tests {
         assert!(rx.is_empty());
     }
 
-    #[test]
-    fn animate_critical_actions_dispatch_distinct_events_and_other_actions_do_not() {
+    #[tokio::test]
+    async fn animate_critical_actions_dispatch_distinct_events_and_other_actions_do_not() {
         use azalea_core::entity_id::MinecraftEntityId;
         use azalea_protocol::packets::game::c_animate::{AnimationAction, ClientboundAnimate};
 
@@ -2347,6 +2485,7 @@ mod tests {
                 &mut batches,
                 &mut cookies,
             )
+            .await
             .unwrap();
             assert!(
                 matches!(event_rx.recv().unwrap(), NetworkEvent::CriticalHit { id: 41, kind } if kind == expected)
@@ -2364,6 +2503,7 @@ mod tests {
             &mut batches,
             &mut cookies,
         )
+        .await
         .unwrap();
         assert!(matches!(
             event_rx.recv().unwrap(),
@@ -2384,6 +2524,7 @@ mod tests {
                 &mut batches,
                 &mut cookies,
             )
+            .await
             .unwrap();
             if let Some(id) = expected {
                 assert!(
@@ -2395,8 +2536,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn explosion_ingress_preserves_the_complete_native_payload() {
+    #[tokio::test]
+    async fn explosion_ingress_preserves_the_complete_native_payload() {
         use azalea_core::position::Vec3;
         use azalea_entity::particle::Particle;
         use azalea_protocol::packets::game::c_explode::{
@@ -2435,6 +2576,7 @@ mod tests {
             &mut batches,
             &mut cookies,
         )
+        .await
         .unwrap();
         let NetworkEvent::Explosion(event) = event_rx.recv().unwrap() else {
             panic!("expected Explosion event");
@@ -2448,8 +2590,8 @@ mod tests {
         assert_eq!(event.explosion_sound.event_name(), "minecraft:ambient.cave");
     }
 
-    #[test]
-    fn player_rotation_and_entity_teleport_keep_relative_flags_in_events() {
+    #[tokio::test]
+    async fn player_rotation_and_entity_teleport_keep_relative_flags_in_events() {
         use azalea_core::entity_id::MinecraftEntityId;
         use azalea_core::position::Vec3;
         use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
@@ -2464,7 +2606,7 @@ mod tests {
         let command_tree = Arc::new(Mutex::new(None));
         let mut batches = ChunkBatchSizeCalculator::default();
         let mut cookies = std::collections::HashMap::new();
-        let mut dispatch = |packet: ClientboundGamePacket| {
+        let mut dispatch = async |packet: ClientboundGamePacket| {
             handle_game_packet(
                 &packet,
                 &sender,
@@ -2474,6 +2616,7 @@ mod tests {
                 &mut batches,
                 &mut cookies,
             )
+            .await
             .unwrap();
         };
         dispatch(ClientboundGamePacket::PlayerRotation(
@@ -2483,7 +2626,8 @@ mod tests {
                 x_rot: 25.0,
                 relative_x: false,
             },
-        ));
+        ))
+        .await;
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::PlayerRotation {
@@ -2515,7 +2659,8 @@ mod tests {
                 },
                 on_ground: true,
             },
-        ));
+        ))
+        .await;
         let NetworkEvent::EntityTeleported {
             relative: Some(relative),
             velocity: Some(velocity),
@@ -2538,7 +2683,8 @@ mod tests {
                 },
                 on_ground: false,
             },
-        ));
+        ))
+        .await;
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::EntityTeleported {
@@ -2549,8 +2695,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn merchant_mount_and_border_packets_keep_native_fields_in_events() {
+    #[tokio::test]
+    async fn merchant_mount_and_border_packets_keep_native_fields_in_events() {
         use azalea_core::entity_id::MinecraftEntityId;
         use azalea_inventory::ItemStackData;
         use azalea_protocol::packets::game::c_initialize_border::ClientboundInitializeBorder;
@@ -2572,7 +2718,7 @@ mod tests {
         let command_tree = Arc::new(Mutex::new(None));
         let mut batches = ChunkBatchSizeCalculator::default();
         let mut cookies = std::collections::HashMap::new();
-        let mut dispatch = |packet: ClientboundGamePacket| {
+        let mut dispatch = async |packet: ClientboundGamePacket| {
             handle_game_packet(
                 &packet,
                 &sender,
@@ -2582,6 +2728,7 @@ mod tests {
                 &mut batches,
                 &mut cookies,
             )
+            .await
             .unwrap();
         };
         dispatch(ClientboundGamePacket::MerchantOffers(
@@ -2612,7 +2759,8 @@ mod tests {
                 show_progress: true,
                 can_restock: false,
             },
-        ));
+        ))
+        .await;
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::MerchantOffers {
@@ -2640,7 +2788,8 @@ mod tests {
                 inventory_columns: 5,
                 entity_id: MinecraftEntityId(42),
             },
-        ));
+        ))
+        .await;
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::MountScreenOpen {
@@ -2660,7 +2809,8 @@ mod tests {
                 warning_blocks: 7,
                 warning_time: 21,
             },
-        ));
+        ))
+        .await;
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::WorldBorderInitialize {
@@ -2679,14 +2829,16 @@ mod tests {
                 new_center_x: 3.0,
                 new_center_z: 4.0,
             },
-        ));
+        ))
+        .await;
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::WorldBorderCenter { x: 3.0, z: 4.0 }
         ));
         dispatch(ClientboundGamePacket::SetBorderSize(
             ClientboundSetBorderSize { size: 75.0 },
-        ));
+        ))
+        .await;
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::WorldBorderSize { size: 75.0 }
@@ -2697,7 +2849,8 @@ mod tests {
                 new_size: 25.0,
                 lerp_time: 20,
             },
-        ));
+        ))
+        .await;
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::WorldBorderLerpSize {
@@ -2708,14 +2861,16 @@ mod tests {
         ));
         dispatch(ClientboundGamePacket::SetBorderWarningDistance(
             ClientboundSetBorderWarningDistance { warning_blocks: 11 },
-        ));
+        ))
+        .await;
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::WorldBorderWarningBlocks { warning_blocks: 11 }
         ));
         dispatch(ClientboundGamePacket::SetBorderWarningDelay(
             ClientboundSetBorderWarningDelay { warning_delay: 31 },
-        ));
+        ))
+        .await;
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::WorldBorderWarningTime { warning_time: 31 }
@@ -2763,14 +2918,14 @@ mod tests {
         assert!(event_rx.try_recv().is_err());
     }
 
-    #[test]
-    fn set_held_slot_emits_authoritative_hotbar_selection() {
+    #[tokio::test]
+    async fn set_held_slot_emits_authoritative_hotbar_selection() {
         let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
         let sender = PacketSender::new(out_tx);
         let (event_tx, event_rx) = crossbeam_channel::bounded(1);
         let registries = RegistryHolder::default();
         let command_tree = Arc::new(Mutex::new(None));
-        let receive = |slot| {
+        let receive = async |slot| {
             handle_game_packet(
                 &ClientboundGamePacket::SetHeldSlot(ClientboundSetHeldSlot { slot }),
                 &sender,
@@ -2780,17 +2935,18 @@ mod tests {
                 &mut ChunkBatchSizeCalculator::default(),
                 &mut std::collections::HashMap::new(),
             )
+            .await
             .unwrap();
         };
 
-        receive(5);
+        receive(5).await;
         assert!(matches!(
             event_rx.recv().unwrap(),
             NetworkEvent::HeldSlot { slot: 5 }
         ));
 
         for invalid in [9, u32::MAX] {
-            receive(invalid);
+            receive(invalid).await;
             assert!(matches!(
                 event_rx.try_recv(),
                 Err(crossbeam_channel::TryRecvError::Empty)
@@ -2798,8 +2954,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn game_ping_is_answered_and_cookies_round_trip() {
+    #[tokio::test]
+    async fn game_ping_is_answered_and_cookies_round_trip() {
         let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
         let sender = PacketSender::new(out_tx);
         let (event_tx, event_rx) = crossbeam_channel::bounded(4);
@@ -2807,9 +2963,9 @@ mod tests {
         let command_tree = Arc::new(Mutex::new(None));
         let mut cookies = std::collections::HashMap::new();
         let mut batches = ChunkBatchSizeCalculator::default();
-        let dispatch = |packet: &ClientboundGamePacket,
-                        cookies: &mut std::collections::HashMap<_, _>,
-                        batches: &mut ChunkBatchSizeCalculator| {
+        let dispatch = async |packet: &ClientboundGamePacket,
+                              cookies: &mut std::collections::HashMap<_, _>,
+                              batches: &mut ChunkBatchSizeCalculator| {
             handle_game_packet(
                 packet,
                 &sender,
@@ -2819,6 +2975,7 @@ mod tests {
                 batches,
                 cookies,
             )
+            .await
             .unwrap();
         };
 
@@ -2828,7 +2985,8 @@ mod tests {
             }),
             &mut cookies,
             &mut batches,
-        );
+        )
+        .await;
         let Outbound::Packet(packet) = out_rx.try_recv().unwrap() else {
             panic!("expected pong packet");
         };
@@ -2844,14 +3002,16 @@ mod tests {
             ),
             &mut cookies,
             &mut batches,
-        );
+        )
+        .await;
         dispatch(
             &ClientboundGamePacket::CookieRequest(
                 azalea_protocol::packets::game::c_cookie_request::ClientboundCookieRequest { key },
             ),
             &mut cookies,
             &mut batches,
-        );
+        )
+        .await;
         let Outbound::Packet(packet) = out_rx.try_recv().unwrap() else {
             panic!("expected cookie response packet");
         };
@@ -2875,7 +3035,8 @@ mod tests {
             ),
             &mut cookies,
             &mut batches,
-        );
+        )
+        .await;
         assert!(matches!(
             event_rx.try_recv().unwrap(),
             NetworkEvent::ChunkBiomes { pos: event_pos, data }

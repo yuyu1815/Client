@@ -157,6 +157,15 @@ impl ChunkStore {
         self.light_data.keys().map(|&(x, z)| ChunkPos::new(x, z))
     }
 
+    pub fn load_decoded_chunk(&mut self, pos: ChunkPos, chunk: Chunk) {
+        if !self.partial_storage.in_range(&pos) {
+            tracing::warn!("Ignoring chunk since it's not in the view range: {pos:?}");
+            return;
+        }
+        self.partial_storage
+            .set(&pos, Some(chunk), &mut self.chunk_storage);
+    }
+
     pub fn load_chunk(
         &mut self,
         pos: ChunkPos,

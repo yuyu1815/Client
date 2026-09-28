@@ -303,15 +303,14 @@ fn load_network_chunk(
     chunks: &mut ChunkStore,
     animations: &mut crate::world::block_entity_anim::BlockEntityAnimStore,
     pos: azalea_core::position::ChunkPos,
-    data: &[u8],
-    heightmaps: &[(azalea_core::heightmap_kind::HeightmapKind, Box<[u64]>)],
+    chunk: azalea_world::chunk::Chunk,
     block_entities: Vec<(
         azalea_core::position::BlockPos,
         azalea_registry::builtin::BlockEntityKind,
         simdnbt::owned::NbtCompound,
     )>,
-) -> Result<(), crate::world::chunk::ChunkError> {
-    chunks.load_chunk(pos, data, heightmaps)?;
+) {
+    chunks.load_decoded_chunk(pos, chunk);
     chunks
         .block_entities
         .retain(|p, _| p.x.div_euclid(16) != pos.x || p.z.div_euclid(16) != pos.z);
@@ -322,7 +321,6 @@ fn load_network_chunk(
             crate::world::block_entity::StoredBlockEntity::new(kind, nbt),
         );
     }
-    Ok(())
 }
 
 fn writable_book_editor(
@@ -1877,22 +1875,17 @@ impl AppCore {
                 }
                 NetworkEvent::ChunkLoaded {
                     pos,
-                    data,
-                    heightmaps,
+                    chunk,
                     light,
                     block_entities,
                 } => {
-                    if let Err(e) = load_network_chunk(
+                    load_network_chunk(
                         &mut game.chunk_store,
                         &mut game.block_entity_anim,
                         pos,
-                        &data,
-                        &heightmaps,
+                        *chunk,
                         block_entities,
-                    ) {
-                        tracing::error!("Failed to load chunk [{}, {}]: {e}", pos.x, pos.z);
-                        continue;
-                    }
+                    );
                     game.light_engine
                         .on_chunk_loaded(&mut game.chunk_store, (pos.x, pos.z));
                     // Biome/AO snapshots retain the whole 3x3 dependency set;
@@ -4693,8 +4686,15 @@ mod tests {
         }
         tx.try_send(NetworkEvent::ChunkLoaded {
             pos: chunk_pos,
-            data: std::sync::Arc::new(empty_chunk_section().into_boxed_slice()),
-            heightmaps: Vec::new(),
+            chunk: Box::new(
+                azalea_world::chunk::Chunk::read_with_dimension_height(
+                    &mut std::io::Cursor::new(empty_chunk_section().as_slice()),
+                    16,
+                    -64,
+                    &[],
+                )
+                .unwrap(),
+            ),
             light: (&light).into(),
             block_entities: vec![(pos, kind, NbtCompound::new())],
         })
@@ -4717,20 +4717,11 @@ mod tests {
             match event {
                 NetworkEvent::ChunkLoaded {
                     pos,
-                    data,
-                    heightmaps,
+                    chunk,
                     block_entities,
                     ..
                 } => {
-                    load_network_chunk(
-                        &mut chunks,
-                        &mut animations,
-                        pos,
-                        &data,
-                        &heightmaps,
-                        block_entities,
-                    )
-                    .unwrap();
+                    load_network_chunk(&mut chunks, &mut animations, pos, *chunk, block_entities);
                 }
                 NetworkEvent::LevelChunksLoadStart => {}
                 _ => panic!("later update must remain queued for the next tick"),
@@ -4957,9 +4948,15 @@ mod tests {
                 NbtCompound::new(),
             )]
         };
+        // A failed decode never enters the event queue or mutates the old snapshot.
         assert!(
-            load_network_chunk(&mut chunks, &mut animations, chunk_pos, &[], &[], entries(),)
-                .is_err()
+            azalea_world::chunk::Chunk::read_with_dimension_height(
+                &mut std::io::Cursor::new(&[]),
+                16,
+                -64,
+                &[],
+            )
+            .is_err()
         );
         assert_eq!(chunks.block_entities.len(), 2);
         assert_eq!(chunks.block_entities[&stale].kind, BlockEntityKind::Chest);
@@ -4970,11 +4967,15 @@ mod tests {
             &mut chunks,
             &mut animations,
             chunk_pos,
-            &data,
-            &[],
+            azalea_world::chunk::Chunk::read_with_dimension_height(
+                &mut std::io::Cursor::new(data.as_slice()),
+                16,
+                -64,
+                &[],
+            )
+            .unwrap(),
             entries(),
-        )
-        .unwrap();
+        );
         assert!(!chunks.block_entities.contains_key(&stale));
         assert_eq!(
             chunks.block_entities[&statue].kind,
@@ -4989,11 +4990,15 @@ mod tests {
             &mut chunks,
             &mut animations,
             chunk_pos,
-            &data,
-            &[],
+            azalea_world::chunk::Chunk::read_with_dimension_height(
+                &mut std::io::Cursor::new(data.as_slice()),
+                16,
+                -64,
+                &[],
+            )
+            .unwrap(),
             Vec::new(),
-        )
-        .unwrap();
+        );
         assert_eq!(chunks.block_entities.len(), 1);
         assert!(chunks.block_entities.contains_key(&neighbor));
         assert!(animations.container(&statue).is_none());
