@@ -13,6 +13,7 @@ pub struct StoredBlockEntity {
     pub nbt: NbtCompound,
     pub sign_front: Option<[String; 4]>,
     pub sign_back: Option<[String; 4]>,
+    pub player_head_profile_source: Option<PlayerHeadProfileSource>,
 }
 
 impl StoredBlockEntity {
@@ -22,6 +23,8 @@ impl StoredBlockEntity {
             kind,
             sign_front: is_sign.then(|| sign_lines(&nbt, true)),
             sign_back: is_sign.then(|| sign_lines(&nbt, false)),
+            player_head_profile_source: (kind == BlockEntityKind::Skull)
+                .then(|| player_head_profile_source(&nbt)),
             nbt,
         }
     }
@@ -29,6 +32,8 @@ impl StoredBlockEntity {
     pub fn update_nbt(&mut self, nbt: NbtCompound) {
         self.sign_front = (self.kind == BlockEntityKind::Sign).then(|| sign_lines(&nbt, true));
         self.sign_back = (self.kind == BlockEntityKind::Sign).then(|| sign_lines(&nbt, false));
+        self.player_head_profile_source =
+            (self.kind == BlockEntityKind::Skull).then(|| player_head_profile_source(&nbt));
         self.nbt = nbt;
     }
 }
@@ -527,6 +532,53 @@ mod tests {
             entity.sign_back.as_ref().unwrap(),
             &sign_lines(&entity.nbt, false)
         );
+    }
+
+    #[test]
+    fn stored_skull_profile_matches_parser_and_refreshes_on_nbt_update() {
+        let mut first = NbtCompound::new();
+        first.insert("profile", "Player_1");
+        let mut entity = StoredBlockEntity::new(BlockEntityKind::Skull, first.clone());
+        assert_eq!(
+            entity.player_head_profile_source,
+            Some(PlayerHeadProfileSource::Profile("Player_1".into()))
+        );
+        assert_eq!(
+            entity.clone().player_head_profile_source,
+            Some(player_head_profile_source(&first))
+        );
+        assert!(
+            StoredBlockEntity::new(BlockEntityKind::Chest, first)
+                .player_head_profile_source
+                .is_none()
+        );
+
+        let mut second = NbtCompound::new();
+        second.insert("profile", "Player_2");
+        entity.update_nbt(second);
+        assert_eq!(
+            entity.player_head_profile_source,
+            Some(PlayerHeadProfileSource::Profile("Player_2".into()))
+        );
+        assert_eq!(
+            entity.player_head_profile_source,
+            Some(player_head_profile_source(&entity.nbt))
+        );
+
+        entity.update_nbt(NbtCompound::new());
+        assert_eq!(
+            entity.player_head_profile_source,
+            Some(PlayerHeadProfileSource::Default)
+        );
+        assert_eq!(
+            entity.player_head_profile_source,
+            Some(player_head_profile_source(&entity.nbt))
+        );
+        let mut chest = StoredBlockEntity::new(BlockEntityKind::Chest, NbtCompound::new());
+        let mut profile = NbtCompound::new();
+        profile.insert("profile", "Player_3");
+        chest.update_nbt(profile);
+        assert!(chest.player_head_profile_source.is_none());
     }
 
     #[test]

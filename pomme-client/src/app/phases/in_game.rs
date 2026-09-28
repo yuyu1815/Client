@@ -4605,7 +4605,8 @@ pub fn update_game(
                         (([0.0; 3], false), ([0.0; 3], false))
                     };
                 let player_head_profile_source = matches!(id, "player_head" | "player_wall_head")
-                    .then(|| crate::world::block_entity::player_head_profile_source(&be.nbt));
+                    .then(|| be.player_head_profile_source.clone())
+                    .flatten();
                 Some(crate::renderer::BlockEntityRenderInfo {
                     pos: *pos,
                     player_head_profile_source,
