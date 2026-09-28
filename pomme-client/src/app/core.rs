@@ -3890,7 +3890,7 @@ impl AppCore {
         for &(col, si) in &priority_remesh {
             game.enqueue_section_edit(
                 col,
-                si,
+                si..si + 1,
                 chunk_lod(col, player_chunk, self.menu.chunk_detail),
             );
         }

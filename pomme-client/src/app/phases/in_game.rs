@@ -462,6 +462,40 @@ fn bump_loaded_content_generations(
     affected
 }
 
+/// Only adjacent dirty sections in the same column can share a snapshot/job.
+fn consecutive_section_runs(
+    sections: impl IntoIterator<Item = (ChunkPos, i32)>,
+) -> Vec<(ChunkPos, std::ops::Range<i32>)> {
+    let mut sections: Vec<_> = sections.into_iter().collect();
+    sections.sort_unstable_by_key(|(col, si)| (col.x, col.z, *si));
+    sections.dedup();
+    let mut runs: Vec<(ChunkPos, std::ops::Range<i32>)> = Vec::new();
+    for (col, si) in sections {
+        if let Some((last_col, range)) = runs.last_mut()
+            && *last_col == col
+            && range.end == si
+        {
+            range.end = si + 1;
+        } else {
+            runs.push((col, si..si + 1));
+        }
+    }
+    runs
+}
+
+fn bump_section_generations(
+    generations: &mut HashMap<(ChunkPos, i32), u64>,
+    next: &mut u64,
+    col: ChunkPos,
+    sections: std::ops::Range<i32>,
+) -> u64 {
+    *next += 1;
+    for si in sections {
+        generations.insert((col, si), *next);
+    }
+    *next
+}
+
 /// Reject unloaded columns even while a worker snapshot keeps the chunk Arc
 /// alive; the weak-backed chunk storage alone cannot answer membership.
 fn mesh_result_is_stale(
@@ -1230,20 +1264,21 @@ impl GameState {
             let player_chunk = self.player_chunk();
             let min_section_y = self.chunk_store.min_y() >> 4;
             let section_count = self.chunk_store.section_count();
-            for key in &dirty.sections {
+            let sections = dirty.sections.iter().filter_map(|key| {
                 let si = key.y - min_section_y;
                 let col = ChunkPos::new(key.x, key.z);
                 // Padding/out-of-range sections have no mesh; columns already
                 // bumped above remesh wholesale anyway.
-                if si < 0 || si >= section_count || bumped.contains(&col) {
-                    continue;
-                }
-                if self.chunk_store.get_chunk(&col).is_none() {
-                    continue;
-                }
+                (si >= 0
+                    && si < section_count
+                    && !bumped.contains(&col)
+                    && self.chunk_store.get_chunk(&col).is_some())
+                .then_some((col, si))
+            });
+            for (col, range) in consecutive_section_runs(sections) {
                 self.enqueue_section_edit(
                     col,
-                    si,
+                    range,
                     crate::app::core::chunk_lod(col, player_chunk, chunk_detail),
                 );
             }
@@ -1266,11 +1301,15 @@ impl GameState {
         }
     }
 
-    /// Mesh a single edited section now on the priority lane, ungated by
-    /// visibility. Bumps that section's generation so the result is dropped
-    /// only if the same section is edited again before it lands.
-    pub fn enqueue_section_edit(&mut self, col: ChunkPos, si: i32, lod: u32) {
-        let g = self.bump_section_gen(col, si..si + 1);
+    /// Mesh edited sections on the priority lane, ungated by visibility.
+    /// Every section in the span gets the same generation for stale rejection.
+    pub fn enqueue_section_edit(
+        &mut self,
+        col: ChunkPos,
+        sections: std::ops::Range<i32>,
+        lod: u32,
+    ) {
+        let g = self.bump_section_gen(col, sections.clone());
         self.mesh_dispatcher.enqueue(
             &self.chunk_store,
             &self.block_entity_anim,
@@ -1278,7 +1317,7 @@ impl GameState {
             lod,
             true,
             g,
-            si..si + 1,
+            sections,
         );
     }
 
@@ -1311,11 +1350,12 @@ impl GameState {
     /// section in a mesh's `replaced` range against its single
     /// `content_gen`, so grouped sections must share a value.
     fn bump_section_gen(&mut self, col: ChunkPos, sections: std::ops::Range<i32>) -> u64 {
-        self.next_section_gen += 1;
-        for si in sections {
-            self.section_gen.insert((col, si), self.next_section_gen);
-        }
-        self.next_section_gen
+        bump_section_generations(
+            &mut self.section_gen,
+            &mut self.next_section_gen,
+            col,
+            sections,
+        )
     }
 
     /// Collect the frame's ready meshes, apply their CPU-side bookkeeping, then
@@ -5849,8 +5889,9 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 mod tests {
     use super::{
         advance_server_time, arrow_render_infos, block_entity_in_frustum,
-        bump_loaded_content_generations, credits_may_advance, death_confirm_escape_allowed,
-        finish_win_credits, finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
+        bump_loaded_content_generations, bump_section_generations, consecutive_section_runs,
+        credits_may_advance, death_confirm_escape_allowed, finish_win_credits,
+        finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
         item_frame_base_position, item_frame_base_rotation, limited_crafting_param,
         mesh_result_is_stale, mesh_target_mask, section_bit, section_bits, server_tick_runs,
         show_death_screen_param, sign_has_text, sign_text_in_range,
@@ -6305,6 +6346,98 @@ mod tests {
         assert_eq!(section_bit(-1), 0);
         assert_eq!(section_bit(32), 0);
         assert_eq!(section_bits(-3..-2), 0);
+    }
+
+    #[test]
+    fn light_edits_group_only_adjacent_sections_in_one_column() {
+        use azalea_core::position::ChunkPos;
+
+        let a = ChunkPos::new(-2, 3);
+        let b = ChunkPos::new(-2, 4);
+        let c = ChunkPos::new(1, 3);
+        // Shuffled keys, duplicate, separate columns and negative world Y
+        // normalized against min_y = -64 (min_section_y = -4).
+        let min_section_y = -64 >> 4;
+        assert_eq!(
+            consecutive_section_runs([
+                (c, -2 - min_section_y),
+                (a, 2),
+                (b, 1),
+                (a, 0),
+                (c, -3 - min_section_y),
+                (a, 1),
+                (a, 0),
+                (a, 5)
+            ]),
+            vec![(a, 0..3), (a, 5..6), (b, 1..2), (c, 1..3)]
+        );
+        assert!(consecutive_section_runs([]).is_empty());
+    }
+
+    #[test]
+    fn grouped_edit_generation_rejects_old_results_per_section() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use azalea_core::position::ChunkPos;
+
+        use crate::world::chunk::{ChunkLightData, ChunkStore};
+
+        let col = ChunkPos::new(-2, 3);
+        let mut generations = HashMap::new();
+        let mut next = 0;
+        let first = bump_section_generations(&mut generations, &mut next, col, 0..3);
+        assert!((0..3).all(|si| generations[&(col, si)] == first));
+        assert!(!generations.contains_key(&(col, 3)));
+        let mut chunks = ChunkStore::new_with_dimension(2, 16, -64);
+        chunks.light_data.insert(
+            (col.x, col.z),
+            Arc::new(ChunkLightData {
+                sky_sections: vec![],
+                block_sections: vec![],
+                min_y: -64,
+                has_sky: false,
+                sky_top_section: None,
+            }),
+        );
+        assert!(!mesh_result_is_stale(
+            &chunks,
+            &HashMap::new(),
+            &generations,
+            col,
+            first,
+            0..3,
+            true
+        ));
+        let second = bump_section_generations(&mut generations, &mut next, col, 1..2);
+        assert!(second > first);
+        assert!(mesh_result_is_stale(
+            &chunks,
+            &HashMap::new(),
+            &generations,
+            col,
+            first,
+            0..3,
+            true
+        ));
+        assert!(!mesh_result_is_stale(
+            &chunks,
+            &HashMap::new(),
+            &generations,
+            col,
+            first,
+            0..1,
+            true
+        ));
+        assert!(!mesh_result_is_stale(
+            &chunks,
+            &HashMap::new(),
+            &generations,
+            col,
+            second,
+            1..2,
+            true
+        ));
     }
 
     #[test]
