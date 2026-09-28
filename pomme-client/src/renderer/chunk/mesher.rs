@@ -135,9 +135,10 @@ fn unpack_sprite_uv(x: u16) -> f32 {
 /// Convert an ordinary chest half to section-local static geometry. The upload
 /// path claims the chest only after its indexed section has been accepted.
 /// `block_pos` is section-local, `yaw` uses the BE pipeline's degrees, and
-/// `region` comes from the matching entity chest sheet (sprite 0
-/// missing-tile fallback if the pack has no usable PNG). Indices use cutout
-/// for any chest sheet with alpha; the caller must never force opaque draws.
+/// `region` comes from the matching normal or christmas entity chest sheet.
+/// Missing/unsuitable sheets must be rejected by `chest_sheet`. Indices use
+/// cutout for any chest sheet with alpha; the caller must never force opaque
+/// draws.
 fn chest_quads(
     model: &crate::renderer::entity_model::BakedEntityModel,
     block_pos: [f32; 3],
@@ -186,16 +187,20 @@ fn chest_sheet(
     variant: usize,
     christmas: bool,
 ) -> Option<AtlasRegion> {
-    if christmas {
-        return None; // BE owns the seasonal sheet, not the normal-only chunk atlas.
-    }
-    let name = [
-        "entity/chest/normal",
-        "entity/chest/normal_left",
-        "entity/chest/normal_right",
-    ]
-    .get(variant)?;
-    let region = uv_map.get_region(name);
+    let names = if christmas {
+        [
+            "entity/chest/christmas",
+            "entity/chest/christmas_left",
+            "entity/chest/christmas_right",
+        ]
+    } else {
+        [
+            "entity/chest/normal",
+            "entity/chest/normal_left",
+            "entity/chest/normal_right",
+        ]
+    };
+    let region = uv_map.get_region(names.get(variant)?);
     // A partially translucent custom sheet needs BE alpha blending, not the
     // chunk cutout pass; binary-alpha sheets remain safe here.
     (lod == 0 && region.sprite != uv_map.missing_region().sprite && !region.translucent)
@@ -2125,10 +2130,10 @@ fn mesh_chunk_snapshot(
 
     // Chest snapshots are immutable job inputs, but the shared chunk arcs can
     // change before the worker runs. Never emit a now-different block state.
-    // No normal sheet => leave the BE renderer in charge (not the missing tile).
+    // No matching sheet => leave the BE renderer in charge (not the missing tile).
     let mut chest_vertices: Vec<Vec<PackedVertex>> = vec![Vec::new(); sinks.len()];
     let mut emitted: Vec<Vec<EmittedChest>> = vec![Vec::new(); sinks.len()];
-    if !snapshot.chests.is_empty() && lod == 0 && !christmas_chests {
+    if !snapshot.chests.is_empty() && lod == 0 {
         let models = crate::renderer::block_entity_model::bake_chest_models();
         for chest in &snapshot.chests {
             let Some(region) = chest_sheet(uv_map, lod, chest.variant, christmas_chests) else {
@@ -3617,56 +3622,112 @@ mod chest_quad_tests {
             }
         }
         let empty = AtlasUVMap::test_empty();
-        for variant in [1, 2] {
-            assert!(chest_sheet(&empty, 0, variant, false).is_none());
+        for christmas in [false, true] {
+            for variant in 0..3 {
+                assert!(chest_sheet(&empty, 0, variant, christmas).is_none());
+            }
+            assert!(chest_sheet(&empty, 0, 3, christmas).is_none());
         }
-        assert!(chest_sheet(&empty, 0, 3, false).is_none());
-        assert_eq!(
-            crate::renderer::chunk::atlas::atlas_asset_path("entity/chest/normal_left"),
-            "minecraft/textures/entity/chest/normal_left.png"
-        );
-        assert_eq!(
-            crate::renderer::chunk::atlas::atlas_asset_path("entity/chest/normal_right"),
-            "minecraft/textures/entity/chest/normal_right.png"
-        );
+        for variant in [1, 2] {
+            for name in ["normal", "christmas"] {
+                let key = format!(
+                    "entity/chest/{name}_{}",
+                    if variant == 1 { "left" } else { "right" }
+                );
+                assert_eq!(
+                    crate::renderer::chunk::atlas::atlas_asset_path(&key),
+                    format!("minecraft/textures/{key}.png")
+                );
+            }
+            // The same 64x64 sheet UVs are used by the normal and christmas
+            // textures, including both open/closed lid poses.
+            for open in [false, true] {
+                let (verts, _, _) = chest_quads(&models[variant], [0.0; 3], 0.0, open, region, 1.0);
+                for (i, face) in models[variant].vertices.chunks_exact(6).enumerate() {
+                    for (corner, src) in [0, 1, 2, 5].into_iter().enumerate() {
+                        for axis in 0..2 {
+                            let uv = unpack_sprite_uv(verts[i * 4 + corner].uv[axis]);
+                            let expected = face[src].tex_coords[axis] as f32 / 65535.0;
+                            assert!(
+                                (uv - expected).abs() <= 0.5 / TERRAIN_UV_FIXED_SCALE + 0.00001
+                            );
+                            assert!((0.0..=1.0).contains(&uv));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
     fn session_chest_policy_survives_midnight_and_pack_reload() {
         let names = [
-            "entity/chest/normal",
-            "entity/chest/normal_left",
-            "entity/chest/normal_right",
+            [
+                "entity/chest/normal",
+                "entity/chest/normal_left",
+                "entity/chest/normal_right",
+            ],
+            [
+                "entity/chest/christmas",
+                "entity/chest/christmas_left",
+                "entity/chest/christmas_right",
+            ],
         ];
         let mut original = AtlasUVMap::test_empty();
         // A pack reload replaces UVs but not the BE pipeline or its date flag.
         let mut reloaded = AtlasUVMap::test_empty();
-        for (variant, name) in names.into_iter().enumerate() {
-            for (atlas, sprite) in [(&mut original, variant + 1), (&mut reloaded, variant + 4)] {
-                atlas.test_insert_region(
-                    name,
-                    AtlasRegion {
-                        sprite: sprite as u16,
-                        ..atlas.missing_region()
-                    },
-                );
+        for (season, variants) in names.into_iter().enumerate() {
+            for (variant, name) in variants.into_iter().enumerate() {
+                for (atlas, sprite) in [
+                    (&mut original, 1 + season * 3 + variant),
+                    (&mut reloaded, 7 + season * 3 + variant),
+                ] {
+                    atlas.test_insert_region(
+                        name,
+                        AtlasRegion {
+                            sprite: sprite as u16,
+                            ..atlas.missing_region()
+                        },
+                    );
+                }
             }
         }
-        for (atlas, base) in [(&original, 1), (&reloaded, 4)] {
-            for variant in 0..3 {
+        for (atlas, base) in [(&original, 1), (&reloaded, 7)] {
+            for (day, christmas) in [(23, false), (24, true), (26, true), (27, false)] {
                 assert_eq!(
-                    chest_sheet(atlas, 0, variant, false).unwrap().sprite,
-                    (base + variant) as u16
+                    crate::renderer::pipelines::block_entity::christmas_on(
+                        time::Month::December,
+                        day
+                    ),
+                    christmas
                 );
-                assert!(chest_sheet(atlas, 0, variant, true).is_none());
+                for variant in 0..3 {
+                    assert_eq!(
+                        chest_sheet(atlas, 0, variant, christmas).unwrap().sprite,
+                        (base + usize::from(christmas) * 3 + variant) as u16
+                    );
+                    assert!(chest_sheet(atlas, 1, variant, christmas).is_none());
+                }
             }
         }
-        let empty_pack = AtlasUVMap::test_empty();
-        assert!(chest_sheet(&empty_pack, 0, 0, false).is_none());
-        // Keep the session flag even if the clock changes from Dec 23 to 24,
-        // or Dec 26 to 27; BE selection is frozen at the same instant.
-        let christmas_session = true;
-        assert!(chest_sheet(&reloaded, 0, 0, christmas_session).is_none());
+        // Dec 23 -> 24 and Dec 26 -> 27 do not change an existing renderer's flag.
+        for session in [false, true] {
+            assert_eq!(
+                chest_sheet(&reloaded, 0, 0, session).unwrap().sprite,
+                (7 + usize::from(session) * 3) as u16
+            );
+            let empty_pack = AtlasUVMap::test_empty();
+            assert!(chest_sheet(&empty_pack, 0, 0, session).is_none());
+            let mut unsuitable = reloaded.clone();
+            unsuitable.test_insert_region(
+                names[usize::from(session)][0],
+                AtlasRegion {
+                    translucent: true,
+                    ..reloaded.get_region(names[usize::from(session)][0])
+                },
+            );
+            assert!(chest_sheet(&unsuitable, 0, 0, session).is_none());
+        }
     }
 
     fn decoded_pos(v: &PackedVertex) -> [f32; 3] {

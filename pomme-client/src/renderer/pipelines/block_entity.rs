@@ -296,7 +296,7 @@ pub(crate) fn is_christmas() -> bool {
     christmas_on(now.month(), now.day())
 }
 
-fn christmas_on(month: time::Month, day: u8) -> bool {
+pub(crate) fn christmas_on(month: time::Month, day: u8) -> bool {
     month == time::Month::December && (24..=26).contains(&day)
 }
 

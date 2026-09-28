@@ -2025,6 +2025,48 @@ mod tests {
     }
 
     #[test]
+    fn christmas_chest_pngs_resolve_from_pack_and_missing_image_falls_back() {
+        let root = test_temp_dir("christmas_chest_pack");
+        let jar = root.join("jar");
+        let instance = root.join("instance");
+        let pack = instance.join("resourcepacks/test_pack");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(
+            pack.join("pack.mcmeta"),
+            r#"{"pack":{"pack_format":84,"description":"test"}}"#,
+        )
+        .unwrap();
+        let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
+        packs.enable_local_pack("test_pack");
+        for suffix in ["", "_left", "_right"] {
+            let name = format!("entity/chest/christmas{suffix}");
+            let key = atlas_asset_path(&name);
+            assert_eq!(
+                key,
+                format!("minecraft/textures/entity/chest/christmas{suffix}.png")
+            );
+            let jar_png = jar.join(&key);
+            let pack_png = pack.join("assets").join(&key);
+            std::fs::create_dir_all(jar_png.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(pack_png.parent().unwrap()).unwrap();
+            image::RgbaImage::from_pixel(64, 64, image::Rgba([10, 20, 30, 255]))
+                .save(&jar_png)
+                .unwrap();
+            assert_eq!(load_source(&name, &jar, &None, None, false).data[0], 10);
+            image::RgbaImage::from_pixel(64, 64, image::Rgba([40, 50, 60, 255]))
+                .save(&pack_png)
+                .unwrap();
+            let source = load_source(&name, &jar, &None, Some(&packs), false);
+            assert_eq!((source.w, source.h, source.data[0]), (64, 64, 40));
+            std::fs::remove_file(pack_png).unwrap();
+            std::fs::remove_file(jar_png).unwrap();
+            let missing = load_source(&name, &jar, &None, Some(&packs), false);
+            assert!(missing.data.is_empty());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cross_namespace_texture_keys_resolve_without_minecraft_rewrite() {
         assert_eq!(
             atlas_asset_path("other:block/custom"),

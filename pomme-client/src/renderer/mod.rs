@@ -373,6 +373,9 @@ impl Renderer {
                 "entity/chest/normal",
                 "entity/chest/normal_left",
                 "entity/chest/normal_right",
+                "entity/chest/christmas",
+                "entity/chest/christmas_left",
+                "entity/chest/christmas_right",
             ])
             .collect();
         let atlas = TextureAtlas::build(
@@ -1790,6 +1793,9 @@ impl Renderer {
                 "entity/chest/normal",
                 "entity/chest/normal_left",
                 "entity/chest/normal_right",
+                "entity/chest/christmas",
+                "entity/chest/christmas_left",
+                "entity/chest/christmas_right",
             ])
             .collect();
         self.atlas = TextureAtlas::build(
