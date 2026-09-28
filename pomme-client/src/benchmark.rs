@@ -193,7 +193,9 @@ pub struct BenchmarkResult {
     pub min_fps: f32,
     pub max_fps: f32,
     pub avg_frame_ms: f32,
+    /// 1st percentile frame time (lower 1% side).
     pub p1_frame_ms: f32,
+    /// 99th percentile frame time (upper 1% side).
     pub p99_frame_ms: f32,
     pub avg_fence_ms: f32,
     pub avg_cull_ms: f32,
@@ -332,8 +334,8 @@ impl Benchmark {
 
         let sum: f32 = frame_times.iter().sum();
         let avg_ms = sum / count as f32;
-        let p1_idx = ((count as f32 * 0.99) as usize).min(count - 1);
-        let p99_idx = (count as f32 * 0.01) as usize;
+        let p1_idx = (count as f32 * 0.01) as usize;
+        let p99_idx = ((count as f32 * 0.99) as usize).min(count - 1);
 
         let fence_sum: f32 = self.samples.iter().map(|s| s.fence_ms).sum();
         let cull_sum: f32 = self.samples.iter().map(|s| s.cull_ms).sum();
@@ -420,6 +422,20 @@ impl Benchmark {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_percentiles_keep_heavy_tail_on_p99_side() {
+        let mut frame_times = vec![10.0; 99];
+        frame_times.push(100.0);
+        frame_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let count = frame_times.len();
+        let p1 = (count as f32 * 0.01) as usize;
+        let p95 = (count as f32 * 0.95) as usize;
+        let p99 = ((count as f32 * 0.99) as usize).min(count - 1);
+        assert!(frame_times[p99] > frame_times[p1]);
+        assert_eq!(frame_times[p95], 10.0);
+        assert_eq!(frame_times.iter().sum::<f32>() / count as f32, 10.9);
+    }
 
     #[test]
     fn result_json_write_reports_success_and_io_failure() {
