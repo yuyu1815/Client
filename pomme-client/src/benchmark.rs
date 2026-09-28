@@ -71,6 +71,20 @@ pub struct FrameSample {
     #[serde(default)]
     pub dynamic_atlas_ms: f32,
     #[serde(default)]
+    pub dynamic_atlas_added_keys: u32,
+    #[serde(default)]
+    pub dynamic_atlas_removed_keys: u32,
+    #[serde(default)]
+    pub dynamic_atlas_dirty: bool,
+    #[serde(default)]
+    pub dynamic_atlas_face_dirty: bool,
+    #[serde(default)]
+    pub dynamic_atlas_spectator_changed: bool,
+    /// CPU wall time around update_face_atlas, including queue waits; not GPU
+    /// execution.
+    #[serde(default)]
+    pub dynamic_atlas_renderer_ms: f32,
+    #[serde(default)]
     pub pre_ui_other_ms: f32,
     #[serde(default)]
     pub light_engine_ms: f32,
@@ -166,6 +180,20 @@ pub struct SpikeSample {
     pub light_update_ms: f32,
     #[serde(default)]
     pub dynamic_atlas_ms: f32,
+    #[serde(default)]
+    pub dynamic_atlas_added_keys: u32,
+    #[serde(default)]
+    pub dynamic_atlas_removed_keys: u32,
+    #[serde(default)]
+    pub dynamic_atlas_dirty: bool,
+    #[serde(default)]
+    pub dynamic_atlas_face_dirty: bool,
+    #[serde(default)]
+    pub dynamic_atlas_spectator_changed: bool,
+    /// CPU wall time around update_face_atlas, including queue waits; not GPU
+    /// execution.
+    #[serde(default)]
+    pub dynamic_atlas_renderer_ms: f32,
     #[serde(default)]
     pub pre_ui_other_ms: f32,
     #[serde(default)]
@@ -314,6 +342,12 @@ impl Benchmark {
             cpu_update_ms,
             light_update_ms: phases.light_update_ms,
             dynamic_atlas_ms: phases.dynamic_atlas_ms,
+            dynamic_atlas_added_keys: phases.dynamic_atlas_added_keys,
+            dynamic_atlas_removed_keys: phases.dynamic_atlas_removed_keys,
+            dynamic_atlas_dirty: phases.dynamic_atlas_dirty,
+            dynamic_atlas_face_dirty: phases.dynamic_atlas_face_dirty,
+            dynamic_atlas_spectator_changed: phases.dynamic_atlas_spectator_changed,
+            dynamic_atlas_renderer_ms: phases.dynamic_atlas_renderer_ms,
             pre_ui_other_ms: phases.pre_ui_other_ms,
             light_engine_ms: phases.light_engine_ms,
             light_mesh_ms: phases.light_mesh_ms,
@@ -366,6 +400,12 @@ impl Benchmark {
                 cpu_update_ms: sample.cpu_update_ms,
                 light_update_ms: sample.light_update_ms,
                 dynamic_atlas_ms: sample.dynamic_atlas_ms,
+                dynamic_atlas_added_keys: sample.dynamic_atlas_added_keys,
+                dynamic_atlas_removed_keys: sample.dynamic_atlas_removed_keys,
+                dynamic_atlas_dirty: sample.dynamic_atlas_dirty,
+                dynamic_atlas_face_dirty: sample.dynamic_atlas_face_dirty,
+                dynamic_atlas_spectator_changed: sample.dynamic_atlas_spectator_changed,
+                dynamic_atlas_renderer_ms: sample.dynamic_atlas_renderer_ms,
                 pre_ui_other_ms: sample.pre_ui_other_ms,
                 light_engine_ms: sample.light_engine_ms,
                 light_mesh_ms: sample.light_mesh_ms,
@@ -556,6 +596,12 @@ mod tests {
         assert_eq!(legacy.cpu_update_ms, 0.0);
         assert_eq!(legacy.light_update_ms, 0.0);
         assert_eq!(legacy.dynamic_atlas_ms, 0.0);
+        assert_eq!(legacy.dynamic_atlas_added_keys, 0);
+        assert_eq!(legacy.dynamic_atlas_removed_keys, 0);
+        assert!(!legacy.dynamic_atlas_dirty);
+        assert!(!legacy.dynamic_atlas_face_dirty);
+        assert!(!legacy.dynamic_atlas_spectator_changed);
+        assert_eq!(legacy.dynamic_atlas_renderer_ms, 0.0);
         assert_eq!(legacy.pre_ui_other_ms, 0.0);
         assert_eq!(legacy.light_engine_ms, 0.0);
         assert_eq!(legacy.light_mesh_ms, 0.0);
@@ -581,6 +627,12 @@ mod tests {
         assert_eq!(legacy_spike.fixed_tick_count, 0);
         assert_eq!(legacy_spike.light_update_ms, 0.0);
         assert_eq!(legacy_spike.dynamic_atlas_ms, 0.0);
+        assert_eq!(legacy_spike.dynamic_atlas_added_keys, 0);
+        assert_eq!(legacy_spike.dynamic_atlas_removed_keys, 0);
+        assert!(!legacy_spike.dynamic_atlas_dirty);
+        assert!(!legacy_spike.dynamic_atlas_face_dirty);
+        assert!(!legacy_spike.dynamic_atlas_spectator_changed);
+        assert_eq!(legacy_spike.dynamic_atlas_renderer_ms, 0.0);
         assert_eq!(legacy_spike.pre_ui_other_ms, 0.0);
         assert_eq!(legacy_spike.light_engine_ms, 0.0);
         assert_eq!(legacy_spike.light_mesh_ms, 0.0);
@@ -643,6 +695,12 @@ mod tests {
         let phases = UpdatePhases {
             light_update_ms: 3.0,
             dynamic_atlas_ms: 0.75,
+            dynamic_atlas_added_keys: 2,
+            dynamic_atlas_removed_keys: 1,
+            dynamic_atlas_dirty: true,
+            dynamic_atlas_face_dirty: true,
+            dynamic_atlas_spectator_changed: true,
+            dynamic_atlas_renderer_ms: 0.5,
             pre_ui_other_ms: 2.5,
             light_engine_ms: 1.25,
             light_mesh_ms: 1.75,
@@ -700,6 +758,14 @@ mod tests {
         assert_eq!(sample.cpu_update_ms, 30.0);
         assert_eq!(sample.light_update_ms, 3.0);
         assert_eq!(sample.dynamic_atlas_ms, 0.75);
+        assert_eq!(sample.dynamic_atlas_added_keys, 2);
+        assert_eq!(sample.dynamic_atlas_removed_keys, 1);
+        assert!(sample.dynamic_atlas_dirty);
+        assert!(sample.dynamic_atlas_face_dirty);
+        assert!(sample.dynamic_atlas_spectator_changed);
+        assert_eq!(sample.dynamic_atlas_renderer_ms, 0.5);
+        assert_eq!(bench.spikes[0].dynamic_atlas_added_keys, 2);
+        assert_eq!(bench.spikes[0].dynamic_atlas_renderer_ms, 0.5);
         assert_eq!(sample.pre_ui_other_ms, 2.5);
         assert_eq!(sample.light_engine_ms, 1.25);
         assert_eq!(sample.light_mesh_ms, 1.75);
@@ -865,6 +931,14 @@ pub struct UpdatePhases {
     pub light_update_ms: f32,
     /// Time spent in `sync_game_dynamic_atlas` alone.
     pub dynamic_atlas_ms: f32,
+    pub dynamic_atlas_added_keys: u32,
+    pub dynamic_atlas_removed_keys: u32,
+    pub dynamic_atlas_dirty: bool,
+    pub dynamic_atlas_face_dirty: bool,
+    pub dynamic_atlas_spectator_changed: bool,
+    /// CPU wall time around `update_face_atlas`, including queue waits; not GPU
+    /// execution.
+    pub dynamic_atlas_renderer_ms: f32,
     /// Light-update completion to UI extraction start; includes
     /// `dynamic_atlas_ms`.
     pub pre_ui_other_ms: f32,

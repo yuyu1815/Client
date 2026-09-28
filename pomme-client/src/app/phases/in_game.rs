@@ -2974,14 +2974,21 @@ pub fn update_game(
     core.input.menu_capture = game.gui_open() || game.death_screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
     let dynamic_atlas_start = game.benchmark.is_some().then(std::time::Instant::now);
-    core.sync_game_dynamic_atlas(
+    let atlas_stats = core.sync_game_dynamic_atlas(
         game,
         &mut gfx.renderer,
         core.input.spectator && game.spectator.is_menu_active(),
+        dynamic_atlas_start.is_some(),
     );
     game.last_update_phases.dynamic_atlas_ms = dynamic_atlas_start
         .map(|start| start.elapsed().as_secs_f32() * 1000.0)
         .unwrap_or_default();
+    game.last_update_phases.dynamic_atlas_added_keys = atlas_stats.added_keys;
+    game.last_update_phases.dynamic_atlas_removed_keys = atlas_stats.removed_keys;
+    game.last_update_phases.dynamic_atlas_dirty = atlas_stats.dirty;
+    game.last_update_phases.dynamic_atlas_face_dirty = atlas_stats.face_dirty;
+    game.last_update_phases.dynamic_atlas_spectator_changed = atlas_stats.spectator_changed;
+    game.last_update_phases.dynamic_atlas_renderer_ms = atlas_stats.renderer_ms;
 
     // The F3+F4 switcher shows the mouse cursor while open.
     let switcher_open = game.game_mode_switcher.is_some();

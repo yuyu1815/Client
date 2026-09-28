@@ -267,7 +267,7 @@ fn draw_server_dialog(
 
     // A configuration-phase dialog can carry object glyphs, which load into
     // the same atlas the in-game text uses.
-    core.sync_game_dynamic_atlas(game, &mut gfx.renderer, false);
+    core.sync_game_dynamic_atlas(game, &mut gfx.renderer, false, false);
 
     let mut elements = Vec::new();
     let text_events = core.input.drain_text_events();

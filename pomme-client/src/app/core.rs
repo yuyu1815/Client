@@ -994,6 +994,19 @@ fn serverbound_player_input(state: &PlayerInputState) -> ServerboundPlayerInput 
     }
 }
 
+/// Diagnostic data for one dynamic-atlas sync; key counts cover inline-object
+/// keys.
+#[derive(Clone, Copy, Default)]
+pub struct DynamicAtlasSyncStats {
+    pub added_keys: u32,
+    pub removed_keys: u32,
+    pub dirty: bool,
+    pub face_dirty: bool,
+    pub spectator_changed: bool,
+    /// CPU wall time around `update_face_atlas`, including any queue waits.
+    pub renderer_ms: f32,
+}
+
 pub struct AppCore {
     pub probe: Option<crate::app::probe::Probe>,
     pub user: UserData,
@@ -1434,7 +1447,8 @@ impl AppCore {
         game: &GameState,
         renderer: &mut Renderer,
         spectator_active: bool,
-    ) {
+        benchmark_active: bool,
+    ) -> DynamicAtlasSyncStats {
         let now = Instant::now();
         self.drain_head_results();
 
@@ -1489,15 +1503,23 @@ impl AppCore {
         // The packed set is compared by its keys, without rebuilding the
         // tiles every frame.
         let wanted = self.inline_objects.values().filter(|e| packable(e)).count();
-        let rebuild = self.inline_atlas_dirty
+        let dirty = self.inline_atlas_dirty;
+        let face_dirty = self.player_faces_dirty;
+        let spectator_changed = spectator_active != self.spectator_faces_packed;
+        let rebuild = dirty
             || wanted != self.game_dynamic_atlas_keys.len()
             || self
                 .inline_objects
                 .iter()
                 .any(|(key, entry)| packable(entry) && !self.game_dynamic_atlas_keys.contains(key))
-            || spectator_active != self.spectator_faces_packed
-            || self.player_faces_dirty;
+            || spectator_changed
+            || face_dirty;
+        let mut stats = DynamicAtlasSyncStats::default();
         if rebuild {
+            stats.dirty = dirty;
+            stats.face_dirty = face_dirty;
+            stats.spectator_changed = spectator_changed;
+            let old_keys = self.game_dynamic_atlas_keys.clone();
             let mut entries = Vec::<(String, Vec<u8>, u32)>::new();
             entries.extend(self.player_faces.iter().flat_map(|(uuid, (base, hat))| {
                 [
@@ -1540,8 +1562,16 @@ impl AppCore {
                     }
                 }
             }
+            stats.added_keys = self.game_dynamic_atlas_keys.difference(&old_keys).count() as u32;
+            stats.removed_keys = old_keys.difference(&self.game_dynamic_atlas_keys).count() as u32;
             if !entries.is_empty() {
-                renderer.update_face_atlas(&entries);
+                if benchmark_active {
+                    let start = Instant::now();
+                    renderer.update_face_atlas(&entries);
+                    stats.renderer_ms = start.elapsed().as_secs_f32() * 1000.0;
+                } else {
+                    renderer.update_face_atlas(&entries);
+                }
             }
             self.inline_atlas_dirty = false;
             self.spectator_faces_packed = spectator_active;
@@ -1561,6 +1591,7 @@ impl AppCore {
                 }
             }
         }
+        stats
     }
 
     /// The tile (or frames) behind one inline object, starting a head fetch
@@ -4624,15 +4655,16 @@ mod tests {
     use azalea_protocol::packets::game::ServerboundGamePacket;
 
     use super::{
-        CursorOp, DeathRoute, HeadProfile, PendingPackDownload, Velocity, accepted_player_chat_tag,
-        add_explosion_knockback, apply_passengers, apply_vehicle_teleport, chest_open_event,
-        cursor_step, death_route, entity_look_direction, explosion_sound_pitch, load_network_chunk,
-        local_player_motion, pack_download_action, player_command_packet, player_input_state,
-        player_ride_state, player_rotation_packet, post_teleport_echo, register_nonliving_spawn,
-        resolve_entity_teleport, resolve_head_profile, resolve_rotation,
-        server_view_distance_update, serverbound_player_input, set_first_disconnect_reason,
-        set_player_experience, set_player_inventory_slot, take_finished_pack_downloads,
-        time_update_clock, update_block_entity,
+        CursorOp, DeathRoute, DynamicAtlasSyncStats, HeadProfile, PendingPackDownload, Velocity,
+        accepted_player_chat_tag, add_explosion_knockback, apply_passengers,
+        apply_vehicle_teleport, chest_open_event, cursor_step, death_route, entity_look_direction,
+        explosion_sound_pitch, load_network_chunk, local_player_motion, pack_download_action,
+        player_command_packet, player_input_state, player_ride_state, player_rotation_packet,
+        post_teleport_echo, register_nonliving_spawn, resolve_entity_teleport,
+        resolve_head_profile, resolve_rotation, server_view_distance_update,
+        serverbound_player_input, set_first_disconnect_reason, set_player_experience,
+        set_player_inventory_slot, take_finished_pack_downloads, time_update_clock,
+        update_block_entity,
     };
     use crate::app::input::{InputState, gamepad_movement_axes};
     use crate::net::chat_security::SignedChatBody;
@@ -4640,6 +4672,17 @@ mod tests {
     use crate::player::valid_player_name;
     use crate::resource_pack::ResourcePackManager;
     use crate::ui::chat::ChatMessageTag;
+
+    #[test]
+    fn unchanged_dynamic_atlas_stats_are_zeroed() {
+        let stats = DynamicAtlasSyncStats::default();
+        assert_eq!(stats.added_keys, 0);
+        assert_eq!(stats.removed_keys, 0);
+        assert!(!stats.dirty);
+        assert!(!stats.face_dirty);
+        assert!(!stats.spectator_changed);
+        assert_eq!(stats.renderer_ms, 0.0);
+    }
 
     #[test]
     fn writable_book_editor_accepts_default_content_without_open_packet() {
