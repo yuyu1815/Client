@@ -2855,6 +2855,7 @@ pub fn update_game(
     game.last_update_phases.light_update_ms = light_update_start
         .map(|start| start.elapsed().as_secs_f32() * 1000.0)
         .unwrap_or_default();
+    let pre_ui_start = game.benchmark.is_some().then(std::time::Instant::now);
 
     // F1 (vanilla keyToggleGui); only while no screen or chat is open.
     if core.input.key_just_pressed(winit::keyboard::KeyCode::F1) && game.input_live() {
@@ -2972,11 +2973,15 @@ pub fn update_game(
     core.input.text_capture = game.wants_text_input() || game.chat.is_open();
     core.input.menu_capture = game.gui_open() || game.death_screen_open;
     core.input.spectator = crate::player::is_spectator(game.player.game_mode);
+    let dynamic_atlas_start = game.benchmark.is_some().then(std::time::Instant::now);
     core.sync_game_dynamic_atlas(
         game,
         &mut gfx.renderer,
         core.input.spectator && game.spectator.is_menu_active(),
     );
+    game.last_update_phases.dynamic_atlas_ms = dynamic_atlas_start
+        .map(|start| start.elapsed().as_secs_f32() * 1000.0)
+        .unwrap_or_default();
 
     // The F3+F4 switcher shows the mouse cursor while open.
     let switcher_open = game.game_mode_switcher.is_some();
@@ -3040,6 +3045,9 @@ pub fn update_game(
     let sw = gfx.renderer.screen_width() as f32;
     let sh = gfx.renderer.screen_height() as f32;
     let gs = hud::gui_scale(sw, sh, core.menu.gui_scale_setting);
+    game.last_update_phases.pre_ui_other_ms = pre_ui_start
+        .map(|start| start.elapsed().as_secs_f32() * 1000.0)
+        .unwrap_or_default();
     let ui_extract_start = game.benchmark.is_some().then(std::time::Instant::now);
 
     let mut elements: Vec<MenuElement> = Vec::new();

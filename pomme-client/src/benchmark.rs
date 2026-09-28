@@ -69,6 +69,10 @@ pub struct FrameSample {
     #[serde(default)]
     pub light_update_ms: f32,
     #[serde(default)]
+    pub dynamic_atlas_ms: f32,
+    #[serde(default)]
+    pub pre_ui_other_ms: f32,
+    #[serde(default)]
     pub light_engine_ms: f32,
     #[serde(default)]
     pub light_mesh_ms: f32,
@@ -161,6 +165,10 @@ pub struct SpikeSample {
     #[serde(default)]
     pub light_update_ms: f32,
     #[serde(default)]
+    pub dynamic_atlas_ms: f32,
+    #[serde(default)]
+    pub pre_ui_other_ms: f32,
+    #[serde(default)]
     pub light_engine_ms: f32,
     #[serde(default)]
     pub light_mesh_ms: f32,
@@ -236,6 +244,8 @@ pub struct BenchmarkResult {
     pub avg_fence_ms: f32,
     pub avg_cull_ms: f32,
     pub avg_draw_ms: f32,
+    pub avg_dynamic_atlas_ms: f32,
+    pub avg_pre_ui_other_ms: f32,
     pub peak_chunk_count: u32,
     pub peak_entity_count: u32,
     pub spike_count: u32,
@@ -303,6 +313,8 @@ impl Benchmark {
             hud_draw_ms: timings.hud_draw_ms,
             cpu_update_ms,
             light_update_ms: phases.light_update_ms,
+            dynamic_atlas_ms: phases.dynamic_atlas_ms,
+            pre_ui_other_ms: phases.pre_ui_other_ms,
             light_engine_ms: phases.light_engine_ms,
             light_mesh_ms: phases.light_mesh_ms,
             light_tasks_processed: phases.light_tasks_processed,
@@ -353,6 +365,8 @@ impl Benchmark {
                 hud_draw_ms: sample.hud_draw_ms,
                 cpu_update_ms: sample.cpu_update_ms,
                 light_update_ms: sample.light_update_ms,
+                dynamic_atlas_ms: sample.dynamic_atlas_ms,
+                pre_ui_other_ms: sample.pre_ui_other_ms,
                 light_engine_ms: sample.light_engine_ms,
                 light_mesh_ms: sample.light_mesh_ms,
                 light_tasks_processed: sample.light_tasks_processed,
@@ -394,6 +408,8 @@ impl Benchmark {
         let fence_sum: f32 = self.samples.iter().map(|s| s.fence_ms).sum();
         let cull_sum: f32 = self.samples.iter().map(|s| s.cull_ms).sum();
         let draw_sum: f32 = self.samples.iter().map(|s| s.draw_ms).sum();
+        let dynamic_atlas_sum: f32 = self.samples.iter().map(|s| s.dynamic_atlas_ms).sum();
+        let pre_ui_other_sum: f32 = self.samples.iter().map(|s| s.pre_ui_other_ms).sum();
         let peak_chunks = self
             .samples
             .iter()
@@ -447,6 +463,8 @@ impl Benchmark {
             avg_fence_ms: fence_sum / count as f32,
             avg_cull_ms: cull_sum / count as f32,
             avg_draw_ms: draw_sum / count as f32,
+            avg_dynamic_atlas_ms: dynamic_atlas_sum / count as f32,
+            avg_pre_ui_other_ms: pre_ui_other_sum / count as f32,
             peak_chunk_count: peak_chunks,
             peak_entity_count: peak_entities,
             spike_count: self.spikes.len() as u32,
@@ -537,6 +555,8 @@ mod tests {
         assert_eq!(legacy.hud_draw_ms, 0.0);
         assert_eq!(legacy.cpu_update_ms, 0.0);
         assert_eq!(legacy.light_update_ms, 0.0);
+        assert_eq!(legacy.dynamic_atlas_ms, 0.0);
+        assert_eq!(legacy.pre_ui_other_ms, 0.0);
         assert_eq!(legacy.light_engine_ms, 0.0);
         assert_eq!(legacy.light_mesh_ms, 0.0);
         assert_eq!(legacy.light_tasks_processed, 0);
@@ -560,6 +580,8 @@ mod tests {
         assert_eq!(legacy_spike.fixed_tick_ms, 0.0);
         assert_eq!(legacy_spike.fixed_tick_count, 0);
         assert_eq!(legacy_spike.light_update_ms, 0.0);
+        assert_eq!(legacy_spike.dynamic_atlas_ms, 0.0);
+        assert_eq!(legacy_spike.pre_ui_other_ms, 0.0);
         assert_eq!(legacy_spike.light_engine_ms, 0.0);
         assert_eq!(legacy_spike.light_mesh_ms, 0.0);
         assert_eq!(legacy_spike.light_tasks_processed, 0);
@@ -620,6 +642,8 @@ mod tests {
         };
         let phases = UpdatePhases {
             light_update_ms: 3.0,
+            dynamic_atlas_ms: 0.75,
+            pre_ui_other_ms: 2.5,
             light_engine_ms: 1.25,
             light_mesh_ms: 1.75,
             light_tasks_processed: 4,
@@ -675,6 +699,8 @@ mod tests {
         };
         assert_eq!(sample.cpu_update_ms, 30.0);
         assert_eq!(sample.light_update_ms, 3.0);
+        assert_eq!(sample.dynamic_atlas_ms, 0.75);
+        assert_eq!(sample.pre_ui_other_ms, 2.5);
         assert_eq!(sample.light_engine_ms, 1.25);
         assert_eq!(sample.light_mesh_ms, 1.75);
         assert_eq!(sample.light_tasks_processed, 4);
@@ -718,6 +744,8 @@ mod tests {
         assert_eq!(sample.upload_ms, 5.0);
         assert_eq!(sample.unaccounted_ms, 30.0);
         assert_eq!(bench.spikes[0].light_update_ms, 3.0);
+        assert_eq!(bench.spikes[0].dynamic_atlas_ms, 0.75);
+        assert_eq!(bench.spikes[0].pre_ui_other_ms, 2.5);
         assert_eq!(bench.spikes[0].light_engine_ms, 1.25);
         assert_eq!(bench.spikes[0].light_mesh_ms, 1.75);
         assert_eq!(bench.spikes[0].light_tasks_processed, 4);
@@ -747,6 +775,8 @@ mod tests {
         assert_eq!(json["entity_pose_ms"], 0.25);
         assert_eq!(json["entity_pose_count"], 3);
         assert_eq!(json["light_update_ms"], 3.0);
+        assert_eq!(json["dynamic_atlas_ms"], 0.75);
+        assert_eq!(json["pre_ui_other_ms"], 2.5);
         assert_eq!(json["light_engine_ms"], 1.25);
         assert_eq!(json["light_mesh_ms"], 1.75);
         assert_eq!(json["light_tasks_processed"], 4);
@@ -761,6 +791,13 @@ mod tests {
         assert!(json.get("frame_wait_ms").is_none());
         assert_eq!(sample.effective_fps_limit, Some(60));
         assert!(sample.vsync);
+        let dir =
+            std::env::temp_dir().join(format!("pomme-benchmark-stats-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let result = bench.finish(&dir);
+        assert_eq!(result.avg_dynamic_atlas_ms, 0.75);
+        assert_eq!(result.avg_pre_ui_other_ms, 2.5);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -826,6 +863,11 @@ pub struct UpdatePhases {
     pub update_ms: f32,
     pub cpu_update_ms: f32,
     pub light_update_ms: f32,
+    /// Time spent in `sync_game_dynamic_atlas` alone.
+    pub dynamic_atlas_ms: f32,
+    /// Light-update completion to UI extraction start; includes
+    /// `dynamic_atlas_ms`.
+    pub pre_ui_other_ms: f32,
     /// Overlaps `light_update_ms`; time in `poll_and_run` only.
     pub light_engine_ms: f32,
     /// Overlaps `light_update_ms`; time in dirty remesh enqueue only.
