@@ -233,6 +233,48 @@ pub(crate) fn extract_face_8x8_with_hat(
     Some(out)
 }
 
+fn pack_favicon_tile(
+    rgba: &[u8],
+    src_size: u32,
+    pixels: &mut [u8],
+    atlas_w: u32,
+    dst_x: u32,
+    dst_y: u32,
+    icon_size: u32,
+) {
+    if src_size == 0 {
+        return;
+    }
+    if src_size == 8 && icon_size == 64 && rgba.len() >= 8 * 8 * 4 {
+        let stride = atlas_w as usize * 4;
+        for sy in 0..8 {
+            let row_start = ((dst_y + sy * 8) * atlas_w + dst_x) as usize * 4;
+            for sx in 0..8 {
+                let src = &rgba[(sy * 8 + sx) as usize * 4..][..4];
+                let off = row_start + sx as usize * 8 * 4;
+                for dst in pixels[off..off + 8 * 4].chunks_exact_mut(4) {
+                    dst.copy_from_slice(src);
+                }
+            }
+            for py in 1..8 {
+                pixels.copy_within(row_start..row_start + 64 * 4, row_start + py * stride);
+            }
+        }
+    } else {
+        for py in 0..icon_size {
+            for px in 0..icon_size {
+                let sx = (px * src_size / icon_size).min(src_size - 1);
+                let sy = (py * src_size / icon_size).min(src_size - 1);
+                let src_off = ((sy * src_size + sx) * 4) as usize;
+                let dst_off = (((dst_y + py) * atlas_w + dst_x + px) * 4) as usize;
+                if src_off + 3 < rgba.len() && dst_off + 3 < pixels.len() {
+                    pixels[dst_off..dst_off + 4].copy_from_slice(&rgba[src_off..src_off + 4]);
+                }
+            }
+        }
+    }
+}
+
 pub struct MenuOverlayPipeline {
     pipeline: vk::Pipeline,
     depth_pipeline: vk::Pipeline,
@@ -1821,17 +1863,15 @@ impl MenuOverlayPipeline {
             let dst_x = col * icon_size;
             let dst_y = row * icon_size;
 
-            for py in 0..icon_size {
-                for px in 0..icon_size {
-                    let sx = (px * src_size / icon_size).min(src_size - 1);
-                    let sy = (py * src_size / icon_size).min(src_size - 1);
-                    let src_off = ((sy * src_size + sx) * 4) as usize;
-                    let dst_off = (((dst_y + py) * atlas_w + dst_x + px) * 4) as usize;
-                    if src_off + 3 < rgba.len() && dst_off + 3 < pixels.len() {
-                        pixels[dst_off..dst_off + 4].copy_from_slice(&rgba[src_off..src_off + 4]);
-                    }
-                }
-            }
+            pack_favicon_tile(
+                rgba,
+                *src_size,
+                &mut pixels,
+                atlas_w,
+                dst_x,
+                dst_y,
+                icon_size,
+            );
 
             let u0 = dst_x as f32 / atlas_w as f32;
             let v0 = dst_y as f32 / atlas_h as f32;
@@ -5334,6 +5374,42 @@ fn create_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn favicon_face_fast_path_matches_generic_packing() {
+        let atlas_w = 192;
+        let atlas_h = 256;
+        let cases = [
+            (8, 8 * 8 * 4, 64, 128),
+            (8, 8 * 8 * 4 - 1, 128, 192),
+            (16, 16 * 16 * 4, 0, 64),
+            (0, 0, 128, 0),
+        ];
+        let mut expected = vec![0xC7; (atlas_w * atlas_h * 4) as usize];
+        let mut actual = expected.clone();
+        for (size, len, x, y) in cases {
+            let rgba: Vec<u8> = (0..len)
+                .map(|i| (i as u8).wrapping_mul(73).wrapping_add(19))
+                .collect();
+            if size != 0 {
+                // Original generic loop, kept here as the byte-for-byte oracle.
+                for py in 0..64 {
+                    for px in 0..64 {
+                        let sx = (px * size / 64).min(size - 1);
+                        let sy = (py * size / 64).min(size - 1);
+                        let src_off = ((sy * size + sx) * 4) as usize;
+                        let dst_off = (((y + py) * atlas_w + x + px) * 4) as usize;
+                        if src_off + 3 < rgba.len() && dst_off + 3 < expected.len() {
+                            expected[dst_off..dst_off + 4]
+                                .copy_from_slice(&rgba[src_off..src_off + 4]);
+                        }
+                    }
+                }
+            }
+            pack_favicon_tile(&rgba, size, &mut actual, atlas_w, x, y, 64);
+            assert_eq!(actual, expected, "size={size}, len={len}, x={x}, y={y}");
+        }
+    }
 
     #[test]
     fn book_sprite_crop_stays_inside_its_packed_region() {
