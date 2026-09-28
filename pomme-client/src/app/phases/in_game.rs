@@ -515,6 +515,26 @@ fn mesh_result_is_stale(
         }
 }
 
+/// A rejected grouped edit can still contain sections with no newer job.
+/// Re-mesh those from a fresh snapshot; uploading the old group would also
+/// replace sections whose generation has moved on.
+fn current_edit_section_runs(
+    chunks: &ChunkStore,
+    section_gen: &HashMap<(ChunkPos, i32), u64>,
+    pos: ChunkPos,
+    generation: u64,
+    replaced: std::ops::Range<i32>,
+) -> Vec<(ChunkPos, std::ops::Range<i32>)> {
+    if !chunks.light_data.contains_key(&(pos.x, pos.z)) {
+        return Vec::new();
+    }
+    consecutive_section_runs(
+        replaced
+            .filter(|&si| section_gen.get(&(pos, si)).copied() == Some(generation))
+            .map(|si| (pos, si)),
+    )
+}
+
 /// What a column was last meshed as: LOD, content generation, and the set of
 /// section indices (bitmask) that have been meshed so far.
 #[derive(Clone, Copy)]
@@ -1374,9 +1394,8 @@ impl GameState {
             }
             // Drop a mesh built from an out-of-date snapshot. A mesh for a chunk
             // that has since unloaded is always stale (uploading it would resurrect
-            // a column nothing cleans up). Edits (priority lane, single section)
-            // are keyed per section so editing one section never drops a sibling's
-            // in-flight result; bulk loads keep the column key.
+            // a column nothing cleans up). Grouped edits can overlap newer jobs
+            // with different queue keys; bulk loads keep the column key.
             let stale = mesh_result_is_stale(
                 &self.chunk_store,
                 &self.content_gen,
@@ -1387,6 +1406,22 @@ impl GameState {
                 mesh.timing.is_some(),
             );
             if stale {
+                if mesh.timing.is_some() {
+                    // Rebuild only sections not covered by a newer edit. A fresh
+                    // snapshot also covers intervening chunk/neighbor changes;
+                    // do not enqueue anything for an unloaded column.
+                    let runs = current_edit_section_runs(
+                        &self.chunk_store,
+                        &self.section_gen,
+                        mesh.pos,
+                        mesh.content_gen,
+                        mesh.replaced.clone(),
+                    );
+                    let lod = self.meshed.get(&mesh.pos).map_or(0, |m| m.lod);
+                    for (_, range) in runs {
+                        self.enqueue_section_edit(mesh.pos, range, lod);
+                    }
+                }
                 self.mesh_dispatcher.recycle(mesh);
                 continue;
             }
@@ -5890,8 +5925,8 @@ mod tests {
     use super::{
         advance_server_time, arrow_render_infos, block_entity_in_frustum,
         bump_loaded_content_generations, bump_section_generations, consecutive_section_runs,
-        credits_may_advance, death_confirm_escape_allowed, finish_win_credits,
-        finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
+        credits_may_advance, current_edit_section_runs, death_confirm_escape_allowed,
+        finish_win_credits, finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
         item_frame_base_position, item_frame_base_rotation, limited_crafting_param,
         mesh_result_is_stale, mesh_target_mask, section_bit, section_bits, server_tick_runs,
         show_death_screen_param, sign_has_text, sign_text_in_range,
@@ -6438,6 +6473,79 @@ mod tests {
             1..2,
             true
         ));
+    }
+
+    #[test]
+    fn overlapping_grouped_edit_reschedules_only_still_current_sections() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use azalea_core::position::ChunkPos;
+
+        use crate::world::chunk::{ChunkLightData, ChunkStore};
+
+        let col = ChunkPos::new(-2, 3);
+        let mut chunks = ChunkStore::new_with_dimension(2, 16, -64);
+        chunks.light_data.insert(
+            (col.x, col.z),
+            Arc::new(ChunkLightData {
+                sky_sections: vec![],
+                block_sections: vec![],
+                min_y: -64,
+                has_sky: false,
+                sky_top_section: None,
+            }),
+        );
+        let mut generations = HashMap::new();
+        let mut next = 0;
+        let old = bump_section_generations(&mut generations, &mut next, col, 0..2);
+        let new = bump_section_generations(&mut generations, &mut next, col, 1..2);
+        assert!(mesh_result_is_stale(
+            &chunks,
+            &HashMap::new(),
+            &generations,
+            col,
+            old,
+            0..2,
+            true
+        )); // The old group cannot upload section 1.
+        let runs = current_edit_section_runs(&chunks, &generations, col, old, 0..2);
+        assert_eq!(runs, vec![(col, 0..1)]);
+        // The drain enqueues each run with a fresh generation and snapshot.
+        for (_, range) in runs {
+            let fresh = bump_section_generations(&mut generations, &mut next, col, range.clone());
+            assert!(!mesh_result_is_stale(
+                &chunks,
+                &HashMap::new(),
+                &generations,
+                col,
+                fresh,
+                range,
+                true
+            )); // Section 0 can now upload.
+        }
+        assert_eq!(generations[&(col, 1)], new); // No old geometry or requeue for 1.
+        assert!(!mesh_result_is_stale(
+            &chunks,
+            &HashMap::new(),
+            &generations,
+            col,
+            new,
+            1..2,
+            true
+        )); // The newer section 1 job remains valid.
+        assert!(current_edit_section_runs(&chunks, &generations, col, old, 0..2).is_empty());
+
+        // Disjoint survivors, including a negative section, must not requeue
+        // the overlapping stale section or an unloaded column.
+        let old = bump_section_generations(&mut generations, &mut next, col, -2..2);
+        bump_section_generations(&mut generations, &mut next, col, -1..1);
+        assert_eq!(
+            current_edit_section_runs(&chunks, &generations, col, old, -2..2),
+            vec![(col, -2..-1), (col, 1..2)]
+        );
+        chunks.light_data.remove(&(col.x, col.z));
+        assert!(current_edit_section_runs(&chunks, &generations, col, old, -2..2).is_empty());
     }
 
     #[test]
