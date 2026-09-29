@@ -331,6 +331,7 @@ impl ApplicationHandler for App {
                         winit::dpi::Size::Logical(winit::dpi::LogicalSize::new(854.0, 480.0))
                     })
                     .with_fullscreen(self.core.display_mode.fullscreen_for(monitor))
+                    .with_maximized(self.auto_fps.is_some())
                     .with_visible(false)
                     .with_window_icon(window_icon);
 
