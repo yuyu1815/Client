@@ -2694,6 +2694,7 @@ pub fn update_game(
     // (otherwise a system overlay like Win-key search opens over a still
     // captured cursor). TODO: F3+P toggle (options.pauseOnLostFocus).
     if core.probe.is_none()
+        && core.auto_fps_result_path.is_none()
         && core
             .unfocused_since
             .is_some_and(|t| t.elapsed().as_millis() > 500)
@@ -3556,7 +3557,11 @@ pub fn update_game(
         });
         if done {
             let bench = game.benchmark.take().unwrap();
-            let (result, saved) = bench.finish_with_save(&core.data_dirs.game_dir);
+            let (result, saved) = if let Some(path) = &core.auto_fps_result_path {
+                bench.finish_with_save_at(path)
+            } else {
+                bench.finish_with_save(&core.data_dirs.game_dir)
+            };
             game.benchmark_saved = saved.is_ok();
             if let Err(error) = saved {
                 tracing::error!("Failed to save benchmark: {error}");
@@ -3592,7 +3597,10 @@ pub fn update_game(
                 "{} spikes (>{:.0}ms) - Saved to {}",
                 result.spike_count,
                 8.0,
-                core.data_dirs.game_dir.join("benchmark.json").display()
+                core.auto_fps_result_path
+                    .as_deref()
+                    .unwrap_or(&core.data_dirs.game_dir.join("benchmark.json"))
+                    .display()
             ),
         ];
         if crate::benchmark::is_debug_build() {

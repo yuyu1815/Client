@@ -43,6 +43,50 @@ use pomme_protocol::version::{NATIVE, VERSIONS};
 use crate::app::App;
 use crate::user::UserData;
 
+fn verify_data_dirs(
+    dirs: &dirs::DataDirs,
+    auto: &mut Option<app::auto_fps::AutoFps>,
+) -> Result<(), String> {
+    dirs.verify().inspect_err(|_| {
+        if let Some(auto) = auto {
+            auto.fail("startup_failed");
+        }
+    })
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn failed_asset_validation_replaces_previous_success() {
+        let dir = crate::test_util::test_temp_dir("auto-startup");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut auto = Some(app::auto_fps::AutoFps::new(&dir));
+        std::fs::write(
+            dir.join("auto-fps-benchmark-status.json"),
+            r#"{"state":"success"}"#,
+        )
+        .unwrap();
+        auto.as_mut().unwrap().start().unwrap();
+        let dirs = dirs::DataDirs::resolve(
+            "26.2",
+            Some(dir.join("missing").to_str().unwrap()),
+            None,
+            Some(dir.to_str().unwrap()),
+        );
+        assert!(verify_data_dirs(&dirs, &mut auto).is_err());
+        let status: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.join("auto-fps-benchmark-status.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(status["state"], "failed");
+        assert_eq!(status["reason"], "startup_failed");
+        assert_ne!(status["run_id"], "");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 fn main() {
     let args = args::LaunchArgs::parse();
 
@@ -72,9 +116,30 @@ fn main() {
         .unwrap_or(&NATIVE);
     let version = args.version.as_deref().unwrap_or(default_version.name);
 
+    let data_dirs = dirs::DataDirs::resolve(
+        version,
+        args.assets_dir.as_deref(),
+        args.versions_dir.as_deref(),
+        args.game_dir.as_deref(),
+    );
+
+    // Replace any prior success before fallible assets/runtime initialization.
+    let mut auto_fps = args
+        .auto_fps_benchmark
+        .then(|| app::auto_fps::AutoFps::new(&data_dirs.game_dir));
+    if let Some(auto) = &mut auto_fps {
+        if let Err(e) = data_dirs.ensure_game_dir().and_then(|_| auto.start()) {
+            eprintln!("Failed to initialize auto FPS status: {e}");
+            std::process::exit(1);
+        }
+    }
+
     match ProtocolVersion::from_name(version) {
         Some(v) => version::set_selected_protocol(v.protocol),
         None => {
+            if let Some(auto) = &mut auto_fps {
+                auto.fail("startup_failed");
+            }
             eprintln!(
                 "{version} is not currently supported. Supported versions: {}",
                 VERSIONS
@@ -87,13 +152,6 @@ fn main() {
             std::process::exit(1);
         }
     }
-
-    let data_dirs = dirs::DataDirs::resolve(
-        version,
-        args.assets_dir.as_deref(),
-        args.versions_dir.as_deref(),
-        args.game_dir.as_deref(),
-    );
 
     let log_dir = data_dirs.game_dir.join("logs");
     std::fs::create_dir_all(&log_dir).unwrap();
@@ -109,7 +167,7 @@ fn main() {
     app::startup_mark("block_tables_ready");
 
     app::startup_mark("data_dirs_verify_start");
-    if let Err(e) = data_dirs.verify() {
+    if let Err(e) = verify_data_dirs(&data_dirs, &mut auto_fps) {
         eprintln!("Failed to verify directories: {e}");
         std::process::exit(1);
     }
@@ -154,7 +212,7 @@ fn main() {
         presence,
         user,
         args.quick_access_multiplayer,
-        args.auto_fps_benchmark,
+        auto_fps,
         args.render_probe_root,
     )
     .run()

@@ -483,6 +483,10 @@ impl Benchmark {
 
     /// Returns the save outcome as well as the result for unattended runs.
     pub fn finish_with_save(self, game_dir: &Path) -> (BenchmarkResult, std::io::Result<()>) {
+        self.finish_with_save_at(&game_dir.join("benchmark.json"))
+    }
+
+    pub fn finish_with_save_at(self, path: &Path) -> (BenchmarkResult, std::io::Result<()>) {
         let count = self.samples.len().max(1);
         let mut frame_times: Vec<f32> = self.samples.iter().map(|s| s.frame_ms).collect();
         frame_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -559,8 +563,7 @@ impl Benchmark {
             spikes: self.spikes,
         };
 
-        let path = game_dir.join("benchmark.json");
-        let saved = write_result_json(&path, &result);
+        let saved = write_result_json(path, &result);
         if saved.is_ok() {
             tracing::info!("Benchmark saved to {}", path.display());
         }

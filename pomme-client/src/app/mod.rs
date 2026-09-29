@@ -1,4 +1,4 @@
-mod auto_fps;
+pub(crate) mod auto_fps;
 pub mod core;
 pub mod input;
 pub mod level_load;
@@ -41,9 +41,6 @@ pub enum WindowError {
 
     #[error("renderer error: {0}")]
     Renderer(#[from] renderer::RendererError),
-
-    #[error("auto FPS status could not be written: {0}")]
-    AutoStatus(#[source] std::io::Error),
 
     #[error("auto FPS benchmark failed; see auto-fps-benchmark-status.json")]
     AutoFailed,
@@ -228,13 +225,15 @@ impl App {
         presence: Option<crate::discord::DiscordPresence>,
         user: UserData,
         quick_access_multiplayer: Option<String>,
-        auto_fps_benchmark: bool,
+        auto_fps: Option<auto_fps::AutoFps>,
         probe_root: Option<std::path::PathBuf>,
     ) -> Self {
         let pending_skin_uuid = user.has_profile.then_some(user.uuid);
-        let auto_fps = auto_fps_benchmark.then(|| auto_fps::AutoFps::new(&data_dirs.game_dir));
         let mut core = AppCore::new(version, data_dirs, tokio_rt, presence, user);
-        if auto_fps_benchmark {
+        core.auto_fps_result_path = auto_fps
+            .as_ref()
+            .map(|auto| auto.benchmark_path(&core.data_dirs.game_dir));
+        if auto_fps.is_some() {
             core.display_mode = core::DisplayMode::Windowed;
         }
         if let Some(root) = probe_root {
@@ -257,9 +256,6 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<(), WindowError> {
-        if let Some(auto) = &mut self.auto_fps {
-            auto.start().map_err(WindowError::AutoStatus)?;
-        }
         let event_loop = EventLoop::new().inspect_err(|_| {
             if let Some(auto) = &mut self.auto_fps {
                 auto.fail("event_loop_error");
@@ -272,12 +268,13 @@ impl App {
             }
         }
         result?;
-        if self
-            .auto_fps
-            .as_ref()
-            .is_some_and(|auto| auto.failed || !auto.finished())
-        {
-            return Err(WindowError::AutoFailed);
+        if let Some(auto) = &mut self.auto_fps {
+            if !auto.finished() {
+                auto.fail("exited_before_completion");
+            }
+            if auto.failed {
+                return Err(WindowError::AutoFailed);
+            }
         }
         Ok(())
     }
@@ -807,6 +804,15 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Focused(focused) => {
+                if !focused
+                    && self
+                        .auto_fps
+                        .as_mut()
+                        .is_some_and(auto_fps::AutoFps::focus_lost)
+                {
+                    event_loop.exit();
+                    return;
+                }
                 self.core.unfocused_since = (!focused).then(Instant::now);
                 // The window manager may silently drop a cursor lock on focus
                 // change, so a quick refocus (under the pause-on-lost-focus
@@ -844,7 +850,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(auto) = &mut self.auto_fps {
                     if auto.joining()
-                        && let Err(reason) = auto.tick(Instant::now(), 0)
+                        && let Err(reason) = auto.tick(Instant::now(), 0, false)
                     {
                         auto.fail(reason);
                         event_loop.exit();
@@ -1116,9 +1122,28 @@ impl ApplicationHandler for App {
                                     }
                                     event_loop.exit();
                                 } else if !auto.running() && !auto.finished() {
-                                    match auto
-                                        .tick(Instant::now(), gfx.renderer.loaded_chunk_count())
-                                    {
+                                    let camera = *game.player.position;
+                                    let pos = azalea_core::position::ChunkPos::new(
+                                        (camera.x.floor() as i32).div_euclid(16),
+                                        (camera.z.floor() as i32).div_euclid(16),
+                                    );
+                                    let section = (camera.y.floor() as i32
+                                        - game.chunk_store.min_y())
+                                    .div_euclid(16);
+                                    let camera_ready = game.chunk_store.get_chunk(&pos).is_some()
+                                        && gfx.renderer.has_chunk_section(
+                                            &pos,
+                                            section,
+                                            game.chunk_store.section_is_empty(
+                                                (pos.x, pos.z),
+                                                camera.y.floor() as i32 >> 4,
+                                            ),
+                                        );
+                                    match auto.tick(
+                                        Instant::now(),
+                                        gfx.renderer.loaded_chunk_count(),
+                                        camera_ready,
+                                    ) {
                                         Ok(true) => {
                                             game.benchmark =
                                                 Some(crate::benchmark::Benchmark::new(

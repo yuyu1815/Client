@@ -420,6 +420,19 @@ fn swap_accepted(
     freed
 }
 
+fn section_resident(
+    chunks: &HashMap<ChunkPos, ChunkAlloc>,
+    empty_epochs: &HashMap<(ChunkPos, i32), u64>,
+    pos: &ChunkPos,
+    section: i32,
+    world_empty: bool,
+) -> bool {
+    chunks
+        .get(pos)
+        .is_some_and(|c| c.sections.iter().any(|s| s.section_index == section))
+        || (world_empty && empty_epochs.contains_key(&(*pos, section)))
+}
+
 // Duplicated positions are ambiguous (e.g. a malformed section upload):
 // never claim a unique resident shape unless exactly one draw owns the
 // position.
@@ -1507,6 +1520,11 @@ impl ChunkBufferStore {
         self.chunks.len() as u32
     }
 
+    /// Accepted GPU section, including empty sections with no draw allocation.
+    pub fn has_section(&self, pos: &ChunkPos, section: i32, world_empty: bool) -> bool {
+        section_resident(&self.chunks, &self.empty_epochs, pos, section, world_empty)
+    }
+
     /// Push the CPU visibility graph's per-column visible-section masks.
     /// Columns not present default to fully visible, so the cull only omits
     /// sections the graph proved occluded.
@@ -1985,6 +2003,31 @@ mod staging_tests {
             ChunkBufferStore::section_visibility(false, &alloc, now),
             1.0
         );
+    }
+
+    #[test]
+    fn camera_section_requires_matching_resident_or_accepted_empty() {
+        let pos = ChunkPos::new(-1, 2);
+        let chunks = HashMap::from([(
+            pos,
+            ChunkAlloc {
+                sections: vec![section(3, BlockPos::new(-1, 48, 32), false, 1)],
+            },
+        )]);
+        let mut empty = HashMap::new();
+        assert!(section_resident(&chunks, &empty, &pos, 3, false));
+        assert!(!section_resident(&chunks, &empty, &pos, 4, true));
+        empty.insert((pos, 4), 1);
+        // A tombstone may also mark pool exhaustion: a nonempty section needs a draw.
+        assert!(!section_resident(&chunks, &empty, &pos, 4, false));
+        assert!(section_resident(&chunks, &empty, &pos, 4, true));
+        assert!(!section_resident(
+            &chunks,
+            &empty,
+            &ChunkPos::new(0, 2),
+            3,
+            true
+        ));
     }
 
     #[test]

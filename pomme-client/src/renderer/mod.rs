@@ -1269,6 +1269,10 @@ impl Renderer {
         self.chunk_buffers.chunk_count()
     }
 
+    pub fn has_chunk_section(&self, pos: &ChunkPos, section: i32, world_empty: bool) -> bool {
+        self.chunk_buffers.has_section(pos, section, world_empty)
+    }
+
     /// Sections actually drawn after frustum culling (lags a few frames). The
     /// graph's occluded sections are omitted before the cull, so this also
     /// drops when occlusion hides geometry — useful for the F3 overlay.

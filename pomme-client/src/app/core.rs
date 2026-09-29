@@ -1037,6 +1037,7 @@ pub struct AppCore {
     /// When the window lost OS focus, for pause-on-lost-focus (vanilla
     /// `pauseIfInactive`); `None` while focused.
     pub unfocused_since: Option<Instant>,
+    pub auto_fps_result_path: Option<std::path::PathBuf>,
     /// Vanilla `MouseHandler.mouseGrabbed`.
     mouse_grabbed: bool,
     /// The OS grab may no longer match `mouse_grabbed` (the window manager
@@ -1203,6 +1204,7 @@ impl AppCore {
             server_tick_frozen: false,
             server_tick_steps: 0,
             unfocused_since: None,
+            auto_fps_result_path: None,
             mouse_grabbed: false,
             os_grab_stale: false,
             player_skin_tx,
