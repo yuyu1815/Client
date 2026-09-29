@@ -1,8 +1,5 @@
 use std::io::Cursor;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static NEXT_COLLISION_REVISION: AtomicU64 = AtomicU64::new(1);
 
 use azalea_block::BlockState;
 use azalea_core::heightmap_kind::HeightmapKind;
@@ -128,9 +125,6 @@ impl ChunkLightData {
 }
 
 pub struct ChunkStore {
-    // Live block/chunk writes and block-entity packets bump this; direct writes
-    // to the public storage fields (used by test fixtures) bypass the stamp.
-    collision_revision: AtomicU64,
     pub debug_world: Option<super::block::DebugWorld>,
     pub chunk_storage: ChunkStorage,
     pub partial_storage: PartialChunkStorage,
@@ -149,9 +143,6 @@ impl ChunkStore {
 
     pub fn new_with_dimension(view_distance: u32, height: u32, min_y: i32) -> Self {
         Self {
-            collision_revision: AtomicU64::new(
-                NEXT_COLLISION_REVISION.fetch_add(1, Ordering::Relaxed),
-            ),
             debug_world: None,
             chunk_storage: ChunkStorage::new(height, min_y),
             // The grid silently drops out-of-range chunks and is never resized,
@@ -160,17 +151,6 @@ impl ChunkStore {
             light_data: std::collections::HashMap::new(),
             block_entities: std::collections::HashMap::new(),
         }
-    }
-
-    pub fn collision_revision(&self) -> u64 {
-        self.collision_revision.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn bump_collision_revision(&self) {
-        self.collision_revision.store(
-            NEXT_COLLISION_REVISION.fetch_add(1, Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
     }
 
     pub fn loaded_positions(&self) -> impl Iterator<Item = ChunkPos> + '_ {
@@ -182,7 +162,6 @@ impl ChunkStore {
             tracing::warn!("Ignoring chunk since it's not in the view range: {pos:?}");
             return;
         }
-        self.bump_collision_revision();
         self.partial_storage
             .set(&pos, Some(chunk), &mut self.chunk_storage);
     }
@@ -196,9 +175,7 @@ impl ChunkStore {
         let mut cursor = Cursor::new(data);
         self.partial_storage
             .replace_with_packet_data(&pos, &mut cursor, heightmaps, &mut self.chunk_storage)
-            .map_err(|e| ChunkError::Parse(e.to_string()))?;
-        self.bump_collision_revision();
-        Ok(())
+            .map_err(|e| ChunkError::Parse(e.to_string()))
     }
 
     /// Replace the biome palettes of a loaded chunk from a
@@ -257,7 +234,6 @@ impl ChunkStore {
     }
 
     pub fn unload_chunk(&mut self, pos: &ChunkPos) {
-        self.bump_collision_revision();
         self.light_data.remove(&(pos.x, pos.z));
         self.partial_storage.limited_set(pos, None);
         let cx = pos.x;
@@ -267,7 +243,6 @@ impl ChunkStore {
     }
 
     pub fn set_center(&mut self, pos: ChunkPos) {
-        self.bump_collision_revision();
         self.partial_storage.update_view_center(pos);
     }
 
@@ -310,9 +285,6 @@ impl ChunkStore {
         };
         let old = chunk.get_and_set_block_state(&block_pos, state, self.chunk_storage.min_y());
         let is_empty = chunk.sections[section].block_count == 0;
-        if old != state {
-            self.bump_collision_revision();
-        }
         (old, (was_empty != is_empty).then_some(is_empty))
     }
 
