@@ -383,13 +383,16 @@ pub fn block_state_from_section(
     }
     // div_euclid so below-world y maps out of range (-> AIR) instead of
     // truncating into section 0; vanilla getSectionIndex floors.
-    let section_idx = (y - min_y).div_euclid(16) as usize;
+    let relative_y = i64::from(y) - i64::from(min_y);
+    let Ok(section_idx) = usize::try_from(relative_y.div_euclid(16)) else {
+        return BlockState::AIR;
+    };
     if section_idx >= chunk.sections.len() {
         return BlockState::AIR;
     }
 
     let local_x = x.rem_euclid(16) as u8;
-    let local_y = (y - min_y).rem_euclid(16) as u8;
+    let local_y = relative_y.rem_euclid(16) as u8;
     let local_z = z.rem_euclid(16) as u8;
 
     chunk.sections[section_idx].get_block_state(azalea_core::position::ChunkSectionBlockPos {
@@ -402,6 +405,21 @@ pub fn block_state_from_section(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_state_from_section_handles_extreme_y_in_loaded_column() {
+        let chunks = ChunkStore::new(1);
+        let mut chunk = Chunk::default();
+        chunk.sections = vec![Default::default(); chunks.section_count() as usize].into();
+        assert_eq!(chunks.min_y(), -64);
+        for y in [i32::MIN, -65, 320, 2_147_483_600, i32::MAX] {
+            assert_eq!(
+                block_state_from_section(&chunk, 2, y, 2, chunks.min_y(), None),
+                BlockState::AIR,
+                "y={y}"
+            );
+        }
+    }
 
     #[test]
     fn probe_debug_world_override_is_shared_not_a_dump_substitution() {

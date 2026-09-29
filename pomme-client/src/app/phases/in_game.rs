@@ -6609,11 +6609,29 @@ mod tests {
             false,
             |_| 1.0,
         );
-        assert!((snowball[0].position[1] - 69.985).abs() < 1e-4);
+        assert!((snowball[0].position[1] - 69.98514999985695).abs() < 1e-10);
         assert_eq!(
             store.vehicles[&4].projectile.as_ref().unwrap().velocity.y,
-            -0.03 * 0.99
+            -0.03 * (0.99_f32 as f64)
         );
+        // Rendering multiple frames between two 20 Hz ticks must not move it.
+        for _ in 0..10 {
+            let frame = super::snowball_render_infos(
+                &store,
+                0.5,
+                DVec3::new(0.0, 70.0, 0.0),
+                DVec3::ZERO,
+                DVec3::ZERO,
+                1.0,
+                (0.0, 0.0),
+                &[[0.0; 4]; 6],
+                Some(glam::Mat4::IDENTITY),
+                false,
+                |_| 1.0,
+            );
+            assert_eq!(frame[0].position, snowball[0].position);
+        }
+        assert_eq!(store.vehicles[&4].projectile.as_ref().unwrap().ticks, 1);
         for _ in 0..12 {
             store.tick_projectile_displays(&chunks);
         }
@@ -6669,7 +6687,9 @@ mod tests {
         store.set_projectile_grounded(4, true);
         assert!(store.vehicles[&4].projectile.as_ref().unwrap().stopped);
         store.set_vehicle_transform(4, Position::new(5.0, 70.0, 2.0), DVec3::X);
+        store.set_projectile_grounded(4, false);
         store.set_projectile_metadata(4, 5, crate::entity::MetaValue::Bool(true));
+        assert!(!store.vehicles[&4].projectile.as_ref().unwrap().stopped);
         store.tick_projectile_displays(&chunks);
         assert_eq!(
             store.vehicles[&4].projectile.as_ref().unwrap().velocity.y,

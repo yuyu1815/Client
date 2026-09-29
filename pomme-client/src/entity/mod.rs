@@ -1404,22 +1404,41 @@ impl EntityStore {
             } else {
                 0.03
             };
-            // Throwable projectiles apply gravity before movement; arrows after drag.
-            let motion = if arrow {
-                display.velocity
-            } else {
-                display.velocity - DVec3::new(0.0, gravity, 0.0)
-            };
-            let to = from + motion;
-            // Validate before float-to-int conversion (which saturates), before
-            // i32 subtraction, and before scanning collision cells or chunks.
+            // Validate untrusted packet values before block probes, float-to-int
+            // conversion, AABB expansion, or scanning collision cells.
             // Leave a margin for ceil() and Aabb::block(x + 1).
             const SAFE: f64 = (i32::MAX - 32) as f64;
             if !from.is_finite()
-                || !to.is_finite()
                 || from.abs().max_element() >= SAFE
-                || to.abs().max_element() >= SAFE
-                || (to - from).abs().max_element() > 8.0
+                || !display.velocity.is_finite()
+                || display.velocity.abs().max_element() > 8.0
+            {
+                display.stopped = true;
+                continue;
+            }
+            let water = fluid(chunks.get_block_state(
+                from.x.floor() as i32,
+                from.y.floor() as i32,
+                from.z.floor() as i32,
+            ))
+            .kind
+                == FluidKind::Water;
+            let drag = if water {
+                if arrow { 0.6 } else { 0.8_f32 as f64 }
+            } else if arrow {
+                0.99
+            } else {
+                0.99_f32 as f64
+            };
+            // Snowballs: gravity -> inertia -> movement; arrows: movement -> drag ->
+            // gravity.
+            let motion = if arrow {
+                display.velocity
+            } else {
+                (display.velocity - DVec3::new(0.0, gravity, 0.0)) * drag
+            };
+            let to = from + motion;
+            if !to.is_finite() || to.abs().max_element() >= SAFE || motion.abs().max_element() > 8.0
             {
                 display.stopped = true;
                 continue;
@@ -1446,24 +1465,11 @@ impl EntityStore {
                 display.stopped = true;
             } else {
                 display.current = to.into();
-                let water = fluid(chunks.get_block_state(
-                    from.x.floor() as i32,
-                    from.y.floor() as i32,
-                    from.z.floor() as i32,
-                ))
-                .kind
-                    == FluidKind::Water;
-                let drag = if water {
-                    if arrow { 0.6 } else { 0.8 }
+                display.velocity = if arrow {
+                    motion * drag - DVec3::new(0.0, gravity, 0.0)
                 } else {
-                    0.99
+                    motion
                 };
-                display.velocity = motion * drag
-                    - if arrow {
-                        DVec3::new(0.0, gravity, 0.0)
-                    } else {
-                        DVec3::ZERO
-                    };
             }
             display.ticks += 1;
         }
@@ -2251,7 +2257,10 @@ mod tests {
     #[test]
     fn huge_projectile_coordinates_and_velocities_do_not_scan_or_panic() {
         crate::world::block::init("26.2");
-        let chunks = ChunkStore::new(1);
+        let mut chunks = ChunkStore::new(1);
+        let _loaded = chunks
+            .chunk_storage
+            .upsert(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
         for (position, velocity) in [
             (
                 Position::new(2_147_483_648.0, 0.0, 2_147_483_648.0),
@@ -2267,6 +2276,17 @@ mod tests {
             store.tick_projectile_displays(&chunks);
             assert!(store.vehicles[&1].projectile.as_ref().unwrap().stopped);
         }
+        // Within the projectile's i32 guard, but y - min_y used to overflow
+        // in the shared loaded-column block lookup before bounds checking.
+        let mut store = projectile(
+            EntityKind::Arrow,
+            Position::new(2.0, 2_147_483_600.0, 2.0),
+            DVec3::X,
+        );
+        store.tick_projectile_displays(&chunks);
+        let display = store.vehicles[&1].projectile.as_ref().unwrap();
+        assert_eq!(display.ticks, 1);
+        assert_eq!(display.current.x, 3.0);
     }
 
     #[test]
@@ -2289,7 +2309,7 @@ mod tests {
     }
 
     #[test]
-    fn snowball_gravity_precedes_drag_and_motion_does_not_rewind() {
+    fn snowball_gravity_and_drag_precede_movement_and_motion_does_not_rewind() {
         crate::world::block::init("26.2");
         let mut chunks = ChunkStore::new(1);
         let _chunk = chunks
@@ -2298,12 +2318,13 @@ mod tests {
         let mut store = projectile(
             EntityKind::Snowball,
             Position::new(2.0, 70.0, 2.0),
-            DVec3::new(0.0, 1.0, 0.0),
+            DVec3::X,
         );
         store.tick_projectile_displays(&chunks);
         let p = store.vehicles[&1].projectile.as_ref().unwrap();
-        assert!((p.current.y - 70.97).abs() < 1e-12);
-        assert!((p.velocity.y - 0.9603).abs() < 1e-12);
+        assert!((p.current.x - 2.9900000095367432).abs() < 1e-12);
+        assert!((p.current.y - 69.9702999997139).abs() < 1e-12);
+        assert!((p.velocity.y - (-0.029700000286102295)).abs() < 1e-12);
         for _ in 1..5 {
             store.tick_projectile_displays(&chunks);
         }
@@ -2320,14 +2341,43 @@ mod tests {
         let mut store = projectile(
             EntityKind::Snowball,
             Position::new(2.0, 70.0, 2.0),
-            DVec3::new(0.0, 1.0, 0.0),
+            DVec3::X,
         );
         for _ in 0..10 {
             store.tick_projectile_displays(&chunks);
         }
         let p = store.vehicles[&1].projectile.as_ref().unwrap();
-        assert!((p.current.y - 77.96031622150461).abs() < 1e-10);
-        assert!((p.velocity.y - 0.6203968377849532).abs() < 1e-10);
+        assert!((p.current.x - 11.466175068104723).abs() < 1e-10);
+        assert!((p.current.y - 68.41453842498419).abs() < 1e-10);
+        assert!((p.velocity.y - (-0.28398525204314173)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn snowball_collision_uses_post_inertia_segment() {
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        let _loaded = chunks
+            .chunk_storage
+            .upsert(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
+        chunks.set_block_state(
+            2,
+            70,
+            2,
+            crate::world::block::first_state_of("stone").unwrap(),
+        );
+        let mut store = projectile(
+            EntityKind::Snowball,
+            Position::new(1.0, 70.5, 2.0),
+            DVec3::X,
+        );
+        store.tick_projectile_displays(&chunks);
+        let p = store.vehicles[&1].projectile.as_ref().unwrap();
+        assert!(!p.stopped, "first tick ends before the stone at x=2");
+        assert!((p.current.x - 1.9900000095367432).abs() < 1e-12);
+        store.tick_projectile_displays(&chunks);
+        let p = store.vehicles[&1].projectile.as_ref().unwrap();
+        assert!(p.stopped);
+        assert_eq!(p.current.x, 2.0);
     }
 
     #[test]
