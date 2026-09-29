@@ -633,10 +633,7 @@ impl ApplicationHandler for App {
                                     if !game.handle_debug_key(code, f3_held, &connection) {
                                         self.core.input.on_menu_key_event(&event);
                                     }
-                                } else if game.server_dialog.is_some()
-                                    || (game.chat.has_pending_modal_prompt()
-                                        && !game.chat.is_open())
-                                {
+                                } else if server_dialog_takes_key(game.server_dialog.is_some(), &game.chat) {
                                     crate::app::phases::in_game::server_dialog_key(
                                         code,
                                         &event,
@@ -1366,9 +1363,35 @@ impl ApplicationHandler for App {
     }
 }
 
+// A confirm screen takes keys even when the chat screen remains open underneath
+// it.
+fn server_dialog_takes_key(server_dialog_open: bool, chat: &crate::ui::chat::ChatState) -> bool {
+    server_dialog_open || chat.has_pending_modal_prompt()
+}
+
 #[cfg(test)]
 mod transfer_tests {
     use super::{Transport, transfer_connect_args_for, transfer_server_address};
+
+    #[test]
+    fn escape_chat_url_confirmation_returns_to_chat() {
+        use crate::ui::chat::{ChatMethod, ChatState};
+
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Message, None);
+        assert!(
+            chat.request_open_url("https://example.com".into())
+                .is_none()
+        );
+        assert!(chat.has_pending_modal_prompt());
+        assert!(super::server_dialog_takes_key(false, &chat));
+        // The dialog-key branch handles Escape, without falling through to ChatScreen.
+        assert!(!chat.handle_escape());
+        assert!(!chat.has_pending_modal_prompt());
+        assert!(chat.is_open());
+        assert!(!super::server_dialog_takes_key(false, &chat));
+        assert!(super::server_dialog_takes_key(true, &chat));
+    }
 
     #[test]
     fn server_transfer_address_is_validated_before_reconnect() {
