@@ -6875,9 +6875,24 @@ mod tests {
             moved[0].model_matrix.transform_point3(Vec3::ZERO),
             Vec3::new(1.0, 3.0, 5.0)
         );
-        store.remove_entity(1); // EntitiesRemoved/unload lifecycle
+        assert!(!store.remove_impacted_snowball(2)); // Event 3 on another kind
+        assert!(store.remove_impacted_snowball(1)); // Event 3 on snowball
         assert!(extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground)).is_empty());
         assert_eq!(super::arrow_render_infos(&store, 1.0).len(), 1);
+        assert!(store.vehicles.contains_key(&3));
+        store.remove_entity(1); // later RemoveEntities is idempotent
+        assert!(!store.remove_impacted_snowball(1));
+        store.set_vehicle_spawn_transform(
+            1,
+            Position::new(0.0, 0.0, 4.0),
+            DVec3::ZERO,
+            LookDirection::default(),
+        );
+        store.set_vehicle_kind(1, EntityKind::Snowball); // fresh id reuse is visible
+        assert_eq!(
+            extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground)).len(),
+            1
+        );
     }
 
     #[test]

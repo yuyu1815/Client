@@ -3645,6 +3645,10 @@ impl AppCore {
                 NetworkEvent::EntityDamaged { id } => hurt_entity(game, id, None),
                 NetworkEvent::HurtAnimation { id, yaw } => hurt_entity(game, id, Some(yaw)),
                 NetworkEvent::EntityDied { id } => {
+                    if game.entity_store.remove_impacted_snowball(id) {
+                        game.entity_positions.remove(&id);
+                        continue;
+                    }
                     if id == game.player.entity_id {
                         let pitch = (fastrand::f32() - fastrand::f32()) * 0.2 + 1.0;
                         self.audio.play_world_sound(

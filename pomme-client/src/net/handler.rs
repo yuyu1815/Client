@@ -1158,11 +1158,11 @@ pub async fn handle_game_packet(
                     _ => None,
                 };
                 if let Some(value) = scalar {
-                    let _ = event_tx.try_send(NetworkEvent::EntityData {
+                    event_tx.try_send(NetworkEvent::EntityData {
                         id: p.id.0,
                         index: item.index,
                         value,
-                    });
+                    })?;
                 }
                 // Player score (Int; index gated per wire version above).
                 // Kind-blind; the consumer applies it only to the local
@@ -1251,10 +1251,10 @@ pub async fn handle_game_packet(
                 }
             }
         }
-        // Event id 3 = living entity death.
+        // Event id 3 = living entity death or snowball impact.
         // TODO: event 60 (`makePoofParticles`) when a mob's death clock hits 20.
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 3 => {
-            let _ = event_tx.try_send(NetworkEvent::EntityDied { id: p.entity_id.0 });
+            event_tx.try_send(NetworkEvent::EntityDied { id: p.entity_id.0 })?;
         }
         // Event id 9 = finished using an item (vanilla `completeUsingItem`).
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 9 => {
@@ -2264,6 +2264,59 @@ mod tests {
         assert!(matches!(
             dispatch_world_packet(&packet, &tx).await,
             Err(TrySendError::Disconnected(NetworkEvent::EntitiesRemoved { ids })) if ids == [12, 34]
+        ));
+    }
+
+    #[tokio::test]
+    async fn landing_signals_stay_ordered_and_fail_on_full_queue() {
+        use azalea_core::entity_id::MinecraftEntityId;
+        use azalea_entity::{EntityDataItem, EntityDataValue, EntityMetadataItems};
+        use azalea_protocol::packets::game::c_entity_event::ClientboundEntityEvent;
+        use azalea_protocol::packets::game::c_set_entity_data::ClientboundSetEntityData;
+
+        let metadata = ClientboundGamePacket::SetEntityData(ClientboundSetEntityData {
+            id: MinecraftEntityId(12),
+            packed_items: EntityMetadataItems(vec![EntityDataItem {
+                index: 10,
+                value: EntityDataValue::Boolean(true),
+            }]),
+        });
+        let impact = ClientboundGamePacket::EntityEvent(ClientboundEntityEvent {
+            entity_id: MinecraftEntityId(34),
+            event_id: 3,
+        });
+        let (tx, rx) = crossbeam_channel::bounded(2);
+        dispatch_world_packet(&metadata, &tx).await.unwrap();
+        dispatch_world_packet(&impact, &tx).await.unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::EntityData {
+                id: 12,
+                index: 10,
+                value: MetaValue::Bool(true)
+            }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::EntityDied { id: 34 }
+        ));
+        for packet in [&metadata, &impact] {
+            tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+            tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+            assert!(matches!(
+                dispatch_world_packet(packet, &tx).await,
+                Err(TrySendError::Full(_))
+            ));
+            assert_eq!(rx.len(), 2);
+            rx.try_recv().unwrap();
+            rx.try_recv().unwrap();
+        }
+        drop(rx);
+        assert!(matches!(
+            dispatch_world_packet(&impact, &tx).await,
+            Err(TrySendError::Disconnected(NetworkEvent::EntityDied {
+                id: 34
+            }))
         ));
     }
 

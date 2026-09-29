@@ -2097,6 +2097,17 @@ impl EntityStore {
         }
     }
 
+    /// Event 3 removes an impacted snowball visually before RemoveEntities
+    /// arrives. Only a tracked snowball may be removed; a later removal is
+    /// harmless.
+    pub fn remove_impacted_snowball(&mut self, id: i32) -> bool {
+        if self.vehicles.get(&id).and_then(|v| v.kind) != Some(EntityKind::Snowball) {
+            return false;
+        }
+        self.remove_entity(id);
+        true
+    }
+
     /// Remove one entity and direct graph edges without deleting passenger
     /// subtrees.
     pub fn remove_entity(&mut self, id: i32) -> Option<LivingEntity> {
