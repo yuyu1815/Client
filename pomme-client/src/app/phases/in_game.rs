@@ -5358,6 +5358,8 @@ fn item_frame_base_position(
     position + normal * 0.46875
 }
 
+const SNOWBALL_ITEM_NAME: &str = "snowball";
+
 /// 26.2 ThrownItemRenderer: one camera-facing GROUND item at the packet
 /// transform, not a dropped-item cluster. No previous vehicle position is
 /// retained, so movement uses the latest authoritative packet position.
@@ -5404,7 +5406,7 @@ fn snowball_render_infos(
                 return None;
             }
             Some(ItemRenderInfo {
-                item_name: "minecraft:snowball".to_owned(),
+                item_name: SNOWBALL_ITEM_NAME.to_owned(),
                 raw_dye_rgb: None,
                 model_matrix: glam::Mat4::from_translation((pos - anchor).as_vec3())
                     * billboard
@@ -5556,8 +5558,8 @@ fn build_item_render_infos(
     // Only Snowball currently maps to a thrown item. Do not infer other
     // projectile item meshes (egg, etc.) from entity kinds here.
     let snowball_mesh = renderer
-        .item_mesh_info("minecraft:snowball")
-        .map(|_| dropped_item_geometry(renderer, "minecraft:snowball").0);
+        .item_mesh_info(SNOWBALL_ITEM_NAME)
+        .map(|_| dropped_item_geometry(renderer, SNOWBALL_ITEM_NAME).0);
     infos.extend(snowball_render_infos(
         entities,
         camera_pos,
@@ -6526,7 +6528,7 @@ mod tests {
             };
         let renders = extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground));
         assert_eq!(renders.len(), 1);
-        assert_eq!(renders[0].item_name, "minecraft:snowball");
+        assert_eq!(renders[0].item_name, "snowball");
         assert_eq!(renders[0].stack_count, 1);
         assert_eq!(renders[0].position, [0.0, 0.0, 4.0]);
         assert_eq!(renders[0].light, 0.7);
@@ -6554,6 +6556,68 @@ mod tests {
         store.remove_entity(1); // EntitiesRemoved/unload lifecycle
         assert!(extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground)).is_empty());
         assert_eq!(super::arrow_render_infos(&store).len(), 1);
+    }
+
+    #[test]
+    fn snowball_draw_key_matches_warmed_registry_item_name() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::DVec3;
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::{LookDirection, Position};
+        use crate::world::block::registry::BlockRegistry;
+
+        let root = crate::test_util::test_temp_dir("snowball_item_key");
+        let jar = root.join("jar");
+        let items = jar.join("minecraft/items");
+        let models = jar.join("minecraft/models/item");
+        std::fs::create_dir_all(&items).unwrap();
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(
+            items.join("snowball.json"),
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/snowball"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("snowball.json"),
+            r#"{"textures":{"layer0":"minecraft:item/snowball"}}"#,
+        )
+        .unwrap();
+        crate::world::block::prewarm_protocol(pomme_protocol::version::NATIVE.protocol);
+        let registry = BlockRegistry::load(&jar, &None, &root, None);
+        assert_eq!(
+            registry.get_flat_item_texture_key("snowball"),
+            Some("item/snowball")
+        );
+        // warm_item_meshes registers these exact names; mesh_info and draw use exact
+        // keys.
+        let warmed_keys: std::collections::HashSet<_> = registry.item_names().collect();
+        assert!(warmed_keys.contains(super::SNOWBALL_ITEM_NAME));
+        assert!(!warmed_keys.contains("minecraft:snowball"));
+
+        let mut store = EntityStore::new();
+        store.set_vehicle_spawn_transform(
+            1,
+            Position::new(0.0, 0.0, 4.0),
+            DVec3::ZERO,
+            LookDirection::new(0.0, 0.0),
+        );
+        store.set_vehicle_kind(1, EntityKind::Snowball);
+        let renders = super::snowball_render_infos(
+            &store,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            1.0,
+            (0.0, 0.0),
+            &[[0.0; 4]; 6],
+            Some(glam::Mat4::IDENTITY),
+            false,
+            |_| 1.0,
+        );
+        assert_eq!(renders.len(), 1);
+        assert!(warmed_keys.contains(renders[0].item_name.as_str()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
