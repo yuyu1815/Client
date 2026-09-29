@@ -68,6 +68,17 @@ pub fn set_locale(locale: &str) -> bool {
     true
 }
 
+/// Pomme-only UI text without a vanilla translation key. Works before the
+/// Minecraft language catalogs have loaded.
+pub fn ui(en: &'static str, ja: &'static str) -> &'static str {
+    ui_for(locale(), en, ja)
+}
+
+/// Format Pomme UI text for a specified locale without mutating the selection.
+pub fn ui_for(locale: &str, en: &'static str, ja: &'static str) -> &'static str {
+    if locale == "ja_jp" { ja } else { en }
+}
+
 pub fn locale() -> &'static str {
     if LOCALE.load(Ordering::Relaxed) == 1 {
         "ja_jp"
@@ -86,7 +97,12 @@ fn lookup<'a>(catalogs: &'a Catalogs, key: &str, selected: u8) -> Option<&'a str
 }
 
 pub fn translate(key: &str) -> Option<&'static str> {
-    lookup(LANG.get()?, key, LOCALE.load(Ordering::Relaxed))
+    translate_for(locale(), key)
+}
+
+/// Look up a key for a specified locale without mutating the selection.
+pub fn translate_for(locale: &str, key: &str) -> Option<&'static str> {
+    lookup(LANG.get()?, key, u8::from(locale == "ja_jp"))
 }
 
 pub fn item_display_name(kind: ItemKind) -> String {

@@ -48,6 +48,23 @@ const COPYRIGHT: &str = "Copyright Mojang AB. Do not distribute!";
 const DROP_LINKS_W: f32 = 74.0;
 const DROP_THEME_W: f32 = 66.0;
 
+fn title_rows(locale: &str) -> [(&'static str, bool); 3] {
+    [
+        (
+            crate::lang::ui_for(locale, "Singleplayer", "シングルプレイ"),
+            true,
+        ),
+        (
+            crate::lang::ui_for(locale, "Multiplayer", "マルチプレイ"),
+            true,
+        ),
+        (
+            crate::lang::ui_for(locale, "Minecraft Realms", "Minecraft Realms"),
+            false,
+        ),
+    ]
+}
+
 impl MainMenu {
     #[allow(clippy::too_many_lines)]
     pub(super) fn build_main_vanilla(
@@ -96,12 +113,9 @@ impl MainMenu {
 
         self.push_splash(&mut elements, cx, gs, &text_width_fn);
 
-        // Realms is never enabled.
-        let rows: [(&str, bool); 3] = [
-            ("Singleplayer", true),
-            ("Multiplayer", true),
-            ("Minecraft Realms", false),
-        ];
+        // Realms is never enabled. Keep the action id separate from the translated
+        // label.
+        let rows = title_rows(crate::lang::locale());
         for (i, (label, enabled)) in rows.iter().enumerate() {
             let y = base + i as f32 * ROW_SPACING * gs;
             let hit = push_button_f(
@@ -120,11 +134,11 @@ impl MainMenu {
             );
             if hit {
                 any_clicked = true;
-                match *label {
-                    "Singleplayer" => {
+                match i {
+                    0 => {
                         self.open_world_list(gs, &|t: &str| text_width_fn(t, fs));
                     }
-                    "Multiplayer" => self.set_screen(Screen::ServerList),
+                    1 => self.set_screen(Screen::ServerList),
                     _ => {}
                 }
             }
@@ -141,13 +155,24 @@ impl MainMenu {
                 SpriteId::IconFriends,
                 friends_enabled,
                 if friends_enabled {
-                    "Friends"
+                    crate::lang::ui("Friends", "フレンド")
                 } else {
-                    "Sign in to use friends"
+                    crate::lang::ui(
+                        "Sign in to use friends",
+                        "フレンドを使うにはサインインしてください",
+                    )
                 },
             ),
-            (SpriteId::IconLanguage, true, "Change Language"),
-            (SpriteId::IconAccessibility, true, "Accessibility Settings"),
+            (
+                SpriteId::IconLanguage,
+                true,
+                crate::lang::ui("Change Language", "言語の変更"),
+            ),
+            (
+                SpriteId::IconAccessibility,
+                true,
+                crate::lang::ui("Accessibility Settings", "アクセシビリティ設定"),
+            ),
         ];
         for (i, (sprite, enabled, tip)) in icons.iter().enumerate() {
             let x = icon_x0 + i as f32 * (ICON_W + ICON_GAP) * gs;
@@ -200,7 +225,7 @@ impl MainMenu {
             half_w,
             btn_h,
             gs,
-            "Options...",
+            crate::lang::ui("Options...", "設定..."),
             true,
         ) {
             any_clicked = true;
@@ -217,7 +242,7 @@ impl MainMenu {
             half_w,
             btn_h,
             gs,
-            "Quit Game",
+            crate::lang::ui("Quit Game", "ゲームを終了"),
             true,
         ) {
             any_clicked = true;
@@ -229,8 +254,13 @@ impl MainMenu {
         let links_x = screen_w - (ICON_W * 2.0 + ICON_GAP + 4.0) * gs;
         let theme_x = screen_w - (ICON_W + 4.0) * gs;
         for (x, glyph, tip, is_links) in [
-            (links_x, ICON_LINK, "Links", true),
-            (theme_x, ICON_PAINTBRUSH, "Theme", false),
+            (links_x, ICON_LINK, crate::lang::ui("Links", "リンク"), true),
+            (
+                theme_x,
+                ICON_PAINTBRUSH,
+                crate::lang::ui("Theme", "テーマ"),
+                false,
+            ),
         ] {
             if push_icon_button(
                 &mut elements,
@@ -410,6 +440,39 @@ fn push_icon_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn japanese_multiplayer_label_keeps_server_list_action() {
+        assert_eq!(title_rows("ja_jp")[1], ("マルチプレイ", true));
+        assert_eq!(title_rows("en_us")[1], ("Multiplayer", true));
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
+        let mut menu = MainMenu::new(
+            Path::new("pomme-ja-title-action-test"),
+            rt,
+            "tester".into(),
+            "26.2".into(),
+            None,
+        );
+        menu.theme = PanoramaTheme::Default;
+        menu.gui_scale_setting = 1;
+        let width = |_: &str, _: f32| 0.0;
+        let y = 600.0 / 4.0 + 48.0 + ROW_SPACING + common::BTN_H / 2.0;
+        menu.build(
+            800.0,
+            600.0,
+            &MenuInput {
+                cursor: (400.0, y),
+                clicked: true,
+                ..MenuInput::backdrop()
+            },
+            width,
+        );
+        assert!(matches!(menu.screen, Screen::ServerList));
+    }
 
     #[test]
     fn default_language_icon_opens_language_and_returns_to_title() {

@@ -87,7 +87,7 @@ impl SignEditState {
         elements.push(MenuElement::Text {
             x: sw / 2.0,
             y: y + 10.0 * gs,
-            text: "Edit Sign".into(),
+            text: crate::lang::ui("Edit Sign", "看板を編集").into(),
             scale,
             color: crate::ui::common::WHITE,
             centered: true,
@@ -122,7 +122,7 @@ impl SignEditState {
         elements.push(MenuElement::Text {
             x: sw / 2.0,
             y: y + 132.0 * gs,
-            text: "Done     Esc: Done".into(),
+            text: crate::lang::ui("Done     Esc: Done", "完了     Esc: 完了").into(),
             scale,
             color: crate::ui::common::WHITE,
             centered: true,

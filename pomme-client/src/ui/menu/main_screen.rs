@@ -60,17 +60,17 @@ impl MainMenu {
         }
         let buttons = [
             BtnDef {
-                label: "Singleplayer",
+                label: crate::lang::ui("Singleplayer", "シングルプレイ"),
                 id: 0,
                 enabled: true,
             },
             BtnDef {
-                label: "Multiplayer",
+                label: crate::lang::ui("Multiplayer", "マルチプレイ"),
                 id: 1,
                 enabled: true,
             },
             BtnDef {
-                label: "Quit Game",
+                label: crate::lang::ui("Quit Game", "ゲームを終了"),
                 id: 2,
                 enabled: true,
             },
@@ -197,7 +197,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: sub_x,
             y: sub_y2,
-            text: "Edition".into(),
+            text: crate::lang::ui("Edition", "エディション").into(),
             scale: sub_size,
             color: text_dim,
             centered: false,
@@ -362,9 +362,12 @@ impl MainMenu {
         // centered. Friends needs a signed-in account, so it's disabled offline.
         let friends_enabled = self.access_token.is_some();
         let friends_tip = if friends_enabled {
-            "Friends"
+            crate::lang::ui("Friends", "フレンド")
         } else {
-            "Sign in to use friends"
+            crate::lang::ui(
+                "Sign in to use friends",
+                "フレンドを使うにはサインインしてください",
+            )
         };
         let new_row_w = icon_size * 3.0 + icon_gap * 2.0;
         let new_x0 = btn_x + (content_w - new_row_w) / 2.0;
@@ -374,13 +377,14 @@ impl MainMenu {
                 new_x0 + icon_size + icon_gap,
                 ICON_LANGUAGE,
                 true,
-                crate::lang::translate("options.language.tooltip").unwrap_or("Language"),
+                crate::lang::translate("options.language.tooltip")
+                    .unwrap_or(crate::lang::ui("Language", "言語")),
             ),
             (
                 new_x0 + (icon_size + icon_gap) * 2.0,
                 ICON_UNIVERSAL_ACCESS,
                 true,
-                "Accessibility Settings",
+                crate::lang::ui("Accessibility Settings", "アクセシビリティ設定"),
             ),
         ];
 
@@ -450,7 +454,7 @@ impl MainMenu {
             color: footer_col,
             centered: false,
         });
-        let copy = "Pomme early dev";
+        let copy = crate::lang::ui("Pomme early dev", "Pomme 開発初期版");
         let copy_w = text_width_fn(copy, footer_size);
         elements.push(MenuElement::Text {
             x: screen_w - footer_pad - copy_w,

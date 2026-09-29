@@ -79,7 +79,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: screen_w / 2.0,
             y: 8.0 * gs,
-            text: "Select World".into(),
+            text: crate::lang::ui("Select World", "世界を選択").into(),
             scale: fs,
             color: WHITE,
             centered: true,
@@ -111,7 +111,7 @@ impl MainMenu {
             field_h,
             fs,
             gs,
-            "Search...",
+            crate::lang::ui("Search...", "検索..."),
         );
 
         push_menu_backdrop(&mut elements, 0.0, list_top, screen_w, list_h, gs);
@@ -302,7 +302,7 @@ impl MainMenu {
             &mut ctx,
             &mut any_hovered,
             [grid_x, row1_y, wide_w, btn_h],
-            "Play Selected World",
+            crate::lang::ui("Play Selected World", "選択したワールドで遊ぶ"),
             has_sel && playable,
             (!playable).then_some(crate::singleplayer::UNAVAILABLE_MESSAGE),
         ) && let Some(folder) = self.selected_world.clone()
@@ -320,7 +320,7 @@ impl MainMenu {
             wide_w,
             btn_h,
             gs,
-            "Create New World",
+            crate::lang::ui("Create New World", "新しいワールドを作成"),
             true,
         ) {
             self.open_create_world(gs, &|t: &str| text_width_fn(t, fs));
@@ -336,7 +336,7 @@ impl MainMenu {
             narrow_w,
             btn_h,
             gs,
-            "Edit",
+            crate::lang::ui("Edit", "編集"),
             has_sel,
         ) && let Some(folder) = self.selected_world.clone()
         {
@@ -353,7 +353,7 @@ impl MainMenu {
             narrow_w,
             btn_h,
             gs,
-            "Delete",
+            crate::lang::ui("Delete", "削除"),
             has_sel,
         ) && let Some(folder) = self.selected_world.clone()
         {
@@ -364,9 +364,9 @@ impl MainMenu {
             &mut ctx,
             &mut any_hovered,
             [col(2.0), row2_y, narrow_w, btn_h],
-            "Re-Create",
+            crate::lang::ui("Re-Create", "再作成"),
             false,
-            Some("Not available yet"),
+            Some(crate::lang::ui("Not available yet", "まだ利用できません")),
         );
         if push_button_f(
             &mut elements,
@@ -379,7 +379,7 @@ impl MainMenu {
             narrow_w,
             btn_h,
             gs,
-            "Back",
+            crate::lang::ui("Back", "戻る"),
             true,
         ) {
             self.set_screen(Screen::Main);
@@ -430,14 +430,32 @@ fn info_line(world: &WorldSummary) -> Vec<TextSpan> {
 
     let mut spans = Vec::new();
     if world.hardcore {
-        spans.push(TextSpan::new("Hardcore Mode".into(), COL_HARDCORE));
+        spans.push(TextSpan::new(
+            crate::lang::ui("Hardcore Mode", "ハードコアモード").into(),
+            COL_HARDCORE,
+        ));
     } else {
-        spans.push(grey(world.game_mode.label().into()));
+        spans.push(grey(
+            crate::lang::ui(
+                world.game_mode.label(),
+                match world.game_mode {
+                    GameMode::Survival => "サバイバルモード",
+                    GameMode::Creative => "クリエイティブモード",
+                },
+            )
+            .into(),
+        ));
     }
     if world.allow_commands {
-        spans.push(grey(", Commands".into()));
+        spans.push(grey(
+            crate::lang::ui(", Commands", ", コマンド使用可").into(),
+        ));
     }
-    spans.push(grey(format!(", Version: {}", world.version)));
+    spans.push(grey(format!(
+        "{} {}",
+        crate::lang::ui("Version:", "バージョン:"),
+        world.version
+    )));
     spans
 }
 
@@ -454,7 +472,7 @@ fn format_last_played(millis: u64) -> String {
         .map(|t| t.to_offset(offset))
         .ok()
         .and_then(|t| t.format(&FORMAT).ok())
-        .unwrap_or_else(|| "unknown".into())
+        .unwrap_or_else(|| crate::lang::ui("unknown", "不明").into())
 }
 
 /// Which of vanilla's three create-world tabs is showing.
@@ -487,25 +505,27 @@ impl SelectedMode {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Survival => "Survival",
-            Self::Hardcore => "Hardcore",
-            Self::Creative => "Creative",
+            Self::Survival => crate::lang::ui("Survival", "サバイバル"),
+            Self::Hardcore => crate::lang::ui("Hardcore", "ハードコア"),
+            Self::Creative => crate::lang::ui("Creative", "クリエイティブ"),
         }
     }
 
     /// Vanilla `selectWorld.gameMode.<name>.info`.
     fn info(self) -> &'static str {
         match self {
-            Self::Survival => {
-                "Explore a mysterious world where you build, collect, craft, and fight monsters."
-            }
-            Self::Hardcore => {
-                "Survival Mode locked to 'Hard' difficulty. You can't respawn if you die."
-            }
-            Self::Creative => {
-                "Create, build, and explore without limits. You can fly, have endless materials, \
-                 and can't be hurt by monsters."
-            }
+            Self::Survival => crate::lang::ui(
+                "Explore a mysterious world where you build, collect, craft, and fight monsters.",
+                "建築、収集、クラフトをしながらモンスターと戦う世界を探索します。",
+            ),
+            Self::Hardcore => crate::lang::ui(
+                "Survival Mode locked to 'Hard' difficulty. You can't respawn if you die.",
+                "難易度がハードに固定されたサバイバルモードです。死亡すると復活できません。",
+            ),
+            Self::Creative => crate::lang::ui(
+                "Create, build, and explore without limits. You can fly, have endless materials, and can't be hurt by monsters.",
+                "制限なく作成、建築、探索できます。飛行でき、素材は無限で、モンスターからダメージを受けません。",
+            ),
         }
     }
 
@@ -528,6 +548,27 @@ pub(super) struct CreateWorldState {
     allow_commands: Option<bool>,
     folder: String,
     folder_for: String,
+}
+
+fn difficulty_info(difficulty: Difficulty) -> &'static str {
+    match difficulty {
+        Difficulty::Peaceful => crate::lang::ui(
+            "No hostile mobs and only some neutral mobs spawn. Hunger bar doesn't deplete and health replenishes over time.",
+            "敵対的なMobは出現せず、中立のMobのみ出現します。満腹度は減らず、体力は時間とともに回復します。",
+        ),
+        Difficulty::Easy => crate::lang::ui(
+            "Hostile mobs spawn but deal less damage. Hunger bar depletes and drains health down to 5 hearts.",
+            "敵対的なMobが出現しますが、与えるダメージは少なくなります。満腹度が減り、体力は5ハートまで減少します。",
+        ),
+        Difficulty::Normal => crate::lang::ui(
+            "Hostile mobs spawn and deal standard damage. Hunger bar depletes and drains health down to half a heart.",
+            "敵対的なMobが出現し、標準のダメージを与えます。満腹度が減り、体力は半ハートまで減少します。",
+        ),
+        Difficulty::Hard => crate::lang::ui(
+            "Hostile mobs spawn and deal more damage. Hunger bar depletes and drains all health.",
+            "敵対的なMobが出現し、より大きなダメージを与えます。満腹度が減り、体力はすべて失われます。",
+        ),
+    }
 }
 
 impl CreateWorldState {
@@ -639,7 +680,7 @@ impl MainMenu {
                 screen_h,
                 gs,
                 [x, y, w, btn_h],
-                "Not available yet",
+                crate::lang::ui("Not available yet", "まだ利用できません"),
             );
         };
 
@@ -649,9 +690,9 @@ impl MainMenu {
         let tab_w = bar_w / 3.0;
         let bar_x = (screen_w - bar_w) / 2.0;
         for (i, (tab, label)) in [
-            (CreateTab::Game, "Game"),
-            (CreateTab::World, "World"),
-            (CreateTab::More, "More"),
+            (CreateTab::Game, crate::lang::ui("Game", "ゲーム")),
+            (CreateTab::World, crate::lang::ui("World", "ワールド")),
+            (CreateTab::More, crate::lang::ui("More", "その他")),
         ]
         .into_iter()
         .enumerate()
@@ -738,7 +779,7 @@ impl MainMenu {
                 let rect = self.labelled_field(
                     &mut elements,
                     input,
-                    "World Name",
+                    crate::lang::ui("World Name", "ワールド名"),
                     TextTarget::WorldName,
                     cx,
                     &mut y,
@@ -749,32 +790,55 @@ impl MainMenu {
                 );
                 self.refresh_target_folder();
                 if common::hit_test(cursor, rect) {
-                    let tip = format!("Save folder: {}", self.create.folder);
+                    let tip = format!(
+                        "{} {}",
+                        crate::lang::ui("Save folder:", "保存フォルダー:"),
+                        self.create.folder
+                    );
                     common::push_tooltip(&mut elements, cursor, screen_w, screen_h, gs, &tip);
                 }
                 y += row_gap;
 
                 let hardcore = self.create.hardcore();
                 let cheats = if self.create.allow_commands() {
-                    "ON"
+                    crate::lang::ui("ON", "オン")
                 } else {
-                    "OFF"
+                    crate::lang::ui("OFF", "オフ")
                 };
                 let rows = [
                     (
-                        format!("Game Mode: {}", self.create.mode.label()),
+                        format!(
+                            "{} {}",
+                            crate::lang::ui("Game Mode:", "ゲームモード:"),
+                            self.create.mode.label()
+                        ),
                         true,
                         self.create.mode.info(),
                     ),
                     (
-                        format!("Difficulty: {}", self.create.difficulty().label()),
+                        format!(
+                            "{} {}",
+                            crate::lang::ui("Difficulty:", "難易度:"),
+                            match self.create.difficulty() {
+                                Difficulty::Peaceful => crate::lang::ui("Peaceful", "ピースフル"),
+                                Difficulty::Easy => crate::lang::ui("Easy", "イージー"),
+                                Difficulty::Normal => crate::lang::ui("Normal", "ノーマル"),
+                                Difficulty::Hard => crate::lang::ui("Hard", "ハード"),
+                            }
+                        ),
                         !hardcore,
-                        self.create.difficulty().info(),
+                        difficulty_info(self.create.difficulty()),
                     ),
                     (
-                        format!("Allow Cheats: {cheats}"),
+                        format!(
+                            "{} {cheats}",
+                            crate::lang::ui("Allow Cheats:", "チートを許可:")
+                        ),
                         !hardcore,
-                        "Commands like /gamemode, /experience",
+                        crate::lang::ui(
+                            "Commands like /gamemode, /experience",
+                            "/gamemode や /experience などのコマンド",
+                        ),
                     ),
                 ];
                 for (i, (label, enabled, info)) in rows.into_iter().enumerate() {
@@ -811,7 +875,13 @@ impl MainMenu {
             }
             CreateTab::World => {
                 let left = cx - (half * 2.0 + COL_GAP * gs) / 2.0;
-                for (i, label) in ["World Type: Default", "Customize"].into_iter().enumerate() {
+                for (i, label) in [
+                    crate::lang::ui("World Type: Default", "ワールドタイプ: デフォルト"),
+                    crate::lang::ui("Customize", "カスタマイズ"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
                     let x = left + (half + COL_GAP * gs) * i as f32;
                     inert(&mut elements, &mut any_hovered, x, y, half, label);
                 }
@@ -820,7 +890,7 @@ impl MainMenu {
                 let rect = self.labelled_field(
                     &mut elements,
                     input,
-                    "Seed for the world generator",
+                    crate::lang::ui("Seed for the world generator", "ワールド生成シード"),
                     TextTarget::WorldSeed,
                     cx,
                     &mut y,
@@ -838,13 +908,25 @@ impl MainMenu {
                     rect[3],
                     fs,
                     gs,
-                    "Leave blank for a random seed",
+                    crate::lang::ui(
+                        "Leave blank for a random seed",
+                        "空欄の場合はランダムなシードを使用",
+                    ),
                 );
                 y += row_gap;
 
                 let switch_w = SWITCH_W * gs;
                 let switch_x = left + half * 2.0 + COL_GAP * gs - switch_w;
-                for (label, state) in [("Generate Structures", "ON"), ("Bonus Chest", "OFF")] {
+                for (label, state) in [
+                    (
+                        crate::lang::ui("Generate Structures", "構造物を生成"),
+                        crate::lang::ui("ON", "オン"),
+                    ),
+                    (
+                        crate::lang::ui("Bonus Chest", "ボーナスチェスト"),
+                        crate::lang::ui("OFF", "オフ"),
+                    ),
+                ] {
                     elements.push(MenuElement::Text {
                         x: left,
                         y: y + (btn_h - fs) / 2.0,
@@ -865,7 +947,11 @@ impl MainMenu {
                 }
             }
             CreateTab::More => {
-                for label in ["Game Rules", "Experiments", "Data Packs"] {
+                for label in [
+                    crate::lang::ui("Game Rules", "ゲームルール"),
+                    crate::lang::ui("Experiments", "実験"),
+                    crate::lang::ui("Data Packs", "データパック"),
+                ] {
                     inert(&mut elements, &mut any_hovered, opt_x, y, opt_w, label);
                     y += btn_h + row_gap;
                 }
@@ -882,7 +968,7 @@ impl MainMenu {
             half,
             btn_h,
             gs,
-            "Create New World",
+            crate::lang::ui("Create New World", "新しいワールドを作成"),
             true,
         ) && clicked
         {
@@ -897,7 +983,7 @@ impl MainMenu {
             half,
             btn_h,
             gs,
-            "Cancel",
+            crate::lang::ui("Cancel", "キャンセル"),
             true,
         ) && clicked
         {
@@ -1063,7 +1149,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: cx,
             y: 15.0 * gs,
-            text: "Edit World".into(),
+            text: crate::lang::ui("Edit World", "ワールドを編集").into(),
             scale: fs,
             color: WHITE,
             centered: true,
@@ -1076,7 +1162,7 @@ impl MainMenu {
         self.labelled_field(
             &mut elements,
             input,
-            "World Name",
+            crate::lang::ui("World Name", "ワールド名"),
             TextTarget::WorldName,
             cx,
             &mut y,
@@ -1096,7 +1182,7 @@ impl MainMenu {
             form_x,
             y,
             form_w,
-            "Reset Icon",
+            crate::lang::ui("Reset Icon", "アイコンをリセット"),
             icon.is_file(),
         );
         y += btn_h + spacing;
@@ -1107,7 +1193,7 @@ impl MainMenu {
             form_x,
             y,
             form_w,
-            "Open World Folder",
+            crate::lang::ui("Open World Folder", "ワールドフォルダーを開く"),
             true,
         ) && clicked
         {
@@ -1115,7 +1201,11 @@ impl MainMenu {
         }
         y += btn_h + spacing;
 
-        for label in ["Make Backup", "Open Backups Folder", "Optimize World"] {
+        for label in [
+            crate::lang::ui("Make Backup", "バックアップを作成"),
+            crate::lang::ui("Open Backups Folder", "バックアップフォルダーを開く"),
+            crate::lang::ui("Optimize World", "ワールドを最適化"),
+        ] {
             button(
                 &mut elements,
                 &mut any_hovered,
@@ -1132,7 +1222,7 @@ impl MainMenu {
                 screen_h,
                 gs,
                 [form_x, y, form_w, btn_h],
-                "Not available yet",
+                crate::lang::ui("Not available yet", "まだ利用できません"),
             );
             y += btn_h + spacing;
         }
@@ -1147,7 +1237,7 @@ impl MainMenu {
             form_x,
             y,
             half,
-            "Save",
+            crate::lang::ui("Save", "保存"),
             !name.is_empty(),
         );
         // Vanilla also saves on Enter while the name field is focused.
@@ -1164,7 +1254,7 @@ impl MainMenu {
             form_x + half + gap,
             y,
             half,
-            "Cancel",
+            crate::lang::ui("Cancel", "キャンセル"),
             true,
         ) && clicked
         {
@@ -1198,18 +1288,22 @@ impl MainMenu {
         let Some(folder) = self.screen_folder() else {
             return empty_result(2.0);
         };
-        let warning = format!(
-            "'{}' will be lost forever! (A long time!)",
-            self.world_display_name(&folder)
-        );
+        let warning = crate::lang::ui(
+            "'{name}' will be lost forever! (A long time!)",
+            "「{name}」は永久に失われます！（ずっと長い時間！）",
+        )
+        .replace("{name}", &self.world_display_name(&folder));
         let (result, choice) = self.build_confirm(
             screen_w,
             screen_h,
             input,
             text_width_fn,
-            "Are you sure you want to delete this world?",
+            crate::lang::ui(
+                "Are you sure you want to delete this world?",
+                "このワールドを削除しますか？",
+            ),
             &warning,
-            "Delete",
+            crate::lang::ui("Delete", "削除"),
         );
         if choice == Some(true) {
             // TODO: blocking. Fine while a world is one small file; the layer

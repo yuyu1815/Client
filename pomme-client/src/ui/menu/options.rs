@@ -1,6 +1,243 @@
 use super::*;
 use crate::resource_pack::PackCompat;
 
+// Keep the English row strings as control IDs. The grid resolves sliders,
+// disabled controls, navigation and click handlers against those IDs before
+// translating only the text passed to the renderer.
+fn option_text(label: &str) -> String {
+    option_text_for(crate::lang::locale(), label)
+}
+
+fn option_text_for(locale: &str, label: &str) -> String {
+    let (name, value) = label
+        .split_once(": ")
+        .map_or((label, None), |(n, v)| (n, Some(v)));
+    let (key, ja) = match name {
+        "Options" => ("options.title", "設定"),
+        "Language" => ("options.language.title", "言語"),
+        "Online..." => ("options.online", "オンライン..."),
+        "Online Options..." => ("options.online.title", "オンライン設定..."),
+        "Skin Customization..." => ("options.skinCustomisation", "スキンのカスタマイズ..."),
+        "Skin Customization" => ("options.skinCustomisation.title", "スキンのカスタマイズ"),
+        "Music & Sounds..." => ("options.sounds", "音楽とサウンド..."),
+        "Music & Sounds" => ("options.sounds.title", "音楽とサウンド"),
+        "Video Settings..." => ("options.video", "ビデオ設定..."),
+        "Video Settings" => ("options.videoTitle", "ビデオ設定"),
+        "Controls..." => ("options.controls", "操作設定..."),
+        "Controls" => ("", "操作設定"),
+        "Chat Settings..." => ("options.chat", "チャット設定..."),
+        "Chat Settings" => ("options.chat.title", "チャット設定"),
+        "Resource Packs..." => ("options.resourcepack", "リソースパック..."),
+        "Accessibility Settings..." => ("options.accessibility", "アクセシビリティ設定..."),
+        "Accessibility Settings" => ("options.accessibility.title", "アクセシビリティ設定"),
+        "Telemetry Data..." => ("options.telemetry", "テレメトリーデータ..."),
+        "Credits & Attribution..." => {
+            ("options.credits_and_attribution", "クレジットと帰属表示...")
+        }
+        "Display" => ("options.video.display.header", "ディスプレイ"),
+        "Quality" => ("", "画質"),
+        "Preferences" => ("options.video.preferences.header", "環境設定"),
+        "FOV" => ("options.fov", "視野角"),
+        "Fullscreen Resolution" => ("options.fullscreen.resolution", "フルスクリーン解像度"),
+        "Max Framerate" => ("options.framerateLimit", "最大フレームレート"),
+        "VSync" => ("", "垂直同期"),
+        "Inactivity FPS Limit" => ("options.inactivityFpsLimit", "非アクティブ時のFPS制限"),
+        "GUI Scale" => ("options.guiScale", "GUIの大きさ"),
+        "Fullscreen" => ("options.fullscreen", "フルスクリーン"),
+        "Exclusive Fullscreen" => ("options.exclusiveFullscreen", "排他的フルスクリーン"),
+        "Brightness" => ("options.gamma", "明るさ"),
+        "Graphics Backend" => ("", "描画方式"),
+        "Graphics" => ("options.graphics", "グラフィックス"),
+        "Biome Blend" => ("options.biomeBlendRadius", "バイオームの混合"),
+        "Render Distance" => ("options.renderDistance", "描画距離"),
+        "Prioritize Chunk Updates" => ("", "チャンク更新の優先度"),
+        "Simulation Distance" => ("options.simulationDistance", "シミュレーション距離"),
+        "Smooth Lighting" => ("options.ao", "スムースライティング"),
+        "Clouds" => ("options.renderClouds", "雲"),
+        "Chunk Detail" => ("", "チャンクの詳細度"),
+        "Particles" => ("options.particles", "パーティクル"),
+        "Mipmap Levels" => ("options.mipmapLevels", "ミップマップレベル"),
+        "Entity Shadows" => ("options.entityShadows", "エンティティの影"),
+        "Entity Distance" => ("options.entityDistanceScaling", "エンティティの描画距離"),
+        "Menu Background Blur" => (
+            "options.accessibility.menu_background_blurriness",
+            "メニュー背景のぼかし",
+        ),
+        "Cloud Range" => ("", "雲の表示範囲"),
+        "Cutout Leaves" => ("options.cutoutLeaves", "葉の透過"),
+        "Improved Transparency" => ("options.improvedTransparency", "透過表現の改善"),
+        "Texture Filtering" => ("", "テクスチャフィルタリング"),
+        "Max Anisotropy" => ("options.maxAnisotropy", "異方性フィルタリング"),
+        "Weather Radius" => ("", "天候の表示範囲"),
+        "Show Autosave Indicator" => ("options.autosaveIndicator", "自動保存表示"),
+        "Vignette" => ("options.vignette", "周辺減光"),
+        "Attack Indicator" => ("options.attackIndicator", "攻撃インジケーター"),
+        "Chunk Fade-in" => ("", "チャンクのフェードイン"),
+        "Sensitivity" => ("options.sensitivity", "マウス感度"),
+        "Invert Mouse" => ("options.invertMouse", "マウスの反転"),
+        "Auto-Jump" => ("options.autoJump", "自動ジャンプ"),
+        "Operator Items Tab" => ("", "オペレーターアイテムタブ"),
+        "Key Binds..." => ("", "キー設定..."),
+        "Mouse Settings..." => ("options.mouse_settings", "マウス設定..."),
+        "Sneak" => ("", "スニーク"),
+        "Sprint" => ("", "ダッシュ"),
+        "Chat" => ("options.chat.visibility", "チャット"),
+        "Colors" => ("options.chat.color", "色"),
+        "Web Links" => ("options.chat.links", "ウェブリンク"),
+        "Prompt on Links" => ("", "リンクを開く前に確認"),
+        "Chat Text Opacity" => ("options.chat.opacity", "チャット文字の不透明度"),
+        "Text Background Opacity" => (
+            "options.accessibility.text_background_opacity",
+            "文字の背景の不透明度",
+        ),
+        "Chat Text Size" => ("options.chat.scale", "チャット文字の大きさ"),
+        "Line Spacing" => ("options.chat.line_spacing", "行間"),
+        "Chat Delay" => ("", "チャットの遅延"),
+        "Width" => ("options.chat.width", "幅"),
+        "Focused Height" => ("options.chat.height.focused", "表示中の高さ"),
+        "Unfocused Height" => ("options.chat.height.unfocused", "非表示中の高さ"),
+        "Narrator" => ("options.narrator", "ナレーター"),
+        "Command Suggestions" => ("options.autoSuggestCommands", "コマンド候補"),
+        "Hide Matched Names" => ("options.hideMatchedNames", "一致する名前を非表示"),
+        "Reduced Debug Info" => ("", "デバッグ情報を減らす"),
+        "Only Show Secure Chat" => ("options.onlyShowSecureChat", "安全なチャットのみ表示"),
+        "Save Unsent Chats" => ("options.chat.drafts", "未送信のチャットを保存"),
+        "Show Subtitles" => ("options.showSubtitles", "字幕を表示"),
+        "High Contrast" => ("options.accessibility.high_contrast", "ハイコントラスト"),
+        "Background for Chat Only" => ("", "チャットのみ背景を表示"),
+        "Notification Time" => ("", "通知の表示時間"),
+        "View Bobbing" => ("options.viewBobbing", "視点の揺れ"),
+        "Distortion Effects" => ("", "画面の歪み"),
+        "FOV Effects" => ("options.fovEffectScale", "視野角への効果"),
+        "Darkness Pulsing" => ("options.darknessEffectScale", "暗闇の脈動"),
+        "Damage Tilt" => ("options.damageTiltStrength", "ダメージ時の傾き"),
+        "Glint Speed" => ("options.glintSpeed", "エンチャントの輝きの速度"),
+        "Glint Strength" => ("options.glintStrength", "エンチャントの輝きの強さ"),
+        "Hide Lightning Flashes" => ("options.hideLightningFlashes", "稲光を非表示"),
+        "Dark Loading Screen" => ("", "暗いロード画面"),
+        "Panorama Scroll Speed" => (
+            "options.accessibility.panorama_speed",
+            "パノラマのスクロール速度",
+        ),
+        "Hide Splash Texts" => ("options.hideSplashTexts", "スプラッシュを非表示"),
+        "Narrator Hotkey" => (
+            "options.accessibility.narrator_hotkey",
+            "ナレーターのショートカット",
+        ),
+        "Rotate with Minecart" => ("", "トロッコに合わせて回転"),
+        "High Contrast Outlines" => (
+            "options.accessibility.high_contrast_block_outline",
+            "ハイコントラストな輪郭",
+        ),
+        "Master Volume" => ("", "全体の音量"),
+        "Music" => ("", "音楽"),
+        "Jukebox/Note Blocks" => ("", "ジュークボックス/音符ブロック"),
+        "Weather" => ("", "天候"),
+        "Blocks" => ("", "ブロック"),
+        "Hostile Creatures" => ("", "敵対的な生物"),
+        "Friendly Creatures" => ("", "友好的な生物"),
+        "Players" => ("", "プレイヤー"),
+        "Ambient/Environment" => ("", "環境音"),
+        "Voice/Speech" => ("", "声/会話"),
+        "UI" => ("", "UI"),
+        "Device" => ("options.audioDevice", "音声デバイス"),
+        "Directional Audio" => ("options.directionalAudio", "立体音響"),
+        "Music Frequency" => ("options.music_frequency", "音楽の頻度"),
+        "Music Toast" => ("options.musicToast", "音楽の通知"),
+        "Cape" => ("options.modelPart.cape", "マント"),
+        "Jacket" => ("options.modelPart.jacket", "上着"),
+        "Left Sleeve" => ("options.modelPart.left_sleeve", "左袖"),
+        "Right Sleeve" => ("options.modelPart.right_sleeve", "右袖"),
+        "Left Pants Leg" => ("options.modelPart.left_pants_leg", "左のズボン"),
+        "Right Pants Leg" => ("options.modelPart.right_pants_leg", "右のズボン"),
+        "Hat" => ("options.modelPart.hat", "帽子"),
+        "Main Hand" => ("options.mainHand", "利き手"),
+        "Realms Notifications" => ("", "Realmsの通知"),
+        "Allow Server Listings" => ("options.allowServerListing", "サーバーの一覧表示を許可"),
+        "Show Online Status" => ("", "オンライン状態を表示"),
+        "Show Current Server" => ("", "現在のサーバーを表示"),
+        _ => return label.to_string(),
+    };
+    let translated = if locale == "ja_jp" {
+        if key.is_empty() {
+            ja
+        } else {
+            crate::lang::translate_for(locale, key).unwrap_or(ja)
+        }
+    } else {
+        name
+    };
+    match value {
+        Some(value) => format!("{translated}: {}", option_value_for(locale, value)),
+        None => translated.to_owned(),
+    }
+}
+
+fn option_value_for(locale: &str, value: &str) -> String {
+    if locale != "ja_jp" {
+        return value.to_owned();
+    }
+    let (key, ja) = match value {
+        "ON" => ("options.on", "オン"),
+        "OFF" => ("options.off", "オフ"),
+        "Auto" => ("options.guiScale.auto", "自動"),
+        "Normal" => ("options.fov.min", "標準"),
+        "Quake Pro" => ("options.fov.max", "最大"),
+        "Unlimited" => ("options.framerateLimit.max", "無制限"),
+        "Fancy" => ("options.graphics.fancy", "高品質"),
+        "All" => ("options.particles.all", "すべて"),
+        "Default" => ("options.graphicsApi.default", "デフォルト"),
+        "Current" => ("options.fullscreen.current", "現在の設定"),
+        "Right" => ("options.mainHand.right", "右"),
+        "Left" => ("options.mainHand.left", "左"),
+        "Toggle" => ("options.key.toggle", "切り替え"),
+        "Hold" => ("options.key.hold", "長押し"),
+        "*yawn*" => ("options.sensitivity.min", "とても遅い"),
+        "HYPERSPEED!!!" => ("options.sensitivity.max", "超高速!!!"),
+        "None" => ("", "なし"),
+        "Windowed" => ("", "ウィンドウ"),
+        "Borderless" => ("", "枠なし"),
+        "Exclusive" => ("", "排他モード"),
+        "Off" => ("options.off", "オフ"),
+        "Fast" => ("options.clouds.fast", "高速"),
+        "Crosshair" => ("options.attack.crosshair", "クロスヘア"),
+        "Hotbar" => ("options.attack.hotbar", "ホットバー"),
+        "Shown" => ("options.chat.visibility.full", "表示"),
+        "Commands Only" => ("options.chat.visibility.system", "コマンドのみ"),
+        "Hidden" => ("options.chat.visibility.hidden", "非表示"),
+        "1 minute" => ("", "1分"),
+        "1.0s" => ("", "1.0秒"),
+        "10.0s" => ("", "10.0秒"),
+        _ => ("", ""),
+    };
+    if !ja.is_empty() {
+        return if key.is_empty() {
+            ja.to_owned()
+        } else {
+            localized_option_value(value, ja, crate::lang::translate_for(locale, key))
+        };
+    }
+    if let Some(n) = value.strip_suffix(" chunks") {
+        return format!("{n}{}", crate::lang::ui_for(locale, " chunks", "チャンク"));
+    }
+    if let Some(n) = value.strip_suffix(" second(s)") {
+        return format!("{n}{}", crate::lang::ui_for(locale, " second(s)", "秒"));
+    }
+    value.to_owned()
+}
+
+// `translate` falls back to the English catalog when the Japanese asset is
+// missing. Keep common toggle values Japanese in that case.
+fn localized_option_value(value: &str, ja: &str, translated: Option<&str>) -> String {
+    if matches!(value, "ON" | "OFF" | "Off")
+        && translated.is_some_and(|text| text.eq_ignore_ascii_case(value))
+    {
+        ja.to_owned()
+    } else {
+        translated.unwrap_or(ja).to_owned()
+    }
+}
+
 /// A row in a vanilla-style options list: 25px pitch, a 310px `Big` widget, or
 /// two 150px widgets per `Pair` (`PairLeft` for an odd trailing widget).
 pub(super) enum OptRow<'a> {
@@ -27,9 +264,59 @@ fn row_labels<'a>(row: &OptRow<'a>) -> Vec<&'a str> {
 
 fn compat_label(compat: PackCompat) -> (&'static str, [f32; 4]) {
     match compat {
-        PackCompat::Compatible => ("Compatible", [0.33, 0.87, 0.33, 1.0]),
-        PackCompat::TooOld => ("Made for an older version", COL_RED),
-        PackCompat::TooNew => ("Made for a newer version", COL_RED),
+        PackCompat::Compatible => (
+            crate::lang::ui("Compatible", "互換性あり"),
+            [0.33, 0.87, 0.33, 1.0],
+        ),
+        PackCompat::TooOld => (
+            crate::lang::ui("Made for an older version", "古いバージョン向け"),
+            COL_RED,
+        ),
+        PackCompat::TooNew => (
+            crate::lang::ui("Made for a newer version", "新しいバージョン向け"),
+            COL_RED,
+        ),
+    }
+}
+
+fn option_tooltip(tip: &str) -> String {
+    let (key, ja) = match tip {
+        "3rd-party Servers may send chat messages in non-standard formats.\nWith this option on, hidden players will be matched based on chat sender names." => {
+            (
+                "options.hideMatchedNames.tooltip",
+                "外部サーバーでは標準以外の形式のチャットが送信される場合があります。\n有効にすると、非表示のプレイヤーを送信者名から判定します。",
+            )
+        }
+        "Only display messages from other players that can be verified to have been sent by that player, and have not been modified." => {
+            (
+                "options.onlyShowSecureChat.tooltip",
+                "送信者を確認でき、改変されていないメッセージのみ表示します。",
+            )
+        }
+        "Unsent messages will be saved and can be sent the next time chat is opened." => (
+            "",
+            "未送信のメッセージを保存し、次にチャットを開いたときに送信できます。",
+        ),
+        "Receive notifications about Realms updates" => ("", "Realmsの更新通知を受け取ります。"),
+        "Allow servers to list your name in their player list" => (
+            "",
+            "サーバーのプレイヤー一覧に名前を表示することを許可します。",
+        ),
+        "Allow friends to see when you're online" => ("", "フレンドにオンライン状態を公開します。"),
+        "Allow friends to see which server you're on" => {
+            ("", "フレンドに現在のサーバーを公開します。")
+        }
+        _ => return tip.to_owned(),
+    };
+    if crate::lang::locale() == "ja_jp" {
+        if key.is_empty() {
+            ja
+        } else {
+            crate::lang::translate(key).unwrap_or(ja)
+        }
+        .to_owned()
+    } else {
+        tip.to_owned()
     }
 }
 
@@ -858,7 +1145,7 @@ impl MainMenu {
             elements.push(MenuElement::Text {
                 x: cx,
                 y: (header_h - fs) / 2.0,
-                text: title.into(),
+                text: option_text(title),
                 scale: fs,
                 color: WHITE,
                 centered: true,
@@ -891,7 +1178,7 @@ impl MainMenu {
             elements.push(MenuElement::Text {
                 x: cx,
                 y: title_y,
-                text: title.into(),
+                text: option_text(title),
                 scale: fs,
                 color: WHITE,
                 centered: true,
@@ -971,7 +1258,7 @@ impl MainMenu {
                     elements.push(MenuElement::Text {
                         x: left_x,
                         y: y_cursor + pad_top + (lh - fs) / 2.0,
-                        text: (*title).into(),
+                        text: option_text(title),
                         scale: fs,
                         color: WHITE,
                         centered: false,
@@ -985,6 +1272,7 @@ impl MainMenu {
                 OptRow::PairLeft(a) => widgets.push((*a, left_x, small_w)),
             }
             for (label, bx, bw) in widgets {
+                let display_label = option_text(label);
                 let enabled = option_enabled(label, disabled);
                 if let Some((prefix, value)) = sliders
                     .iter()
@@ -1013,7 +1301,7 @@ impl MainMenu {
                         btn_h,
                         gs,
                         fs,
-                        label,
+                        &display_label,
                         *value,
                         enabled,
                         focused,
@@ -1056,7 +1344,7 @@ impl MainMenu {
                     btn_h,
                     gs,
                     fs,
-                    label,
+                    &display_label,
                     enabled,
                     &label_scroll,
                 );
@@ -1064,7 +1352,7 @@ impl MainMenu {
                 // Vanilla keys tooltips off `isHovered`, which ignores `active`
                 // (`AbstractWidget.extractTooltipForNextRenderPass`).
                 if hit && let Some((_, tip)) = tooltips.iter().find(|(p, _)| label.starts_with(p)) {
-                    common::push_tooltip(&mut elements, cursor, sw, sh, gs, tip);
+                    common::push_tooltip(&mut elements, cursor, sw, sh, gs, &option_tooltip(tip));
                 }
                 if (clicked && h) || (focused && ctx.activate) {
                     any_clicked = true;
@@ -1296,7 +1584,7 @@ impl MainMenu {
             btn_h,
             gs,
             fs,
-            crate::lang::translate("gui.done").unwrap_or("Done"),
+            crate::lang::translate("gui.done").unwrap_or(crate::lang::ui("Done", "完了")),
             true,
             &label_scroll,
         );
@@ -1357,13 +1645,16 @@ impl MainMenu {
         let text_x = 34.0 * gs;
         let field_h = 15.0 * gs;
         let hover_color: [f32; 4] = [1.0, 1.0, 1.0, 0.1];
-        let drag_text = "Drag and drop files into this window to add packs";
+        let drag_text = crate::lang::ui(
+            "Drag and drop files into this window to add packs",
+            "このウィンドウにファイルをドラッグ＆ドロップしてパックを追加",
+        );
 
         let mut header_y = pad;
         elements.push(MenuElement::Text {
             x: cx,
             y: header_y,
-            text: "Select Resource Packs".into(),
+            text: crate::lang::ui("Select Resource Packs", "リソースパックの選択").into(),
             scale: fs,
             color: WHITE,
             centered: true,
@@ -1402,7 +1693,7 @@ impl MainMenu {
             field_h,
             fs,
             gs,
-            "Search...",
+            crate::lang::ui("Search...", "検索..."),
         );
         header_y += field_h + pad;
 
@@ -1424,7 +1715,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: left_x + list_w / 2.0,
             y: list_top + (label_h - fs) / 2.0,
-            text: "Available".into(),
+            text: crate::lang::ui("Available", "利用可能").into(),
             scale: fs,
             color: WHITE,
             centered: true,
@@ -1432,7 +1723,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: right_x + list_w / 2.0,
             y: list_top + (label_h - fs) / 2.0,
-            text: "Selected".into(),
+            text: crate::lang::ui("Selected", "選択済み").into(),
             scale: fs,
             color: WHITE,
             centered: true,
@@ -1529,7 +1820,7 @@ impl MainMenu {
             let ey = entries_top + i as f32 * (entry_h + entry_gap);
             let is_server = pack.source == PackSource::Server;
             let label = if is_server {
-                format!("[Server] {}", pack.name)
+                format!("[{}] {}", crate::lang::ui("Server", "サーバー"), pack.name)
             } else {
                 pack.name.clone()
             };
@@ -1560,8 +1851,11 @@ impl MainMenu {
             &mut any_hovered,
             right_x,
             entries_top + default_offset * (entry_h + entry_gap),
-            "Default",
-            "The default look and feel of Minecraft",
+            crate::lang::ui("Default", "デフォルト"),
+            crate::lang::ui(
+                "The default look and feel of Minecraft",
+                "Minecraftの標準の外観",
+            ),
             WHITE,
             crate::resource_pack::PackCompat::Compatible,
             false,
@@ -1579,7 +1873,7 @@ impl MainMenu {
             btn_h,
             gs,
             fs,
-            "Open Pack Folder",
+            crate::lang::ui("Open Pack Folder", "パックフォルダーを開く"),
             true,
         );
         any_hovered |= h;
@@ -1596,7 +1890,7 @@ impl MainMenu {
             btn_h,
             gs,
             fs,
-            "Done",
+            crate::lang::translate("gui.done").unwrap_or(crate::lang::ui("Done", "完了")),
             true,
         );
         any_hovered |= h;
@@ -1639,7 +1933,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: cx,
             y: (chrome.content_top + chrome.content_bottom) / 2.0 - body_fs / 2.0,
-            text: "Coming soon".into(),
+            text: crate::lang::ui("Coming soon", "準備中").into(),
             scale: body_fs,
             color: COL_DIM,
             centered: true,
@@ -1960,6 +2254,43 @@ mod tests {
         // Locked, the first arrow did nothing; unlocked, one step is
         // `1 / (150 - 8)` GUI units.
         assert!((grid.menu.sensitivity - (0.5 + 1.0 / 142.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn japanese_labels_keep_toggle_and_slider_ids() {
+        assert_eq!(option_text_for("en_us", "VSync: ON"), "VSync: ON");
+        assert_eq!(option_text_for("ja_jp", "VSync: ON"), "垂直同期: オン");
+        let mut grid = Grid::new("VSync: ON", "Second");
+        grid.frame(&click(300.0));
+        assert!(!grid.menu.vsync);
+        let mut grid = Grid::with_slider("First", "Entity Distance: 100%", ENTITY_DISTANCE);
+        grid.sliders[0].1 = 1.0;
+        grid.frame(&click(550.0));
+        assert_eq!(grid.menu.entity_distance_percent, 500);
+        grid.sliders[0].1 = 0.0;
+        grid.frame(&click(408.0));
+        assert_eq!(grid.menu.entity_distance_percent, 50);
+        assert_eq!(grid.menu.discrete_slider_span(ENTITY_DISTANCE), Some(18.0));
+    }
+
+    #[test]
+    fn toggles_use_japanese_when_catalog_falls_back_to_english() {
+        for (value, english, japanese) in [
+            ("ON", "ON", "オン"),
+            ("OFF", "OFF", "オフ"),
+            ("Off", "OFF", "オフ"),
+        ] {
+            assert_eq!(localized_option_value(value, japanese, None), japanese);
+            assert_eq!(
+                localized_option_value(value, japanese, Some(english)),
+                japanese
+            );
+            assert_eq!(
+                localized_option_value(value, japanese, Some(japanese)),
+                japanese
+            );
+        }
+        assert_eq!(localized_option_value("Auto", "自動", Some("Auto")), "Auto");
     }
 
     #[test]

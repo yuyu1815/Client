@@ -64,19 +64,32 @@ pub fn build_pause_menu(
             cursor,
             clicked,
             gs,
-            "Benchmark",
+            crate::lang::ui("Benchmark", "ベンチマーク"),
             None,
             &[
-                ("FPS / Frametime", PauseAction::StartFpsBenchmark),
-                ("Chunk Loader", PauseAction::OpenChunkLoader),
-                ("Back", PauseAction::Back),
+                (
+                    crate::lang::ui("FPS / Frametime", "FPS / フレーム時間"),
+                    PauseAction::StartFpsBenchmark,
+                ),
+                (
+                    crate::lang::ui("Chunk Loader", "チャンク読み込み"),
+                    PauseAction::OpenChunkLoader,
+                ),
+                (crate::lang::ui("Back", "戻る"), PauseAction::Back),
             ],
         ),
         PauseScreen::ChunkLoader => {
             let subtitle = if server_rd > 0 {
-                format!("Server render distance: {server_rd}")
+                format!(
+                    "{}: {server_rd}",
+                    crate::lang::ui("Server render distance", "サーバーの描画距離")
+                )
             } else {
-                "Server render distance: unknown".to_string()
+                format!(
+                    "{}: {}",
+                    crate::lang::ui("Server render distance", "サーバーの描画距離"),
+                    crate::lang::ui("unknown", "不明")
+                )
             };
             build_submenu(
                 elements,
@@ -85,14 +98,26 @@ pub fn build_pause_menu(
                 cursor,
                 clicked,
                 gs,
-                "Chunk Loader",
+                crate::lang::ui("Chunk Loader", "チャンク読み込み"),
                 Some(&subtitle),
                 &[
-                    ("Render Distance 8", PauseAction::StartChunkLoad(8)),
-                    ("Render Distance 16", PauseAction::StartChunkLoad(16)),
-                    ("Render Distance 24", PauseAction::StartChunkLoad(24)),
-                    ("Render Distance 32", PauseAction::StartChunkLoad(32)),
-                    ("Back", PauseAction::Back),
+                    (
+                        crate::lang::ui("Render Distance 8", "描画距離 8"),
+                        PauseAction::StartChunkLoad(8),
+                    ),
+                    (
+                        crate::lang::ui("Render Distance 16", "描画距離 16"),
+                        PauseAction::StartChunkLoad(16),
+                    ),
+                    (
+                        crate::lang::ui("Render Distance 24", "描画距離 24"),
+                        PauseAction::StartChunkLoad(24),
+                    ),
+                    (
+                        crate::lang::ui("Render Distance 32", "描画距離 32"),
+                        PauseAction::StartChunkLoad(32),
+                    ),
+                    (crate::lang::ui("Back", "戻る"), PauseAction::Back),
                 ],
             )
         }
@@ -134,7 +159,7 @@ fn build_main(
     elements.push(MenuElement::Text {
         x: screen_w / 2.0,
         y: grid_y + 40.0 * gs - top_pad,
-        text: "Game".into(),
+        text: crate::lang::ui("Game", "ゲームメニュー").into(),
         scale: fs,
         color: WHITE,
         centered: true,
@@ -149,7 +174,7 @@ fn build_main(
         btn_h,
         gs,
         fs,
-        "Return to Game",
+        crate::lang::ui("Return to Game", "ゲームに戻る"),
         true,
     ) && clicked
     {
@@ -165,7 +190,7 @@ fn build_main(
         btn_h,
         gs,
         fs,
-        "Advancements",
+        crate::lang::ui("Advancements", "進捗"),
         false,
     );
     common::push_button(
@@ -177,7 +202,7 @@ fn build_main(
         btn_h,
         gs,
         fs,
-        "Statistics",
+        crate::lang::ui("Statistics", "統計"),
         false,
     );
 
@@ -190,7 +215,7 @@ fn build_main(
         btn_h,
         gs,
         fs,
-        "Give Feedback",
+        crate::lang::ui("Give Feedback", "フィードバックを送る"),
         false,
     );
     if common::push_button(
@@ -202,7 +227,7 @@ fn build_main(
         btn_h,
         gs,
         fs,
-        "Report Bugs",
+        crate::lang::ui("Report Bugs", "バグを報告"),
         true,
     ) && clicked
     {
@@ -218,7 +243,7 @@ fn build_main(
         btn_h,
         gs,
         fs,
-        "Options...",
+        crate::lang::ui("Options...", "設定..."),
         true,
     ) && clicked
     {
@@ -233,7 +258,7 @@ fn build_main(
         btn_h,
         gs,
         fs,
-        "Benchmark",
+        crate::lang::ui("Benchmark", "ベンチマーク"),
         true,
     ) && clicked
     {
@@ -242,9 +267,9 @@ fn build_main(
 
     // Vanilla `menu.returnToMenu` on a local server.
     let leave_label = if singleplayer {
-        "Save and Quit to Title"
+        crate::lang::ui("Save and Quit to Title", "セーブしてタイトルへ戻る")
     } else {
-        "Disconnect"
+        crate::lang::ui("Disconnect", "切断")
     };
     if common::push_button(
         elements,

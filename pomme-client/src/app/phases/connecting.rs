@@ -84,8 +84,12 @@ pub fn update_connecting(
     }
 
     let status_text = match connect_phase {
-        ConnectionPhase::StartingWorld | ConnectionPhase::Loading => "Loading terrain...",
-        ConnectionPhase::Connecting => "Connecting to the server...",
+        ConnectionPhase::StartingWorld | ConnectionPhase::Loading => {
+            crate::lang::ui("Loading terrain...", "地形を読み込み中...")
+        }
+        ConnectionPhase::Connecting => {
+            crate::lang::ui("Connecting to the server...", "サーバーに接続中...")
+        }
     };
 
     if game.code_of_conduct.is_some() {
@@ -99,7 +103,14 @@ pub fn update_connecting(
         }
     } else if game.dialog_open() {
         draw_server_dialog(core, dt, gfx, panorama, connection, game);
-    } else if draw_status(core, dt, gfx, panorama, status_text, Some("Cancel")) {
+    } else if draw_status(
+        core,
+        dt,
+        gfx,
+        panorama,
+        status_text,
+        Some(crate::lang::ui("Cancel", "キャンセル")),
+    ) {
         return ConnectingUpdateResult::ManualDisconnect;
     }
 
@@ -137,7 +148,7 @@ fn draw_code_of_conduct(
         MenuElement::Text {
             x: sw / 2.0,
             y: panel_y + 12.0,
-            text: "Code of Conduct".into(),
+            text: crate::lang::ui("Code of Conduct", "行動規範").into(),
             scale: fs * 1.5,
             color: [1.0; 4],
             centered: true,
@@ -209,8 +220,16 @@ fn draw_code_of_conduct(
     ];
     let cursor = core.input.cursor_pos();
     for (rect, label, color) in [
-        (accept, "Accept", [0.12, 0.42, 0.18, 1.0]),
-        (decline, "Decline", [0.48, 0.14, 0.14, 1.0]),
+        (
+            accept,
+            crate::lang::ui("Accept", "同意する"),
+            [0.12, 0.42, 0.18, 1.0],
+        ),
+        (
+            decline,
+            crate::lang::ui("Decline", "拒否する"),
+            [0.48, 0.14, 0.14, 1.0],
+        ),
     ] {
         elements.push(MenuElement::Rect {
             x: rect[0],

@@ -111,11 +111,16 @@ impl MainMenu {
 
         // --- Tab bar (both clickable) ---
         let tabs = [
-            (content_x, FriendTab::Friends, "Friends".to_string()),
+            (
+                content_x,
+                FriendTab::Friends,
+                crate::lang::ui("Friends", "フレンド").to_string(),
+            ),
             (
                 content_x + tab_w,
                 FriendTab::Requests,
-                format!("Requests ({incoming_count})"),
+                crate::lang::ui("Requests ({count})", "リクエスト ({count})")
+                    .replace("{count}", &incoming_count.to_string()),
             ),
         ];
         for (tx, tab, label) in &tabs {
@@ -203,7 +208,10 @@ impl MainMenu {
             (None, _) => {
                 let msg = match &state {
                     FriendsState::Failed(e) => (e.as_str(), ERR_COL),
-                    _ => ("Loading friends…", MSG_DIM),
+                    _ => (
+                        crate::lang::ui("Loading friends…", "フレンドを読み込み中…"),
+                        MSG_DIM,
+                    ),
                 };
                 push_centered(
                     &mut elements,
@@ -235,7 +243,8 @@ impl MainMenu {
                 screen_w / 2.0,
                 py + 12.0 * gs,
                 fs,
-                &format!("Remove {name}?"),
+                &crate::lang::ui("Remove {name}?", "{name}をフレンドから削除しますか？")
+                    .replace("{name}", &name),
                 WHITE,
             );
             // Vanilla FriendsListConfirmScreen has a message body under the title.
@@ -244,7 +253,10 @@ impl MainMenu {
                 screen_w / 2.0,
                 py + 12.0 * gs + fs + 6.0 * gs,
                 fs,
-                "Are you sure you want to remove them?",
+                crate::lang::ui(
+                    "Are you sure you want to remove them?",
+                    "本当にこのフレンドを削除しますか？",
+                ),
                 MSG_DIM,
             );
             let bw = 84.0 * gs;
@@ -259,7 +271,7 @@ impl MainMenu {
                 bh,
                 gs,
                 fs,
-                "Remove",
+                crate::lang::ui("Remove", "削除"),
                 true,
             ) && clicked
             {
@@ -275,7 +287,7 @@ impl MainMenu {
                 bh,
                 gs,
                 fs,
-                "Cancel",
+                crate::lang::ui("Cancel", "キャンセル"),
                 true,
             ) && clicked
             {
@@ -335,7 +347,7 @@ impl MainMenu {
             elements.push(MenuElement::Text {
                 x: lx + 4.0 * gs,
                 y: field_y + (field_h - fs) / 2.0,
-                text: "Enter Profile Name".into(),
+                text: crate::lang::ui("Enter Profile Name", "プロフィール名を入力").into(),
                 scale: fs,
                 color: MSG_DIM,
                 centered: false,
@@ -353,7 +365,7 @@ impl MainMenu {
             15.0,
             screen_w,
             screen_h,
-            "Send request",
+            crate::lang::ui("Send request", "リクエストを送信"),
         );
         let submit = (clicked && send_hit) || (self.focused_field == Some(0) && input.enter);
         if submit {
@@ -365,7 +377,7 @@ impl MainMenu {
         }
 
         // Profile row (input 3+20 + 6px margin) then separator (+ profile 9 + 4).
-        let label = "My profile name: ";
+        let label = crate::lang::ui("My profile name: ", "自分のプロフィール名: ");
         let profile_y = content_y + 29.0 * gs;
         elements.push(MenuElement::Text {
             x: lx,
@@ -394,7 +406,7 @@ impl MainMenu {
                 screen_w,
                 screen_h,
                 gs,
-                "Copy to clipboard",
+                crate::lang::ui("Copy to clipboard", "クリップボードにコピー"),
             );
             if clicked {
                 super::servers::write_clipboard(&self.username);
@@ -443,7 +455,10 @@ impl MainMenu {
                 content_x + content_w / 2.0,
                 group_top + illo_h + gap,
                 fs,
-                "No friends yet — add one above",
+                crate::lang::ui(
+                    "No friends yet — add one above",
+                    "フレンドはいません — 上から追加してください",
+                ),
                 MSG_DIM,
             );
             return;
@@ -491,7 +506,7 @@ impl MainMenu {
                 11.0,
                 screen_w,
                 screen_h,
-                "Unfriend",
+                crate::lang::ui("Unfriend", "フレンド解除"),
             ) && clicked
             {
                 self.pending_remove = Some((friend.uuid.clone(), friend.name.clone()));
@@ -504,7 +519,10 @@ impl MainMenu {
                 content_x + content_w / 2.0,
                 footer_y,
                 fs,
-                "Manage your account at minecraft.net",
+                crate::lang::ui(
+                    "Manage your account at minecraft.net",
+                    "minecraft.net でアカウントを管理",
+                ),
                 MSG_DIM,
             );
         }
@@ -520,7 +538,8 @@ impl MainMenu {
         );
     }
 
-    /// Requests tab: "Received" (accept/decline) then "Sent" (cancel).
+    /// Requests tab: crate::lang::ui("Received", "受信") (accept/decline) then
+    /// crate::lang::ui("Sent", "送信") (cancel).
     #[allow(clippy::too_many_arguments)]
     fn requests_body(
         &mut self,
@@ -544,7 +563,7 @@ impl MainMenu {
                 content_x + content_w / 2.0,
                 content_y + (content_h - fs) / 2.0,
                 fs,
-                "No pending requests",
+                crate::lang::ui("No pending requests", "保留中のリクエストはありません"),
                 MSG_DIM,
             );
             return;
@@ -585,7 +604,7 @@ impl MainMenu {
                 y,
                 fs,
                 gs,
-                "Received",
+                crate::lang::ui("Received", "受信"),
             );
             y += header_h;
             for req in &lists.incoming {
@@ -608,7 +627,7 @@ impl MainMenu {
                         18.0,
                         screen_w,
                         screen_h,
-                        "Accept",
+                        crate::lang::ui("Accept", "承認"),
                     ) && clicked
                     {
                         self.friend_mutate(FriendAction::ById(req.uuid.clone(), UpdateType::Add));
@@ -625,7 +644,7 @@ impl MainMenu {
                         18.0,
                         screen_w,
                         screen_h,
-                        "Decline",
+                        crate::lang::ui("Decline", "拒否"),
                     ) && clicked
                     {
                         self.friend_mutate(FriendAction::ById(
@@ -647,7 +666,7 @@ impl MainMenu {
                 y,
                 fs,
                 gs,
-                "Sent",
+                crate::lang::ui("Sent", "送信"),
             );
             y += header_h;
             for req in &lists.outgoing {
@@ -668,7 +687,7 @@ impl MainMenu {
                         12.0,
                         screen_w,
                         screen_h,
-                        "Cancel request",
+                        crate::lang::ui("Cancel request", "リクエストをキャンセル"),
                     ) && clicked
                     {
                         self.friend_mutate(FriendAction::ById(
@@ -869,10 +888,16 @@ fn push_section_header(
 /// Vanilla `gui.friends.presence.status.*` label + color for a friend.
 fn status_label(status: &FriendStatus) -> (&'static str, [f32; 4]) {
     match status {
-        FriendStatus::Online => ("Online", STATUS_ONLINE),
-        FriendStatus::PlayingOffline => ("Playing offline", STATUS_ONLINE),
-        FriendStatus::PlayingServer => ("Playing on a server", STATUS_ONLINE),
-        FriendStatus::Offline => ("Offline", STATUS_OFFLINE),
+        FriendStatus::Online => (crate::lang::ui("Online", "オンライン"), STATUS_ONLINE),
+        FriendStatus::PlayingOffline => (
+            crate::lang::ui("Playing offline", "オフラインでプレイ中"),
+            STATUS_ONLINE,
+        ),
+        FriendStatus::PlayingServer => (
+            crate::lang::ui("Playing on a server", "サーバーでプレイ中"),
+            STATUS_ONLINE,
+        ),
+        FriendStatus::Offline => (crate::lang::ui("Offline", "オフライン"), STATUS_OFFLINE),
     }
 }
 

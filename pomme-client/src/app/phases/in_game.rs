@@ -2232,7 +2232,7 @@ pub(crate) fn build_server_screens(
         elements.push(MenuElement::Text {
             x: sw / 2.0,
             y: y + 12.0,
-            text: "Code of Conduct".into(),
+            text: crate::lang::ui("Code of Conduct", "行動規範").into(),
             scale: fs * 1.5,
             color: common::WHITE,
             centered: true,
@@ -2291,7 +2291,10 @@ pub(crate) fn build_server_screens(
             [sw / 2.0 - 108.0, y + h - 38.0, 96.0, 24.0],
             [sw / 2.0 + 12.0, y + h - 38.0, 96.0, 24.0],
         ];
-        for (rect, label) in buttons.into_iter().zip(["Accept", "Decline"]) {
+        for (rect, label) in buttons.into_iter().zip([
+            crate::lang::ui("Accept", "同意する"),
+            crate::lang::ui("Decline", "拒否する"),
+        ]) {
             elements.push(MenuElement::Rect {
                 x: rect[0],
                 y: rect[1],
@@ -3588,7 +3591,11 @@ pub fn update_game(
         elements.push(MenuElement::Text {
             x: sw / 2.0,
             y: 28.0,
-            text: format!("Benchmarking... {:.0}%", progress * 100.0),
+            text: format!(
+                "{} {:.0}%",
+                crate::lang::ui("Benchmarking...", "計測中..."),
+                progress * 100.0
+            ),
             scale: 8.0 * gs,
             color: [1.0, 1.0, 1.0, 1.0],
             centered: true,
@@ -3614,27 +3621,50 @@ pub fn update_game(
         let mut lines = vec![
             format!("GPU: {}", result.gpu),
             format!(
-                "{}x{} / RD {} / {} chunks / {} entities",
+                "{}x{} / {} {} / {} {} / {} {}",
                 result.resolution[0],
                 result.resolution[1],
+                crate::lang::ui("RD", "描画距離"),
                 result.render_distance,
                 result.peak_chunk_count,
+                crate::lang::ui("chunks", "チャンク"),
                 result.peak_entity_count,
-            ),
-            format!("Avg FPS: {:.0}", result.avg_fps),
-            format!("Min: {:.0} / Max: {:.0}", result.min_fps, result.max_fps),
-            format!(
-                "Frame: {:.2}ms / P1: {:.2}ms / P99: {:.2}ms",
-                result.avg_frame_ms, result.p1_frame_ms, result.p99_frame_ms
+                crate::lang::ui("entities", "エンティティ"),
             ),
             format!(
-                "Fence: {:.2}ms / Cull: {:.2}ms / Draw: {:.2}ms",
-                result.avg_fence_ms, result.avg_cull_ms, result.avg_draw_ms
+                "{}: {:.0}",
+                crate::lang::ui("Avg FPS", "平均 FPS"),
+                result.avg_fps
             ),
             format!(
-                "{} spikes (>{:.0}ms) - Saved to {}",
+                "{}: {:.0} / {}: {:.0}",
+                crate::lang::ui("Min", "最小"),
+                result.min_fps,
+                crate::lang::ui("Max", "最大"),
+                result.max_fps
+            ),
+            format!(
+                "{}: {:.2}ms / P1: {:.2}ms / P99: {:.2}ms",
+                crate::lang::ui("Frame", "フレーム"),
+                result.avg_frame_ms,
+                result.p1_frame_ms,
+                result.p99_frame_ms
+            ),
+            format!(
+                "{}: {:.2}ms / {}: {:.2}ms / {}: {:.2}ms",
+                crate::lang::ui("Fence", "フェンス"),
+                result.avg_fence_ms,
+                crate::lang::ui("Cull", "カリング"),
+                result.avg_cull_ms,
+                crate::lang::ui("Draw", "描画"),
+                result.avg_draw_ms
+            ),
+            format!(
+                "{} {} (>{:.0}ms) - {} {}",
                 result.spike_count,
+                crate::lang::ui("spikes", "スパイク"),
                 8.0,
+                crate::lang::ui("Saved to", "保存先:"),
                 core.auto_fps_result_path
                     .as_deref()
                     .unwrap_or(&core.data_dirs.game_dir.join("benchmark.json"))
@@ -3642,7 +3672,13 @@ pub fn update_game(
             ),
         ];
         if crate::benchmark::is_debug_build() {
-            lines.push("Debug build - frame times are not representative".to_string());
+            lines.push(
+                crate::lang::ui(
+                    "Debug build - frame times are not representative",
+                    "デバッグビルド - フレーム時間は参考値です",
+                )
+                .to_string(),
+            );
         }
         let json = serde_json::to_string_pretty(result).unwrap_or_default();
         let status = game
@@ -3655,7 +3691,7 @@ pub fn update_game(
             sh,
             gs,
             sh / 2.0 - 90.0,
-            "Benchmark Complete",
+            crate::lang::ui("Benchmark Complete", "ベンチマーク完了"),
             &lines,
             status.as_ref(),
             core.input.cursor_pos(),
@@ -3703,14 +3739,24 @@ pub fn update_game(
     }
 
     if let Some(ref bench) = game.chunk_load_bench {
-        let progress = format!("run {}/{}", bench.current_run(), bench.total_runs());
+        let progress = format!(
+            "{} {}/{}",
+            crate::lang::ui("run", "実行"),
+            bench.current_run(),
+            bench.total_runs()
+        );
         let label = if bench.resetting() {
-            format!("Resetting world... ({progress})")
+            format!(
+                "{} ({progress})",
+                crate::lang::ui("Resetting world...", "ワールドをリセット中...")
+            )
         } else {
             format!(
-                "Loading RD {}... {} chunks ({progress})",
+                "{} {}... {} {} ({progress})",
+                crate::lang::ui("Loading RD", "描画距離を読み込み中"),
                 bench.target_rd(),
-                bench.loaded()
+                bench.loaded(),
+                crate::lang::ui("chunks", "チャンク")
             )
         };
         elements.push(MenuElement::Text {
@@ -3726,30 +3772,53 @@ pub fn update_game(
     if let Some(ref result) = game.chunk_load_result {
         let rd_line = if result.effective_rd != result.target_rd {
             format!(
-                "Render Distance: {} (server-capped to {})",
-                result.target_rd, result.effective_rd
+                "{}: {} ({} {})",
+                crate::lang::ui("Render Distance", "描画距離"),
+                result.target_rd,
+                crate::lang::ui("server-capped to", "サーバーの上限"),
+                result.effective_rd
             )
         } else if result.achieved_rd < result.target_rd {
             format!(
-                "Render Distance: {} (server loaded ~{})",
-                result.target_rd, result.achieved_rd
+                "{}: {} ({} ~{})",
+                crate::lang::ui("Render Distance", "描画距離"),
+                result.target_rd,
+                crate::lang::ui("server loaded", "サーバーの読み込み距離"),
+                result.achieved_rd
             )
         } else {
-            format!("Render Distance: {}", result.target_rd)
+            format!(
+                "{}: {}",
+                crate::lang::ui("Render Distance", "描画距離"),
+                result.target_rd
+            )
         };
         let mut lines = vec![
             rd_line,
             format!(
-                "Loaded {} chunks in {:.2}s (avg of {} runs)",
-                result.chunk_count, result.load_secs, result.runs
+                "{} {} {} {:.2}s ({} {} {})",
+                crate::lang::ui("Loaded", "読み込み完了:"),
+                result.chunk_count,
+                crate::lang::ui("chunks in", "チャンク /"),
+                result.load_secs,
+                crate::lang::ui("avg of", "平均"),
+                result.runs,
+                crate::lang::ui("runs", "回")
             ),
             format!(
-                "{:.0} chunks/sec - first chunk in {:.2}s",
-                result.chunks_per_sec, result.time_to_first_secs
+                "{:.0} {} - {} {:.2}s",
+                result.chunks_per_sec,
+                crate::lang::ui("chunks/sec", "チャンク/秒"),
+                crate::lang::ui("first chunk in", "最初のチャンクまで"),
+                result.time_to_first_secs
             ),
             format!(
-                "Frame while loading: avg {:.1}ms / worst {:.1}ms",
-                result.avg_frame_ms, result.worst_frame_ms
+                "{}: {} {:.1}ms / {} {:.1}ms",
+                crate::lang::ui("Frame while loading", "読み込み中のフレーム"),
+                crate::lang::ui("avg", "平均"),
+                result.avg_frame_ms,
+                crate::lang::ui("worst", "最悪"),
+                result.worst_frame_ms
             ),
             format!("GPU: {} / Vulkan {}", result.gpu, result.vulkan),
             format!(
@@ -3762,12 +3831,19 @@ pub fn update_game(
                 result.resolution[1],
             ),
             format!(
-                "Saved to {}",
+                "{} {}",
+                crate::lang::ui("Saved to", "保存先:"),
                 core.data_dirs.game_dir.join("chunk_load.json").display()
             ),
         ];
         if crate::benchmark::is_debug_build() {
-            lines.push("Debug build - frame times are not representative".to_string());
+            lines.push(
+                crate::lang::ui(
+                    "Debug build - frame times are not representative",
+                    "デバッグビルド - フレーム時間は参考値です",
+                )
+                .to_string(),
+            );
         }
         let json = serde_json::to_string_pretty(result).unwrap_or_default();
         let status = game
@@ -3780,7 +3856,7 @@ pub fn update_game(
             sh,
             gs,
             sh / 2.0 - 100.0,
-            "Chunk Load Complete",
+            crate::lang::ui("Chunk Load Complete", "チャンク読み込み完了"),
             &lines,
             status.as_ref(),
             core.input.cursor_pos(),

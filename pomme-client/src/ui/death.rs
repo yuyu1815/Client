@@ -52,7 +52,12 @@ pub fn build_death_screen(
     elements.push(MenuElement::Text {
         x: cx,
         y: 30.0 * gs,
-        text: if hardcore { "Game Over!" } else { "You Died!" }.into(),
+        text: if hardcore {
+            crate::lang::ui("Game Over!", "ゲームオーバー！")
+        } else {
+            crate::lang::ui("You Died!", "死んでしまった！")
+        }
+        .into(),
         scale: title_fs,
         color: [1.0, 1.0, 1.0, 1.0],
         centered: true,
@@ -69,7 +74,7 @@ pub fn build_death_screen(
         });
     }
 
-    let score_label = "Score: ";
+    let score_label = crate::lang::ui("Score: ", "スコア: ");
     let score_value = score.to_string();
     let score_str = score_value.as_str();
     let label_w = text_width_fn(score_label, fs);
@@ -104,9 +109,9 @@ pub fn build_death_screen(
         gs,
         fs,
         if hardcore {
-            "Spectate World"
+            crate::lang::ui("Spectate World", "ワールドを観戦")
         } else {
-            "Respawn"
+            crate::lang::ui("Respawn", "リスポーン")
         },
         buttons_enabled,
     );
@@ -124,7 +129,7 @@ pub fn build_death_screen(
         btn_h,
         gs,
         fs,
-        "Title Screen",
+        crate::lang::ui("Title Screen", "タイトル画面"),
         buttons_enabled,
     );
     if clicked && h {
@@ -158,7 +163,7 @@ pub fn build_death_confirm(
     elements.push(MenuElement::Text {
         x: cx,
         y: cy - 30.0 * gs,
-        text: "Are you sure you want to quit?".into(),
+        text: crate::lang::ui("Are you sure you want to quit?", "本当に終了しますか？").into(),
         scale: fs,
         color: [1.0, 1.0, 1.0, 1.0],
         centered: true,
@@ -179,7 +184,7 @@ pub fn build_death_confirm(
         btn_h,
         gs,
         fs,
-        "Title Screen",
+        crate::lang::ui("Title Screen", "タイトル画面"),
         buttons_enabled,
     );
     if clicked && h {
@@ -195,7 +200,7 @@ pub fn build_death_confirm(
         btn_h,
         gs,
         fs,
-        "Respawn",
+        crate::lang::ui("Respawn", "リスポーン"),
         buttons_enabled,
     );
     if clicked && h {

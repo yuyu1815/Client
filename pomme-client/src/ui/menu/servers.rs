@@ -47,7 +47,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: screen_w / 2.0,
             y: (header_h - fs) / 2.0,
-            text: "Play Multiplayer".into(),
+            text: crate::lang::ui("Play Multiplayer", "マルチプレイ").into(),
             scale: fs,
             color: WHITE,
             centered: true,
@@ -271,7 +271,7 @@ impl MainMenu {
             elements.push(MenuElement::Text {
                 x: screen_w / 2.0,
                 y: list_top + 40.0 * gs,
-                text: "No servers added".into(),
+                text: crate::lang::ui("No servers added", "サーバーがありません").into(),
                 scale: fs,
                 color: COL_DIM,
                 centered: true,
@@ -286,7 +286,11 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: screen_w / 2.0,
             y: lan_y,
-            text: "Scanning for games on your local network".into(),
+            text: crate::lang::ui(
+                "Scanning for games on your local network",
+                "ローカルネットワーク上のゲームを検索中",
+            )
+            .into(),
             scale: fs,
             color: WHITE,
             centered: true,
@@ -360,7 +364,7 @@ impl MainMenu {
             top_w,
             btn_h,
             gs,
-            "Join Server",
+            crate::lang::ui("Join Server", "サーバーに接続"),
             has_sel,
         ) && let Some(idx) = self.selected_server
             && let Some(server) = self.server_list.servers.get(idx)
@@ -382,7 +386,7 @@ impl MainMenu {
             top_w,
             btn_h,
             gs,
-            "Direct Connect",
+            crate::lang::ui("Direct Connect", "ダイレクト接続"),
             true,
         ) {
             self.edit_address
@@ -402,7 +406,7 @@ impl MainMenu {
             top_w,
             btn_h,
             gs,
-            "Add Server",
+            crate::lang::ui("Add Server", "サーバーを追加"),
             true,
         ) {
             self.edit_name.clear();
@@ -427,7 +431,7 @@ impl MainMenu {
             bot_w,
             btn_h,
             gs,
-            "Edit",
+            crate::lang::ui("Edit", "編集"),
             has_sel,
         ) && let Some(idx) = self.selected_server
             && let Some(server) = self.server_list.servers.get(idx)
@@ -450,7 +454,7 @@ impl MainMenu {
             bot_w,
             btn_h,
             gs,
-            "Delete",
+            crate::lang::ui("Delete", "削除"),
             has_sel,
         ) && let Some(idx) = self.selected_server
         {
@@ -467,7 +471,7 @@ impl MainMenu {
             bot_w,
             btn_h,
             gs,
-            "Refresh",
+            crate::lang::ui("Refresh", "更新"),
             true,
         ) {
             self.refresh_servers();
@@ -483,7 +487,7 @@ impl MainMenu {
             bot_w,
             btn_h,
             gs,
-            "Back",
+            crate::lang::ui("Back", "戻る"),
             true,
         ) {
             self.set_screen(Screen::Main);
@@ -522,16 +526,25 @@ impl MainMenu {
             .server_list
             .servers
             .get(idx)
-            .map(|s| format!("'{}' will be lost forever! (A long time!)", s.name))
+            .map(|s| {
+                crate::lang::ui(
+                    "'{name}' will be lost forever! (A long time!)",
+                    "「{name}」は永久に失われます！（ずっと長い時間！）",
+                )
+                .replace("{name}", &s.name)
+            })
             .unwrap_or_default();
         let (result, choice) = self.build_confirm(
             screen_w,
             screen_h,
             input,
             text_width_fn,
-            "Are you sure you want to remove this server?",
+            crate::lang::ui(
+                "Are you sure you want to remove this server?",
+                "このサーバーを削除しますか？",
+            ),
             &warning,
-            "Delete",
+            crate::lang::ui("Delete", "削除"),
         );
         if choice == Some(true) {
             self.server_list.remove(idx);
@@ -577,7 +590,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: cx,
             y,
-            text: "Direct Connect".into(),
+            text: crate::lang::ui("Direct Connect", "ダイレクト接続").into(),
             scale: fs,
             color: WHITE,
             centered: true,
@@ -587,7 +600,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: form_x,
             y,
-            text: "Server Address".into(),
+            text: crate::lang::ui("Server Address", "サーバーアドレス").into(),
             scale: fs,
             color: COL_DIM,
             centered: false,
@@ -622,7 +635,7 @@ impl MainMenu {
             form_w,
             btn_h,
             gs,
-            "Join Server",
+            crate::lang::ui("Join Server", "サーバーに接続"),
             valid,
         ) && clicked)
             || enter_submit
@@ -650,7 +663,7 @@ impl MainMenu {
             form_w,
             btn_h,
             gs,
-            "Cancel",
+            crate::lang::ui("Cancel", "キャンセル"),
             true,
         ) && clicked
         {
@@ -707,7 +720,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: cx,
             y,
-            text: "Edit Server Info".into(),
+            text: crate::lang::ui("Edit Server Info", "サーバー情報を編集").into(),
             scale: fs,
             color: WHITE,
             centered: true,
@@ -717,7 +730,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: form_x,
             y,
-            text: "Server Name".into(),
+            text: crate::lang::ui("Server Name", "サーバー名").into(),
             scale: fs,
             color: COL_DIM,
             centered: false,
@@ -742,7 +755,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: form_x,
             y,
-            text: "Server Address".into(),
+            text: crate::lang::ui("Server Address", "サーバーアドレス").into(),
             scale: fs,
             color: COL_DIM,
             centered: false,
@@ -776,7 +789,7 @@ impl MainMenu {
             form_w,
             btn_h,
             gs,
-            "Done",
+            crate::lang::ui("Done", "完了"),
             valid,
         ) && clicked
         {
@@ -816,7 +829,7 @@ impl MainMenu {
             form_w,
             btn_h,
             gs,
-            "Cancel",
+            crate::lang::ui("Cancel", "キャンセル"),
             true,
         ) && clicked
         {
@@ -1059,7 +1072,7 @@ impl MainMenu {
         elements.push(MenuElement::Text {
             x: cx,
             y: top_y,
-            text: "Disconnected".into(),
+            text: crate::lang::ui("Disconnected", "切断されました").into(),
             scale: title_size,
             color: [1.0, 0.4, 0.4, 1.0],
             centered: true,
@@ -1088,7 +1101,7 @@ impl MainMenu {
             btn_w,
             btn_h,
             gs,
-            "Back to Menu",
+            crate::lang::ui("Back to Menu", "メニューに戻る"),
             true,
         ) {
             self.set_screen(Screen::Main);
