@@ -1012,7 +1012,7 @@ pub async fn handle_game_packet(
         }
         ClientboundGamePacket::RemoveEntities(p) => {
             let ids: Vec<i32> = p.entity_ids.iter().map(|id| id.0).collect();
-            let _ = event_tx.try_send(NetworkEvent::EntitiesRemoved { ids });
+            event_tx.try_send(NetworkEvent::EntitiesRemoved { ids })?;
         }
         ClientboundGamePacket::SetPassengers(p) => {
             let _ = event_tx.try_send(NetworkEvent::SetPassengers {
@@ -2229,6 +2229,42 @@ mod tests {
             &mut std::collections::HashMap::new(),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn remove_entities_stays_ordered_and_fails_when_queue_is_full() {
+        use azalea_core::entity_id::MinecraftEntityId;
+        use azalea_protocol::packets::game::c_remove_entities::ClientboundRemoveEntities;
+
+        let packet = ClientboundGamePacket::RemoveEntities(ClientboundRemoveEntities {
+            entity_ids: vec![MinecraftEntityId(12), MinecraftEntityId(34)],
+        });
+        let (tx, rx) = crossbeam_channel::bounded(4096);
+        tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+        dispatch_world_packet(&packet, &tx).await.unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::LevelChunksLoadStart
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::EntitiesRemoved { ids } if ids == [12, 34]
+        ));
+        assert!(rx.is_empty());
+
+        for _ in 0..4096 {
+            tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+        }
+        assert!(matches!(
+            dispatch_world_packet(&packet, &tx).await,
+            Err(TrySendError::Full(NetworkEvent::EntitiesRemoved { ids })) if ids == [12, 34]
+        ));
+        assert_eq!(rx.len(), 4096);
+        drop(rx);
+        assert!(matches!(
+            dispatch_world_packet(&packet, &tx).await,
+            Err(TrySendError::Disconnected(NetworkEvent::EntitiesRemoved { ids })) if ids == [12, 34]
+        ));
     }
 
     #[tokio::test]
