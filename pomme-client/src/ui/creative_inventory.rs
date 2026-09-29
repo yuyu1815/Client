@@ -1377,60 +1377,59 @@ fn draw_search_box(
     let fs = FONT_SIZE * scale;
     let text_y = y + (h - fs) / 2.0;
     let wf = |t: &str| text_width_fn(t, fs);
-    let mut info = field.render_info(SEARCH_BOX_W * scale, true, &wf);
-    let shown = &field.value()[info.display_start..info.display_end];
-    if preedit.is_some() {
-        info.caret_visible = false;
-    }
-
-    crate::ui::common::push_field_text(
-        elements,
-        &info,
-        shown,
-        None,
-        x + pad,
-        text_y,
-        fs,
-        scale,
-        scale,
-        WHITE,
-        None,
-        &wf,
-    );
     if let Some((text, caret)) = preedit.filter(|(text, _)| !text.is_empty()) {
-        let (px, start, end, cx) = search_preedit_layout(
-            text,
-            caret,
-            x + pad + wf(&shown[..info.caret_byte]),
-            x + pad,
-            x + SEARCH_BOX_W * scale,
-            &wf,
-        );
+        let layout = search_preedit_layout(field, text, caret, SEARCH_BOX_W * scale - pad, &wf);
+        let px = x + pad;
         let color = rgb(0xffdd55);
-        elements.push(MenuElement::Text {
-            x: px,
-            y: text_y,
-            text: text[start..end].into(),
-            scale: fs,
-            color,
-            centered: false,
-        });
+        for (start, end, tint) in [
+            (0, layout.preedit_start, WHITE),
+            (layout.preedit_start, layout.preedit_end, color),
+            (layout.preedit_end, layout.shown.len(), WHITE),
+        ] {
+            if start != end {
+                elements.push(MenuElement::Text {
+                    x: px + wf(&layout.shown[..start]),
+                    y: text_y,
+                    text: layout.shown[start..end].into(),
+                    scale: fs,
+                    color: tint,
+                    centered: false,
+                });
+            }
+        }
         elements.push(MenuElement::Rect {
-            x: px,
+            x: px + wf(&layout.shown[..layout.preedit_start]),
             y: text_y + fs,
-            w: wf(&text[start..end]),
+            w: wf(&layout.shown[..layout.preedit_end]) - wf(&layout.shown[..layout.preedit_start]),
             h: scale,
             corner_radius: 0.0,
             color,
         });
         elements.push(MenuElement::Rect {
-            x: cx,
+            x: px + layout.caret_x,
             y: text_y - scale,
             w: scale,
             h: fs + 2.0 * scale,
             corner_radius: 0.0,
             color: WHITE,
         });
+    } else {
+        let info = field.render_info(SEARCH_BOX_W * scale, true, &wf);
+        let shown = &field.value()[info.display_start..info.display_end];
+        crate::ui::common::push_field_text(
+            elements,
+            &info,
+            shown,
+            None,
+            x + pad,
+            text_y,
+            fs,
+            scale,
+            scale,
+            WHITE,
+            None,
+            &wf,
+        );
     }
 }
 
@@ -1453,15 +1452,8 @@ pub fn search_ime_cursor_area(
     let shown = &field.value()[info.display_start..info.display_end];
     let caret_x = x + scale + wf(&shown[..info.caret_byte]);
     let caret_x = if let Some((text, caret)) = preedit.filter(|(text, _)| !text.is_empty()) {
-        search_preedit_layout(
-            text,
-            caret,
-            caret_x,
-            x + scale,
-            x + SEARCH_BOX_W * scale,
-            &wf,
-        )
-        .3
+        x + scale
+            + search_preedit_layout(field, text, caret, (SEARCH_BOX_W - 1.0) * scale, &wf).caret_x
     } else {
         caret_x
     };
@@ -1472,33 +1464,53 @@ pub fn search_ime_cursor_area(
     )
 }
 
-// Keep long compositions inside the narrow box, preserving the preedit caret.
+struct SearchPreeditLayout {
+    shown: String,
+    preedit_start: usize,
+    preedit_end: usize,
+    caret_x: f32,
+}
+
+// Compose for display only; the real field (and search query) changes on
+// Commit.
 fn search_preedit_layout(
+    field: &crate::ui::text_edit::TextFieldState,
     text: &str,
     caret: usize,
-    caret_x: f32,
-    left: f32,
-    right: f32,
+    width: f32,
     wf: &dyn Fn(&str) -> f32,
-) -> (f32, usize, usize, f32) {
-    let caret = if text.is_char_boundary(caret) {
-        caret
-    } else {
-        text.len()
-    };
+) -> SearchPreeditLayout {
+    let selection = field.selection_range();
+    let mut composed = String::from(&field.value()[..selection.start]);
+    let preedit_start = composed.len();
+    composed.push_str(text);
+    let preedit_end = composed.len();
+    composed.push_str(&field.value()[selection.end..]);
+    let caret = preedit_start
+        + if text.is_char_boundary(caret) {
+            caret
+        } else {
+            text.len()
+        };
     let mut start = 0;
-    while start < caret && wf(&text[start..caret]) > right - left {
-        start += text[start..].chars().next().unwrap().len_utf8();
+    while start < caret && wf(&composed[start..caret]) > width {
+        start += composed[start..].chars().next().unwrap().len_utf8();
     }
-    let mut end = text.len();
-    while end > caret && wf(&text[start..end]) > right - left {
-        end = text[..end].char_indices().last().unwrap().0;
+    let mut end = start;
+    for (offset, ch) in composed[start..].char_indices() {
+        let next = start + offset + ch.len_utf8();
+        if wf(&composed[start..next]) > width {
+            break;
+        }
+        end = next;
     }
-    let px = caret_x
-        .min((right - wf(&text[start..end])).max(left))
-        .max(left);
-    let cx = (px + wf(&text[start..caret])).min(right);
-    (px, start, end, cx)
+    let shown = composed[start..end].to_string();
+    SearchPreeditLayout {
+        preedit_start: preedit_start.clamp(start, end) - start,
+        preedit_end: preedit_end.clamp(start, end) - start,
+        caret_x: wf(&composed[start..caret.min(end)]),
+        shown,
+    }
 }
 
 /// Returns `true` if the click was consumed by the scrollbar.
@@ -1670,16 +1682,101 @@ mod ime_tests {
             MenuElement::Rect { x: rect_x, y: rect_y, color, .. }
                 if *rect_x == x && *rect_y == y - 2.0 && *color == WHITE
         )));
-        let (_, start, end, caret) = search_preedit_layout(
+        let layout = search_preedit_layout(
+            &field,
             "日本語日本語日本語日本語",
             "日本語日本語日本語日本語".len(),
-            left + 159.0,
-            left + 2.0,
-            left + 160.0,
+            158.0,
             &wf,
         );
-        assert!("日本語日本語日本語日本語".is_char_boundary(start));
-        assert!("日本語日本語日本語日本語".is_char_boundary(end));
-        assert!(caret <= left + 160.0);
+        assert!(layout.shown.is_char_boundary(layout.preedit_start));
+        assert!(layout.shown.is_char_boundary(layout.preedit_end));
+        assert!(layout.caret_x <= 158.0);
+    }
+
+    #[test]
+    fn long_search_preedit_is_composed_and_scrolled_without_overlap() {
+        let mut field = crate::ui::text_edit::TextFieldState::new(50);
+        let wf = |s: &str| s.chars().count() as f32 * 8.0;
+        field.set_value(&"石".repeat(15), 80.0, &wf);
+        let layout = search_preedit_layout(&field, "にほん", "にほん".len(), 79.0, &wf);
+        assert_eq!(layout.shown, format!("{}にほん", "石".repeat(6)));
+        assert_eq!(field.value(), "石".repeat(15));
+        let mut elements = Vec::new();
+        draw_search_box(
+            &mut elements,
+            &field,
+            0.0,
+            0.0,
+            1.0,
+            Some(("にほん", 9)),
+            &|s, _| wf(s),
+        );
+        let runs: Vec<_> = elements
+            .iter()
+            .filter_map(|e| match e {
+                MenuElement::Text { x, text, .. } => Some((*x, text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (SEARCH_BOX_X + 1.0, "石石石石石石"),
+                (SEARCH_BOX_X + 49.0, "にほん")
+            ]
+        );
+        assert!(
+            runs.iter()
+                .all(|(x, text)| x + wf(text) <= SEARCH_BOX_X + SEARCH_BOX_W)
+        );
+
+        field.move_cursor_to("石".len() * 7, false, 80.0, &wf);
+        let layout = search_preedit_layout(&field, "にほん", 9, 79.0, &wf);
+        assert_eq!(layout.shown, format!("{}にほん", "石".repeat(6)));
+        field.move_cursor_to("石".len(), false, 80.0, &wf);
+        let layout = search_preedit_layout(&field, "にほん", 9, 79.0, &wf);
+        assert_eq!(layout.shown, format!("石にほん{}", "石".repeat(5)));
+        draw_search_box(
+            &mut elements,
+            &field,
+            0.0,
+            0.0,
+            1.0,
+            Some(("にほん", 9)),
+            &|s, _| wf(s),
+        );
+        let runs: Vec<_> = elements
+            .iter()
+            .filter_map(|e| match e {
+                MenuElement::Text { x, text, .. } => Some((*x, text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            &runs[2..],
+            &[
+                (SEARCH_BOX_X + 1.0, "石"),
+                (SEARCH_BOX_X + 9.0, "にほん"),
+                (SEARCH_BOX_X + 33.0, "石石石石石")
+            ]
+        );
+        let (caret_x, _, _) = search_ime_cursor_area(
+            &field,
+            TEX_W,
+            TEX_H,
+            1.0,
+            Some(("にほん", 9)),
+            &|s, _| wf(s),
+        );
+        assert_eq!(caret_x, SEARCH_BOX_X + 33.0);
+        assert!(elements.iter().any(|e| matches!(e,
+            MenuElement::Rect { x, color, .. } if *x == caret_x && *color == WHITE
+        )));
+        // Preview is not truncated by the field's 50 UTF-16-unit commit limit.
+        field.set_value(&"石".repeat(50), 80.0, &wf);
+        let layout = search_preedit_layout(&field, "にほん", 9, 79.0, &wf);
+        assert!(layout.shown.ends_with("にほん"));
+        assert_eq!(field.value(), "石".repeat(50));
     }
 }

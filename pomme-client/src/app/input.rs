@@ -855,19 +855,23 @@ impl InputState {
     pub(crate) fn composing_edit_key(&self, code: KeyCode) -> bool {
         matches!(self.text_owner, TextOwner::Chat | TextOwner::CreativeSearch)
             && self.ime_preedit.is_some()
-            && matches!(
+            && ((matches!(
                 code,
-                KeyCode::Backspace
-                    | KeyCode::Delete
-                    | KeyCode::ArrowLeft
-                    | KeyCode::ArrowRight
-                    | KeyCode::ArrowUp
-                    | KeyCode::ArrowDown
-                    | KeyCode::Home
-                    | KeyCode::End
-                    | KeyCode::PageUp
-                    | KeyCode::PageDown
-            )
+                KeyCode::KeyA | KeyCode::KeyC | KeyCode::KeyX | KeyCode::KeyV
+            ) && (self.modifiers.state().control_key() || self.modifiers.state().super_key()))
+                || matches!(
+                    code,
+                    KeyCode::Backspace
+                        | KeyCode::Delete
+                        | KeyCode::ArrowLeft
+                        | KeyCode::ArrowRight
+                        | KeyCode::ArrowUp
+                        | KeyCode::ArrowDown
+                        | KeyCode::Home
+                        | KeyCode::End
+                        | KeyCode::PageUp
+                        | KeyCode::PageDown
+                ))
             || (self.text_owner == TextOwner::CreativeSearch
                 && self.ime_preedit.is_some()
                 && (code == KeyCode::Escape
@@ -1330,6 +1334,40 @@ mod ime_tests {
                 TextInputEvent::Char('1')
             ]
         ));
+    }
+
+    #[test]
+    fn creative_ctrl_a_during_preedit_preserves_committed_search() {
+        use winit::keyboard::ModifiersState;
+
+        let mut input = InputState::released();
+        let mut search = crate::ui::text_edit::TextFieldState::new(50);
+        let width = |s: &str| s.chars().count() as f32;
+        let mut clipboard = crate::ui::text_edit::SystemClipboard;
+        search.set_value("石", 80.0, &width);
+        input.set_text_owner(TextOwner::CreativeSearch);
+        input.on_chat_ime(Ime::Preedit("にほん".into(), None), true);
+        input.set_modifiers(ModifiersState::CONTROL.into());
+        for code in [KeyCode::KeyA, KeyCode::KeyX, KeyCode::KeyV] {
+            assert!(input.composing_edit_key(code));
+            input.on_menu_input(Some(code), true, None);
+        }
+        assert!(input.drain_text_events().is_empty());
+        assert_eq!(search.value(), "石");
+        input.on_chat_ime(Ime::Preedit(String::new(), None), true);
+        input.on_chat_ime(Ime::Commit("日本".into()), true);
+        for event in input.drain_text_events() {
+            search.handle(&event, &mut clipboard, 80.0, &width);
+        }
+        assert_eq!(search.value(), "石日本");
+        input.on_menu_input(Some(KeyCode::KeyA), true, None);
+        for event in input.drain_text_events() {
+            search.handle(&event, &mut clipboard, 80.0, &width);
+        }
+        assert_eq!(search.get_highlighted(), "石日本"); // shortcuts still work outside preedit
+        input.set_modifiers(ModifiersState::SUPER.into());
+        input.on_chat_ime(Ime::Preedit("a".into(), None), true);
+        assert!(input.composing_edit_key(KeyCode::KeyA));
     }
 
     #[test]

@@ -129,6 +129,10 @@ impl TextFieldState {
         &self.value[start..end]
     }
 
+    pub(crate) fn selection_range(&self) -> std::ops::Range<usize> {
+        self.cursor_pos.min(self.highlight_pos)..self.cursor_pos.max(self.highlight_pos)
+    }
+
     pub fn cursor(&self) -> usize {
         self.cursor_pos
     }
