@@ -3219,11 +3219,7 @@ impl AppCore {
                     }
                     game.item_entity_store.set_motion(id, velocity);
                     game.entity_store.set_living_motion(id, velocity);
-                    if let Some(position) = game.entity_store.vehicles.get(&id).map(|v| v.position)
-                    {
-                        game.entity_store
-                            .set_vehicle_transform(id, position, velocity);
-                    }
+                    game.entity_store.set_vehicle_motion(id, velocity);
                 }
                 NetworkEvent::EntityTeleported {
                     id,

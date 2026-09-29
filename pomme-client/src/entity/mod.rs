@@ -1171,6 +1171,8 @@ pub struct ProjectileDisplay {
     pub velocity: DVec3,
     pub ticks: u8,
     pub stopped: bool,
+    pub on_ground: bool,
+    pub in_ground: bool,
     pub no_gravity: bool,
 }
 
@@ -1333,7 +1335,23 @@ impl EntityStore {
             display.current = position;
             display.velocity = velocity;
             display.ticks = 0;
-            display.stopped = false;
+            display.stopped = display.in_ground || display.on_ground;
+        }
+    }
+
+    /// Motion packets update flight without rewinding the visual to the packet
+    /// baseline.
+    pub fn set_vehicle_motion(&mut self, id: i32, velocity: DVec3) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id) {
+            vehicle.velocity = velocity;
+            if let Some(display) = &mut vehicle.projectile {
+                display.velocity = velocity;
+                if velocity.length_squared() > 1.0e-8 {
+                    display.on_ground = false;
+                }
+                display.stopped = display.in_ground || display.on_ground;
+                display.ticks = 0;
+            }
         }
     }
 
@@ -1350,6 +1368,8 @@ impl EntityStore {
                 velocity: vehicle.velocity,
                 ticks: 0,
                 stopped: false,
+                on_ground: false,
+                in_ground: false,
                 no_gravity: false,
             });
         }
@@ -1363,7 +1383,7 @@ impl EntityStore {
         use crate::physics::collision::collect_block_aabbs;
         use crate::world::block::{FluidKind, fluid};
 
-        for vehicle in self.vehicles.values_mut() {
+        'projectiles: for vehicle in self.vehicles.values_mut() {
             let Some(display) = &mut vehicle.projectile else {
                 continue;
             };
@@ -1377,25 +1397,41 @@ impl EntityStore {
                 continue;
             }
             let from = *display.current;
-            let to = from + display.velocity;
-            let min = from.min(to).floor().as_ivec3();
-            let max = from.max(to).floor().as_ivec3();
-            // ponytail: cap extraordinary packet velocities instead of scanning
-            // unbounded terrain; wait for authoritative correction.
-            if (max - min).max_element() > 8 {
+            let gravity = if display.no_gravity {
+                0.0
+            } else if arrow {
+                0.05
+            } else {
+                0.03
+            };
+            // Throwable projectiles apply gravity before movement; arrows after drag.
+            let motion = if arrow {
+                display.velocity
+            } else {
+                display.velocity - DVec3::new(0.0, gravity, 0.0)
+            };
+            let to = from + motion;
+            // Validate before float-to-int conversion (which saturates), before
+            // i32 subtraction, and before scanning collision cells or chunks.
+            // Leave a margin for ceil() and Aabb::block(x + 1).
+            const SAFE: f64 = (i32::MAX - 32) as f64;
+            if !from.is_finite()
+                || !to.is_finite()
+                || from.abs().max_element() >= SAFE
+                || to.abs().max_element() >= SAFE
+                || (to - from).abs().max_element() > 8.0
+            {
                 display.stopped = true;
                 continue;
             }
-            let mut loaded = true;
+            let min = from.min(to).floor().as_ivec3();
+            let max = from.max(to).floor().as_ivec3();
             for cx in min.x.div_euclid(16)..=max.x.div_euclid(16) {
                 for cz in min.z.div_euclid(16)..=max.z.div_euclid(16) {
                     if chunks.get_chunk(&ChunkPos::new(cx, cz)).is_none() {
-                        loaded = false;
+                        continue 'projectiles;
                     }
                 }
-            }
-            if !loaded {
-                continue;
             }
             let region = Aabb::new(
                 from.min(to) - DVec3::splat(0.001),
@@ -1422,45 +1458,54 @@ impl EntityStore {
                 } else {
                     0.99
                 };
-                let gravity = if display.no_gravity {
-                    0.0
-                } else if arrow {
-                    0.05
-                } else {
-                    0.03
-                };
-                display.velocity = display.velocity * drag - DVec3::new(0.0, gravity, 0.0);
+                display.velocity = motion * drag
+                    - if arrow {
+                        DVec3::new(0.0, gravity, 0.0)
+                    } else {
+                        DVec3::ZERO
+                    };
             }
             display.ticks += 1;
         }
     }
 
     pub fn set_projectile_grounded(&mut self, id: i32, on_ground: bool) {
-        if on_ground
-            && let Some(vehicle) = self.vehicles.get_mut(&id)
+        if let Some(vehicle) = self.vehicles.get_mut(&id)
             && let Some(display) = &mut vehicle.projectile
         {
-            display.stopped = true;
-            display.prev = vehicle.position;
-            display.current = vehicle.position;
+            display.on_ground = on_ground;
+            display.stopped = display.in_ground || on_ground;
+            if display.stopped {
+                display.prev = vehicle.position;
+                display.current = vehicle.position;
+            }
         }
     }
 
     pub fn set_projectile_metadata(&mut self, id: i32, index: u8, value: MetaValue) {
+        self.set_projectile_metadata_at(id, index, value, crate::version::session_protocol());
+    }
+
+    fn set_projectile_metadata_at(&mut self, id: i32, index: u8, value: MetaValue, protocol: i32) {
         if let Some(vehicle) = self.vehicles.get_mut(&id)
             && let Some(display) = &mut vehicle.projectile
         {
             if let (5, MetaValue::Bool(no_gravity)) = (index, value) {
                 display.no_gravity = no_gravity;
             }
-            // 26.2 AbstractArrow inGround index 10 conflicts with older wire
-            // metadata; only decode when the session protocol is 26.2.
-            if crate::version::session_protocol() == 776
-                && let (10, MetaValue::Bool(true)) = (index, value)
+            // AbstractArrow inGround index 10 is a Boolean in 26.1 and 26.2.
+            if matches!(
+                vehicle.kind,
+                Some(EntityKind::Arrow | EntityKind::SpectralArrow)
+            ) && matches!(protocol, 775 | 776)
+                && let (10, MetaValue::Bool(in_ground)) = (index, value)
             {
-                display.stopped = true;
-                display.prev = vehicle.position;
-                display.current = vehicle.position;
+                display.in_ground = in_ground;
+                display.stopped = in_ground || display.on_ground;
+                if in_ground {
+                    display.prev = vehicle.position;
+                    display.current = vehicle.position;
+                }
             }
         }
     }
@@ -2195,6 +2240,95 @@ fn probes_water(kind: &EntityKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn projectile(kind: EntityKind, position: Position, velocity: DVec3) -> EntityStore {
+        let mut store = EntityStore::new();
+        store.set_vehicle_spawn_transform(1, position, velocity, LookDirection::default());
+        store.set_vehicle_kind(1, kind);
+        store
+    }
+
+    #[test]
+    fn huge_projectile_coordinates_and_velocities_do_not_scan_or_panic() {
+        crate::world::block::init("26.2");
+        let chunks = ChunkStore::new(1);
+        for (position, velocity) in [
+            (
+                Position::new(2_147_483_648.0, 0.0, 2_147_483_648.0),
+                DVec3::X,
+            ),
+            (
+                Position::new(0.0, 70.0, 0.0),
+                DVec3::new(4_294_967_296.0, 0.0, 0.0),
+            ),
+            (Position::new(f64::NAN, 70.0, 0.0), DVec3::X),
+        ] {
+            let mut store = projectile(EntityKind::Arrow, position, velocity);
+            store.tick_projectile_displays(&chunks);
+            assert!(store.vehicles[&1].projectile.as_ref().unwrap().stopped);
+        }
+    }
+
+    #[test]
+    fn grounded_arrow_metadata_survives_zero_delta_correction_in_both_protocols() {
+        for protocol in [775, 776] {
+            let mut store = projectile(EntityKind::Arrow, Position::new(2.0, 70.0, 2.0), DVec3::X);
+            store.set_projectile_metadata_at(1, 10, MetaValue::Bool(true), protocol);
+            let pos = store.vehicles[&1].position;
+            store.set_vehicle_transform(1, pos, DVec3::X); // zero-delta PosRot
+            store.set_projectile_grounded(1, false);
+            assert!(store.vehicles[&1].projectile.as_ref().unwrap().stopped);
+            store.set_vehicle_motion(1, DVec3::X);
+            assert!(store.vehicles[&1].projectile.as_ref().unwrap().stopped);
+            store.set_projectile_metadata_at(1, 10, MetaValue::Bool(false), protocol);
+            assert!(!store.vehicles[&1].projectile.as_ref().unwrap().stopped);
+        }
+        let mut older = projectile(EntityKind::Arrow, Position::default(), DVec3::X);
+        older.set_projectile_metadata_at(1, 10, MetaValue::Bool(true), 774);
+        assert!(!older.vehicles[&1].projectile.as_ref().unwrap().in_ground);
+    }
+
+    #[test]
+    fn snowball_gravity_precedes_drag_and_motion_does_not_rewind() {
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        let _chunk = chunks
+            .chunk_storage
+            .upsert(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
+        let mut store = projectile(
+            EntityKind::Snowball,
+            Position::new(2.0, 70.0, 2.0),
+            DVec3::new(0.0, 1.0, 0.0),
+        );
+        store.tick_projectile_displays(&chunks);
+        let p = store.vehicles[&1].projectile.as_ref().unwrap();
+        assert!((p.current.y - 70.97).abs() < 1e-12);
+        assert!((p.velocity.y - 0.9603).abs() < 1e-12);
+        for _ in 1..5 {
+            store.tick_projectile_displays(&chunks);
+        }
+        let before = store.vehicles[&1].projectile.as_ref().unwrap().current;
+        assert_eq!(store.vehicles[&1].projectile.as_ref().unwrap().ticks, 5);
+        assert_eq!(store.vehicles[&1].position, Position::new(2.0, 70.0, 2.0));
+        store.set_vehicle_motion(1, DVec3::new(0.0, 1.0, 0.0));
+        assert_eq!(
+            store.vehicles[&1].projectile.as_ref().unwrap().current,
+            before
+        );
+        assert_eq!(store.vehicles[&1].position, Position::new(2.0, 70.0, 2.0));
+        // Fresh flight for the exact ten-tick vanilla sequence.
+        let mut store = projectile(
+            EntityKind::Snowball,
+            Position::new(2.0, 70.0, 2.0),
+            DVec3::new(0.0, 1.0, 0.0),
+        );
+        for _ in 0..10 {
+            store.tick_projectile_displays(&chunks);
+        }
+        let p = store.vehicles[&1].projectile.as_ref().unwrap();
+        assert!((p.current.y - 77.96031622150461).abs() < 1e-10);
+        assert!((p.velocity.y - 0.6203968377849532).abs() < 1e-10);
+    }
 
     #[test]
     fn horse_inventory_family_is_scoped_and_stored_as_living() {

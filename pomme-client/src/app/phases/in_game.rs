@@ -5135,8 +5135,8 @@ fn arrow_render_infos(
                 .map_or(entity.velocity, |p| p.velocity);
             let (yaw, pitch) = if velocity.length_squared() > 1.0e-8 {
                 (
-                    (velocity.z.atan2(velocity.x).to_degrees() - 90.0) as f32,
-                    (-velocity.y.atan2(velocity.x.hypot(velocity.z)).to_degrees()) as f32,
+                    (velocity.x.atan2(velocity.z).to_degrees()) as f32,
+                    (velocity.y.atan2(velocity.x.hypot(velocity.z)).to_degrees()) as f32,
                 )
             } else {
                 (look.y_rot_deg(), look.x_rot_deg())
@@ -6609,10 +6609,10 @@ mod tests {
             false,
             |_| 1.0,
         );
-        assert_eq!(snowball[0].position, [1.5, 70.0, 1.0]);
+        assert!((snowball[0].position[1] - 69.985).abs() < 1e-4);
         assert_eq!(
             store.vehicles[&4].projectile.as_ref().unwrap().velocity.y,
-            -0.03
+            -0.03 * 0.99
         );
         for _ in 0..12 {
             store.tick_projectile_displays(&chunks);
@@ -6635,7 +6635,7 @@ mod tests {
         let mut store = EntityStore::new();
         store.set_vehicle_spawn_transform(
             4,
-            Position::new(2.0, 70.0, 2.0),
+            Position::new(2.0, 70.5, 2.0),
             DVec3::new(2.0, 0.0, 0.0),
             LookDirection::new(0.0, 0.0),
         );
@@ -6685,6 +6685,26 @@ mod tests {
         store.tick_projectile_displays(&chunks);
         assert!(store.vehicles[&5].projectile.is_none());
         assert_eq!(store.vehicles[&5].position.x, 7.0);
+    }
+
+    #[test]
+    fn arrow_visual_angles_match_packet_look_and_zero_motion_falls_back() {
+        use crate::entity::components::{LookDirection, Position};
+        let mut store = crate::entity::EntityStore::new();
+        store.set_vehicle_spawn_transform(
+            1,
+            Position::default(),
+            glam::DVec3::new(1.0, 1.0, 0.0),
+            LookDirection::new(12.0, 13.0),
+        );
+        store.set_vehicle_kind(1, azalea_registry::builtin::EntityKind::Arrow);
+        let arrows = arrow_render_infos(&store, 1.0);
+        let arrow = &arrows[0];
+        assert_eq!((arrow.body_y_rot_deg, arrow.head_x_rot_deg), (90.0, 45.0));
+        store.set_vehicle_motion(1, glam::DVec3::ZERO);
+        let arrows = arrow_render_infos(&store, 1.0);
+        let arrow = &arrows[0];
+        assert_eq!((arrow.body_y_rot_deg, arrow.head_x_rot_deg), (12.0, 13.0));
     }
 
     #[test]

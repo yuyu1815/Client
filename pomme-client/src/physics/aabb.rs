@@ -58,7 +58,16 @@ impl Aabb {
                 continue;
             }
             let plane = component(if d > 0.0 { self.min } else { self.max }, axis);
-            if let Some(t) = clip_point(self, plane, axis, from, delta, nearest) {
+            let t = (plane - component(from, axis)) / d;
+            if !(0.0..=nearest).contains(&t) {
+                continue;
+            }
+            let (b, c) = axis.cross_axes();
+            if [b, c].into_iter().all(|cross| {
+                let p = component(from, cross) + t * component(delta, cross);
+                p >= component(self.min, cross) - EPSILON
+                    && p <= component(self.max, cross) + EPSILON
+            }) {
                 nearest = t;
                 hit = true;
             }
@@ -265,6 +274,23 @@ mod tests {
     use super::*;
 
     const BOTTOM_SLAB: LocalBox = [0.0, 0.0, 0.0, 1.0, 0.5, 1.0];
+
+    #[test]
+    fn segment_includes_incoming_endpoint_and_face_edge() {
+        let box_ = Aabb::block(3, 70, 2);
+        assert_eq!(
+            box_.clip_segment(dvec3(3.0, 70.5, 2.5), dvec3(4.0, 70.5, 2.5)),
+            Some(0.0)
+        );
+        assert_eq!(
+            box_.clip_segment(dvec3(2.0, 70.5, 3.0), dvec3(3.0, 70.5, 3.0)),
+            Some(1.0)
+        );
+        assert_eq!(
+            box_.clip_segment(dvec3(4.0, 70.5, 2.5), dvec3(5.0, 70.5, 2.5)),
+            None
+        );
+    }
 
     #[test]
     fn contains_is_half_open() {
