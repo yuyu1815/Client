@@ -2766,6 +2766,7 @@ impl AppCore {
                     if game.chunk_store.get_chunk(&chunk_pos).is_some()
                         && update_block_entity(&mut game.chunk_store.block_entities, pos, kind, nbt)
                     {
+                        game.chunk_store.bump_collision_revision();
                         game.bump_loaded_mesh_neighborhoods([chunk_pos]);
                         dirty_sections_for_block(
                             &mut priority_remesh,

@@ -2,6 +2,7 @@ pub mod components;
 pub mod villager;
 
 use std::collections::HashMap;
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 
 use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_registry::builtin::EntityKind;
@@ -1329,7 +1330,52 @@ pub struct VehicleState {
     pub text_display_view_range: f32,
 }
 
+type ProjectileJob = Vec<(i32, u64, ProjectileStepInput)>;
+type ProjectileResult = Vec<(i32, u64, ProjectileDisplay)>;
+
+struct ProjectileWorker {
+    jobs: SyncSender<ProjectileJob>,
+    results: Receiver<ProjectileResult>,
+    pending: bool,
+    world_revision: u64,
+    protocol: i32,
+    tick: u64,
+}
+
+impl ProjectileWorker {
+    fn new() -> Option<Self> {
+        let (jobs, job_rx) = mpsc::sync_channel::<ProjectileJob>(1);
+        let (result_tx, results) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("projectile-collision".into())
+            .spawn(move || {
+                while let Ok(batch) = job_rx.recv() {
+                    let result = batch
+                        .into_iter()
+                        .map(|(id, rev, input)| (id, rev, input.integrate()))
+                        .collect();
+                    if result_tx.try_send(result).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self {
+            jobs,
+            results,
+            pending: false,
+            world_revision: 0,
+            protocol: 0,
+            tick: 0,
+        })
+    }
+}
+
 pub struct EntityStore {
+    projectile_revisions: HashMap<i32, u64>,
+    next_projectile_revision: u64,
+    projectile_worker: Option<ProjectileWorker>,
+    projectile_tick: u64,
     pub living: HashMap<i32, LivingEntity>,
     /// Passenger lists and root transforms for all entity kinds, including
     /// nonliving vehicles.
@@ -1340,9 +1386,62 @@ pub struct EntityStore {
 impl EntityStore {
     pub fn new() -> Self {
         Self {
+            projectile_revisions: HashMap::new(),
+            next_projectile_revision: 0,
+            projectile_worker: None,
+            projectile_tick: 0,
             living: HashMap::new(),
             vehicles: HashMap::new(),
             vehicle_of: HashMap::new(),
+        }
+    }
+
+    fn invalidate_projectile(&mut self, id: i32) {
+        if self
+            .vehicles
+            .get(&id)
+            .is_some_and(|v| v.projectile.is_some())
+        {
+            self.next_projectile_revision = self.next_projectile_revision.wrapping_add(1);
+            self.projectile_revisions
+                .insert(id, self.next_projectile_revision);
+        }
+    }
+
+    /// Drain only after network packets have been applied. No wait, including
+    /// on drop.
+    pub fn drain_projectile_results(&mut self, chunks: &ChunkStore) {
+        let Some(worker) = &mut self.projectile_worker else {
+            return;
+        };
+        let batch = match worker.results.try_recv() {
+            Ok(batch) => batch,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                self.projectile_worker = None;
+                return;
+            }
+        };
+        worker.pending = false;
+        if worker.world_revision != chunks.collision_revision()
+            || worker.protocol != crate::version::session_protocol()
+            || self.projectile_tick.saturating_sub(worker.tick) > 2
+        {
+            return;
+        }
+        for (id, revision, mut result) in batch {
+            if self.projectile_revisions.get(&id) != Some(&revision) {
+                continue;
+            }
+            if let Some(display) = self
+                .vehicles
+                .get_mut(&id)
+                .and_then(|v| v.projectile.as_mut())
+            {
+                // Late completion must not lerp backwards when tick alpha wraps.
+                result.prev = result.current;
+                *display = result;
+            }
         }
     }
 
@@ -1418,6 +1517,7 @@ impl EntityStore {
     }
 
     pub fn set_vehicle_transform(&mut self, id: i32, position: Position, velocity: DVec3) {
+        self.invalidate_projectile(id);
         let state = self.vehicles.entry(id).or_insert(VehicleState {
             position,
             kind: None,
@@ -1454,6 +1554,7 @@ impl EntityStore {
     /// Motion packets update flight without rewinding the visual to the packet
     /// baseline.
     pub fn set_vehicle_motion(&mut self, id: i32, velocity: DVec3) {
+        self.invalidate_projectile(id);
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.velocity = velocity;
             if let Some(display) = &mut vehicle.projectile {
@@ -1471,6 +1572,7 @@ impl EntityStore {
     }
 
     pub fn set_vehicle_kind(&mut self, id: i32, kind: EntityKind) {
+        self.projectile_revisions.remove(&id);
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.kind = Some(kind);
             vehicle.projectile = matches!(
@@ -1487,6 +1589,72 @@ impl EntityStore {
                 in_ground: false,
                 no_gravity: false,
             });
+        }
+        self.invalidate_projectile(id);
+    }
+
+    /// One bounded batch, one reusable worker. Snapshot capture remains on the
+    /// main thread.
+    pub fn tick_projectile_displays_async(&mut self, chunks: &ChunkStore) {
+        self.projectile_tick = self.projectile_tick.wrapping_add(1);
+        self.drain_projectile_results(chunks);
+        if self.projectile_worker.as_ref().is_some_and(|w| w.pending) {
+            for vehicle in self.vehicles.values_mut() {
+                if let Some(display) = &mut vehicle.projectile {
+                    display.prev = display.current;
+                }
+            }
+            return;
+        }
+        let active = self
+            .vehicles
+            .values()
+            .filter(|v| v.projectile.as_ref().is_some_and(|d| !d.stopped))
+            .count();
+        // ponytail: snapshot capture dominates below ~16; measure this cutoff before
+        // tuning.
+        if active < 16 {
+            self.tick_projectile_displays(chunks);
+            return;
+        }
+        if self.projectile_worker.is_none() {
+            self.projectile_worker = ProjectileWorker::new();
+        }
+        if self.projectile_worker.is_none() {
+            self.tick_projectile_displays(chunks);
+            return;
+        }
+        let mut batch = Vec::with_capacity(active);
+        for (&id, vehicle) in &mut self.vehicles {
+            let Some(display) = &mut vehicle.projectile else {
+                continue;
+            };
+            display.prev = display.current;
+            if display.stopped {
+                continue;
+            }
+            let arrow = matches!(
+                vehicle.kind,
+                Some(EntityKind::Arrow | EntityKind::SpectralArrow)
+            );
+            match ProjectileStepInput::capture(chunks, display, arrow) {
+                Ok(input) => {
+                    batch.push((id, *self.projectile_revisions.get(&id).unwrap_or(&0), input))
+                }
+                Err(crate::physics::collision::SnapshotError::MissingChunk) => {}
+                Err(crate::physics::collision::SnapshotError::UnsafeBounds) => {
+                    display.stopped = true
+                }
+            }
+        }
+        let worker = self.projectile_worker.as_mut().unwrap();
+        worker.world_revision = chunks.collision_revision();
+        worker.protocol = crate::version::session_protocol();
+        worker.tick = self.projectile_tick;
+        match worker.jobs.try_send(batch) {
+            Ok(()) => worker.pending = true,
+            Err(TrySendError::Disconnected(_)) => self.projectile_worker = None,
+            Err(TrySendError::Full(_)) => { /* Never block the render thread. */ }
         }
     }
 
@@ -1517,6 +1685,7 @@ impl EntityStore {
     }
 
     pub fn set_projectile_grounded(&mut self, id: i32, on_ground: bool) {
+        self.invalidate_projectile(id);
         if let Some(vehicle) = self.vehicles.get_mut(&id)
             && let Some(display) = &mut vehicle.projectile
         {
@@ -1536,6 +1705,7 @@ impl EntityStore {
     }
 
     fn set_projectile_metadata_at(&mut self, id: i32, index: u8, value: MetaValue, protocol: i32) {
+        self.invalidate_projectile(id);
         if let Some(vehicle) = self.vehicles.get_mut(&id)
             && let Some(display) = &mut vehicle.projectile
         {
@@ -2100,6 +2270,7 @@ impl EntityStore {
     /// Remove one entity and direct graph edges without deleting passenger
     /// subtrees.
     pub fn remove_entity(&mut self, id: i32) -> Option<LivingEntity> {
+        self.projectile_revisions.remove(&id);
         for vehicle in self.vehicles.values_mut() {
             vehicle.passengers.retain(|&passenger| passenger != id);
         }
@@ -2297,6 +2468,273 @@ mod tests {
         store.set_vehicle_spawn_transform(1, position, velocity, LookDirection::default());
         store.set_vehicle_kind(1, kind);
         store
+    }
+
+    fn async_fixture() -> (
+        EntityStore,
+        ChunkStore,
+        Receiver<ProjectileJob>,
+        SyncSender<ProjectileResult>,
+    ) {
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        chunks.load_decoded_chunk(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
+        let mut store = EntityStore::new();
+        for id in 0..16 {
+            store.set_vehicle_spawn_transform(
+                id,
+                Position::new(2.0, 70.5, 2.5),
+                DVec3::X,
+                LookDirection::default(),
+            );
+            store.set_vehicle_kind(id, EntityKind::Arrow);
+        }
+        let (jobs, job_rx) = mpsc::sync_channel(1);
+        let (result_tx, results) = mpsc::sync_channel(1);
+        store.projectile_worker = Some(ProjectileWorker {
+            jobs,
+            results,
+            pending: false,
+            world_revision: 0,
+            protocol: 0,
+            tick: 0,
+        });
+        (store, chunks, job_rx, result_tx)
+    }
+
+    #[test]
+    fn batch_is_bounded_nonblocking_and_matches_sync_without_alpha_reversal() {
+        let (mut store, chunks, job_rx, result_tx) = async_fixture();
+        let mut expected = projectile(EntityKind::Arrow, Position::new(2.0, 70.5, 2.5), DVec3::X);
+        expected.tick_projectile_displays(&chunks);
+        store.tick_projectile_displays_async(&chunks);
+        let batch = job_rx.try_recv().unwrap();
+        assert_eq!(batch.len(), 16);
+        assert!(store.projectile_worker.as_ref().unwrap().pending);
+        // Controlled slow worker: the main thread never waits or queues a second batch.
+        store.tick_projectile_displays_async(&chunks);
+        assert!(matches!(job_rx.try_recv(), Err(TryRecvError::Empty)));
+        let output: ProjectileResult = std::thread::spawn(move || {
+            batch
+                .into_iter()
+                .map(|(id, rev, input)| (id, rev, input.integrate()))
+                .collect()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            output[0].2.current,
+            expected.vehicles[&1].projectile.as_ref().unwrap().current
+        );
+        result_tx.try_send(output).unwrap();
+        store.drain_projectile_results(&chunks);
+        let display = store.vehicles[&1].projectile.as_ref().unwrap();
+        assert_eq!(
+            display.current,
+            expected.vehicles[&1].projectile.as_ref().unwrap().current
+        );
+        assert_eq!(display.position(0.9), display.position(0.1));
+        assert!(!store.projectile_worker.as_ref().unwrap().pending);
+    }
+
+    #[test]
+    fn stale_batches_cannot_overwrite_corrections_reused_ids_or_changed_world() {
+        let (mut store, chunks, job_rx, result_tx) = async_fixture();
+        store.tick_projectile_displays_async(&chunks);
+        let batch = job_rx.try_recv().unwrap();
+        store.set_vehicle_motion(0, DVec3::Y);
+        store.set_vehicle_transform(1, Position::new(5.0, 70.0, 2.0), DVec3::X);
+        store.set_projectile_grounded(2, true);
+        store.set_projectile_metadata_at(3, 10, MetaValue::Bool(true), 776);
+        store.set_projectile_metadata(4, 5, MetaValue::Bool(true));
+        store.remove_entity(5);
+        store.set_vehicle_spawn_transform(
+            5,
+            Position::new(7.0, 70.0, 2.0),
+            DVec3::Y,
+            LookDirection::default(),
+        );
+        store.set_vehicle_kind(5, EntityKind::Snowball);
+        let corrected: Vec<_> = (0..6)
+            .map(|id| store.vehicles[&id].projectile.as_ref().unwrap().current)
+            .collect();
+        result_tx
+            .try_send(
+                batch
+                    .into_iter()
+                    .map(|(id, rev, input)| (id, rev, input.integrate()))
+                    .collect(),
+            )
+            .unwrap();
+        store.drain_projectile_results(&chunks);
+        for (id, current) in corrected.into_iter().enumerate() {
+            assert_eq!(
+                store.vehicles[&(id as i32)]
+                    .projectile
+                    .as_ref()
+                    .unwrap()
+                    .current,
+                current
+            );
+        }
+        assert!(store.vehicles[&6].projectile.as_ref().unwrap().current.x > 2.0);
+
+        for id in 16..18 {
+            store.set_vehicle_spawn_transform(
+                id,
+                Position::new(2.0, 70.5, 2.5),
+                DVec3::X,
+                LookDirection::default(),
+            );
+            store.set_vehicle_kind(id, EntityKind::Arrow);
+        }
+        store.tick_projectile_displays_async(&chunks);
+        let batch = job_rx.try_recv().unwrap();
+        let old_position = store.vehicles[&6].projectile.as_ref().unwrap().current;
+        chunks.set_block_state(
+            2,
+            70,
+            2,
+            crate::world::block::first_state_of("stone").unwrap(),
+        );
+        result_tx
+            .try_send(
+                batch
+                    .into_iter()
+                    .map(|(id, rev, input)| (id, rev, input.integrate()))
+                    .collect(),
+            )
+            .unwrap();
+        store.drain_projectile_results(&chunks);
+        assert_eq!(
+            store.vehicles[&6].projectile.as_ref().unwrap().current,
+            old_position
+        );
+        store.tick_projectile_displays_async(&chunks);
+        let batch = job_rx.try_recv().unwrap();
+        let other_world = ChunkStore::new(1);
+        result_tx
+            .try_send(
+                batch
+                    .into_iter()
+                    .map(|(id, rev, input)| (id, rev, input.integrate()))
+                    .collect(),
+            )
+            .unwrap();
+        store.drain_projectile_results(&other_world);
+        assert_eq!(
+            store.vehicles[&6].projectile.as_ref().unwrap().current,
+            old_position
+        );
+
+        store.tick_projectile_displays_async(&chunks);
+        let batch = job_rx.try_recv().unwrap();
+        store.projectile_worker.as_mut().unwrap().protocol = -1;
+        result_tx
+            .try_send(
+                batch
+                    .into_iter()
+                    .map(|(id, rev, input)| (id, rev, input.integrate()))
+                    .collect(),
+            )
+            .unwrap();
+        store.drain_projectile_results(&chunks);
+        assert_eq!(
+            store.vehicles[&6].projectile.as_ref().unwrap().current,
+            old_position
+        );
+    }
+
+    #[test]
+    fn late_result_and_unloaded_chunk_do_not_replay_old_collision() {
+        let (mut store, mut chunks, job_rx, result_tx) = async_fixture();
+        store.tick_projectile_displays_async(&chunks);
+        let batch = job_rx.try_recv().unwrap();
+        for _ in 0..3 {
+            store.tick_projectile_displays_async(&chunks);
+            assert!(matches!(job_rx.try_recv(), Err(TryRecvError::Empty)));
+        }
+        result_tx
+            .try_send(
+                batch
+                    .into_iter()
+                    .map(|(id, rev, input)| (id, rev, input.integrate()))
+                    .collect(),
+            )
+            .unwrap();
+        store.drain_projectile_results(&chunks);
+        assert_eq!(
+            store.vehicles[&0].projectile.as_ref().unwrap().current.x,
+            2.0
+        );
+        store.tick_projectile_displays_async(&chunks);
+        let batch = job_rx.try_recv().unwrap();
+        chunks.unload_chunk(&ChunkPos::new(0, 0));
+        result_tx
+            .try_send(
+                batch
+                    .into_iter()
+                    .map(|(id, rev, input)| (id, rev, input.integrate()))
+                    .collect(),
+            )
+            .unwrap();
+        store.drain_projectile_results(&chunks);
+        assert_eq!(
+            store.vehicles[&0].projectile.as_ref().unwrap().current.x,
+            2.0
+        );
+    }
+
+    #[test]
+    fn worker_disconnect_falls_back_without_waiting_or_applying_result() {
+        let (mut store, chunks, job_rx, result_tx) = async_fixture();
+        store.tick_projectile_displays_async(&chunks);
+        let _unprocessed = job_rx.try_recv().unwrap();
+        drop(result_tx);
+        store.drain_projectile_results(&chunks);
+        assert!(store.projectile_worker.is_none());
+        assert_eq!(
+            store.vehicles[&0].projectile.as_ref().unwrap().current.x,
+            2.0
+        );
+        store.remove_entity(0); // Next tick is below the async threshold.
+        store.tick_projectile_displays_async(&chunks);
+        assert!(store.vehicles[&1].projectile.as_ref().unwrap().current.x > 2.0);
+    }
+
+    #[test]
+    fn real_worker_completes_the_whole_batch_off_thread() {
+        let (mut store, chunks, _, _) = async_fixture();
+        store.projectile_worker = None;
+        store.tick_projectile_displays_async(&chunks);
+        assert!(store.projectile_worker.as_ref().unwrap().pending);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while store.projectile_worker.as_ref().unwrap().pending
+            && std::time::Instant::now() < deadline
+        {
+            store.drain_projectile_results(&chunks);
+            std::thread::yield_now();
+        }
+        assert!(!store.projectile_worker.as_ref().unwrap().pending);
+        assert!(store.vehicles[&0].projectile.as_ref().unwrap().current.x > 2.0);
+    }
+
+    #[test]
+    fn small_batch_uses_sync_and_stopped_projectiles_do_not_move() {
+        let (mut store, chunks, job_rx, _result_tx) = async_fixture();
+        for id in 0..15 {
+            store.remove_entity(id);
+        }
+        store.tick_projectile_displays_async(&chunks);
+        assert!(matches!(job_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(store.vehicles[&15].projectile.as_ref().unwrap().current.x > 2.0);
+        store.set_projectile_grounded(15, true);
+        let at_rest = store.vehicles[&15].projectile.as_ref().unwrap().current;
+        store.tick_projectile_displays_async(&chunks);
+        assert_eq!(
+            store.vehicles[&15].projectile.as_ref().unwrap().current,
+            at_rest
+        );
     }
 
     #[test]

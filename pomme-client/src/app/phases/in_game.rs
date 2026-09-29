@@ -2775,6 +2775,8 @@ pub fn update_game(
         return GameUpdateResult::Disconnected { reason };
     }
 
+    game.entity_store
+        .drain_projectile_results(&game.chunk_store);
     game.chat.tick();
     for mark in game.chat.take_chat_marks() {
         connection.packet_tx.mark_chat(mark);
@@ -2804,7 +2806,8 @@ pub fn update_game(
     }
 
     // Menus never pause the simulation; tick_physics substitutes neutral input.
-    core.tick_accumulator += dt;
+    // Bound catch-up after a stalled worker/frame; do not replay unlimited ticks.
+    core.tick_accumulator = (core.tick_accumulator + dt).min(TICK_RATE * 4.0);
     let fixed_tick_start = game.benchmark.is_some().then(std::time::Instant::now);
     let mut fixed_tick_count = 0;
     while core.tick_accumulator >= TICK_RATE {
@@ -2856,7 +2859,7 @@ pub fn update_game(
         }
         game.item_entity_store.tick(&game.chunk_store);
         game.entity_store
-            .tick_projectile_displays(&game.chunk_store);
+            .tick_projectile_displays_async(&game.chunk_store);
         let chunks = &game.chunk_store;
         let player = &game.player;
         let entities = &game.entity_store;
