@@ -6580,7 +6580,6 @@ mod tests {
                 Position::new(3.0, 70.0, 2.0)
             );
         }
-        assert_eq!(store.vehicles[&4].projectile.as_ref().unwrap().ticks, 1);
         store.set_vehicle_transform(4, Position::new(3.25, 71.0, 2.0), DVec3::Y);
         assert_eq!(
             arrow_render_infos(&store, 0.5)[0].position,
@@ -6594,7 +6593,6 @@ mod tests {
             LookDirection::new(0.0, 0.0),
         );
         store.set_vehicle_kind(4, EntityKind::Snowball);
-        assert_eq!(store.vehicles[&4].projectile.as_ref().unwrap().ticks, 0);
         store.tick_projectile_displays(&chunks);
         let snowball = super::snowball_render_infos(
             &store,
@@ -6631,13 +6629,15 @@ mod tests {
             );
             assert_eq!(frame[0].position, snowball[0].position);
         }
-        assert_eq!(store.vehicles[&4].projectile.as_ref().unwrap().ticks, 1);
         for _ in 0..12 {
             store.tick_projectile_displays(&chunks);
         }
         let display = store.vehicles[&4].projectile.as_ref().unwrap();
-        assert_eq!(display.ticks, 10); // no unbounded ghosts without correction
-        assert_eq!(display.prev, display.current);
+        assert!(
+            display.current.x > 10.0,
+            "snowball still moves past tick ten"
+        );
+        assert_ne!(display.prev, display.current);
         assert_eq!(store.vehicles[&4].position, Position::new(1.0, 70.0, 1.0));
     }
 
@@ -6675,7 +6675,7 @@ mod tests {
         );
         store.tick_projectile_displays(&chunks);
         let projectile = store.vehicles[&4].projectile.as_ref().unwrap();
-        assert!(projectile.stopped);
+        assert!(!projectile.stopped);
         assert_eq!(projectile.current.x, 3.0);
         store.tick_projectile_displays(&chunks);
         assert_eq!(
