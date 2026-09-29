@@ -65,6 +65,7 @@ pub struct App {
     phase: StateSlot<AppPhase>,
     core: AppCore,
     occluded: bool,
+    chat_ime_allowed: bool,
     fps_limiter: FramerateLimiter,
     auto_fps: Option<auto_fps::AutoFps>,
 }
@@ -250,6 +251,7 @@ impl App {
             }),
             core,
             occluded: false,
+            chat_ime_allowed: false,
             fps_limiter: FramerateLimiter::new(),
             auto_fps,
         }
@@ -515,6 +517,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.core.input.set_modifiers(mods);
+            }
+            WindowEvent::Ime(ime) => {
+                self.core.input.on_chat_ime(ime, self.chat_ime_allowed);
             }
             // TODO: Migrate _fully_ to Action system
             WindowEvent::KeyboardInput { event, .. } => {
@@ -1301,6 +1306,21 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+        // Only the un-covered chat EditBox owns IME for now. A late Commit
+        // after closing or losing focus must not reach another screen.
+        let allowed = self.core.probe.is_none()
+            && self.auto_fps.is_none()
+            && matches!(self.phase.get(), AppPhase::InGame { gfx, game, .. }
+                if gfx.window.has_focus() && game.chat.is_focused() && !game.dialog_open());
+        if allowed != self.chat_ime_allowed {
+            self.chat_ime_allowed = allowed;
+            if !allowed {
+                self.core.input.clear_chat_ime();
+            }
+            if let Some(gfx) = self.phase.gfx_mut() {
+                gfx.window.set_ime_allowed(allowed);
+            }
         }
     }
 

@@ -37,8 +37,13 @@ impl KeyMods {
 }
 
 pub enum TextInputEvent {
-    Key { code: KeyCode, mods: KeyMods },
+    Key {
+        code: KeyCode,
+        mods: KeyMods,
+    },
     Char(char),
+    /// One OS composition result; apply as a single selection replacement.
+    Commit(String),
 }
 
 /// Clipboard indirection so tests can mock `Minecraft.keyboardHandler`.
@@ -411,6 +416,10 @@ impl TextFieldState {
                 self.key_pressed(*code, mods, clipboard, inner_w, width_fn)
             }
             TextInputEvent::Char(c) => self.char_typed(*c, inner_w, width_fn),
+            TextInputEvent::Commit(text) => {
+                self.insert_text(text, inner_w, width_fn);
+                true
+            }
         }
     }
 
@@ -860,6 +869,10 @@ impl MultilineField {
             TextInputEvent::Key { code, mods } => {
                 self.key_pressed(*code, mods, clipboard, width_fn)
             }
+            TextInputEvent::Commit(text) => {
+                self.insert_text(text, width_fn);
+                true
+            }
             TextInputEvent::Char(c) => {
                 if is_allowed_chat_character(*c) {
                     let mut buf = [0u8; 4];
@@ -1065,6 +1078,31 @@ fn plain_substr_by_width<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ime_commit_replaces_selection_atomically_and_obeys_utf16_limit() {
+        let width = |s: &str| s.chars().count() as f32;
+        let mut field = TextFieldState::new(5);
+        let mut clipboard = MockClipboard(String::new());
+        field.set_value("ab終", 20.0, &width);
+        field.move_cursor_to(1, false, 20.0, &width);
+        field.move_cursor_to(2, true, 20.0, &width);
+        field.handle(
+            &TextInputEvent::Commit("日本語😀".into()),
+            &mut clipboard,
+            20.0,
+            &width,
+        );
+        assert_eq!(field.value(), "a日本語終"); // selected b replaced; emoji needs 2 units
+        assert_eq!(field.cursor(), "a日本語".len());
+        field.handle(
+            &TextInputEvent::Commit("い".into()),
+            &mut clipboard,
+            20.0,
+            &width,
+        );
+        assert_eq!(field.value(), "a日本語終");
+    }
 
     /// `MultilineTextField` wraps on the widget's width, breaks on a newline
     /// and refuses an edit that would overflow either limit.

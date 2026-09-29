@@ -58,6 +58,7 @@ impl SignEditState {
                 TextInputEvent::Char(ch) => {
                     field.char_typed(*ch, 90.0, width);
                 }
+                TextInputEvent::Commit(text) => field.insert_text(text, 90.0, width),
             }
             if width(field.value()) > 90.0 {
                 field.set_value(&previous, 90.0, width);

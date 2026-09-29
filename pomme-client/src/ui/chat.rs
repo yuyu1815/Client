@@ -361,6 +361,7 @@ pub struct ChatBuildContext<'a> {
     pub screen_h: f32,
     pub gui_scale: f32,
     pub cursor: (f32, f32),
+    pub preedit: Option<(&'a str, usize)>,
     pub clicked: bool,
     pub shift: bool,
     /// A screen (a server dialog) covers the chat: it draws as the Hud's
@@ -937,6 +938,11 @@ impl ChatState {
         self.previous_message_time = None;
         self.delayed_deletions.clear();
         self.messages.clear();
+    }
+
+    pub fn ime_caret_x(&self, inner_w: f32, width_fn: &dyn Fn(&str) -> f32) -> f32 {
+        let info = self.input.render_info(inner_w, true, width_fn);
+        width_fn(&self.input.value()[info.display_start..info.display_start + info.caret_byte])
     }
 
     pub fn is_open(&self) -> bool {
@@ -1702,6 +1708,7 @@ impl ChatState {
             screen_h,
             gui_scale: gs,
             cursor,
+            preedit,
             clicked,
             shift,
             covered,
@@ -2063,6 +2070,30 @@ impl ChatState {
                 ghost.as_deref().map(|g| (g, GHOST_TEXT)),
                 &wf,
             );
+
+            if let Some((preedit, caret)) = preedit.filter(|(text, _)| !text.is_empty()) {
+                let caret_x = text_x + wf(&shown[..info.caret_byte]);
+                let x = caret_x.min((screen_w - wf(preedit)).max(text_x));
+                elements.push(MenuElement::Text {
+                    x,
+                    y: text_y,
+                    text: preedit.into(),
+                    scale: ui_fs,
+                    color: common::rgb(0xffdd55),
+                    centered: false,
+                });
+                // Composition is visual only; never change the EditBox value.
+                push_fill(
+                    elements,
+                    [x, text_y + ui_fs, wf(preedit), gs],
+                    common::rgb(0xffdd55),
+                );
+                push_fill(
+                    elements,
+                    [x + wf(&preedit[..caret]), text_y - gs, gs, ui_fs + 2.0 * gs],
+                    common::WHITE,
+                );
+            }
 
             let gui_w = |s: &str| text_width_fn(s, ui_fs) / gs;
             if !self.suggestions.is_empty() {
@@ -3769,8 +3800,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn preedit_is_visible_but_not_in_chat_value() {
+        let mut chat = ChatState::new();
+        chat.open(ChatMethod::Message, None);
+        let elements = build_elements_with_preedit(&mut chat, Some(("日本", 3)));
+        assert!(
+            elements
+                .iter()
+                .any(|e| matches!(e, MenuElement::Text { text, .. } if text == "日本"))
+        );
+        assert_eq!(chat.input.value(), "");
+    }
+
     /// A frame of `chat` at gui scale 1, glyphs one unit per char per font px.
     fn build_elements(chat: &mut ChatState) -> Vec<MenuElement> {
+        build_elements_with_preedit(chat, None)
+    }
+
+    fn build_elements_with_preedit(
+        chat: &mut ChatState,
+        preedit: Option<(&str, usize)>,
+    ) -> Vec<MenuElement> {
         let text_width = |text: &str, scale: f32| text.chars().count() as f32 * scale;
         let spans_width = |spans: &[TextSpan], scale: f32| uniform_width(spans, scale);
         let mut elements = Vec::new();
@@ -3781,6 +3832,7 @@ mod tests {
                 screen_h: 360.0,
                 gui_scale: 1.0,
                 cursor: (0.0, 0.0),
+                preedit,
                 clicked: false,
                 shift: false,
                 covered: false,

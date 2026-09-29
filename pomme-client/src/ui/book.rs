@@ -94,10 +94,10 @@ impl BookEditState {
                         self.store_page();
                     }
                 }
-                TextInputEvent::Char(ch) => {
+                TextInputEvent::Char(_) | TextInputEvent::Commit(_) => {
                     let wf = |s: &str| s.chars().count() as f32 * 6.0;
                     if self.title_focused {
-                        self.title.char_typed(*ch, 250.0, &wf);
+                        self.title.handle(event, &mut clipboard, 250.0, &wf);
                     } else {
                         self.field.handle(event, &mut clipboard, &wf);
                         self.store_page();

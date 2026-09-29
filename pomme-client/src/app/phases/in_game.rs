@@ -4305,6 +4305,17 @@ pub fn update_game(
     // regardless (vanilla Hud.extractChat vs ChatScreen).
     if !game.hide_gui || game.chat.is_focused() {
         let command_tree = game.command_tree.clone();
+        if game.chat.is_focused() && !dialog_open {
+            let fs = common::FONT_SIZE * gs;
+            let x = 4.0 * gs
+                + game
+                    .chat
+                    .ime_caret_x(sw - 4.0 * gs, &|s| gfx.renderer.menu_text_width(s, fs));
+            gfx.window.set_ime_cursor_area(
+                winit::dpi::PhysicalPosition::new(x as i32, (sh - 14.0 * gs) as i32),
+                winit::dpi::PhysicalSize::new(1, fs.max(1.0) as u32),
+            );
+        }
         let chat_action = game.chat.build(
             &mut elements,
             crate::ui::chat::ChatBuildContext {
@@ -4312,6 +4323,7 @@ pub fn update_game(
                 screen_h: sh,
                 gui_scale: gs,
                 cursor: core.input.cursor_pos(),
+                preedit: core.input.chat_preedit(),
                 covered: dialog_open,
                 clicked: core.input.left_just_pressed(),
                 shift: core.input.shift_held(),
