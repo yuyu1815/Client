@@ -177,18 +177,46 @@ fn text_display_background_color(e: &VehicleState) -> [f32; 4] {
 /// including third-person view changes, NOT the local player's body rotation.
 /// FIXED orientation comes from each entity's own spawn/update look direction.
 /// Invalid transforms discard the entire entity, never a partial triangle.
-pub(crate) fn extract_text_displays(
+#[cfg(test)]
+fn extract_text_displays(
     store: &EntityStore,
     camera_anchor: DVec3,
     camera_yaw: f32,
     camera_pitch: f32,
     font: &GlyphMap,
 ) -> Vec<TextDisplayDraw> {
+    extract_text_displays_scaled(
+        store,
+        camera_anchor,
+        camera_anchor,
+        camera_yaw,
+        camera_pitch,
+        font,
+        1.0,
+    )
+}
+
+pub(crate) fn extract_text_displays_scaled(
+    store: &EntityStore,
+    camera_anchor: DVec3,
+    camera_eye: DVec3,
+    camera_yaw: f32,
+    camera_pitch: f32,
+    font: &GlyphMap,
+    view_scale: f32,
+) -> Vec<TextDisplayDraw> {
     store
         .vehicles
         .iter()
         .filter_map(|(&id, entity)| {
-            if entity.kind != Some(azalea_registry::builtin::EntityKind::TextDisplay) {
+            if entity.kind != Some(azalea_registry::builtin::EntityKind::TextDisplay)
+                || !crate::renderer::entity_distance_visible(
+                    *entity.position,
+                    camera_eye,
+                    f64::from(entity.text_display_view_range) * 64.0,
+                    view_scale,
+                )
+            {
                 return None;
             }
             extract_display(id, entity, camera_anchor, camera_yaw, camera_pitch, font)
@@ -373,6 +401,32 @@ mod tests {
     }
 
     #[test]
+    fn text_display_range_uses_wire_metadata_before_glyph_extraction() {
+        use crate::entity::MetaValue;
+
+        let mut store = store();
+        store.vehicles.get_mut(&7).unwrap().position = Position::new(40.0, 0.0, 0.0);
+        let draw = |store: &EntityStore, scale| {
+            super::extract_text_displays_scaled(
+                store,
+                DVec3::ZERO,
+                DVec3::ZERO,
+                0.0,
+                0.0,
+                &font(),
+                scale,
+            )
+        };
+        assert_eq!(draw(&store, 1.0).len(), 1); // default view_range = 1
+        assert!(draw(&store, 0.5).is_empty());
+        store.set_text_display_metadata(7, 17, MetaValue::Float(2.0));
+        assert_eq!(store.vehicles[&7].text_display_view_range, 2.0);
+        assert_eq!(draw(&store, 0.5).len(), 1); // custom range survives slider
+        store.vehicles.get_mut(&7).unwrap().position = Position::new(64.0, 0.0, 0.0);
+        assert!(draw(&store, 0.5).is_empty()); // strict boundary
+    }
+
+    #[test]
     fn world_draw_list_keeps_nameplates_and_uses_current_camera_and_font() {
         use super::super::menu_overlay::MenuElement;
         use crate::player::tab_list::{PlayerInfoActions, PlayerInfoEntry, TabList};
@@ -443,6 +497,7 @@ mod tests {
                     screen_height: 1080,
                     fov_degrees: camera.fov_degrees(),
                     camera_pos: eye,
+                    entity_view_scale: 1.0,
                     project: &|_| Some((400.0, 300.0, 12.0)),
                 },
             );
@@ -471,6 +526,28 @@ mod tests {
         };
         let nameplate = gui(&store);
         assert_eq!(nameplate.3, "Regular nameplate");
+        // A tag within the fixed 64-block gate must still disappear with
+        // its player body at 50% (player base range = 64 * 0.5 = 32).
+        let player = store.living.get_mut(&9).unwrap();
+        player.position = Position::from(eye + DVec3::X * 40.0);
+        let mut culled_tag = Vec::new();
+        build_player_nameplates(
+            &mut culled_tag,
+            PlayerNameplates {
+                entity_store: &store,
+                tab_list: &tab_list,
+                scoreboard: &scoreboard,
+                local_uuid: uuid::Uuid::nil(),
+                partial_tick: 1.0,
+                screen_height: 1080,
+                fov_degrees: camera.fov_degrees(),
+                camera_pos: eye,
+                entity_view_scale: 0.5,
+                project: &|_| Some((400.0, 300.0, 12.0)),
+            },
+        );
+        assert!(culled_tag.is_empty());
+        store.living.get_mut(&9).unwrap().position = Position::from(eye);
         let draws = extract_text_displays(&store, anchor, yaw, pitch, &font);
         assert_eq!(draws.len(), 2);
         for (id, see_through) in [(7, false), (8, true)] {
@@ -543,12 +620,7 @@ mod tests {
         assert!(app.contains("build_player_nameplates("));
         assert!(app.contains("(!benchmark_running).then_some(&game.entity_store)"));
         let renderer = include_str!("../mod.rs");
-        assert_eq!(
-            renderer
-                .matches("extract_text_displays(store, anchor, yaw, pitch, font)")
-                .count(),
-            1
-        );
+        assert_eq!(renderer.matches("extract_text_displays_scaled(").count(), 1);
         let draw = renderer
             .find("self.block_entity_pipeline.draw_text_display(")
             .unwrap();

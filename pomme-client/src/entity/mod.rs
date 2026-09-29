@@ -1192,6 +1192,8 @@ pub struct VehicleState {
     pub text_display_left_rotation: [f32; 4],
     pub text_display_right_rotation: [f32; 4],
     pub text_display_billboard: u8,
+    /// Display metadata index 17; vanilla default 1.0 (64 blocks at scale 1).
+    pub text_display_view_range: f32,
 }
 
 pub struct EntityStore {
@@ -1272,6 +1274,7 @@ impl EntityStore {
             text_display_left_rotation: [0.0, 0.0, 0.0, 1.0],
             text_display_right_rotation: [0.0, 0.0, 0.0, 1.0],
             text_display_billboard: 0,
+            text_display_view_range: 1.0,
         });
         vehicle.passengers.clear();
         vehicle.passengers.extend_from_slice(passengers);
@@ -1300,6 +1303,7 @@ impl EntityStore {
             text_display_left_rotation: [0.0, 0.0, 0.0, 1.0],
             text_display_right_rotation: [0.0, 0.0, 0.0, 1.0],
             text_display_billboard: 0,
+            text_display_view_range: 1.0,
         });
         state.position = position;
         state.velocity = velocity;
@@ -1387,6 +1391,7 @@ impl EntityStore {
             return;
         }
         match (index, value) {
+            (17, MetaValue::Float(range)) => vehicle.text_display_view_range = range,
             (24, MetaValue::Int(width)) => vehicle.text_display_line_width = width,
             (25, MetaValue::Int(color)) => vehicle.text_display_background = color as u32,
             (26, MetaValue::Byte(opacity)) => vehicle.text_display_opacity = opacity,

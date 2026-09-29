@@ -997,6 +997,7 @@ pub struct PlayerNameplates<'a> {
     pub screen_height: u32,
     pub fov_degrees: f32,
     pub camera_pos: glam::DVec3,
+    pub entity_view_scale: f32,
     pub project: &'a dyn Fn(glam::DVec3) -> Option<(f32, f32, f32)>,
 }
 
@@ -1140,7 +1141,14 @@ pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: Play
             + glam::DVec3::Y * if entity.is_crouching { 2.0 } else { 2.3 };
         // LivingEntityRenderer reads the name_tag_distance attribute (default
         // 64) and EntityRenderDispatcher measures from the entity position.
-        if !name_tag_in_range((*entity.position - nameplates.camera_pos).length_squared()) {
+        if !name_tag_in_range((*entity.position - nameplates.camera_pos).length_squared())
+            || !crate::renderer::entity_distance_visible(
+                *entity.position,
+                nameplates.camera_pos,
+                (2.0 * 0.6 + 1.8) / 3.0 * 64.0,
+                nameplates.entity_view_scale,
+            )
+        {
             continue;
         }
         let Some((x, y, depth)) = (nameplates.project)(*pos) else {

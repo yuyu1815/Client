@@ -3413,6 +3413,14 @@ pub fn update_game(
         }
     }
 
+    let effective_rd = if game.server_render_distance > 0 {
+        core.menu.render_distance.min(game.server_render_distance)
+    } else {
+        core.menu.render_distance
+    };
+    let entity_view_scale =
+        crate::renderer::entity_view_scale(effective_rd, core.menu.entity_distance_percent);
+
     let mut map_quads = Vec::new();
     for frame in game.entity_store.vehicles.values().filter(|entity| {
         matches!(
@@ -3421,6 +3429,14 @@ pub fn update_game(
                 | Some(azalea_registry::builtin::EntityKind::GlowItemFrame)
         )
     }) {
+        if !crate::renderer::entity_distance_visible(
+            *frame.position,
+            gfx.renderer.camera_render_position(),
+            1024.0,
+            entity_view_scale,
+        ) {
+            continue;
+        }
         let azalea_inventory::ItemStack::Present(stack) = &frame.item_frame_item else {
             continue;
         };
@@ -3499,6 +3515,7 @@ pub fn update_game(
                     screen_height: renderer.screen_height(),
                     fov_degrees: renderer.camera_fov_degrees(),
                     camera_pos: renderer.camera_render_position(),
+                    entity_view_scale,
                     project: &|position| renderer.project_world_to_screen_with_depth(position),
                 },
             );
@@ -4544,10 +4561,11 @@ pub fn update_game(
             &game.chunk_store,
             &gfx.renderer,
             game.cardinal_light,
-            *gfx.renderer.camera_pivot_position(),
+            gfx.renderer.camera_render_position(),
             gfx.renderer.camera_anchor(),
             partial_tick,
             item_age_partial_tick,
+            entity_view_scale,
         )
     };
 
@@ -4690,11 +4708,6 @@ pub fn update_game(
             .extract(partial_tick, gfx.renderer.camera_anchor())
     };
 
-    let effective_rd = if game.server_render_distance > 0 {
-        core.menu.render_distance.min(game.server_render_distance)
-    } else {
-        core.menu.render_distance
-    };
     let held_item = if benchmark_running {
         (None, None)
     } else {
@@ -5257,10 +5270,23 @@ fn build_item_render_infos(
     anchor: glam::DVec3,
     partial_tick: f32,
     age_partial_tick: f32,
+    entity_view_scale: f32,
 ) -> Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo> {
     let mut infos = Vec::new();
     let nether_lighting = cardinal_light == CardinalLightType::Nether;
-    for item in entity_store.visible_items(camera_pos, 64.0) {
+    // ItemEntity is 0.25 x 0.25: AABB getSize = 0.25, not 64 blocks.
+    // Keep the existing store filter only as a broad phase at high settings.
+    for item in
+        entity_store.visible_items(camera_pos, (16.0 * f64::from(entity_view_scale)).max(64.0))
+    {
+        if !crate::renderer::entity_distance_visible(
+            *item.position,
+            camera_pos,
+            16.0,
+            entity_view_scale,
+        ) {
+            continue;
+        }
         let actual_age_f = item.age as f32 + age_partial_tick;
         let actual_bob_offset = item.bob_offset;
         let target_trace = std::env::var_os("POMME_ITEM_ENTITY_TRACE").is_some()
@@ -5368,6 +5394,14 @@ fn build_item_render_infos(
                 | Some(azalea_registry::builtin::EntityKind::GlowItemFrame)
         )
     }) {
+        if !crate::renderer::entity_distance_visible(
+            *frame.position,
+            camera_pos,
+            1024.0,
+            entity_view_scale,
+        ) {
+            continue;
+        }
         let Some(kind) = frame.kind else { continue };
         let has_map = matches!(
             &frame.item_frame_item,

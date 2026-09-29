@@ -45,7 +45,7 @@ use pipelines::panorama::PanoramaPipeline;
 pub use pipelines::particle::{ParticlePipeline, ParticleQuad};
 use pipelines::skin_preview::SkinPreviewPipeline;
 pub use pipelines::sky::{SkyPipeline, SkyState};
-use pipelines::text_display::extract_text_displays;
+use pipelines::text_display::extract_text_displays_scaled;
 pub use pipelines::weather::{WeatherColumn, WeatherPipeline};
 use pyronyx::khr::swapchain::{SwapchainDevice, SwapchainQueue};
 use pyronyx::vk;
@@ -127,8 +127,20 @@ fn preview_box_rect(rect: [f32; 4], extent: vk::Extent2D) -> Option<vk::Rect2D> 
 
 // Vanilla EntityRenderDispatcher's view scale: view distance is capped at 20
 // chunks for entities, independent of the chunk/BE rendering paths.
-fn entity_view_scale(render_distance: u32, percent: u32) -> f32 {
+pub(crate) fn entity_view_scale(render_distance: u32, percent: u32) -> f32 {
     (render_distance as f32 / 8.0).clamp(1.0, 2.5) * percent as f32 / 100.0
+}
+
+/// Vanilla 26.2 Entity.shouldRenderAtSqrDistance: strict position-to-camera
+/// distance, before the independent frustum/padded bounding-box check.
+pub(crate) fn entity_distance_visible(
+    position: glam::DVec3,
+    camera: glam::DVec3,
+    base_range: f64,
+    view_scale: f32,
+) -> bool {
+    let range = base_range * f64::from(view_scale);
+    (position - camera).length_squared() < range * range
 }
 
 // Constructed once per frame and consumed immediately, never stored.
@@ -2579,7 +2591,15 @@ impl Renderer {
                     && let Some((font, textures)) = self.menu_pipeline.world_font()
                 {
                     let (yaw, pitch) = self.camera.effective_look_deg();
-                    let mut draws = extract_text_displays(store, anchor, yaw, pitch, font);
+                    let mut draws = extract_text_displays_scaled(
+                        store,
+                        anchor,
+                        eye,
+                        yaw,
+                        pitch,
+                        font,
+                        entity_view_scale,
+                    );
                     // SEE_THROUGH is composited after depth-tested displays.
                     draws.sort_by_key(|draw| draw.see_through);
                     for draw in &draws {

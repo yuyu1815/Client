@@ -2388,10 +2388,6 @@ fn entity_visible(
         (s, m.w_axis.truncate().length())
     });
     let radius = (0.5 * (2.0 * w * w + h * h).sqrt() + ANIM_MARGIN) * scale + shift;
-    let mut q = (*info.position - eye).as_vec3();
-    q.y += h * 0.5 * scale;
-    // Distance-cull with the radius as margin so an oversized entity stays
-    // visible while any of its body is in range.
     // Slime's body transform includes its size and an inverse X/Y squish;
     // the cube root of its determinant recovers size without the squish.
     let distance_scale = if info.entity_kind == EntityKind::Slime {
@@ -2400,10 +2396,19 @@ fn entity_visible(
     } else {
         1.0
     };
-    let max_dist = ((2.0 * w + h) / 3.0 * distance_scale * 64.0) * entity_view_scale + radius;
-    if q.length_squared() > max_dist * max_dist {
+    let base_range = if info.entity_kind == EntityKind::Arrow {
+        // AbstractArrow.shouldRenderAtSqrDistance multiplies AABB getSize by 10.
+        // Arrow dimensions are 0.5 x 0.5; spectral arrows use the same model.
+        0.5 * 10.0 * 64.0
+    } else {
+        f64::from((2.0 * w + h) / 3.0 * distance_scale * 64.0)
+    };
+    if !crate::renderer::entity_distance_visible(*info.position, eye, base_range, entity_view_scale)
+    {
         return false;
     }
+    let mut q = (*info.position - eye).as_vec3();
+    q.y += h * 0.5 * scale;
     for pl in frustum {
         if pl[0] * q.x + pl[1] * q.y + pl[2] * q.z + pl[3] < -radius {
             return false;
@@ -2968,6 +2973,81 @@ mod tests {
         assert!(entity_visible(&slime, &frustum, glam::DVec3::ZERO, 1.0));
         slime.position = Position::new(145.0, 0.0, 0.0);
         assert!(!entity_visible(&slime, &frustum, glam::DVec3::ZERO, 1.0));
+    }
+
+    #[test]
+    fn official_distance_boundaries_for_players_arrows_items_and_frames() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::DVec3;
+
+        use super::{EntityRenderInfo, entity_visible};
+        use crate::entity::components::Position;
+        use crate::renderer::{entity_distance_visible, entity_view_scale};
+
+        let frustum = [[0.0, 0.0, 0.0, 1000.0]; 6];
+        let visible = |kind, x, percent| {
+            entity_visible(
+                &EntityRenderInfo {
+                    entity_kind: kind,
+                    position: Position::new(x, 0.0, 0.0),
+                    ..Default::default()
+                },
+                &frustum,
+                DVec3::ZERO,
+                entity_view_scale(8, percent),
+            )
+        };
+        // Strict position distance (not the padded frustum sphere): player
+        // AABB mean = 1, arrow AABB mean = 0.5 times 10.
+        assert!(visible(EntityKind::Player, 31.99, 50));
+        assert!(!visible(EntityKind::Player, 32.0, 50));
+        assert!(visible(EntityKind::Player, 63.99, 100));
+        assert!(!visible(EntityKind::Player, 64.0, 100));
+        assert!(visible(EntityKind::Arrow, 159.99, 50));
+        assert!(!visible(EntityKind::Arrow, 160.0, 50));
+        for (percent, cutoff) in [(50, 8.0), (100, 16.0), (500, 80.0)] {
+            let scale = entity_view_scale(8, percent);
+            assert!(entity_distance_visible(
+                DVec3::new(cutoff - 0.01, 0.0, 0.0),
+                DVec3::ZERO,
+                16.0,
+                scale
+            ));
+            assert!(!entity_distance_visible(
+                DVec3::new(cutoff, 0.0, 0.0),
+                DVec3::ZERO,
+                16.0,
+                scale
+            ));
+            assert_eq!(
+                entity_distance_visible(DVec3::X * 30.0, DVec3::ZERO, 16.0, scale),
+                percent == 500
+            );
+            assert_eq!(
+                entity_distance_visible(DVec3::X * 70.0, DVec3::ZERO, 16.0, scale),
+                percent == 500
+            );
+        }
+        assert!(entity_distance_visible(
+            DVec3::X * 511.0,
+            DVec3::ZERO,
+            1024.0,
+            entity_view_scale(8, 50)
+        ));
+        assert!(!entity_distance_visible(
+            DVec3::X * 512.0,
+            DVec3::ZERO,
+            1024.0,
+            entity_view_scale(8, 50)
+        ));
+        // At high world coordinates the subtraction is still performed in f64.
+        let camera = DVec3::new(30_000_000.0, 75.0, 0.0);
+        assert!(!entity_distance_visible(
+            camera + DVec3::X * 8.0,
+            camera,
+            16.0,
+            entity_view_scale(8, 50)
+        ));
     }
 
     #[test]
