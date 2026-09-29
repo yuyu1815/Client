@@ -50,7 +50,10 @@ struct EntityInstance {
 }
 
 pub struct EntityRenderInfo {
+    /// Interpolated/visually offset position for the model and frustum.
     pub position: Position,
+    /// Current simulation position for vanilla's strict distance check.
+    pub simulation_position: Position,
     pub head_x_rot_deg: f32,
     pub head_y_rot_deg: f32,
     pub body_y_rot_deg: f32,
@@ -142,6 +145,7 @@ impl Default for EntityRenderInfo {
     fn default() -> Self {
         Self {
             position: Position::new(0.0, 0.0, 0.0),
+            simulation_position: Position::new(0.0, 0.0, 0.0),
             head_x_rot_deg: 0.0,
             head_y_rot_deg: 0.0,
             body_y_rot_deg: 0.0,
@@ -2403,8 +2407,12 @@ fn entity_visible(
     } else {
         f64::from((2.0 * w + h) / 3.0 * distance_scale * 64.0)
     };
-    if !crate::renderer::entity_distance_visible(*info.position, eye, base_range, entity_view_scale)
-    {
+    if !crate::renderer::entity_distance_visible(
+        *info.simulation_position,
+        eye,
+        base_range,
+        entity_view_scale,
+    ) {
         return false;
     }
     let mut q = (*info.position - eye).as_vec3();
@@ -2963,6 +2971,7 @@ mod tests {
         let mut slime = EntityRenderInfo {
             entity_kind: EntityKind::Slime,
             position: Position::new(100.0, 0.0, 0.0),
+            simulation_position: Position::new(100.0, 0.0, 0.0),
             ..Default::default()
         };
         assert!(!entity_visible(&slime, &frustum, glam::DVec3::ZERO, 1.0));
@@ -2972,6 +2981,7 @@ mod tests {
         ));
         assert!(entity_visible(&slime, &frustum, glam::DVec3::ZERO, 1.0));
         slime.position = Position::new(145.0, 0.0, 0.0);
+        slime.simulation_position = slime.position;
         assert!(!entity_visible(&slime, &frustum, glam::DVec3::ZERO, 1.0));
     }
 
@@ -2990,6 +3000,7 @@ mod tests {
                 &EntityRenderInfo {
                     entity_kind: kind,
                     position: Position::new(x, 0.0, 0.0),
+                    simulation_position: Position::new(x, 0.0, 0.0),
                     ..Default::default()
                 },
                 &frustum,
@@ -3051,6 +3062,40 @@ mod tests {
     }
 
     #[test]
+    fn player_distance_uses_current_position_not_interpolated_or_visual_offset() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::DVec3;
+
+        use super::{EntityRenderInfo, entity_visible};
+        use crate::entity::components::Position;
+        use crate::renderer::entity_view_scale;
+
+        let prev = Position::new(64.7, 0.0, 0.0);
+        let now = Position::new(63.7, 0.0, 0.0);
+        let frustum = [[0.0, 0.0, 0.0, 1000.0]; 6];
+        let scale = entity_view_scale(8, 100);
+        let mut player = EntityRenderInfo {
+            entity_kind: EntityKind::Player,
+            position: prev.lerp(now, 0.0) + DVec3::new(0.5, 0.0, 0.0),
+            simulation_position: now,
+            ..Default::default()
+        };
+        assert!(entity_visible(&player, &frustum, DVec3::ZERO, scale));
+        player.position = prev.lerp(now, 0.5);
+        assert!(entity_visible(&player, &frustum, DVec3::ZERO, scale));
+        player.position = prev.lerp(now, 1.0);
+        assert!(entity_visible(&player, &frustum, DVec3::ZERO, scale));
+        player.simulation_position = Position::new(64.0, 0.0, 0.0);
+        assert!(!entity_visible(&player, &frustum, DVec3::ZERO, scale)); // strict edge
+        player.simulation_position = now;
+        player.position = Position::new(100.0, 0.0, 0.0);
+        let frustum = [[-1.0, 0.0, 0.0, 80.0]; 6];
+        assert!(!entity_visible(&player, &frustum, DVec3::ZERO, scale));
+        player.position = now;
+        assert!(entity_visible(&player, &frustum, DVec3::ZERO, scale));
+    }
+
+    #[test]
     fn entity_distance_slider_changes_mob_visibility_at_rd8_and_12() {
         use azalea_registry::builtin::EntityKind;
 
@@ -3062,6 +3107,7 @@ mod tests {
         let mut zombie = EntityRenderInfo {
             entity_kind: EntityKind::Zombie,
             position: Position::new(80.0, 0.0, 0.0),
+            simulation_position: Position::new(80.0, 0.0, 0.0),
             ..Default::default()
         };
         let visible = |info: &EntityRenderInfo, rd, percent| {
@@ -3083,6 +3129,7 @@ mod tests {
         assert!(visible(&zombie, 12, 100));
         assert!(visible(&zombie, 12, 500));
         zombie.position = Position::new(40.0, 0.0, 0.0);
+        zombie.simulation_position = zombie.position;
         assert!(!visible(&zombie, 8, 50));
         assert!(visible(&zombie, 12, 50));
     }

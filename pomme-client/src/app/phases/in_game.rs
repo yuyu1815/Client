@@ -4359,6 +4359,7 @@ pub fn update_game(
 
                 Some(EntityRenderInfo {
                     position: render_pos + extras.render_offset,
+                    simulation_position: e.position,
                     head_y_rot_deg: lerp_angle(
                         e.prev_head_y_rot_deg,
                         e.head_y_rot_deg,
@@ -4502,6 +4503,7 @@ pub fn update_game(
 
         entity_renders.push(EntityRenderInfo {
             position: interp_pos,
+            simulation_position: game.player.position,
             head_y_rot_deg: interp_y_rot_deg,
             head_x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
             body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
@@ -4956,6 +4958,7 @@ fn arrow_render_infos(store: &crate::entity::EntityStore) -> Vec<EntityRenderInf
             let look = entity.look_dir?;
             Some(EntityRenderInfo {
                 position: entity.position,
+                simulation_position: entity.position,
                 body_y_rot_deg: look.y_rot_deg(),
                 head_x_rot_deg: look.x_rot_deg(),
                 entity_kind: EntityKind::Arrow,

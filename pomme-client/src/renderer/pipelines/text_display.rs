@@ -209,13 +209,18 @@ pub(crate) fn extract_text_displays_scaled(
         .vehicles
         .iter()
         .filter_map(|(&id, entity)| {
+            // Malformed server view ranges must not make text disappear. Only
+            // positive finite metadata can impose a distance cutoff.
+            let range = entity.text_display_view_range;
             if entity.kind != Some(azalea_registry::builtin::EntityKind::TextDisplay)
-                || !crate::renderer::entity_distance_visible(
-                    *entity.position,
-                    camera_eye,
-                    f64::from(entity.text_display_view_range) * 64.0,
-                    view_scale,
-                )
+                || (range.is_finite()
+                    && range > 0.0
+                    && !crate::renderer::entity_distance_visible(
+                        *entity.position,
+                        camera_eye,
+                        f64::from(range) * 64.0,
+                        view_scale,
+                    ))
             {
                 return None;
             }
@@ -424,6 +429,12 @@ mod tests {
         assert_eq!(draw(&store, 0.5).len(), 1); // custom range survives slider
         store.vehicles.get_mut(&7).unwrap().position = Position::new(64.0, 0.0, 0.0);
         assert!(draw(&store, 0.5).is_empty()); // strict boundary
+        for malformed in [f32::NAN, f32::INFINITY, -0.01, 0.0] {
+            store.set_text_display_metadata(7, 17, MetaValue::Float(malformed));
+            assert_eq!(draw(&store, 0.5).len(), 1, "range {malformed}");
+        }
+        store.set_text_display_metadata(7, 17, MetaValue::Float(0.5));
+        assert!(draw(&store, 1.0).is_empty()); // valid custom range still applies
     }
 
     #[test]
