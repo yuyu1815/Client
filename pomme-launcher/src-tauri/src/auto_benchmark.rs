@@ -8,7 +8,9 @@ use tauri::AppHandle;
 
 use crate::{auth, commands, installations};
 
-const STATUS: &str = "auto-fps-benchmark-status.json";
+fn status_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("auto-fps-benchmark-status-{id}.json"))
+}
 const TIMEOUT: Duration = Duration::from_secs(240);
 
 pub fn select_unique<'a, T>(
@@ -31,6 +33,31 @@ struct Status {
     reason: Option<String>,
     benchmark_file: String,
     benchmark_modified_unix_ms: Option<u64>,
+    scene_origin: Option<SceneOrigin>,
+}
+#[derive(Deserialize)]
+struct SceneOrigin {
+    dimension: String,
+    position: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+}
+#[derive(Deserialize)]
+struct ResultMetadata {
+    auto_fps_run_id: String,
+    profile: String,
+    version: String,
+    os: String,
+    arch: String,
+    gpu: String,
+    resolution: [u32; 2],
+    timestamp: String,
+    total_frames: u32,
+    duration_secs: f32,
+    avg_fps: f32,
+    avg_frame_ms: f32,
+    peak_chunk_count: u32,
+    spikes: Vec<serde_json::Value>,
 }
 
 // Only return known client reasons, never untrusted status content.
@@ -58,9 +85,16 @@ fn choose_account<'a>(
     accounts: &'a [auth::AuthAccount],
     id: Option<&str>,
 ) -> Result<&'a auth::AuthAccount, &'static str> {
+    let requested = id
+        .map(|s| uuid::Uuid::parse_str(s).map_err(|_| "account_invalid"))
+        .transpose()?;
     select_unique(
         accounts,
-        |a| !a.uuid.is_empty() && id.is_none_or(|id| a.uuid == id),
+        |a| {
+            uuid::Uuid::parse_str(&a.uuid)
+                .ok()
+                .is_some_and(|parsed| requested.is_none_or(|id| id == parsed))
+        },
         "account_not_unique",
     )
 }
@@ -81,45 +115,39 @@ fn reason(raw: Option<&str>) -> &'static str {
         Some("server_transfer") => "server_transfer",
         Some("another_benchmark_running") => "another_benchmark_running",
         Some("status_save_failed") => "status_save_failed",
+        Some("scene_invalid") => "scene_invalid",
+        Some("scene_changed") => "scene_changed",
+        Some("player_dead") => "player_dead",
         Some("benchmark_save_failed") => "benchmark_save_failed",
         _ => "client_failed",
     }
 }
 
-fn inspect_status(
-    dir: &Path,
-    expected_run: &mut Option<String>,
-    saw_running: &mut bool,
-) -> Result<Option<PathBuf>, &'static str> {
-    let bytes = match std::fs::read(dir.join(STATUS)) {
+fn inspect_status(dir: &Path, expected_run: &str) -> Result<Option<PathBuf>, &'static str> {
+    let bytes = match std::fs::read(status_path(dir, expected_run)) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err("status_unreadable"),
     };
     let status: Status = serde_json::from_slice(&bytes).map_err(|_| "status_invalid")?;
-    if status.run_id.len() != 32 || !status.run_id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("status_invalid");
+    if status.run_id != expected_run {
+        return Err("status_run_changed");
     }
-    if let Some(run) = expected_run {
-        if run != &status.run_id {
-            return Err("status_run_changed");
-        }
-    } else if status.state == "running" || status.state == "failed" {
-        *expected_run = Some(status.run_id.clone());
-    } else {
-        // A previous success must never count as this run, even after a rapid exit.
-        return Err("status_missing_start");
-    }
-    if status.benchmark_file != format!("benchmark-{}.json", status.run_id) {
+    if status.benchmark_file != format!("benchmark-{expected_run}.json") {
         return Err("status_invalid");
     }
     match status.state.as_str() {
-        "running" => {
-            *saw_running = true;
-            Ok(None)
-        }
+        "running" => Ok(None),
         "failed" => Err(reason(status.reason.as_deref())),
-        "success" if *saw_running => {
+        "success" => {
+            let origin = status.scene_origin.ok_or("result_invalid")?;
+            if origin.dimension.is_empty()
+                || origin.position.iter().any(|p| !p.is_finite())
+                || !origin.yaw.is_finite()
+                || !origin.pitch.is_finite()
+            {
+                return Err("result_invalid");
+            }
             let path = dir.join(&status.benchmark_file);
             let modified = std::fs::metadata(&path)
                 .and_then(|m| m.modified())
@@ -128,6 +156,29 @@ fn inspect_status(
                 .as_millis();
             if Some(modified as u64) != status.benchmark_modified_unix_ms {
                 return Err("result_mismatch");
+            }
+            let bytes = std::fs::read(&path).map_err(|_| "result_missing")?;
+            let result: ResultMetadata =
+                serde_json::from_slice(&bytes).map_err(|_| "result_invalid")?;
+            if result.auto_fps_run_id != expected_run
+                || !matches!(result.profile.as_str(), "debug" | "release")
+                || result.version.is_empty()
+                || result.os.is_empty()
+                || result.arch.is_empty()
+                || result.gpu.is_empty()
+                || result.timestamp.is_empty()
+                || result.resolution.contains(&0)
+                || result.total_frames == 0
+                || result.peak_chunk_count == 0
+                || !result.duration_secs.is_finite()
+                || result.duration_secs < 1.0
+                || !result.avg_fps.is_finite()
+                || result.avg_fps <= 0.0
+                || !result.avg_frame_ms.is_finite()
+                || result.avg_frame_ms <= 0.0
+                || result.spikes.len() > result.total_frames as usize
+            {
+                return Err("result_invalid");
             }
             Ok(Some(path))
         }
@@ -151,9 +202,12 @@ pub async fn run(
     }
     let accounts = auth::get_all_accounts();
     let account = choose_account(&accounts, account_id)?;
+    let selected_uuid = uuid::Uuid::parse_str(&account.uuid).map_err(|_| "account_invalid")?;
     let restored = auth::try_restore_or_refresh(&account.uuid)
         .await
-        .filter(|a| a.uuid == account.uuid && !a.access_token.is_empty())
+        .filter(|a| {
+            uuid::Uuid::parse_str(&a.uuid).ok() == Some(selected_uuid) && !a.access_token.is_empty()
+        })
         .ok_or("account_unavailable")?;
 
     let version: String = install.version.clone().into();
@@ -177,7 +231,8 @@ pub async fn run(
         }
     }
     let _unlock = Unlock(lock_path);
-    match std::fs::remove_file(dir.join(STATUS)) {
+    let run_id = format!("{:032x}", rand::random::<u128>());
+    match std::fs::remove_file(status_path(dir, &run_id)) {
         Ok(()) => (),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
         Err(_) => return Err("status_unavailable"),
@@ -190,7 +245,7 @@ pub async fn run(
         Some(server),
         None,
         false,
-        true,
+        Some(&run_id),
     )
     .await
     .map_err(|_| "launch_failed")?;
@@ -212,15 +267,13 @@ pub async fn run(
         }
     }
     let deadline = Instant::now() + TIMEOUT;
-    let mut run_id = None;
-    let mut saw_running = false;
     let mut result = None;
     loop {
         if Instant::now() >= deadline {
             let _ = child.kill().await;
             return Err("benchmark_timeout");
         }
-        match inspect_status(dir, &mut run_id, &mut saw_running) {
+        match inspect_status(dir, &run_id) {
             Ok(Some(path)) => result = Some(path),
             Ok(None) => (),
             Err(e) => {
@@ -231,7 +284,7 @@ pub async fn run(
         match child.try_wait() {
             Ok(Some(exit)) => {
                 // One last read, for the status written immediately before exit.
-                let path = inspect_status(dir, &mut run_id, &mut saw_running)?.or(result);
+                let path = inspect_status(dir, &run_id)?.or(result);
                 return if exit.success() {
                     path.ok_or("benchmark_incomplete")
                 } else {
@@ -279,14 +332,65 @@ mod tests {
             access_token: String::new(),
             expires_at: 0,
         };
-        let accounts = [account("id-1"), account("id-2")];
+        let id1 = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+        let id2 = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+        let accounts = [account(id1), account(id2)];
         assert!(choose_account(&accounts, None).is_err());
-        assert!(choose_account(&accounts, Some("missing")).is_err());
+        assert!(choose_account(&accounts, Some("invalid")).is_err());
+        assert!(choose_account(&[account("bad")], None).is_err());
         assert_eq!(
-            choose_account(&accounts, Some("id-2")).unwrap().uuid,
-            "id-2"
+            choose_account(&accounts, Some(&id2.replace('-', "")))
+                .unwrap()
+                .uuid,
+            id2
         );
-        assert!(choose_account(&[account("id-1"), account("id-1")], Some("id-1")).is_err());
+        assert!(choose_account(&[account(id1), account(id1)], Some(id1)).is_err());
+    }
+
+    #[test]
+    fn result_requires_matching_run_and_schema() {
+        let dir = std::env::temp_dir().join(format!("pomme-result-{}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let id = "c".repeat(32);
+        let path = dir.join(format!("benchmark-{id}.json"));
+        std::fs::write(&path, "{}").unwrap();
+        let update_status = || {
+            let modified = std::fs::metadata(&path)
+                .unwrap()
+                .modified()
+                .unwrap()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            std::fs::write(
+            status_path(&dir, &id),
+            serde_json::json!({
+                "run_id": id, "state": "success", "benchmark_file": format!("benchmark-{id}.json"),
+                "benchmark_modified_unix_ms": modified, "scene_origin": {
+                    "dimension": "minecraft:overworld", "position": [0.0, 64.0, 0.0],
+                    "yaw": 0.0, "pitch": 0.0
+                }
+            })
+            .to_string(),
+        ).unwrap();
+        };
+        update_status();
+        assert_eq!(inspect_status(&dir, &id).unwrap_err(), "result_invalid");
+        let result = |run: &str| {
+            serde_json::json!({
+                "auto_fps_run_id": run, "profile": "release", "version": "0.1.0",
+                "os": "windows", "arch": "x86_64", "gpu": "test", "resolution": [854,480],
+                "timestamp": "2026-01-01T00:00:00Z", "total_frames": 300, "duration_secs": 10.0,
+                "avg_fps": 30.0, "avg_frame_ms": 33.3, "peak_chunk_count": 9, "spikes": []
+            })
+        };
+        std::fs::write(&path, result(&"d".repeat(32)).to_string()).unwrap();
+        update_status();
+        assert_eq!(inspect_status(&dir, &id).unwrap_err(), "result_invalid");
+        std::fs::write(&path, result(&id).to_string()).unwrap();
+        update_status();
+        assert_eq!(inspect_status(&dir, &id).unwrap().unwrap(), path);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -299,33 +403,23 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         let id = "a".repeat(32);
         let write = |state: &str, id: &str| {
-            std::fs::write(dir.join(STATUS), serde_json::json!({
+            std::fs::write(status_path(&dir, &id), serde_json::json!({
             "run_id": id, "state": state, "reason": "join_timeout",
             "benchmark_file": format!("benchmark-{id}.json"), "benchmark_modified_unix_ms": null,
         }).to_string()).unwrap()
         };
-        let (mut run, mut running) = (None, false);
         write("success", &id);
-        assert_eq!(
-            inspect_status(&dir, &mut run, &mut running).unwrap_err(),
-            "status_missing_start"
-        );
+        assert_eq!(inspect_status(&dir, &id).unwrap_err(), "result_invalid");
         write("running", &id);
-        assert!(
-            inspect_status(&dir, &mut run, &mut running)
-                .unwrap()
-                .is_none()
-        );
-        write("success", &"b".repeat(32));
-        assert_eq!(
-            inspect_status(&dir, &mut run, &mut running).unwrap_err(),
-            "status_run_changed"
-        );
+        assert!(inspect_status(&dir, &id).unwrap().is_none());
+        write("failed", &"b".repeat(32)); // Another run's own file cannot affect ours.
+        assert!(inspect_status(&dir, &id).unwrap().is_none());
+        std::fs::write(status_path(&dir, &id), serde_json::json!({
+            "run_id": "b".repeat(32), "state": "running", "benchmark_file": format!("benchmark-{id}.json")
+        }).to_string()).unwrap();
+        assert_eq!(inspect_status(&dir, &id).unwrap_err(), "status_run_changed");
         write("failed", &id);
-        assert_eq!(
-            inspect_status(&dir, &mut run, &mut running).unwrap_err(),
-            "join_timeout"
-        );
+        assert_eq!(inspect_status(&dir, &id).unwrap_err(), "join_timeout");
         assert_eq!(reason(Some("private server / account")), "client_failed");
         std::fs::remove_dir_all(dir).unwrap();
     }

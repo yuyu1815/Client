@@ -38,9 +38,21 @@ pub struct LaunchArgs {
     )]
     pub auto_fps_benchmark: bool,
 
+    /// Launcher-generated nonce; unattended runs only.
+    #[arg(long, requires = "auto_fps_benchmark", value_parser = parse_run_id)]
+    pub auto_fps_run_id: Option<String>,
+
     /// Dedicated render probe request/results directory (opt-in).
     #[arg(long)]
     pub render_probe_root: Option<std::path::PathBuf>,
+}
+
+fn parse_run_id(s: &str) -> Result<String, &'static str> {
+    if s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(s.to_ascii_lowercase())
+    } else {
+        Err("invalid auto FPS run ID")
+    }
 }
 
 #[cfg(test)]

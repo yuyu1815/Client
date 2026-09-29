@@ -282,6 +282,9 @@ pub struct Benchmark {
 
 #[derive(serde::Serialize)]
 pub struct BenchmarkResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_fps_run_id: Option<String>,
+    pub profile: String,
     pub version: String,
     pub os: String,
     pub arch: String,
@@ -536,6 +539,13 @@ impl Benchmark {
         let now = iso8601_utc_now();
 
         let result = BenchmarkResult {
+            auto_fps_run_id: path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("benchmark-"))
+                .filter(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                .map(str::to_owned),
+            profile: build_profile().to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),

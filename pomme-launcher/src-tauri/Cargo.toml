@@ -27,6 +27,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
 log = "0.4"
 rand = "0.10"
+uuid = "1"
 keyring = { version = "3", features = ["apple-native", "sync-secret-service", "windows-native"] }
 sha2 = "0.11"
 urlencoding = "2"

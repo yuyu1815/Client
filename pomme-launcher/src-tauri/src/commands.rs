@@ -380,7 +380,7 @@ pub async fn launch_game(
         server_ip.as_deref(),
         override_version,
         debug_enabled.unwrap_or(false),
-        false,
+        None,
     )
     .await?;
     let username = account
@@ -486,7 +486,7 @@ pub(crate) async fn spawn_game(
     server_ip: Option<&str>,
     override_version: Option<String>,
     debug_enabled: bool,
-    auto_fps: bool,
+    auto_fps_run_id: Option<&str>,
 ) -> Result<tokio::process::Child, String> {
     // Prefer a local dev build (target/); otherwise download the latest release.
     let exe = match find_client_binary() {
@@ -507,7 +507,7 @@ pub(crate) async fn spawn_game(
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    if auto_fps {
+    if auto_fps_run_id.is_some() {
         cmd.kill_on_drop(true);
     }
 
@@ -563,8 +563,10 @@ pub(crate) async fn spawn_game(
     if let Some(server_ip) = server_ip {
         cmd.arg("--quick-access-multiplayer").arg(server_ip);
     }
-    if auto_fps {
-        cmd.arg("--auto-fps-benchmark");
+    if let Some(run_id) = auto_fps_run_id {
+        cmd.arg("--auto-fps-benchmark")
+            .arg("--auto-fps-run-id")
+            .arg(run_id);
     }
 
     #[cfg(unix)]

@@ -42,7 +42,7 @@ pub enum WindowError {
     #[error("renderer error: {0}")]
     Renderer(#[from] renderer::RendererError),
 
-    #[error("auto FPS benchmark failed; see auto-fps-benchmark-status.json")]
+    #[error("auto FPS benchmark failed; see auto-fps-benchmark-status-<run-id>.json")]
     AutoFailed,
 }
 
@@ -850,7 +850,7 @@ impl ApplicationHandler for App {
                 }
                 if let Some(auto) = &mut self.auto_fps {
                     if auto.joining()
-                        && let Err(reason) = auto.tick(Instant::now(), 0, false)
+                        && let Err(reason) = auto.tick(Instant::now(), 0, None)
                     {
                         auto.fail(reason);
                         event_loop.exit();
@@ -1111,7 +1111,55 @@ impl ApplicationHandler for App {
 
                         if let Some(auto) = &mut self.auto_fps {
                             if matches!(update_result, GameUpdateResult::None) {
-                                if auto.running() && game.benchmark_result.is_some() {
+                                let camera = *game.player.position;
+                                let pos = azalea_core::position::ChunkPos::new(
+                                    (camera.x.floor() as i32).div_euclid(16),
+                                    (camera.z.floor() as i32).div_euclid(16),
+                                );
+                                let section = (camera.y.floor() as i32 - game.chunk_store.min_y())
+                                    .div_euclid(16);
+                                let camera_ready = game.chunk_store.get_chunk(&pos).is_some()
+                                    && gfx.renderer.has_chunk_section(
+                                        &pos,
+                                        section,
+                                        game.chunk_store.section_is_empty(
+                                            (pos.x, pos.z),
+                                            camera.y.floor() as i32 >> 4,
+                                        ),
+                                    );
+                                let scene = auto_fps::Scene {
+                                    dimension: game.dimension.clone(),
+                                    position: [camera.x, camera.y, camera.z],
+                                    yaw: game.player.look_dir.y_rot_deg(),
+                                    pitch: game.player.look_dir.x_rot_deg(),
+                                    alive: !game.dead,
+                                    camera_ready,
+                                };
+                                match auto.tick(
+                                    Instant::now(),
+                                    gfx.renderer.loaded_chunk_count(),
+                                    Some(scene),
+                                ) {
+                                    Ok(true) => {
+                                        game.benchmark = Some(crate::benchmark::Benchmark::new(
+                                            gfx.renderer.gpu_name(),
+                                            gfx.renderer.screen_width(),
+                                            gfx.renderer.screen_height(),
+                                            core.menu.render_distance,
+                                        ));
+                                        game.benchmark_result = None;
+                                        game.benchmark_saved = false;
+                                    }
+                                    Err(reason) => {
+                                        auto.fail(reason);
+                                        event_loop.exit();
+                                    }
+                                    Ok(false) => {}
+                                }
+                                if auto.running()
+                                    && game.benchmark_result.is_some()
+                                    && !auto.finished()
+                                {
                                     if game.benchmark_saved {
                                         if let Err(error) = auto.succeed(&core.data_dirs.game_dir) {
                                             tracing::error!("Auto FPS status save failed: {error}");
@@ -1121,46 +1169,6 @@ impl ApplicationHandler for App {
                                         auto.fail("benchmark_save_failed");
                                     }
                                     event_loop.exit();
-                                } else if !auto.running() && !auto.finished() {
-                                    let camera = *game.player.position;
-                                    let pos = azalea_core::position::ChunkPos::new(
-                                        (camera.x.floor() as i32).div_euclid(16),
-                                        (camera.z.floor() as i32).div_euclid(16),
-                                    );
-                                    let section = (camera.y.floor() as i32
-                                        - game.chunk_store.min_y())
-                                    .div_euclid(16);
-                                    let camera_ready = game.chunk_store.get_chunk(&pos).is_some()
-                                        && gfx.renderer.has_chunk_section(
-                                            &pos,
-                                            section,
-                                            game.chunk_store.section_is_empty(
-                                                (pos.x, pos.z),
-                                                camera.y.floor() as i32 >> 4,
-                                            ),
-                                        );
-                                    match auto.tick(
-                                        Instant::now(),
-                                        gfx.renderer.loaded_chunk_count(),
-                                        camera_ready,
-                                    ) {
-                                        Ok(true) => {
-                                            game.benchmark =
-                                                Some(crate::benchmark::Benchmark::new(
-                                                    gfx.renderer.gpu_name(),
-                                                    gfx.renderer.screen_width(),
-                                                    gfx.renderer.screen_height(),
-                                                    core.menu.render_distance,
-                                                ));
-                                            game.benchmark_result = None;
-                                            game.benchmark_saved = false;
-                                        }
-                                        Err(reason) => {
-                                            auto.fail(reason);
-                                            event_loop.exit();
-                                        }
-                                        Ok(false) => {}
-                                    }
                                 }
                             } else {
                                 auto.fail("disconnected");

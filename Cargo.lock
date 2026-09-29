@@ -5299,6 +5299,7 @@ dependencies = [
  "tokio",
  "url",
  "urlencoding",
+ "uuid 1.26.1",
  "zip",
 ]
 

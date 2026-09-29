@@ -9,13 +9,14 @@ launcher-build *args:
 
 # Explicit opt-in only: `just auto-benchmark <server>` (optional account UUID as second arg).
 # Build client separately (`mise run build`) before running; never run this in CI.
+[positional-arguments]
 auto-benchmark server account_id="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -n "{{account_id}}" ]; then
-        mise exec -- cargo run -p pomme-launcher --locked -- --auto-benchmark "{{server}}" "{{account_id}}"
+    if [ -n "$2" ]; then
+        mise exec -- cargo run -p pomme-launcher --locked -- --auto-benchmark "$1" "$2"
     else
-        mise exec -- cargo run -p pomme-launcher --locked -- --auto-benchmark "{{server}}"
+        mise exec -- cargo run -p pomme-launcher --locked -- --auto-benchmark "$1"
     fi
 
 launcher-pre-pr:

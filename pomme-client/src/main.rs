@@ -62,9 +62,12 @@ mod startup_tests {
     fn failed_asset_validation_replaces_previous_success() {
         let dir = crate::test_util::test_temp_dir("auto-startup");
         std::fs::create_dir_all(&dir).unwrap();
-        let mut auto = Some(app::auto_fps::AutoFps::new(&dir));
+        let mut auto = Some(app::auto_fps::AutoFps::new(
+            &dir,
+            Some("a0000000000000000000000000000000"),
+        ));
         std::fs::write(
-            dir.join("auto-fps-benchmark-status.json"),
+            dir.join("auto-fps-benchmark-status-a0000000000000000000000000000000.json"),
             r#"{"state":"success"}"#,
         )
         .unwrap();
@@ -77,7 +80,10 @@ mod startup_tests {
         );
         assert!(verify_data_dirs(&dirs, &mut auto).is_err());
         let status: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(dir.join("auto-fps-benchmark-status.json")).unwrap(),
+            &std::fs::read(
+                dir.join("auto-fps-benchmark-status-a0000000000000000000000000000000.json"),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(status["state"], "failed");
@@ -126,7 +132,7 @@ fn main() {
     // Replace any prior success before fallible assets/runtime initialization.
     let mut auto_fps = args
         .auto_fps_benchmark
-        .then(|| app::auto_fps::AutoFps::new(&data_dirs.game_dir));
+        .then(|| app::auto_fps::AutoFps::new(&data_dirs.game_dir, args.auto_fps_run_id.as_deref()));
     if let Some(auto) = &mut auto_fps {
         if let Err(e) = data_dirs.ensure_game_dir().and_then(|_| auto.start()) {
             eprintln!("Failed to initialize auto FPS status: {e}");

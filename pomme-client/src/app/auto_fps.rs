@@ -28,15 +28,55 @@ pub(crate) struct AutoFps {
     stable_frames: u32,
     phase: Phase,
     pub failed: bool,
+    origin: Option<Scene>,
+    previous: Option<Scene>,
+}
+
+/// World/player camera, excluding render-only head bob. Small physics jitter is
+/// allowed.
+#[derive(Clone, Debug)]
+pub struct Scene {
+    pub dimension: String,
+    pub position: [f64; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub alive: bool,
+    pub camera_ready: bool,
+}
+
+impl Scene {
+    fn valid(&self) -> bool {
+        self.alive
+            && !self.dimension.is_empty()
+            && self.position.iter().all(|n| n.is_finite())
+            && self.yaw.is_finite()
+            && self.pitch.is_finite()
+    }
+
+    fn close_to(&self, other: &Self) -> bool {
+        self.dimension == other.dimension
+            && self
+                .position
+                .iter()
+                .zip(other.position)
+                .all(|(a, b)| (a - b).abs() <= 2.0)
+            && (self.yaw - other.yaw)
+                .rem_euclid(360.0)
+                .min((other.yaw - self.yaw).rem_euclid(360.0))
+                <= 10.0
+            && (self.pitch - other.pitch).abs() <= 10.0
+    }
 }
 
 impl AutoFps {
-    pub fn new(game_dir: &std::path::Path) -> Self {
+    pub fn new(game_dir: &std::path::Path, requested_id: Option<&str>) -> Self {
         let now = Instant::now();
-        // Random run nonce, never the player's UUID or any account identifier.
-        let run_id = format!("{:032x}", uuid::Uuid::new_v4().as_u128());
+        // Random nonce unless launched by the parent with its own unpredictable nonce.
+        let run_id = requested_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{:032x}", uuid::Uuid::new_v4().as_u128()));
         Self {
-            path: game_dir.join("auto-fps-benchmark-status.json"),
+            path: game_dir.join(format!("auto-fps-benchmark-status-{run_id}.json")),
             benchmark_file: format!("benchmark-{run_id}.json"),
             run_id,
             started_at: SystemTime::now(),
@@ -46,6 +86,8 @@ impl AutoFps {
             stable_frames: 0,
             phase: Phase::Joining,
             failed: false,
+            origin: None,
+            previous: None,
         }
     }
 
@@ -61,6 +103,9 @@ impl AutoFps {
             "reason": reason,
             "benchmark_file": self.benchmark_file,
             "benchmark_modified_unix_ms": modified_ms,
+            "scene_origin": self.origin.as_ref().map(|s| serde_json::json!({
+                "dimension": s.dimension, "position": s.position, "yaw": s.yaw, "pitch": s.pitch,
+            })),
         });
         write_atomic(
             &self.path,
@@ -111,8 +156,24 @@ impl AutoFps {
         &mut self,
         now: Instant,
         chunks: u32,
-        camera_ready: bool,
+        scene: Option<Scene>,
     ) -> Result<bool, &'static str> {
+        if self.phase == Phase::Stabilizing || self.phase == Phase::Running {
+            let scene = scene.as_ref().ok_or("scene_invalid")?;
+            if !scene.alive {
+                return Err("player_dead");
+            }
+            if !scene.valid() || (self.phase == Phase::Running && !scene.camera_ready) {
+                return Err("scene_invalid");
+            }
+            if self.previous.as_ref().is_some_and(|p| !scene.close_to(p))
+                || self.origin.as_ref().is_some_and(|p| !scene.close_to(p))
+            {
+                return Err("scene_changed");
+            }
+            self.previous = Some(scene.clone());
+        }
+        let camera_ready = scene.as_ref().is_some_and(|s| s.camera_ready);
         match self.phase {
             Phase::Joining => {
                 if now.duration_since(self.since) >= JOIN_TIMEOUT {
@@ -141,6 +202,9 @@ impl AutoFps {
                     && self.stable_frames >= 2
                     && now.duration_since(self.unchanged_since) >= STABLE_FOR
                 {
+                    self.origin = scene;
+                    self.write("running", None, None)
+                        .map_err(|_| "status_save_failed")?;
                     self.phase = Phase::Running;
                     Ok(true)
                 } else {
@@ -185,18 +249,35 @@ impl AutoFps {
 mod tests {
     use super::*;
 
+    fn scene(ready: bool) -> Scene {
+        Scene {
+            dimension: "minecraft:overworld".into(),
+            position: [0.0, 64.0, 0.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            alive: true,
+            camera_ready: ready,
+        }
+    }
+
     #[test]
     fn focus_loss_fails_joining_and_measuring() {
         let dir = crate::test_util::test_temp_dir("auto-focus");
         std::fs::create_dir_all(&dir).unwrap();
         for measuring in [false, true] {
-            let mut run = AutoFps::new(&dir);
+            let mut run = AutoFps::new(&dir, None);
             run.start().unwrap();
             if measuring {
                 let t = Instant::now();
                 run.joined(t);
-                assert_eq!(run.tick(t + Duration::from_secs(1), 1, true), Ok(false));
-                assert_eq!(run.tick(t + Duration::from_secs(5), 1, true), Ok(true));
+                assert_eq!(
+                    run.tick(t + Duration::from_secs(1), 1, Some(scene(true))),
+                    Ok(false)
+                );
+                assert_eq!(
+                    run.tick(t + Duration::from_secs(5), 1, Some(scene(true))),
+                    Ok(true)
+                );
             }
             assert!(run.focus_lost());
             assert!(!run.focus_lost());
@@ -212,8 +293,8 @@ mod tests {
     fn concurrent_runs_have_distinct_results() {
         let dir = crate::test_util::test_temp_dir("auto-concurrent");
         std::fs::create_dir_all(&dir).unwrap();
-        let a = AutoFps::new(&dir);
-        let b = AutoFps::new(&dir);
+        let a = AutoFps::new(&dir, None);
+        let b = AutoFps::new(&dir, None);
         assert_ne!(a.run_id, b.run_id);
         assert_ne!(a.benchmark_path(&dir), b.benchmark_path(&dir));
         assert_eq!(a.benchmark_file, format!("benchmark-{}.json", a.run_id));
@@ -223,47 +304,144 @@ mod tests {
     #[test]
     fn camera_section_must_be_ready_for_stable_window() {
         let dir = crate::test_util::test_temp_dir("auto-camera");
-        let mut run = AutoFps::new(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut run = AutoFps::new(&dir, None);
         let t = Instant::now();
         run.joined(t);
-        assert_eq!(run.tick(t + Duration::from_secs(1), 9, false), Ok(false));
-        assert_eq!(run.tick(t + Duration::from_secs(5), 9, false), Ok(false));
-        assert_eq!(run.tick(t + Duration::from_secs(6), 9, true), Ok(false));
-        assert_eq!(run.tick(t + Duration::from_secs(10), 9, true), Ok(true));
+        assert_eq!(
+            run.tick(t + Duration::from_secs(1), 9, Some(scene(false))),
+            Ok(false)
+        );
+        assert_eq!(
+            run.tick(t + Duration::from_secs(5), 9, Some(scene(false))),
+            Ok(false)
+        );
+        assert_eq!(
+            run.tick(t + Duration::from_secs(6), 9, Some(scene(true))),
+            Ok(false)
+        );
+        assert_eq!(
+            run.tick(t + Duration::from_secs(10), 9, Some(scene(true))),
+            Ok(true)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn death_teleport_and_dimension_fail_measuring() {
+        let dir = crate::test_util::test_temp_dir("auto-scene");
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = Instant::now();
+        for (changed, expected) in [
+            (
+                Scene {
+                    alive: false,
+                    ..scene(true)
+                },
+                "player_dead",
+            ),
+            (
+                Scene {
+                    position: [100.0, 64.0, 0.0],
+                    ..scene(true)
+                },
+                "scene_changed",
+            ),
+            (
+                Scene {
+                    dimension: "minecraft:the_nether".into(),
+                    ..scene(true)
+                },
+                "scene_changed",
+            ),
+            (
+                Scene {
+                    camera_ready: false,
+                    ..scene(true)
+                },
+                "scene_invalid",
+            ),
+        ] {
+            let mut run = AutoFps::new(&dir, None);
+            run.joined(t);
+            assert_eq!(
+                run.tick(t + Duration::from_secs(1), 5, Some(scene(true))),
+                Ok(false)
+            );
+            assert_eq!(
+                run.tick(t + Duration::from_secs(5), 5, Some(scene(true))),
+                Ok(true)
+            );
+            assert_eq!(
+                run.tick(t + Duration::from_secs(6), 5, Some(changed)),
+                Err(expected)
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn stable_chunks_timeout_and_one_shot() {
         let dir = crate::test_util::test_temp_dir("auto-fps");
         std::fs::create_dir_all(&dir).unwrap();
-        let mut run = AutoFps::new(&dir);
+        let mut run = AutoFps::new(&dir, None);
         let t = Instant::now();
-        assert_eq!(run.tick(t + JOIN_TIMEOUT, 1, true), Err("join_timeout"));
+        assert_eq!(
+            run.tick(t + JOIN_TIMEOUT, 1, Some(scene(true))),
+            Err("join_timeout")
+        );
         run.joined(t);
-        assert_eq!(run.tick(t + Duration::from_secs(1), 0, true), Ok(false));
-        assert_eq!(run.tick(t + Duration::from_secs(2), 5, true), Ok(false));
-        assert_eq!(run.tick(t + Duration::from_secs(4), 6, true), Ok(false));
-        assert_eq!(run.tick(t + Duration::from_secs(6), 6, true), Ok(false));
-        assert_eq!(run.tick(t + Duration::from_secs(8), 6, true), Ok(true));
-        assert_eq!(run.tick(t + Duration::from_secs(9), 6, true), Ok(false));
+        assert_eq!(
+            run.tick(t + Duration::from_secs(1), 0, Some(scene(true))),
+            Ok(false)
+        );
+        assert_eq!(
+            run.tick(t + Duration::from_secs(2), 5, Some(scene(true))),
+            Ok(false)
+        );
+        assert_eq!(
+            run.tick(t + Duration::from_secs(4), 6, Some(scene(true))),
+            Ok(false)
+        );
+        assert_eq!(
+            run.tick(t + Duration::from_secs(6), 6, Some(scene(true))),
+            Ok(false)
+        );
+        assert_eq!(
+            run.tick(t + Duration::from_secs(8), 6, Some(scene(true))),
+            Ok(true)
+        );
+        assert_eq!(
+            run.tick(t + Duration::from_secs(9), 6, Some(scene(true))),
+            Ok(false)
+        );
         run.fail("disconnected");
         assert!(run.finished() && run.failed);
-        assert_eq!(run.tick(t + Duration::from_secs(10), 6, true), Ok(false));
+        assert_eq!(
+            run.tick(t + Duration::from_secs(10), 6, Some(scene(true))),
+            Ok(false)
+        );
         let status: serde_json::Value =
             serde_json::from_slice(&std::fs::read(run.path).unwrap()).unwrap();
         assert_eq!(status["reason"], "disconnected");
-        let mut timeout = AutoFps::new(&dir);
+        let mut timeout = AutoFps::new(&dir, None);
         timeout.joined(t);
         assert_eq!(
-            timeout.tick(t + STABLE_TIMEOUT, 5, false),
+            timeout.tick(t + STABLE_TIMEOUT, 5, Some(scene(false))),
             Err("stability_timeout")
         );
-        let mut success = AutoFps::new(&dir);
+        let mut success = AutoFps::new(&dir, None);
         success.start().unwrap();
         assert!(success.succeed(&dir).is_err());
         success.joined(t);
-        assert_eq!(success.tick(t + Duration::from_secs(1), 5, true), Ok(false));
-        assert_eq!(success.tick(t + Duration::from_secs(5), 5, true), Ok(true));
+        assert_eq!(
+            success.tick(t + Duration::from_secs(1), 5, Some(scene(true))),
+            Ok(false)
+        );
+        assert_eq!(
+            success.tick(t + Duration::from_secs(5), 5, Some(scene(true))),
+            Ok(true)
+        );
         assert!(success.succeed(&dir).is_err()); // No result file yet.
         std::fs::write(success.benchmark_path(&dir), "{}").unwrap();
         success.succeed(&dir).unwrap();
