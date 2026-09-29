@@ -805,11 +805,10 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Focused(focused) => {
-                if !focused
-                    && self
-                        .auto_fps
-                        .as_mut()
-                        .is_some_and(auto_fps::AutoFps::focus_lost)
+                if self
+                    .auto_fps
+                    .as_mut()
+                    .is_some_and(|auto| auto.focus_changed(focused, Instant::now()))
                 {
                     event_loop.exit();
                     return;
@@ -848,6 +847,14 @@ impl ApplicationHandler for App {
                 }
                 if matches!(self.phase.get(), AppPhase::Setup { .. }) {
                     return;
+                }
+                if let Some(auto) = &mut self.auto_fps {
+                    if let Some(gfx) = self.phase.gfx_mut()
+                        && auto.focus_changed(gfx.window.has_focus(), Instant::now())
+                    {
+                        event_loop.exit();
+                        return;
+                    }
                 }
                 if let Some(auto) = &mut self.auto_fps {
                     if auto.joining()
@@ -1111,6 +1118,11 @@ impl ApplicationHandler for App {
                         };
 
                         if let Some(auto) = &mut self.auto_fps {
+                            // The OS can drop focus while update_game records its last frame.
+                            // Never publish that result as a successful unattended run.
+                            if auto.focus_changed(gfx.window.has_focus(), Instant::now()) {
+                                event_loop.exit();
+                            }
                             if matches!(update_result, GameUpdateResult::None) {
                                 let camera = *game.player.position;
                                 let pos = azalea_core::position::ChunkPos::new(
@@ -1277,6 +1289,10 @@ impl ApplicationHandler for App {
                 if let Some(gfx) = self.phase.gfx_mut() {
                     if !gfx.window.is_visible().unwrap_or(true) {
                         gfx.window.set_visible(true);
+                        if self.auto_fps.is_some() {
+                            // One request after showing; never steal focus back mid-run.
+                            gfx.window.focus_window();
+                        }
                     }
                     gfx.window.request_redraw();
                 }

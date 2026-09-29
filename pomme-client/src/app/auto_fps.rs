@@ -26,6 +26,7 @@ pub(crate) struct AutoFps {
     unchanged_since: Instant,
     last_chunks: u32,
     stable_frames: u32,
+    focused: bool,
     phase: Phase,
     pub failed: bool,
     origin: Option<Scene>,
@@ -84,6 +85,7 @@ impl AutoFps {
             unchanged_since: now,
             last_chunks: 0,
             stable_frames: 0,
+            focused: false,
             phase: Phase::Joining,
             failed: false,
             origin: None,
@@ -121,12 +123,22 @@ impl AutoFps {
         game_dir.join(&self.benchmark_file)
     }
 
-    pub fn focus_lost(&mut self) -> bool {
+    /// Returns true only when an active measurement was interrupted.
+    pub fn focus_changed(&mut self, focused: bool, now: Instant) -> bool {
         if self.phase == Phase::Finished {
             return false;
         }
-        self.fail("focus_lost");
-        true
+        if !focused && self.phase == Phase::Running {
+            self.fail("focus_lost");
+            return true;
+        }
+        if self.focused != focused {
+            self.focused = focused;
+            self.unchanged_since = now;
+            self.last_chunks = 0;
+            self.stable_frames = 0;
+        }
+        false
     }
 
     pub fn fail(&mut self, reason: &'static str) {
@@ -158,6 +170,13 @@ impl AutoFps {
         chunks: u32,
         scene: Option<Scene>,
     ) -> Result<bool, &'static str> {
+        if !self.focused && self.phase == Phase::Stabilizing {
+            return if now.duration_since(self.since) >= STABLE_TIMEOUT {
+                Err("stability_timeout")
+            } else {
+                Ok(false)
+            };
+        }
         if self.phase == Phase::Stabilizing || self.phase == Phase::Running {
             let scene = scene.as_ref().ok_or("scene_invalid")?;
             if !scene.alive {
@@ -261,32 +280,60 @@ mod tests {
     }
 
     #[test]
-    fn focus_loss_fails_joining_and_measuring() {
+    fn startup_focus_transient_then_measurement_loss_fails() {
         let dir = crate::test_util::test_temp_dir("auto-focus");
         std::fs::create_dir_all(&dir).unwrap();
-        for measuring in [false, true] {
-            let mut run = AutoFps::new(&dir, None);
-            run.start().unwrap();
-            if measuring {
-                let t = Instant::now();
-                run.joined(t);
-                assert_eq!(
-                    run.tick(t + Duration::from_secs(1), 1, Some(scene(true))),
-                    Ok(false)
-                );
-                assert_eq!(
-                    run.tick(t + Duration::from_secs(5), 1, Some(scene(true))),
-                    Ok(true)
-                );
-            }
-            assert!(run.focus_lost());
-            assert!(!run.focus_lost());
-            let status: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(&run.path).unwrap()).unwrap();
-            assert_eq!(status["state"], "failed");
-            assert_eq!(status["reason"], "focus_lost");
-        }
+        let mut run = AutoFps::new(&dir, None);
+        run.start().unwrap();
+        let t = Instant::now();
+        assert!(!run.focus_changed(false, t)); // Maximizing before the window is ready.
+        run.joined(t);
+        assert_eq!(
+            run.tick(t + Duration::from_secs(1), 1, Some(scene(true))),
+            Ok(false)
+        );
+        assert!(!run.focus_changed(true, t + Duration::from_secs(2)));
+        assert_eq!(
+            run.tick(t + Duration::from_secs(3), 1, Some(scene(true))),
+            Ok(false)
+        );
+        assert!(!run.focus_changed(false, t + Duration::from_secs(4))); // Reset settle.
+        assert!(!run.focus_changed(true, t + Duration::from_secs(5)));
+        assert_eq!(
+            run.tick(t + Duration::from_secs(6), 1, Some(scene(true))),
+            Ok(false)
+        );
+        assert_eq!(
+            run.tick(t + Duration::from_secs(8), 1, Some(scene(true))),
+            Ok(false)
+        );
+        assert_eq!(
+            run.tick(t + Duration::from_secs(10), 1, Some(scene(true))),
+            Ok(true)
+        );
+        assert!(run.focus_changed(false, t + Duration::from_secs(11)));
+        assert!(!run.focus_changed(true, t + Duration::from_secs(12)));
+        let status: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&run.path).unwrap()).unwrap();
+        assert_eq!(status["state"], "failed");
+        assert_eq!(status["reason"], "focus_lost");
+        assert!(!run.benchmark_path(&dir).exists());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unfocused_run_times_out() {
+        let dir = crate::test_util::test_temp_dir("auto-unfocused");
+        let mut joining = AutoFps::new(&dir, None);
+        let t = Instant::now();
+        assert!(!joining.focus_changed(false, t));
+        assert_eq!(joining.tick(t + JOIN_TIMEOUT, 0, None), Err("join_timeout"));
+        let mut joined = AutoFps::new(&dir, None);
+        joined.joined(t);
+        assert_eq!(
+            joined.tick(t + STABLE_TIMEOUT, 1, Some(scene(true))),
+            Err("stability_timeout")
+        );
     }
 
     #[test]
@@ -308,6 +355,7 @@ mod tests {
         let mut run = AutoFps::new(&dir, None);
         let t = Instant::now();
         run.joined(t);
+        run.focus_changed(true, t);
         assert_eq!(
             run.tick(t + Duration::from_secs(1), 9, Some(scene(false))),
             Ok(false)
@@ -364,6 +412,7 @@ mod tests {
         ] {
             let mut run = AutoFps::new(&dir, None);
             run.joined(t);
+            run.focus_changed(true, t);
             assert_eq!(
                 run.tick(t + Duration::from_secs(1), 5, Some(scene(true))),
                 Ok(false)
@@ -391,6 +440,7 @@ mod tests {
             Err("join_timeout")
         );
         run.joined(t);
+        run.focus_changed(true, t);
         assert_eq!(
             run.tick(t + Duration::from_secs(1), 0, Some(scene(true))),
             Ok(false)
@@ -434,6 +484,7 @@ mod tests {
         success.start().unwrap();
         assert!(success.succeed(&dir).is_err());
         success.joined(t);
+        success.focus_changed(true, t);
         assert_eq!(
             success.tick(t + Duration::from_secs(1), 5, Some(scene(true))),
             Ok(false)
