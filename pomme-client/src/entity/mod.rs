@@ -1,7 +1,14 @@
 pub mod components;
+mod projectile;
 pub mod villager;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use projectile::{Flight, Frame, HORIZON, Input, Job, MAX_BATCH, THRESHOLD, Worker};
+
+static WORLD_EPOCH: AtomicU64 = AtomicU64::new(1);
+static PROJECTILE_REVISION: AtomicU64 = AtomicU64::new(1);
 
 use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_registry::builtin::EntityKind;
@@ -1169,129 +1176,54 @@ pub struct ProjectileDisplay {
     pub prev: Position,
     pub current: Position,
     pub velocity: DVec3,
-    /// Last flight vector for an arrow stopped by predicted block collision.
-    pub impact_velocity: Option<DVec3>,
     pub stopped: bool,
     pub on_ground: bool,
     pub in_ground: bool,
     pub no_gravity: bool,
-}
-
-/// Owned tick input: copy on the main thread, integrate on either thread.
-/// The sweep stores only touched block cells and parsed piston collision.
-pub struct ProjectileStepInput {
-    display: ProjectileDisplay,
-    arrow: bool,
-    gravity: f64,
+    revision: u64,
     drag: f64,
-    motion: DVec3,
-    blocks: crate::physics::collision::BlockCollisionSnapshot,
-}
-
-impl ProjectileStepInput {
-    pub fn capture(
-        chunks: &ChunkStore,
-        display: &ProjectileDisplay,
-        arrow: bool,
-    ) -> Result<Self, crate::physics::collision::SnapshotError> {
-        use crate::physics::collision::{BlockCollisionSnapshot, SnapshotError};
-        const SAFE: f64 = (i32::MAX - 32) as f64;
-        let from = *display.current;
-        if !from.is_finite()
-            || from.abs().max_element() >= SAFE
-            || !display.velocity.is_finite()
-            || display.velocity.length_squared() > 64.0
-        {
-            return Err(SnapshotError::UnsafeBounds);
-        }
-        let gravity = if display.no_gravity {
-            0.0
-        } else if arrow {
-            0.05
-        } else {
-            0.03
-        };
-        let water = fluid(chunks.get_block_state(
-            from.x.floor() as i32,
-            from.y.floor() as i32,
-            from.z.floor() as i32,
-        ))
-        .kind
-            == FluidKind::Water;
-        let drag = if water {
-            if arrow { 0.6 } else { 0.8_f32 as f64 }
-        } else if arrow {
-            0.99
-        } else {
-            0.99_f32 as f64
-        };
-        // Snowballs: gravity -> inertia -> movement; arrows: movement -> drag ->
-        // gravity.
-        let motion = if arrow {
-            display.velocity
-        } else {
-            (display.velocity - DVec3::new(0.0, gravity, 0.0)) * drag
-        };
-        let to = from + motion;
-        if !to.is_finite() || to.abs().max_element() >= SAFE || motion.length_squared() > 64.0 {
-            return Err(SnapshotError::UnsafeBounds);
-        }
-        let region = Aabb::new(
-            from.min(to) - DVec3::splat(0.001),
-            from.max(to) + DVec3::splat(0.001),
-        );
-        let blocks = BlockCollisionSnapshot::capture(chunks, region, from, to)?;
-        Ok(Self {
-            display: display.clone(),
-            arrow,
-            gravity,
-            drag,
-            motion,
-            blocks,
-        })
-    }
-
-    /// Pure fixed-tick kernel. Neither world nor entity store is read here.
-    pub fn integrate(mut self) -> ProjectileDisplay {
-        let from = *self.display.current;
-        let to = from + self.motion;
-        let hit = self
-            .blocks
-            .collect_block_aabbs()
-            .iter()
-            .filter_map(|b| b.clip_segment(from, to))
-            .min_by(f64::total_cmp);
-        if let Some(t) = hit {
-            let backoff = if self.arrow && self.motion.length_squared() > 0.0 {
-                (0.05 / self.motion.length()).min(t)
-            } else {
-                0.0
-            };
-            self.display.current = (from + self.motion * (t - backoff)).into();
-            if self.arrow {
-                self.display.stopped = true;
-                self.display.impact_velocity = Some(self.motion);
-                self.display.velocity = DVec3::ZERO;
-                return self.display;
-            }
-            // Snowballs are removed on an authoritative server hit/removal;
-            // a local collision must not permanently remove them.
-        } else {
-            self.display.current = to.into();
-        }
-        self.display.velocity = if self.arrow {
-            self.motion * self.drag - DVec3::new(0.0, self.gravity, 0.0)
-        } else {
-            self.motion
-        };
-        self.display
-    }
+    medium_tick: u64,
+    frames: Option<Flight>,
+    next: Option<Flight>,
 }
 
 impl ProjectileDisplay {
+    fn invalidate(&mut self) {
+        self.revision = PROJECTILE_REVISION.fetch_add(1, Ordering::Relaxed);
+        self.frames = None;
+        self.next = None;
+        self.medium_tick = 0;
+    }
+
     pub fn position(&self, partial_tick: f32) -> Position {
         self.prev
             .lerp(self.current, f64::from(partial_tick.clamp(0.0, 1.0)))
+    }
+}
+
+/// Sample available medium at flight start / prefetch. Crossing water inside
+/// a 64-tick flight retains the earlier drag (display-only approximation).
+/// A visible wall ghost until the server impact packet is deliberate; if
+/// observed often, upgrade to a collision-worker snapshot, not a block scan
+/// here.
+fn projectile_drag(chunks: &ChunkStore, pos: Position, arrow: bool) -> f64 {
+    let water = pos.is_finite()
+        && pos.abs().max_element() < (i32::MAX - 32) as f64
+        && fluid(chunks.get_block_state(
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        ))
+        .kind
+            == FluidKind::Water;
+    if water {
+        if arrow {
+            0.6_f32 as f64
+        } else {
+            0.8_f32 as f64
+        }
+    } else {
+        0.99_f32 as f64
     }
 }
 
@@ -1335,6 +1267,9 @@ pub struct EntityStore {
     /// nonliving vehicles.
     pub vehicles: HashMap<i32, VehicleState>,
     pub vehicle_of: HashMap<i32, i32>,
+    tick: u64,
+    epoch: u64,
+    worker: Option<Worker>,
 }
 
 impl EntityStore {
@@ -1343,6 +1278,9 @@ impl EntityStore {
             living: HashMap::new(),
             vehicles: HashMap::new(),
             vehicle_of: HashMap::new(),
+            tick: 0,
+            epoch: WORLD_EPOCH.fetch_add(1, Ordering::Relaxed),
+            worker: None,
         }
     }
 
@@ -1446,7 +1384,7 @@ impl EntityStore {
             display.prev = position;
             display.current = position;
             display.velocity = velocity;
-            display.impact_velocity = None;
+            display.invalidate();
             display.stopped = display.in_ground || display.on_ground;
         }
     }
@@ -1458,14 +1396,13 @@ impl EntityStore {
             vehicle.velocity = velocity;
             if let Some(display) = &mut vehicle.projectile {
                 display.velocity = velocity;
+                display.invalidate();
                 if velocity.length_squared() > 1.0e-8 {
-                    display.impact_velocity = None;
                     display.on_ground = false;
                     // AbstractArrow releases inGround on a new nonzero motion.
                     display.in_ground = false;
                 }
-                display.stopped =
-                    display.in_ground || display.on_ground || display.impact_velocity.is_some();
+                display.stopped = display.in_ground || display.on_ground;
             }
         }
     }
@@ -1481,8 +1418,12 @@ impl EntityStore {
                 prev: vehicle.position,
                 current: vehicle.position,
                 velocity: vehicle.velocity,
-                impact_velocity: None,
                 stopped: false,
+                revision: PROJECTILE_REVISION.fetch_add(1, Ordering::Relaxed),
+                drag: 0.99_f32 as f64,
+                medium_tick: 0,
+                frames: None,
+                next: None,
                 on_ground: false,
                 in_ground: false,
                 no_gravity: false,
@@ -1490,11 +1431,54 @@ impl EntityStore {
         }
     }
 
-    /// Client-world tick (20 Hz), independent of render FPS; packet transforms
-    /// stay untouched. ponytail: block-only collision; entity hits and
-    /// fluid effects need full world/entity physics.
+    /// Fixed 20 Hz world tick. Absolute frame indexes prevent lost ticks even
+    /// when a worker result arrives late; a miss runs the same cheap pure step.
     pub fn tick_projectile_displays(&mut self, chunks: &ChunkStore) {
-        for vehicle in self.vehicles.values_mut() {
+        self.tick = self.tick.wrapping_add(1);
+        let tick = self.tick;
+        if let Some(worker) = &mut self.worker {
+            match worker.poll() {
+                Ok(Some(result)) if result.epoch == self.epoch => {
+                    for flight in result.flights {
+                        if let Some(display) = self
+                            .vehicles
+                            .get_mut(&flight.id)
+                            .and_then(|v| v.projectile.as_mut())
+                            && display.revision == flight.revision
+                            && !display.stopped
+                            && tick <= flight.start + HORIZON as u64
+                            // A late result is valid only when its predicted pose
+                            // still joins the locally simulated pose exactly.
+                            && (flight.start >= tick
+                                || (flight.frames[(tick - flight.start - 1) as usize].position
+                                    == display.current
+                                    && flight.frames[(tick - flight.start - 1) as usize].velocity
+                                        == display.velocity))
+                        {
+                            if flight.start < tick {
+                                display.drag = flight.drag;
+                                display.medium_tick = tick;
+                                display.frames = Some(flight);
+                            } else {
+                                display.next = Some(flight);
+                            }
+                        }
+                    }
+                }
+                Err(_) => self.worker = None,
+                _ => {}
+            }
+        }
+        let active = self
+            .vehicles
+            .values()
+            .filter(|v| v.projectile.as_ref().is_some_and(|p| !p.stopped))
+            .count();
+        if active >= THRESHOLD && self.worker.is_none() {
+            self.worker = Worker::new();
+        }
+        let mut inputs = Vec::new();
+        for (&id, vehicle) in &mut self.vehicles {
             let Some(display) = &mut vehicle.projectile else {
                 continue;
             };
@@ -1506,13 +1490,102 @@ impl EntityStore {
                 vehicle.kind,
                 Some(EntityKind::Arrow | EntityKind::SpectralArrow)
             );
-            match ProjectileStepInput::capture(chunks, display, arrow) {
-                Ok(input) => *display = input.integrate(),
-                Err(crate::physics::collision::SnapshotError::MissingChunk) => {}
-                Err(crate::physics::collision::SnapshotError::UnsafeBounds) => {
-                    display.stopped = true
+            if let Some(next) = display.next.take() {
+                if next.start < tick
+                    && next.start + HORIZON as u64 >= tick
+                    && next.frames[0].position == display.current
+                    && next.frames[0].velocity == display.velocity
+                {
+                    display.drag = next.drag;
+                    display.medium_tick = tick;
+                    display.frames = Some(next);
+                } else if next.start >= tick {
+                    display.next = Some(next);
                 }
+                // Otherwise a packet, changed medium, or late worker result
+                // invalidated the join; continue from the current pose.
             }
+            // Re-sample only at the start of a horizon, not per block crossed.
+            if display.medium_tick == 0 || tick >= display.medium_tick + HORIZON as u64 {
+                display.drag = projectile_drag(chunks, display.current, arrow);
+                display.medium_tick = tick;
+            }
+            let cached = display
+                .frames
+                .as_ref()
+                .is_some_and(|f| f.start < tick && tick <= f.start + HORIZON as u64);
+            if cached {
+                let f = display.frames.as_ref().unwrap();
+                let frame = f.frames[(tick - f.start) as usize];
+                display.current = frame.position;
+                display.velocity = frame.velocity;
+            } else {
+                let frame = projectile::step(
+                    Frame {
+                        position: display.current,
+                        velocity: display.velocity,
+                    },
+                    arrow,
+                    display.no_gravity,
+                    display.drag,
+                );
+                if frame.position.is_finite() && frame.velocity.is_finite() {
+                    display.current = frame.position;
+                    display.velocity = frame.velocity;
+                } else {
+                    display.prev = display.current;
+                } // hold, never permanently ground
+            }
+            // Refill before expiration. While pending, continue from the last
+            // pose, never overwrite it with a stale worker origin.
+            if active >= THRESHOLD
+                && display.current.is_finite()
+                && display.velocity.is_finite()
+                && inputs.len() < MAX_BATCH
+                && display.next.is_none()
+                && display
+                    .frames
+                    .as_ref()
+                    .is_none_or(|f| tick + 16 >= f.start + HORIZON as u64)
+            {
+                let (start, source) = match &display.frames {
+                    Some(f) if tick < f.start + HORIZON as u64 => {
+                        (f.start + HORIZON as u64, f.frames[HORIZON])
+                    }
+                    _ => (
+                        tick,
+                        Frame {
+                            position: display.current,
+                            velocity: display.velocity,
+                        },
+                    ),
+                };
+                inputs.push(Input {
+                    id,
+                    revision: display.revision,
+                    start,
+                    source,
+                    arrow,
+                    no_gravity: display.no_gravity,
+                    // Use the latest available medium for the future horizon;
+                    // it may differ from the medium at its exact start tick.
+                    drag: if start > tick {
+                        projectile_drag(chunks, display.current, arrow)
+                    } else {
+                        display.drag
+                    },
+                });
+            }
+        }
+        if let Some(worker) = &mut self.worker
+            && !worker.in_flight
+            && !inputs.is_empty()
+            && !worker.submit(Job {
+                epoch: self.epoch,
+                inputs,
+            })
+        {
+            self.worker = None; // disconnected -> identical synchronous math
         }
     }
 
@@ -1520,13 +1593,12 @@ impl EntityStore {
         if let Some(vehicle) = self.vehicles.get_mut(&id)
             && let Some(display) = &mut vehicle.projectile
         {
+            display.invalidate();
             display.on_ground = on_ground;
             display.stopped = display.in_ground || on_ground;
             if display.stopped {
                 display.prev = vehicle.position;
                 display.current = vehicle.position;
-            } else {
-                display.impact_velocity = None;
             }
         }
     }
@@ -1540,6 +1612,9 @@ impl EntityStore {
             && let Some(display) = &mut vehicle.projectile
         {
             if let (5, MetaValue::Bool(no_gravity)) = (index, value) {
+                if display.no_gravity != no_gravity {
+                    display.invalidate();
+                }
                 display.no_gravity = no_gravity;
             }
             // AbstractArrow inGround index 10 is a Boolean in 26.1 and 26.2.
@@ -1549,13 +1624,12 @@ impl EntityStore {
             ) && matches!(protocol, 775 | 776)
                 && let (10, MetaValue::Bool(in_ground)) = (index, value)
             {
+                display.invalidate();
                 display.in_ground = in_ground;
                 display.stopped = in_ground || display.on_ground;
                 if in_ground {
                     display.prev = vehicle.position;
                     display.current = vehicle.position;
-                } else if !display.stopped {
-                    display.impact_velocity = None;
                 }
             }
         }
@@ -2329,23 +2403,446 @@ mod tests {
         store.tick_projectile_displays(&chunks);
         for vehicle in store.vehicles.values() {
             let display = vehicle.projectile.as_ref().unwrap();
-            assert!((display.current.x - 3.99).abs() < 1e-12);
+            assert!((display.current.x - (3.0 + 0.99_f32 as f64)).abs() < 1e-12);
             assert_eq!(display.prev.x, 3.0);
             assert!(display.position(0.9).x > display.position(0.1).x);
         }
     }
 
     #[test]
-    fn owned_fixed_tick_matches_sync_and_is_frozen_after_world_edit() {
-        fn assert_send<T: Send + 'static>() {}
-        assert_send::<ProjectileStepInput>();
+    fn held_worker_never_loses_ticks_or_rewinds_interpolation() {
+        crate::world::block::init("26.2");
+        let chunks = ChunkStore::new(1);
+        let mut store = EntityStore::new();
+        for id in 0..THRESHOLD as i32 {
+            store.set_vehicle_spawn_transform(
+                id,
+                Position::new(2.0, 70.0, 2.0),
+                DVec3::X,
+                LookDirection::default(),
+            );
+            store.set_vehicle_kind(id, EntityKind::Arrow);
+        }
+        let (worker, _jobs, results) = Worker::held();
+        store.worker = Some(worker);
+        store.tick_projectile_displays(&chunks);
+        let source = store.vehicles[&0].projectile.as_ref().unwrap();
+        let flight = projectile::flight(Input {
+            id: 0,
+            revision: source.revision,
+            start: store.tick,
+            source: Frame {
+                position: source.current,
+                velocity: source.velocity,
+            },
+            arrow: true,
+            no_gravity: false,
+            drag: source.drag,
+        });
+        store.tick_projectile_displays(&chunks);
+        let p = store.vehicles[&0].projectile.as_ref().unwrap();
+        assert!((p.current.x - (3.0 + 0.99_f32 as f64)).abs() < 1e-12);
+        assert_eq!(p.prev.x, 3.0);
+        assert!(p.position(0.1).x > 3.0);
+        assert!(p.position(0.9).x > p.position(0.1).x);
+        let mut before = p.position(0.9).x;
+        for _ in 0..2 {
+            store.tick_projectile_displays(&chunks);
+            let p = store.vehicles[&0].projectile.as_ref().unwrap();
+            assert!(p.position(0.1).x > before, "0.9 -> 0.1 must not rewind");
+            before = p.position(0.9).x;
+        }
+        results
+            .send(projectile::Result {
+                epoch: store.epoch,
+                flights: vec![flight],
+            })
+            .unwrap();
+        store.tick_projectile_displays(&chunks);
+        assert!(
+            store.vehicles[&0]
+                .projectile
+                .as_ref()
+                .unwrap()
+                .frames
+                .is_some()
+        );
+        assert!(
+            store.vehicles[&0]
+                .projectile
+                .as_ref()
+                .unwrap()
+                .position(0.1)
+                .x
+                > before
+        );
+    }
+
+    #[test]
+    fn sync_and_worker_match_for_all_three_kinds_across_two_horizons() {
+        crate::world::block::init("26.2");
+        let chunks = ChunkStore::new(1);
+        let mut async_store = EntityStore::new();
+        let mut sync_store = EntityStore::new();
+        for store in [&mut async_store, &mut sync_store] {
+            for id in 0..16 {
+                store.set_vehicle_spawn_transform(
+                    id,
+                    Position::new(2.0, 70.0, 2.0),
+                    DVec3::new(1.0, 0.2, 0.0),
+                    LookDirection::default(),
+                );
+                store.set_vehicle_kind(
+                    id,
+                    match id % 3 {
+                        0 => EntityKind::Arrow,
+                        1 => EntityKind::SpectralArrow,
+                        _ => EntityKind::Snowball,
+                    },
+                );
+            }
+        }
+        // Suppress spawning in the reference store without altering its math.
+        let (mut sync_worker, _jobs, _results) = Worker::held();
+        sync_worker.in_flight = true;
+        sync_store.worker = Some(sync_worker);
+        let (mut worker, jobs, results) = Worker::held();
+        worker.in_flight = false;
+        async_store.worker = Some(worker);
+        for tick in 1..=140 {
+            async_store.tick_projectile_displays(&chunks);
+            sync_store.tick_projectile_displays(&chunks);
+            for id in 0..16 {
+                let actual = async_store.vehicles[&id].projectile.as_ref().unwrap();
+                let expected = sync_store.vehicles[&id].projectile.as_ref().unwrap();
+                assert_eq!(
+                    (actual.prev, actual.current, actual.velocity),
+                    (expected.prev, expected.current, expected.velocity),
+                    "entity {id} tick {tick}"
+                );
+            }
+            if let Ok(job) = jobs.try_recv() {
+                results
+                    .send(projectile::Result {
+                        epoch: async_store.epoch,
+                        flights: job.inputs.into_iter().map(projectile::flight).collect(),
+                    })
+                    .unwrap();
+            }
+        }
+        assert!(
+            async_store
+                .vehicles
+                .values()
+                .any(|v| v.projectile.as_ref().unwrap().frames.is_some())
+        );
+    }
+
+    #[test]
+    fn late_worker_and_misordered_packet_cannot_snap_to_an_old_path() {
         crate::world::block::init("26.2");
         let mut chunks = ChunkStore::new(1);
-        chunks.partial_storage.set(
-            &ChunkPos::new(0, 0),
-            Some(azalea_world::chunk::Chunk::default()),
-            &mut chunks.chunk_storage,
+        chunks.load_decoded_chunk(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
+        let mut store = EntityStore::new();
+        for id in 0..16 {
+            store.set_vehicle_spawn_transform(
+                id,
+                Position::new(2.0, 70.0, 2.0),
+                DVec3::X,
+                LookDirection::default(),
+            );
+            store.set_vehicle_kind(id, EntityKind::Arrow);
+        }
+        let (mut worker, jobs, results) = Worker::held();
+        worker.in_flight = false;
+        store.worker = Some(worker);
+        store.tick_projectile_displays(&chunks);
+        let first = jobs.try_recv().unwrap();
+        assert_eq!(first.inputs.len(), 16);
+        // A water update while the job is held changes the synchronous path.
+        chunks.set_block_state(
+            3,
+            70,
+            2,
+            crate::world::block::first_state_of("water").unwrap(),
         );
+        store
+            .vehicles
+            .get_mut(&0)
+            .unwrap()
+            .projectile
+            .as_mut()
+            .unwrap()
+            .medium_tick = 0;
+        for _ in 0..3 {
+            store.tick_projectile_displays(&chunks);
+        }
+        let before = store.vehicles[&0]
+            .projectile
+            .as_ref()
+            .unwrap()
+            .position(0.9)
+            .x;
+        results
+            .send(projectile::Result {
+                epoch: store.epoch,
+                flights: first.inputs.into_iter().map(projectile::flight).collect(),
+            })
+            .unwrap();
+        store.tick_projectile_displays(&chunks);
+        let p = store.vehicles[&0].projectile.as_ref().unwrap();
+        assert!(p.frames.is_none(), "changed drag must reject a late flight");
+        assert!(p.position(0.1).x > before);
+        assert_eq!(
+            store.vehicles[&1]
+                .projectile
+                .as_ref()
+                .unwrap()
+                .frames
+                .as_ref()
+                .unwrap()
+                .start,
+            1
+        );
+
+        // A packet correction invalidates even a future trajectory from the same id.
+        let stale = projectile::flight(Input {
+            id: 0,
+            revision: p.revision,
+            start: store.tick + 1,
+            source: Frame {
+                position: p.current,
+                velocity: p.velocity,
+            },
+            arrow: true,
+            no_gravity: false,
+            drag: p.drag,
+        });
+        let previous = p.current.x;
+        store.set_vehicle_motion(0, DVec3::new(2.0, 0.0, 0.0));
+        results
+            .send(projectile::Result {
+                epoch: store.epoch,
+                flights: vec![stale],
+            })
+            .unwrap();
+        store.tick_projectile_displays(&chunks);
+        assert!(
+            store.vehicles[&0]
+                .projectile
+                .as_ref()
+                .unwrap()
+                .next
+                .is_none()
+        );
+        assert!(store.vehicles[&0].projectile.as_ref().unwrap().current.x > previous);
+    }
+
+    #[test]
+    fn stale_correction_remove_reuse_world_epoch_and_landing_are_authoritative() {
+        crate::world::block::init("26.2");
+        let chunks = ChunkStore::new(1);
+        let mut store = projectile(EntityKind::Arrow, Position::new(2.0, 70.0, 2.0), DVec3::X);
+        store.tick_projectile_displays(&chunks);
+        let p = store.vehicles[&1].projectile.as_ref().unwrap();
+        let stale = projectile::flight(Input {
+            id: 1,
+            revision: p.revision,
+            start: store.tick,
+            source: Frame {
+                position: Position::new(999.0, 70.0, 2.0),
+                velocity: DVec3::X,
+            },
+            arrow: true,
+            no_gravity: false,
+            drag: 0.99_f32 as f64,
+        });
+        let (worker, _jobs, results) = Worker::held();
+        store.worker = Some(worker);
+        store.set_vehicle_transform(1, Position::new(10.0, 70.0, 2.0), DVec3::X);
+        results
+            .send(projectile::Result {
+                epoch: store.epoch,
+                flights: vec![stale.clone()],
+            })
+            .unwrap();
+        store.tick_projectile_displays(&chunks);
+        assert_eq!(
+            store.vehicles[&1].projectile.as_ref().unwrap().current.x,
+            11.0
+        );
+        store.remove_entity(1);
+        store.set_vehicle_spawn_transform(
+            1,
+            Position::new(20.0, 70.0, 2.0),
+            DVec3::X,
+            LookDirection::default(),
+        );
+        store.set_vehicle_kind(1, EntityKind::Arrow);
+        let (worker, _jobs, results) = Worker::held();
+        store.worker = Some(worker);
+        results
+            .send(projectile::Result {
+                epoch: store.epoch,
+                flights: vec![stale.clone()],
+            })
+            .unwrap();
+        store.tick_projectile_displays(&chunks);
+        assert_eq!(
+            store.vehicles[&1].projectile.as_ref().unwrap().current.x,
+            21.0
+        );
+        store.set_projectile_metadata_at(1, 10, MetaValue::Bool(true), 776);
+        store.tick_projectile_displays(&chunks);
+        assert!(store.vehicles[&1].projectile.as_ref().unwrap().stopped);
+        assert_eq!(
+            store.vehicles[&1].projectile.as_ref().unwrap().current.x,
+            20.0
+        );
+        let mut world = projectile(EntityKind::Arrow, Position::new(5.0, 70.0, 2.0), DVec3::X);
+        assert_ne!(world.epoch, store.epoch);
+        let (worker, _jobs, results) = Worker::held();
+        world.worker = Some(worker);
+        results
+            .send(projectile::Result {
+                epoch: store.epoch,
+                flights: vec![stale],
+            })
+            .unwrap();
+        world.tick_projectile_displays(&chunks);
+        assert_eq!(
+            world.vehicles[&1].projectile.as_ref().unwrap().current.x,
+            6.0
+        );
+    }
+
+    #[test]
+    fn threshold_horizon_and_bounded_batch() {
+        crate::world::block::init("26.2");
+        let chunks = ChunkStore::new(1);
+        let mut store = EntityStore::new();
+        for id in 0..(MAX_BATCH + 1) as i32 {
+            store.set_vehicle_spawn_transform(
+                id,
+                Position::new(2.0, 70.0, 2.0),
+                DVec3::X,
+                LookDirection::default(),
+            );
+            store.set_vehicle_kind(id, EntityKind::Arrow);
+        }
+        let (mut worker, jobs, _results) = Worker::held();
+        worker.in_flight = false;
+        store.worker = Some(worker);
+        store.tick_projectile_displays(&chunks);
+        let job = jobs.try_recv().unwrap();
+        assert_eq!(job.inputs.len(), MAX_BATCH);
+        assert_eq!(job.epoch, store.epoch);
+        for _ in 1..140 {
+            store.tick_projectile_displays(&chunks);
+        }
+        assert!(
+            store
+                .vehicles
+                .values()
+                .all(|v| v.projectile.as_ref().unwrap().current.x > 60.0)
+        );
+        assert!(jobs.try_recv().is_err(), "only one in-flight job");
+        let mut fifteen = EntityStore::new();
+        for id in 0..15 {
+            fifteen.set_vehicle_spawn_transform(
+                id,
+                Position::new(2.0, 70.0, 2.0),
+                DVec3::X,
+                LookDirection::default(),
+            );
+            fifteen.set_vehicle_kind(id, EntityKind::Arrow);
+        }
+        fifteen.tick_projectile_displays(&chunks);
+        assert!(fifteen.worker.is_none());
+        fifteen.set_vehicle_spawn_transform(
+            15,
+            Position::new(2.0, 70.0, 2.0),
+            DVec3::X,
+            LookDirection::default(),
+        );
+        fifteen.set_vehicle_kind(15, EntityKind::Arrow);
+        fifteen.tick_projectile_displays(&chunks);
+        assert!(
+            (fifteen.vehicles[&0].projectile.as_ref().unwrap().current.x - (3.0 + 0.99_f32 as f64))
+                .abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn early_refill_keeps_absolute_ticks_across_horizon() {
+        crate::world::block::init("26.2");
+        let chunks = ChunkStore::new(1);
+        let mut store = EntityStore::new();
+        for id in 0..16 {
+            store.set_vehicle_spawn_transform(
+                id,
+                Position::new(2.0, 70.0, 2.0),
+                DVec3::X,
+                LookDirection::default(),
+            );
+            store.set_vehicle_kind(id, EntityKind::Arrow);
+        }
+        let (mut worker, jobs, results) = Worker::held();
+        worker.in_flight = false;
+        store.worker = Some(worker);
+        store.tick_projectile_displays(&chunks);
+        let initial = jobs.try_recv().unwrap();
+        results
+            .send(projectile::Result {
+                epoch: store.epoch,
+                flights: initial.inputs.into_iter().map(projectile::flight).collect(),
+            })
+            .unwrap();
+        for _ in 2..=49 {
+            store.tick_projectile_displays(&chunks);
+        }
+        let refill = jobs.try_recv().unwrap();
+        assert_eq!(refill.inputs.len(), 16);
+        assert!(refill.inputs.iter().all(|f| f.start == 65));
+        results
+            .send(projectile::Result {
+                epoch: store.epoch,
+                flights: refill.inputs.into_iter().map(projectile::flight).collect(),
+            })
+            .unwrap();
+        store.tick_projectile_displays(&chunks);
+        assert!(
+            store.vehicles[&0]
+                .projectile
+                .as_ref()
+                .unwrap()
+                .next
+                .is_some()
+        );
+        let mut previous = store.vehicles[&0]
+            .projectile
+            .as_ref()
+            .unwrap()
+            .position(0.9)
+            .x;
+        for _ in 51..=130 {
+            store.tick_projectile_displays(&chunks);
+            let p = store.vehicles[&0].projectile.as_ref().unwrap();
+            assert!(
+                p.position(0.1).x > previous,
+                "backwards at tick {}",
+                store.tick
+            );
+            previous = p.position(0.9).x;
+        }
+    }
+
+    #[test]
+    fn water_sample_is_display_only_and_crossing_geometry_never_hides_arrow() {
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        chunks.load_decoded_chunk(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
         chunks.set_block_state(
             2,
             70,
@@ -2358,72 +2855,37 @@ mod tests {
             2,
             crate::world::block::first_state_of("stone").unwrap(),
         );
-        let mut store = projectile(EntityKind::Arrow, Position::new(2.0, 70.5, 2.5), DVec3::X);
-        let mut before = store.vehicles[&1].projectile.as_ref().unwrap().clone();
-        before.prev = before.current;
-        let input = ProjectileStepInput::capture(&chunks, &before, true).unwrap();
-        let snowball = projectile(
+        let mut arrow = projectile(
+            EntityKind::SpectralArrow,
+            Position::new(2.0, 70.5, 2.5),
+            DVec3::X,
+        );
+        arrow.tick_projectile_displays(&chunks);
+        arrow.tick_projectile_displays(&chunks);
+        assert_eq!(
+            arrow.vehicles[&1].projectile.as_ref().unwrap().current.x,
+            3.0 + 0.6_f32 as f64
+        );
+        assert!(!arrow.vehicles[&1].projectile.as_ref().unwrap().stopped);
+        assert_eq!(arrow.vehicles[&1].position.x, 2.0);
+        let mut snow = projectile(
             EntityKind::Snowball,
             Position::new(2.0, 70.5, 2.5),
             DVec3::X,
         );
-        let water_input = ProjectileStepInput::capture(
-            &chunks,
-            snowball.vehicles[&1].projectile.as_ref().unwrap(),
-            false,
-        )
-        .unwrap();
-        store.tick_projectile_displays(&chunks);
-        let expected = store.vehicles[&1].projectile.as_ref().unwrap();
-        assert!(expected.stopped);
-        assert!((expected.current.x - 2.95).abs() < 1e-12);
-        chunks.set_block_state(3, 70, 2, azalea_block::BlockState::AIR);
-        chunks.set_block_state(2, 70, 2, azalea_block::BlockState::AIR);
-        chunks.unload_chunk(&ChunkPos::new(0, 0));
-        let snowball_result = water_input.integrate();
-        assert!((snowball_result.current.x - (2.0 + 0.8_f32 as f64)).abs() < 1e-12);
-        assert!((snowball_result.velocity.x - 0.8_f32 as f64).abs() < 1e-12);
-        let result = input.integrate();
-        assert_eq!(result.current, expected.current);
-        assert_eq!(result.prev, expected.prev);
-        assert_eq!(result.velocity, expected.velocity);
-        assert_eq!(result.impact_velocity, expected.impact_velocity);
-        assert_eq!(store.vehicles[&1].position, Position::new(2.0, 70.5, 2.5));
-    }
-
-    #[test]
-    fn huge_projectile_coordinates_and_velocities_do_not_scan_or_panic() {
-        crate::world::block::init("26.2");
-        let mut chunks = ChunkStore::new(1);
-        let _loaded = chunks
-            .chunk_storage
-            .upsert(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
-        for (position, velocity) in [
-            (
-                Position::new(2_147_483_648.0, 0.0, 2_147_483_648.0),
-                DVec3::X,
-            ),
-            (
-                Position::new(0.0, 70.0, 0.0),
-                DVec3::new(4_294_967_296.0, 0.0, 0.0),
-            ),
-            (Position::new(0.0, 70.0, 0.0), DVec3::splat(8.0)),
-            (Position::new(f64::NAN, 70.0, 0.0), DVec3::X),
-        ] {
-            let mut store = projectile(EntityKind::Arrow, position, velocity);
-            store.tick_projectile_displays(&chunks);
-            assert!(store.vehicles[&1].projectile.as_ref().unwrap().stopped);
-        }
-        // Within the projectile's i32 guard, but y - min_y used to overflow
-        // in the shared loaded-column block lookup before bounds checking.
-        let mut store = projectile(
-            EntityKind::Arrow,
-            Position::new(2.0, 2_147_483_600.0, 2.0),
-            DVec3::X,
+        snow.tick_projectile_displays(&chunks);
+        assert!(
+            (snow.vehicles[&1].projectile.as_ref().unwrap().velocity.x - 0.8_f32 as f64).abs()
+                < 1e-12
         );
-        store.tick_projectile_displays(&chunks);
-        let display = store.vehicles[&1].projectile.as_ref().unwrap();
-        assert_eq!(display.current.x, 3.0);
+        assert!(snow.remove_impacted_snowball(1));
+        assert!(!snow.vehicles.contains_key(&1));
+        arrow.set_projectile_grounded(1, true);
+        arrow.tick_projectile_displays(&chunks);
+        assert_eq!(
+            arrow.vehicles[&1].projectile.as_ref().unwrap().current.x,
+            2.0
+        );
     }
 
     #[test]
@@ -2495,114 +2957,6 @@ mod tests {
         let p = store.vehicles[&1].projectile.as_ref().unwrap();
         assert!((p.current.x - (11.466175068104723 + p.velocity.x)).abs() < 1e-10);
         assert_eq!(store.vehicles[&1].position, Position::new(2.0, 70.0, 2.0));
-    }
-
-    #[test]
-    fn arrow_keeps_flying_after_twenty_ticks_and_holds_at_unknown_chunks() {
-        crate::world::block::init("26.2");
-        let mut chunks = ChunkStore::new(1);
-        let _first = chunks
-            .chunk_storage
-            .upsert(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
-        let _second = chunks
-            .chunk_storage
-            .upsert(ChunkPos::new(1, 0), azalea_world::chunk::Chunk::default());
-        let mut store = projectile(EntityKind::Arrow, Position::new(2.0, 70.0, 2.0), DVec3::X);
-        store.set_projectile_metadata(1, 5, MetaValue::Bool(true));
-        for _ in 0..20 {
-            store.tick_projectile_displays(&chunks);
-        }
-        let at_twenty = store.vehicles[&1].projectile.as_ref().unwrap().current;
-        store.tick_projectile_displays(&chunks);
-        assert!(store.vehicles[&1].projectile.as_ref().unwrap().current.x > at_twenty.x);
-        for _ in 0..19 {
-            store.tick_projectile_displays(&chunks);
-        }
-        let held = store.vehicles[&1].projectile.as_ref().unwrap().current;
-        let held_velocity = store.vehicles[&1].projectile.as_ref().unwrap().velocity;
-        assert!(held.x > 20.0 && held.x < 32.0);
-        assert!(!store.vehicles[&1].projectile.as_ref().unwrap().stopped);
-        let _next = chunks
-            .chunk_storage
-            .upsert(ChunkPos::new(2, 0), azalea_world::chunk::Chunk::default());
-        store.tick_projectile_displays(&chunks);
-        let p = store.vehicles[&1].projectile.as_ref().unwrap();
-        assert!((p.current.x - (held.x + held_velocity.x)).abs() < 1e-12);
-        assert_eq!(p.prev, held);
-        assert_eq!(store.vehicles[&1].position, Position::new(2.0, 70.0, 2.0));
-
-        // Default-gravity arrow: position uses the pre-drag velocity even
-        // after the old prediction limit, then drag and gravity update it.
-        let mut gravity = projectile(EntityKind::Arrow, Position::new(2.0, 70.0, 2.0), DVec3::X);
-        for _ in 0..20 {
-            gravity.tick_projectile_displays(&chunks);
-        }
-        let before = gravity.vehicles[&1].projectile.as_ref().unwrap().clone();
-        gravity.tick_projectile_displays(&chunks);
-        let after = gravity.vehicles[&1].projectile.as_ref().unwrap();
-        assert_eq!(*after.current, *before.current + before.velocity);
-        assert_eq!(
-            after.velocity,
-            before.velocity * 0.99 - DVec3::new(0.0, 0.05, 0.0)
-        );
-    }
-
-    #[test]
-    fn arrow_block_hit_backs_out_and_motion_correction_releases_it() {
-        crate::world::block::init("26.2");
-        let mut chunks = ChunkStore::new(1);
-        let _loaded = chunks
-            .chunk_storage
-            .upsert(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
-        chunks.set_block_state(
-            3,
-            70,
-            2,
-            crate::world::block::first_state_of("stone").unwrap(),
-        );
-        let mut store = projectile(EntityKind::Arrow, Position::new(2.0, 70.5, 2.0), DVec3::X);
-        store.tick_projectile_displays(&chunks);
-        let p = store.vehicles[&1].projectile.as_ref().unwrap();
-        assert!(p.stopped);
-        assert!((p.current.x - 2.95).abs() < 1e-12);
-        store.set_vehicle_motion(1, DVec3::new(-1.0, 0.0, 0.0));
-        assert!(!store.vehicles[&1].projectile.as_ref().unwrap().stopped);
-        store.tick_projectile_displays(&chunks);
-        assert!(store.vehicles[&1].projectile.as_ref().unwrap().current.x < 2.0);
-        assert_eq!(store.vehicles[&1].position.x, 2.0);
-    }
-
-    #[test]
-    fn snowball_collision_uses_post_inertia_segment() {
-        crate::world::block::init("26.2");
-        let mut chunks = ChunkStore::new(1);
-        let _loaded = chunks
-            .chunk_storage
-            .upsert(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
-        chunks.set_block_state(
-            2,
-            70,
-            2,
-            crate::world::block::first_state_of("stone").unwrap(),
-        );
-        let mut store = projectile(
-            EntityKind::Snowball,
-            Position::new(1.0, 70.5, 2.0),
-            DVec3::X,
-        );
-        store.tick_projectile_displays(&chunks);
-        let p = store.vehicles[&1].projectile.as_ref().unwrap();
-        assert!(!p.stopped, "first tick ends before the stone at x=2");
-        assert!((p.current.x - 1.9900000095367432).abs() < 1e-12);
-        store.tick_projectile_displays(&chunks);
-        let p = store.vehicles[&1].projectile.as_ref().unwrap();
-        assert!(!p.stopped);
-        assert_eq!(p.current.x, 2.0);
-        store.tick_projectile_displays(&chunks);
-        assert_eq!(
-            store.vehicles[&1].projectile.as_ref().unwrap().current.x,
-            2.0
-        );
     }
 
     #[test]

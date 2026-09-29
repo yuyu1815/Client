@@ -5130,11 +5130,7 @@ fn arrow_render_infos(
                 .as_ref()
                 .map_or(entity.position, |p| p.position(partial_tick));
             let velocity = entity.projectile.as_ref().map_or(entity.velocity, |p| {
-                if p.stopped {
-                    p.impact_velocity.unwrap_or(DVec3::ZERO)
-                } else {
-                    p.velocity
-                }
+                if p.stopped { DVec3::ZERO } else { p.velocity }
             });
             let (yaw, pitch) = if velocity.length_squared() > 1.0e-8 {
                 (
@@ -6645,72 +6641,6 @@ mod tests {
     }
 
     #[test]
-    fn projectile_visual_tick_stops_at_terrain_and_unknown_chunks() {
-        use azalea_registry::builtin::EntityKind;
-        use glam::DVec3;
-
-        use crate::entity::EntityStore;
-        use crate::entity::components::{LookDirection, Position};
-        crate::world::block::init("26.2");
-        let mut chunks = crate::world::chunk::ChunkStore::new(1);
-        let mut store = EntityStore::new();
-        store.set_vehicle_spawn_transform(
-            4,
-            Position::new(2.0, 70.5, 2.0),
-            DVec3::new(2.0, 0.0, 0.0),
-            LookDirection::new(0.0, 0.0),
-        );
-        store.set_vehicle_kind(4, EntityKind::Snowball);
-        store.tick_projectile_displays(&chunks);
-        assert_eq!(
-            store.vehicles[&4].projectile.as_ref().unwrap().current,
-            store.vehicles[&4].position
-        );
-        let _chunk = chunks.chunk_storage.upsert(
-            azalea_core::position::ChunkPos::new(0, 0),
-            azalea_world::chunk::Chunk::default(),
-        );
-        chunks.set_block_state(
-            3,
-            70,
-            2,
-            crate::world::block::first_state_of("stone").unwrap(),
-        );
-        store.tick_projectile_displays(&chunks);
-        let projectile = store.vehicles[&4].projectile.as_ref().unwrap();
-        assert!(!projectile.stopped);
-        assert_eq!(projectile.current.x, 3.0);
-        store.tick_projectile_displays(&chunks);
-        assert_eq!(
-            store.vehicles[&4].projectile.as_ref().unwrap().current.x,
-            3.0
-        );
-        store.set_vehicle_transform(4, Position::new(5.0, 70.0, 2.0), DVec3::ZERO);
-        assert!(!store.vehicles[&4].projectile.as_ref().unwrap().stopped);
-        store.set_projectile_grounded(4, true);
-        assert!(store.vehicles[&4].projectile.as_ref().unwrap().stopped);
-        store.set_vehicle_transform(4, Position::new(5.0, 70.0, 2.0), DVec3::X);
-        store.set_projectile_grounded(4, false);
-        store.set_projectile_metadata(4, 5, crate::entity::MetaValue::Bool(true));
-        assert!(!store.vehicles[&4].projectile.as_ref().unwrap().stopped);
-        store.tick_projectile_displays(&chunks);
-        assert_eq!(
-            store.vehicles[&4].projectile.as_ref().unwrap().velocity.y,
-            0.0
-        );
-        store.set_vehicle_spawn_transform(
-            5,
-            Position::new(7.0, 70.0, 2.0),
-            DVec3::X,
-            LookDirection::new(0.0, 0.0),
-        );
-        store.set_vehicle_kind(5, EntityKind::Minecart);
-        store.tick_projectile_displays(&chunks);
-        assert!(store.vehicles[&5].projectile.is_none());
-        assert_eq!(store.vehicles[&5].position.x, 7.0);
-    }
-
-    #[test]
     fn arrow_visual_angles_match_packet_look_and_zero_motion_falls_back() {
         use crate::entity::components::{LookDirection, Position};
         let mut store = crate::entity::EntityStore::new();
@@ -6733,44 +6663,6 @@ mod tests {
         store.set_projectile_grounded(1, true);
         let arrow = &arrow_render_infos(&store, 1.0)[0];
         assert_eq!((arrow.body_y_rot_deg, arrow.head_x_rot_deg), (12.0, 13.0));
-    }
-
-    #[test]
-    fn ceiling_hit_arrow_keeps_impact_pitch_and_zero_velocity() {
-        use azalea_registry::builtin::EntityKind;
-        use glam::DVec3;
-
-        use crate::entity::components::{LookDirection, Position};
-        crate::world::block::init("26.2");
-        let mut chunks = crate::world::chunk::ChunkStore::new(1);
-        let _loaded = chunks.chunk_storage.upsert(
-            azalea_core::position::ChunkPos::new(0, 0),
-            azalea_world::chunk::Chunk::default(),
-        );
-        chunks.set_block_state(
-            2,
-            71,
-            2,
-            crate::world::block::first_state_of("stone").unwrap(),
-        );
-        let mut store = crate::entity::EntityStore::new();
-        store.set_vehicle_spawn_transform(
-            1,
-            Position::new(2.5, 70.975, 2.5),
-            DVec3::new(0.0, 0.05, 0.0),
-            LookDirection::new(0.0, 0.0),
-        );
-        store.set_vehicle_kind(1, EntityKind::Arrow);
-        for _ in 0..3 {
-            store.tick_projectile_displays(&chunks);
-            let p = store.vehicles[&1].projectile.as_ref().unwrap();
-            assert!(p.stopped);
-            assert_eq!(p.velocity, DVec3::ZERO);
-            assert_eq!(arrow_render_infos(&store, 1.0)[0].head_x_rot_deg, 90.0);
-        }
-        // A later zero-motion packet must not turn the embedded arrow around.
-        store.set_vehicle_motion(1, DVec3::ZERO);
-        assert_eq!(arrow_render_infos(&store, 1.0)[0].head_x_rot_deg, 90.0);
     }
 
     #[test]

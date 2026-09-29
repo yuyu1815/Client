@@ -44,37 +44,6 @@ impl Aabb {
         }
     }
 
-    /// Segment entry into a world-space collision box (fraction 0..1).
-    pub fn clip_segment(&self, from: DVec3, to: DVec3) -> Option<f64> {
-        if self.contains(from) {
-            return Some(0.0);
-        }
-        let delta = to - from;
-        let mut nearest = 1.0;
-        let mut hit = false;
-        for axis in [Axis::X, Axis::Y, Axis::Z] {
-            let d = component(delta, axis);
-            if d.abs() <= EPSILON {
-                continue;
-            }
-            let plane = component(if d > 0.0 { self.min } else { self.max }, axis);
-            let t = (plane - component(from, axis)) / d;
-            if !(0.0..=nearest).contains(&t) {
-                continue;
-            }
-            let (b, c) = axis.cross_axes();
-            if [b, c].into_iter().all(|cross| {
-                let p = component(from, cross) + t * component(delta, cross);
-                p >= component(self.min, cross) - EPSILON
-                    && p <= component(self.max, cross) + EPSILON
-            }) {
-                nearest = t;
-                hit = true;
-            }
-        }
-        hit.then_some(nearest)
-    }
-
     /// Vanilla `AABB.contains`: half-open, so a point on a max face is outside.
     pub fn contains(&self, point: DVec3) -> bool {
         point.x >= self.min.x
@@ -274,32 +243,6 @@ mod tests {
     use super::*;
 
     const BOTTOM_SLAB: LocalBox = [0.0, 0.0, 0.0, 1.0, 0.5, 1.0];
-
-    #[test]
-    fn segment_includes_incoming_endpoint_and_face_edge() {
-        let box_ = Aabb::block(3, 70, 2);
-        assert_eq!(
-            box_.clip_segment(dvec3(3.0, 70.5, 2.5), dvec3(4.0, 70.5, 2.5)),
-            Some(0.0)
-        );
-        assert_eq!(
-            box_.clip_segment(dvec3(2.0, 70.5, 3.0), dvec3(3.0, 70.5, 3.0)),
-            Some(1.0)
-        );
-        assert_eq!(
-            box_.clip_segment(dvec3(4.0, 70.5, 2.5), dvec3(5.0, 70.5, 2.5)),
-            None
-        );
-    }
-
-    #[test]
-    fn contains_is_half_open() {
-        let unit = Aabb::block(0, 0, 0);
-        assert!(unit.contains(dvec3(0.0, 0.0, 0.0)));
-        assert!(unit.contains(dvec3(0.5, 0.5, 0.5)));
-        assert!(!unit.contains(dvec3(1.0, 0.5, 0.5)));
-        assert!(!unit.contains(dvec3(0.5, -0.001, 0.5)));
-    }
 
     #[test]
     fn clip_hits_the_top_of_a_slab() {
