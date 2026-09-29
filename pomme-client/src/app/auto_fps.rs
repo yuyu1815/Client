@@ -161,6 +161,17 @@ impl AutoFps {
         self.unchanged_since = now;
     }
 
+    /// Safe to check without a rendered frame: does not advance scene or frame
+    /// stability.
+    pub fn timeout(&self, now: Instant) -> Option<&'static str> {
+        let (limit, reason) = match self.phase {
+            Phase::Joining => (JOIN_TIMEOUT, "join_timeout"),
+            Phase::Stabilizing => (STABLE_TIMEOUT, "stability_timeout"),
+            Phase::Running | Phase::Finished => return None,
+        };
+        (now.duration_since(self.since) >= limit).then_some(reason)
+    }
+
     /// Call once per rendered game frame. Never start without nonzero,
     /// unchanged GPU-loaded chunks for at least three seconds across
     /// multiple frames.
@@ -171,11 +182,7 @@ impl AutoFps {
         scene: Option<Scene>,
     ) -> Result<bool, &'static str> {
         if !self.focused && self.phase == Phase::Stabilizing {
-            return if now.duration_since(self.since) >= STABLE_TIMEOUT {
-                Err("stability_timeout")
-            } else {
-                Ok(false)
-            };
+            return self.timeout(now).map_or(Ok(false), Err);
         }
         if self.phase == Phase::Stabilizing || self.phase == Phase::Running {
             let scene = scene.as_ref().ok_or("scene_invalid")?;
@@ -194,16 +201,10 @@ impl AutoFps {
         }
         let camera_ready = scene.as_ref().is_some_and(|s| s.camera_ready);
         match self.phase {
-            Phase::Joining => {
-                if now.duration_since(self.since) >= JOIN_TIMEOUT {
-                    Err("join_timeout")
-                } else {
-                    Ok(false)
-                }
-            }
+            Phase::Joining => self.timeout(now).map_or(Ok(false), Err),
             Phase::Stabilizing => {
-                if now.duration_since(self.since) >= STABLE_TIMEOUT {
-                    return Err("stability_timeout");
+                if let Some(reason) = self.timeout(now) {
+                    return Err(reason);
                 }
                 if chunks == 0 || chunks != self.last_chunks {
                     self.last_chunks = chunks;
@@ -334,6 +335,33 @@ mod tests {
             joined.tick(t + STABLE_TIMEOUT, 1, Some(scene(true))),
             Err("stability_timeout")
         );
+    }
+
+    #[test]
+    fn timeout_without_rendered_frames_fails_status() {
+        let dir = crate::test_util::test_temp_dir("auto-no-redraw");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (joined, limit, reason) in [
+            (false, JOIN_TIMEOUT, "join_timeout"),
+            (true, STABLE_TIMEOUT, "stability_timeout"),
+        ] {
+            let mut run = AutoFps::new(&dir, None);
+            run.start().unwrap();
+            let start = run.since;
+            if joined {
+                run.joined(start);
+            }
+            assert_eq!(run.timeout(start + limit - Duration::from_nanos(1)), None);
+            assert_eq!(run.timeout(start + limit), Some(reason));
+            run.fail(reason);
+            assert_eq!(run.timeout(start + limit), None);
+            let status: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&run.path).unwrap()).unwrap();
+            assert_eq!(status["state"], "failed");
+            assert_eq!(status["reason"], reason);
+            assert!(!run.benchmark_path(&dir).exists());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -1321,6 +1321,13 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(auto) = &mut self.auto_fps
+            && let Some(reason) = auto.timeout(Instant::now())
+        {
+            auto.fail(reason);
+            event_loop.exit();
+            return;
+        }
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     }
 }
