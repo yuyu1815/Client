@@ -373,8 +373,8 @@ impl MainMenu {
             (
                 new_x0 + icon_size + icon_gap,
                 ICON_LANGUAGE,
-                false,
-                "Language",
+                true,
+                crate::lang::translate("options.language.tooltip").unwrap_or("Language"),
             ),
             (
                 new_x0 + (icon_size + icon_gap) * 2.0,
@@ -470,5 +470,54 @@ impl MainMenu {
             blur: 1.0,
             clicked_button: any_clicked,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn language_icon_opens_language_screen() {
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
+        let mut menu = MainMenu::new(
+            Path::new("pomme-main-language-icon-test"),
+            rt,
+            "tester".into(),
+            "26.2".into(),
+            None,
+        );
+        menu.gui_scale_setting = 1;
+        menu.menu_open_time = Some(Instant::now() - std::time::Duration::from_secs(3));
+        let width = |_: &str, _: f32| 0.0;
+        let frame = menu.build(800.0, 600.0, &MenuInput::default(), width);
+        let (x, y) = frame
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                MenuElement::Icon {
+                    icon: ICON_LANGUAGE,
+                    x,
+                    y,
+                    ..
+                } => Some((*x, *y)),
+                _ => None,
+            })
+            .unwrap();
+        menu.build(
+            800.0,
+            600.0,
+            &MenuInput {
+                cursor: (x, y),
+                clicked: true,
+                ..Default::default()
+            },
+            width,
+        );
+        assert!(matches!(menu.screen, Screen::OptionsLanguage));
     }
 }

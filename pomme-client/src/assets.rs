@@ -187,7 +187,8 @@ impl AssetIndex {
             .iter()
             .filter_map(|(k, v)| {
                 let hash = v.get("hash")?.as_str()?;
-                Some((k.clone(), hash.to_owned()))
+                (hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+                    .then(|| (k.clone(), hash.to_owned()))
             })
             .collect();
 
@@ -237,6 +238,47 @@ mod tests {
                 "accepted invalid asset key: {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn malformed_index_hashes_are_skipped_without_losing_valid_assets() {
+        let root = std::env::temp_dir().join(format!("pomme-index-{}", uuid::Uuid::new_v4()));
+        let jar = root.join("jar");
+        let indexes = root.join("indexes");
+        let objects = root.join("objects");
+        let hash = "abcdef0123456789abcdef0123456789abcdef01";
+        std::fs::create_dir_all(&indexes).unwrap();
+        std::fs::create_dir_all(objects.join("ab")).unwrap();
+        std::fs::create_dir_all(jar.join("minecraft/lang")).unwrap();
+        let valid_key = "minecraft/lang/en_us.json";
+        let invalid_key = "minecraft/lang/ja_jp.json";
+        let valid_path = objects.join("ab").join(hash);
+        let fallback_path = jar.join(invalid_key);
+        std::fs::write(&valid_path, "indexed English").unwrap();
+        std::fs::write(&fallback_path, "jar Japanese").unwrap();
+
+        for bad in [
+            String::new(),
+            "a".into(),
+            "é".into(),
+            "あ".into(),
+            "g".repeat(40),
+            "a".repeat(41),
+        ] {
+            let json = serde_json::json!({"objects": {
+                valid_key: {"hash": hash},
+                invalid_key: {"hash": bad},
+            }});
+            std::fs::write(indexes.join("test.json"), json.to_string()).unwrap();
+            let index = AssetIndex::load(&indexes, &objects, "test").unwrap();
+            assert_eq!(index.resolve(valid_key), Some(valid_path.clone()));
+            assert_eq!(index.resolve(invalid_key), None, "bad hash: {bad:?}");
+            assert_eq!(
+                resolve_asset_path(&jar, &Some(index), invalid_key),
+                fallback_path
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

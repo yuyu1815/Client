@@ -2014,6 +2014,23 @@ mod tests {
     }
 
     #[test]
+    fn japanese_text_uses_loaded_glyphs_and_unknown_character_uses_missing() {
+        let fixture = Fixture::new();
+        let image = image::RgbaImage::from_pixel(24, 8, image::Rgba([255, 255, 255, 255]));
+        fixture.write_png("jar_assets/minecraft/textures/font/japanese.png", &image);
+        fixture.write(
+            "jar_assets/minecraft/font/default.json",
+            r#"{"providers":[{"type":"bitmap","file":"minecraft:font/japanese.png","ascent":7,"chars":["日本語"]}]}"#,
+        );
+        let (map, _) = fixture.load().unwrap();
+        for ch in "日本語".chars() {
+            assert_eq!(map.glyph(ch, None).pixel_w, 8, "missing {ch}");
+            assert!(!std::ptr::eq(map.glyph(ch, None), map.missing()));
+        }
+        assert!(std::ptr::eq(map.glyph('界', None), map.missing()));
+    }
+
+    #[test]
     fn first_provider_in_a_font_wins() {
         let fixture = Fixture::new();
         let mut first = image::RgbaImage::new(8, 8);

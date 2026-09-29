@@ -146,8 +146,7 @@ impl MainMenu {
                     "Sign in to use friends"
                 },
             ),
-            // TODO: no language selection yet.
-            (SpriteId::IconLanguage, false, "Change Language"),
+            (SpriteId::IconLanguage, true, "Change Language"),
             (SpriteId::IconAccessibility, true, "Accessibility Settings"),
         ];
         for (i, (sprite, enabled, tip)) in icons.iter().enumerate() {
@@ -175,6 +174,10 @@ impl MainMenu {
                 any_clicked = true;
                 match sprite {
                     SpriteId::IconFriends => self.open_friends(),
+                    SpriteId::IconLanguage => {
+                        self.settings_back = Screen::Main;
+                        self.set_screen(Screen::OptionsLanguage);
+                    }
                     SpriteId::IconAccessibility => {
                         self.settings_back = Screen::Main;
                         self.set_screen(Screen::OptionsAccessibility);
@@ -402,4 +405,91 @@ fn push_icon_button(
         common::push_tooltip(elements, cursor, screen_w, screen_h, gs, tooltip);
     }
     (hovered && clicked) || keyboard
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_language_icon_opens_language_and_returns_to_title() {
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
+        let mut menu = MainMenu::new(
+            Path::new("pomme-default-language-icon-test"),
+            rt,
+            "tester".into(),
+            "26.2".into(),
+            None,
+        );
+        menu.theme = PanoramaTheme::Default;
+        menu.gui_scale_setting = 1;
+        let width = |_: &str, _: f32| 0.0;
+        let frame = menu.build(800.0, 600.0, &MenuInput::backdrop(), width);
+        let (x, y, w, h) = frame
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                MenuElement::Image {
+                    x,
+                    y,
+                    w,
+                    h,
+                    sprite: SpriteId::IconLanguage,
+                    ..
+                } => Some((*x, *y, *w, *h)),
+                _ => None,
+            })
+            .unwrap();
+        menu.build(
+            800.0,
+            600.0,
+            &MenuInput {
+                cursor: (x + w / 2.0, y + h / 2.0),
+                clicked: true,
+                ..MenuInput::backdrop()
+            },
+            width,
+        );
+        assert!(matches!(menu.screen, Screen::OptionsLanguage));
+        assert!(matches!(menu.settings_back, Screen::Main));
+        menu.build(
+            800.0,
+            600.0,
+            &MenuInput {
+                escape: true,
+                ..MenuInput::backdrop()
+            },
+            width,
+        );
+        assert!(matches!(menu.screen, Screen::Main));
+
+        // Singleplayer, Multiplayer, Language: Realms/Friends are disabled.
+        menu.build(800.0, 600.0, &MenuInput::backdrop(), width);
+        for _ in 0..3 {
+            menu.build(
+                800.0,
+                600.0,
+                &MenuInput {
+                    tab: true,
+                    ..MenuInput::backdrop()
+                },
+                width,
+            );
+        }
+        menu.build(
+            800.0,
+            600.0,
+            &MenuInput {
+                enter: true,
+                ..MenuInput::backdrop()
+            },
+            width,
+        );
+        assert!(matches!(menu.screen, Screen::OptionsLanguage));
+        assert!(matches!(menu.settings_back, Screen::Main));
+    }
 }

@@ -107,6 +107,19 @@ struct Settings {
     theme: u8,
     #[serde(default)]
     chat: ChatOptions,
+    #[serde(default = "default_locale")]
+    locale: String,
+}
+
+fn default_locale() -> String {
+    "en_us".into()
+}
+
+fn supported_locale(locale: &str) -> &'static str {
+    match locale {
+        "ja_jp" => "ja_jp",
+        _ => "en_us",
+    }
 }
 
 fn default_entity_distance_percent() -> u32 {
@@ -211,16 +224,19 @@ impl Default for Settings {
             display_mode: 0,
             theme: 0,
             chat: ChatOptions::default(),
+            locale: default_locale(),
         }
     }
 }
 
 fn load_settings(game_dir: &Path) -> Settings {
     let path = game_dir.join("options.json");
-    std::fs::read_to_string(&path)
+    let mut settings: Settings = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    settings.locale = supported_locale(&settings.locale).into();
+    settings
 }
 
 fn save_settings(game_dir: &Path, settings: &Settings) -> std::io::Result<()> {
@@ -636,6 +652,7 @@ pub struct MainMenu {
     /// when focus lands on it, toggled by Enter/Space, gates Left/Right.
     slider_can_change_value: bool,
     pub chat_options: ChatOptions,
+    locale: &'static str,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
     /// Set by slider drags, written by `flush_settings`.
@@ -677,6 +694,9 @@ impl MainMenu {
         // Servers ping lazily as their rows draw (build_server_list), not at boot.
         let ping_results: PingResults = Default::default();
         let settings = load_settings(game_dir);
+        // Catalogs load later with the renderer. The selection is safe to set
+        // now and is ready for the first screen (and initial connection).
+        crate::lang::set_locale(supported_locale(&settings.locale));
         Self {
             username,
             version,
@@ -769,6 +789,7 @@ impl MainMenu {
             ),
             slider_can_change_value: true,
             chat_options: settings.chat.sanitized(),
+            locale: supported_locale(&settings.locale),
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             settings_dirty: false,
@@ -891,6 +912,7 @@ impl MainMenu {
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
                 chat: self.chat_options,
+                locale: self.locale.into(),
             },
         )
         .is_err();
@@ -1167,8 +1189,7 @@ impl MainMenu {
                 Screen::OptionsControls,
             ),
             Screen::OptionsLanguage => {
-                let back = self.settings_back.clone_screen();
-                self.build_options_stub(screen_w, screen_h, input, "Language", back)
+                self.build_options_language(screen_w, screen_h, input, &text_width_fn)
             }
             Screen::OptionsChatSettings => {
                 self.build_options_chat(screen_w, screen_h, input, &text_width_fn)
@@ -1239,6 +1260,28 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
         for (stored, expected) in [(0, 50), (62, 50), (63, 75), (100, 100), (501, 500)] {
             assert_eq!(entity_distance_percent(stored), expected);
+        }
+    }
+
+    #[test]
+    fn locale_settings_round_trip_and_normalize_invalid_saved_values() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("locale");
+        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(supported_locale(&legacy.locale), "en_us");
+        for (stored, expected) in [
+            ("en_us", "en_us"),
+            ("ja_jp", "ja_jp"),
+            ("fr_fr", "en_us"),
+            ("", "en_us"),
+        ] {
+            let json = serde_json::to_string(&Settings {
+                locale: stored.into(),
+                ..Settings::default()
+            })
+            .unwrap();
+            let loaded: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(supported_locale(&loaded.locale), expected);
         }
     }
 

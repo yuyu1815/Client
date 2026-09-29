@@ -24,7 +24,6 @@ struct PlayedAt {
 /// at (vanilla `SubtitleOverlay.Subtitle`).
 struct Subtitle {
     key: String,
-    text: String,
     /// Audible range in blocks, captured from the first play and never
     /// updated (vanilla parity).
     range: f32,
@@ -78,7 +77,6 @@ impl SubtitleOverlayState {
         }
         self.subtitles.push(Subtitle {
             key: key.to_string(),
-            text: crate::lang::translate(key).unwrap_or(key).to_string(),
             range,
             played_at: vec![PlayedAt { pos, time: now }],
         });
@@ -129,17 +127,21 @@ impl SubtitleOverlayState {
         // Shared box width: the widest text plus vanilla's "< " / " >" padding,
         // in integer GUI units to keep vanilla's integer-division layout.
         let gui_w = |t: &str| text_width(t, FONT_SIZE).round() as i32;
-        let mut width = displayed
+        // Resolve at render time so a live locale switch updates active cues.
+        let labels: Vec<&str> = displayed
             .iter()
-            .map(|&i| gui_w(&self.subtitles[i].text))
-            .max()
-            .unwrap_or(0);
+            .map(|&i| {
+                let key = &self.subtitles[i].key;
+                crate::lang::translate(key).unwrap_or(key)
+            })
+            .collect();
+        let mut width = labels.iter().map(|text| gui_w(text)).max().unwrap_or(0);
         width += gui_w("<") + gui_w(" ") + gui_w(">") + gui_w(" ");
         let half_width = width / 2;
         let half_height = LINE_HEIGHT / 2;
 
         let mut row = 0;
-        for &i in &displayed {
+        for (&i, &label) in displayed.iter().zip(&labels) {
             let subtitle = &self.subtitles[i];
             let Some(closest) = subtitle.closest(cam_pos) else {
                 continue;
@@ -184,8 +186,8 @@ impl SubtitleOverlayState {
                     push_text("<".to_string(), cx - half_width as f32 * gs);
                 }
             }
-            let text_w = gui_w(&subtitle.text);
-            push_text(subtitle.text.clone(), cx - (text_w / 2) as f32 * gs);
+            let text_w = gui_w(label);
+            push_text(label.to_string(), cx - (text_w / 2) as f32 * gs);
             row += 1;
         }
     }

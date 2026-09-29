@@ -523,7 +523,7 @@ impl MenuOverlayPipeline {
                 (None, None)
             }
         };
-        crate::lang::load(font_sources.jar_assets_dir);
+        crate::lang::load_with_index(font_sources.jar_assets_dir, font_sources.asset_index);
         let (mc_font, mc_font_color) = create_font_textures(
             device,
             queue,

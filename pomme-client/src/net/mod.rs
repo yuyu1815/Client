@@ -784,7 +784,7 @@ pub fn client_information(
         crate::ui::chat::ChatVisibilitySetting::Hidden => ChatVisibility::Hidden,
     };
     ClientInformation {
-        language: "en_us".into(),
+        language: crate::lang::locale().into(),
         view_distance,
         chat_visibility,
         chat_colors: chat_options.colors,

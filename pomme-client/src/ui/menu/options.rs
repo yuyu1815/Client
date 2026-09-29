@@ -34,6 +34,19 @@ fn compat_label(compat: PackCompat) -> (&'static str, [f32; 4]) {
 }
 
 // Chat option label prefixes, shared by the labels and their handlers.
+const ENTITY_DISTANCE: &str = "Entity Distance:";
+
+fn entity_distance_prefix() -> String {
+    format!(
+        "{}:",
+        crate::lang::translate("options.entityDistanceScaling").unwrap_or("Entity Distance")
+    )
+}
+
+fn slider_matches(label: &str, id: &str, entity_prefix: &str) -> bool {
+    label.starts_with(id) || (id == ENTITY_DISTANCE && label.starts_with(entity_prefix))
+}
+
 const CHAT_VISIBILITY: &str = "Chat:";
 const CHAT_COLORS: &str = "Colors:";
 const CHAT_LINKS: &str = "Web Links:";
@@ -114,11 +127,12 @@ impl MainMenu {
         };
         // FOV slider + Online lead the grid, above the categories (vanilla header
         // sub-row).
+        let language_label = crate::lang::translate("options.language").unwrap_or("Language...");
         let rows: Vec<OptRow> = vec![
             OptRow::Pair(&fov_label, "Online..."),
             OptRow::Pair("Skin Customization...", "Music & Sounds..."),
             OptRow::Pair("Video Settings...", "Controls..."),
-            OptRow::Pair("Language...", "Chat Settings..."),
+            OptRow::Pair(language_label, "Chat Settings..."),
             OptRow::Pair("Resource Packs...", "Accessibility Settings..."),
             OptRow::Pair("Telemetry Data...", "Credits & Attribution..."),
         ];
@@ -129,7 +143,7 @@ impl MainMenu {
             ("Music & Sounds...", Screen::OptionsMusicSounds),
             ("Video Settings...", Screen::OptionsVideo),
             ("Controls...", Screen::OptionsControls),
-            ("Language...", Screen::OptionsLanguage),
+            (language_label, Screen::OptionsLanguage),
             ("Chat Settings...", Screen::OptionsChatSettings),
             ("Resource Packs...", Screen::OptionsResourcePacks),
             ("Accessibility Settings...", Screen::OptionsAccessibility),
@@ -141,18 +155,51 @@ impl MainMenu {
         let sliders: &[(&str, f32)] = &[("FOV:", fov_frac)];
         // Nav rows are disabled only where the target is a `build_options_stub`
         // page; screens with real (if inert) controls stay reachable.
-        let disabled = &["Language...", "Telemetry Data..."];
+        let disabled = &["Telemetry Data..."];
         self.build_options_grid(
             sw,
             sh,
             input,
-            "Options",
+            crate::lang::translate("options.title").unwrap_or("Options"),
             Screen::Main,
             &rows,
             nav,
             sliders,
             disabled,
             false,
+            &[],
+            text_width_fn,
+        )
+    }
+
+    pub(super) fn build_options_language(
+        &mut self,
+        sw: f32,
+        sh: f32,
+        input: &MenuInput,
+        text_width_fn: common::TextWidthFn,
+    ) -> MainMenuResult {
+        let english = if self.locale == "en_us" {
+            "English (US) ✓"
+        } else {
+            "English (US)"
+        };
+        let japanese = if self.locale == "ja_jp" {
+            "日本語 (日本) ✓"
+        } else {
+            "日本語 (日本)"
+        };
+        self.build_options_grid(
+            sw,
+            sh,
+            input,
+            crate::lang::translate("options.language.title").unwrap_or("Language"),
+            self.settings_back.clone_screen(),
+            &[OptRow::Pair(english, japanese)],
+            &[],
+            &[],
+            &[],
+            true,
             &[],
             text_width_fn,
         )
@@ -180,7 +227,7 @@ impl MainMenu {
     fn discrete_slider_span(&self, prefix: &str) -> Option<f32> {
         Some(match prefix {
             "Render Distance:" => self.render_distance_max() as f32 - 2.0,
-            "Entity Distance:" => 18.0,
+            ENTITY_DISTANCE => 18.0,
             "Chunk Detail:" => 40.0,
             "Simulation Distance:" => 27.0,
             "Max Framerate:" => 25.0,
@@ -223,7 +270,11 @@ impl MainMenu {
             self.render_distance.min(rd_max)
         );
         let cd = format!("Chunk Detail: {} chunks", self.chunk_detail);
-        let ed = format!("Entity Distance: {}%", self.entity_distance_percent);
+        let ed = format!(
+            "{} {}%",
+            entity_distance_prefix(),
+            self.entity_distance_percent
+        );
         let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
         let mf = if self.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
             "Max Framerate: Unlimited".to_string()
@@ -283,7 +334,7 @@ impl MainMenu {
         let sliders: &[(&str, f32)] = &[
             ("Render Distance:", rd_frac),
             (
-                "Entity Distance:",
+                ENTITY_DISTANCE,
                 (self.entity_distance_percent - 50) as f32 / 450.0,
             ),
             ("Chunk Detail:", cd_frac),
@@ -880,6 +931,7 @@ impl MainMenu {
             content_top + (content_h - grid_h) / 2.0
         };
         let mut slider_results: Vec<(&str, f32)> = Vec::new();
+        let entity_prefix = entity_distance_prefix();
         let label_scroll = common::LabelScroll {
             text_width_fn,
             time_secs: self.created.elapsed().as_secs_f64(),
@@ -934,7 +986,10 @@ impl MainMenu {
             }
             for (label, bx, bw) in widgets {
                 let enabled = option_enabled(label, disabled);
-                if let Some((prefix, value)) = sliders.iter().find(|(p, _)| label.starts_with(p)) {
+                if let Some((prefix, value)) = sliders
+                    .iter()
+                    .find(|(p, _)| slider_matches(label, p, &entity_prefix))
+                {
                     let hovered = enabled && common::hit_test(cursor, [bx, by, bw, btn_h]);
                     let prev_focus = ctx.focus;
                     let focused = ctx.focused(enabled, hovered);
@@ -1021,6 +1076,22 @@ impl MainMenu {
                         if matches!(self.screen, Screen::OptionsResourcePacks) {
                             self.focused_field = Some(0);
                             self.pack_search.set_focused(true);
+                        }
+                    }
+                    if matches!(self.screen, Screen::OptionsLanguage) {
+                        let locale = if label.starts_with("English (US)") {
+                            Some("en_us")
+                        } else if label.starts_with("日本語 (日本)") {
+                            Some("ja_jp")
+                        } else {
+                            None
+                        };
+                        if let Some(locale) = locale
+                            && self.locale != locale
+                            && crate::lang::set_locale(locale)
+                        {
+                            self.locale = supported_locale(locale);
+                            self.save_settings();
                         }
                     }
                     if label.starts_with("GUI Scale:") {
@@ -1137,7 +1208,7 @@ impl MainMenu {
             let span = self.discrete_slider_span(prefix).unwrap_or(1.0);
             match *prefix {
                 "Render Distance:" => self.render_distance = (2.0 + v * span).round() as u32,
-                "Entity Distance:" => {
+                ENTITY_DISTANCE => {
                     self.entity_distance_percent = 50 + 25 * (v * span).round() as u32
                 }
                 "Chunk Detail:" => self.chunk_detail = (8.0 + v * span).round() as u32,
@@ -1225,7 +1296,7 @@ impl MainMenu {
             btn_h,
             gs,
             fs,
-            "Done",
+            crate::lang::translate("gui.done").unwrap_or("Done"),
             true,
             &label_scroll,
         );
@@ -1892,6 +1963,69 @@ mod tests {
     }
 
     #[test]
+    fn translated_entity_distance_keeps_stable_slider_id() {
+        let label = "エンティティの描画距離: 100%";
+        assert!(slider_matches(
+            label,
+            ENTITY_DISTANCE,
+            "エンティティの描画距離:"
+        ));
+        let grid = Grid::with_slider("First", "Entity Distance: 100%", ENTITY_DISTANCE);
+        assert_eq!(grid.menu.discrete_slider_span(ENTITY_DISTANCE), Some(18.0));
+    }
+
+    #[test]
+    fn language_screen_click_and_keyboard_switch_and_persist() {
+        let dir = std::env::temp_dir().join(format!("pomme-language-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        save_settings(
+            &dir,
+            &Settings {
+                locale: "fr_fr".into(),
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(load_settings(&dir).locale, "en_us");
+        let mut menu = test_menu(dir.to_str().unwrap());
+        menu.set_screen(Screen::OptionsLanguage);
+        let width = |_: &str, _: f32| 0.0;
+        menu.build(800.0, 600.0, &MenuInput::default(), width);
+        menu.build(
+            800.0,
+            600.0,
+            &MenuInput {
+                cursor: (450.0, 50.0),
+                ..click(450.0)
+            },
+            width,
+        );
+        assert_eq!(load_settings(&dir).locale, "ja_jp");
+        assert_eq!(menu.locale, "ja_jp");
+        let result = menu.build(800.0, 600.0, &MenuInput::default(), width);
+        assert!(
+            result
+                .elements
+                .iter()
+                .any(|e| matches!(e, MenuElement::Text { text, .. } if text == "日本語 (日本) ✓"))
+        );
+        menu.build(800.0, 600.0, &tab(), width);
+        menu.build(800.0, 600.0, &tab(), width);
+        menu.build(
+            800.0,
+            600.0,
+            &MenuInput {
+                enter: true,
+                ..Default::default()
+            },
+            width,
+        );
+        assert_eq!(menu.locale, "en_us");
+        assert_eq!(load_settings(&dir).locale, "en_us");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn entity_distance_slider_steps_and_snaps() {
         let mut grid = Grid::with_slider("First", "Entity Distance: 100%", "Entity Distance:");
         grid.menu.entity_distance_percent = 100;
@@ -1911,6 +2045,12 @@ mod tests {
         // The right widget spans x=405..555; dragging near 14% snaps to 125%.
         grid.frame(&click(429.0));
         assert_eq!(grid.menu.entity_distance_percent, 125);
+        grid.sliders[0].1 = 0.0;
+        grid.frame(&key(KeyCode::ArrowLeft));
+        assert_eq!(grid.menu.entity_distance_percent, 50);
+        grid.sliders[0].1 = 1.0;
+        grid.frame(&key(KeyCode::ArrowRight));
+        assert_eq!(grid.menu.entity_distance_percent, 500);
     }
 
     #[test]

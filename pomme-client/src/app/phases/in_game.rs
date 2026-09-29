@@ -366,6 +366,7 @@ pub struct GameState {
     pub last_render_distance: u32,
     pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
     pub last_chat_colors: bool,
+    pub last_locale: &'static str,
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
     pub item_entity_store: ItemEntityStore,
@@ -644,6 +645,7 @@ impl GameState {
             last_render_distance: render_distance,
             last_chat_visibility: chat_options.visibility,
             last_chat_colors: chat_options.colors,
+            last_locale: crate::lang::locale(),
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
@@ -1188,11 +1190,28 @@ impl GameState {
         ]);
     }
 
-    /// Whether the chat options `ClientInformation` carries differ from the
-    /// last ones sent.
-    fn chat_information_changed(&self, chat_options: crate::ui::chat::ChatOptions) -> bool {
-        self.last_chat_visibility != chat_options.visibility
-            || self.last_chat_colors != chat_options.colors
+    /// Whether any field sent in `ClientInformation` differs from the last
+    /// packet. The initial connection sends its own packet before this state
+    /// is created.
+    fn client_information_changed(
+        &self,
+        render_distance: u32,
+        chat_options: crate::ui::chat::ChatOptions,
+    ) -> bool {
+        client_information_changed(
+            (
+                self.last_render_distance,
+                self.last_chat_visibility,
+                self.last_chat_colors,
+                self.last_locale,
+            ),
+            (
+                render_distance,
+                chat_options.visibility,
+                chat_options.colors,
+                crate::lang::locale(),
+            ),
+        )
     }
 
     pub fn sync_client_information(
@@ -1202,10 +1221,12 @@ impl GameState {
         chat_options: crate::ui::chat::ChatOptions,
     ) {
         let render_changed = self.last_render_distance != render_distance;
-        let chat_changed = self.chat_information_changed(chat_options);
+        let chat_changed = self.last_chat_visibility != chat_options.visibility
+            || self.last_chat_colors != chat_options.colors;
         self.last_render_distance = render_distance;
         self.last_chat_visibility = chat_options.visibility;
         self.last_chat_colors = chat_options.colors;
+        self.last_locale = crate::lang::locale();
         if render_changed {
             tracing::info!("Render distance changed to {render_distance}");
         }
@@ -4923,9 +4944,7 @@ pub fn update_game(
     }
 
     if game.options_from_game {
-        if core.menu.render_distance != game.last_render_distance
-            || game.chat_information_changed(core.menu.chat_options)
-        {
+        if game.client_information_changed(core.menu.render_distance, core.menu.chat_options) {
             game.sync_client_information(
                 connection,
                 core.menu.render_distance,
@@ -5995,6 +6014,13 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
     (pos_scale, angle_scale)
 }
 
+fn client_information_changed(
+    last: (u32, crate::ui::chat::ChatVisibilitySetting, bool, &str),
+    current: (u32, crate::ui::chat::ChatVisibilitySetting, bool, &str),
+) -> bool {
+    last != current
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -6007,6 +6033,27 @@ mod tests {
         show_death_screen_param, sign_has_text, sign_text_in_range,
     };
     use crate::renderer::SkyState;
+
+    #[test]
+    fn client_information_diff_includes_locale_without_repeat_sends() {
+        use crate::ui::chat::ChatVisibilitySetting;
+        let last = (12, ChatVisibilitySetting::Full, true, "en_us");
+        assert!(!super::client_information_changed(last, last));
+        assert!(super::client_information_changed(
+            last,
+            (12, ChatVisibilitySetting::Full, true, "ja_jp")
+        ));
+        let updated = (12, ChatVisibilitySetting::Full, true, "ja_jp");
+        assert!(!super::client_information_changed(updated, updated));
+        assert!(super::client_information_changed(
+            updated,
+            (13, ChatVisibilitySetting::Full, true, "ja_jp")
+        ));
+        assert!(super::client_information_changed(
+            updated,
+            (12, ChatVisibilitySetting::Full, false, "ja_jp")
+        ));
+    }
 
     #[test]
     fn sign_text_copy_range_matches_draw_distance() {
