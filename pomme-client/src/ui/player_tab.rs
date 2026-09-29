@@ -986,6 +986,13 @@ mod tab_score_tests {
         assert!((scale - 0.3125).abs() < 0.001);
         assert!((scale * DEFAULT_CELL_HEIGHT as f32 - 2.5).abs() < 0.001);
     }
+
+    #[test]
+    fn player_nameplate_glyph_height_matches_world_scale() {
+        let scale = name_tag_screen_scale(10.0, 1000, 90.0) * DEFAULT_CELL_HEIGHT as f32;
+        let renderer_glyph_height = scale / DEFAULT_CELL_HEIGHT as f32;
+        assert!((renderer_glyph_height * DEFAULT_CELL_HEIGHT as f32 - 10.0).abs() < 0.001);
+    }
 }
 
 pub struct PlayerNameplates<'a> {
@@ -1154,7 +1161,8 @@ pub fn build_player_nameplates(elements: &mut Vec<MenuElement>, nameplates: Play
         let Some((x, y, depth)) = (nameplates.project)(*pos) else {
             continue;
         };
-        let scale = name_tag_screen_scale(depth, nameplates.screen_height, nameplates.fov_degrees);
+        let scale = name_tag_screen_scale(depth, nameplates.screen_height, nameplates.fov_degrees)
+            * DEFAULT_CELL_HEIGHT as f32;
         elements.push(MenuElement::TextSpans {
             x,
             y: y - scale * 0.5,
