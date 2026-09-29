@@ -1,3 +1,4 @@
+mod auto_fps;
 pub mod core;
 pub mod input;
 pub mod level_load;
@@ -40,6 +41,12 @@ pub enum WindowError {
 
     #[error("renderer error: {0}")]
     Renderer(#[from] renderer::RendererError),
+
+    #[error("auto FPS status could not be written: {0}")]
+    AutoStatus(#[source] std::io::Error),
+
+    #[error("auto FPS benchmark failed; see auto-fps-benchmark-status.json")]
+    AutoFailed,
 }
 
 static STARTUP_EPOCH: OnceLock<Instant> = OnceLock::new();
@@ -62,6 +69,7 @@ pub struct App {
     core: AppCore,
     occluded: bool,
     fps_limiter: FramerateLimiter,
+    auto_fps: Option<auto_fps::AutoFps>,
 }
 
 /// Port of vanilla `FramerateLimiter`: paces to a target fps by sleeping most
@@ -220,10 +228,15 @@ impl App {
         presence: Option<crate::discord::DiscordPresence>,
         user: UserData,
         quick_access_multiplayer: Option<String>,
+        auto_fps_benchmark: bool,
         probe_root: Option<std::path::PathBuf>,
     ) -> Self {
         let pending_skin_uuid = user.has_profile.then_some(user.uuid);
+        let auto_fps = auto_fps_benchmark.then(|| auto_fps::AutoFps::new(&data_dirs.game_dir));
         let mut core = AppCore::new(version, data_dirs, tokio_rt, presence, user);
+        if auto_fps_benchmark {
+            core.display_mode = core::DisplayMode::Windowed;
+        }
         if let Some(root) = probe_root {
             core.probe = Some(probe::Probe::new(root, quick_access_multiplayer.clone()));
             core.display_mode = core::DisplayMode::Windowed;
@@ -239,12 +252,33 @@ impl App {
             core,
             occluded: false,
             fps_limiter: FramerateLimiter::new(),
+            auto_fps,
         }
     }
 
     pub fn run(&mut self) -> Result<(), WindowError> {
-        let event_loop = EventLoop::new()?;
-        event_loop.run_app(self)?;
+        if let Some(auto) = &mut self.auto_fps {
+            auto.start().map_err(WindowError::AutoStatus)?;
+        }
+        let event_loop = EventLoop::new().inspect_err(|_| {
+            if let Some(auto) = &mut self.auto_fps {
+                auto.fail("event_loop_error");
+            }
+        })?;
+        let result = event_loop.run_app(self);
+        if result.is_err() {
+            if let Some(auto) = &mut self.auto_fps {
+                auto.fail("event_loop_error");
+            }
+        }
+        result?;
+        if self
+            .auto_fps
+            .as_ref()
+            .is_some_and(|auto| auto.failed || !auto.finished())
+        {
+            return Err(WindowError::AutoFailed);
+        }
         Ok(())
     }
 
@@ -267,6 +301,9 @@ impl ApplicationHandler for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         // Minecraft.exitWorldAndClose runs screen().removed() before close().
         self.core.menu.flush_settings();
+        if let Some(auto) = &mut self.auto_fps {
+            auto.fail("exited_before_completion");
+        }
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -411,7 +448,7 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         // Dedicated unattended captures must not consume desktop/controller input.
-        if self.core.probe.is_some()
+        if (self.core.probe.is_some() || self.auto_fps.is_some())
             && matches!(
                 event,
                 WindowEvent::KeyboardInput { .. }
@@ -761,6 +798,12 @@ impl ApplicationHandler for App {
 
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
+                if occluded && matches!(self.phase.get(), AppPhase::InGame { .. }) {
+                    if let Some(auto) = &mut self.auto_fps {
+                        auto.fail("window_occluded");
+                        event_loop.exit();
+                    }
+                }
             }
 
             WindowEvent::Focused(focused) => {
@@ -799,6 +842,15 @@ impl ApplicationHandler for App {
                 if matches!(self.phase.get(), AppPhase::Setup { .. }) {
                     return;
                 }
+                if let Some(auto) = &mut self.auto_fps {
+                    if auto.joining()
+                        && let Err(reason) = auto.tick(Instant::now(), 0)
+                    {
+                        auto.fail(reason);
+                        event_loop.exit();
+                        return;
+                    }
+                }
 
                 // `dt` is clamped for physics; `raw_dt` is the unclamped interval the
                 // benchmarks need.
@@ -819,8 +871,9 @@ impl ApplicationHandler for App {
                 let window_occluded = self.occluded;
                 let core = &mut self.core;
 
-                let should_apply_cursor_grab =
-                    core.probe.is_none() && core.input.update(&mut self.phase);
+                let should_apply_cursor_grab = core.probe.is_none()
+                    && self.auto_fps.is_none()
+                    && core.input.update(&mut self.phase);
                 if should_apply_cursor_grab
                     && let AppPhase::InGame { gfx, game, .. } = self.phase.get_mut()
                 {
@@ -902,15 +955,25 @@ impl ApplicationHandler for App {
                                 game,
                                 world,
                             },
-                            ConnectingUpdateResult::ManualDisconnect => leave_world(
-                                core,
-                                gfx,
-                                panorama,
-                                connection,
-                                world,
-                                AfterSaving::Menu,
-                            ),
+                            ConnectingUpdateResult::ManualDisconnect => {
+                                if let Some(auto) = &mut self.auto_fps {
+                                    auto.fail("connection_cancelled");
+                                    event_loop.exit();
+                                }
+                                leave_world(
+                                    core,
+                                    gfx,
+                                    panorama,
+                                    connection,
+                                    world,
+                                    AfterSaving::Menu,
+                                )
+                            }
                             ConnectingUpdateResult::Disconnected { reason } => {
+                                if let Some(auto) = &mut self.auto_fps {
+                                    auto.fail("connection_failed");
+                                    event_loop.exit();
+                                }
                                 core.menu.show_disconnect(reason);
 
                                 leave_world(
@@ -923,6 +986,18 @@ impl ApplicationHandler for App {
                                 )
                             }
                             ConnectingUpdateResult::Transfer(transfer) => {
+                                if let Some(auto) = &mut self.auto_fps {
+                                    auto.fail("server_transfer");
+                                    event_loop.exit();
+                                    return leave_world(
+                                        core,
+                                        gfx,
+                                        panorama,
+                                        connection,
+                                        world,
+                                        AfterSaving::Menu,
+                                    );
+                                }
                                 match transfer_connect_args(core, transfer) {
                                     Ok(args) => {
                                         drop(connection);
@@ -957,6 +1032,9 @@ impl ApplicationHandler for App {
                                 }
                             }
                             ConnectingUpdateResult::JoinGame => {
+                                if let Some(auto) = &mut self.auto_fps {
+                                    auto.joined(Instant::now());
+                                }
                                 if let Some(p) = &mut core.presence {
                                     if world.is_some() {
                                         p.playing_singleplayer(&core.version);
@@ -984,6 +1062,33 @@ impl ApplicationHandler for App {
                         mut game,
                         mut world,
                     } => {
+                        if let Some(auto) = &mut self.auto_fps {
+                            if self.occluded
+                                || gfx.window.is_minimized() == Some(true)
+                                || gfx.window.is_visible() == Some(false)
+                            {
+                                auto.fail("window_not_visible");
+                                event_loop.exit();
+                                return AppPhase::InGame {
+                                    gfx,
+                                    connection,
+                                    game,
+                                    world,
+                                };
+                            }
+                            if game.chunk_load_bench.is_some()
+                                || (!auto.running() && !auto.finished() && game.benchmark.is_some())
+                            {
+                                auto.fail("another_benchmark_running");
+                                event_loop.exit();
+                                return AppPhase::InGame {
+                                    gfx,
+                                    connection,
+                                    game,
+                                    world,
+                                };
+                            }
+                        }
                         let update_result = match world.as_mut().map(World::poll) {
                             Some(Err(reason)) => GameUpdateResult::Disconnected { reason },
                             _ => update_game(
@@ -998,6 +1103,45 @@ impl ApplicationHandler for App {
                             ),
                         };
 
+                        if let Some(auto) = &mut self.auto_fps {
+                            if matches!(update_result, GameUpdateResult::None) {
+                                if auto.running() && game.benchmark_result.is_some() {
+                                    if game.benchmark_saved {
+                                        if let Err(error) = auto.succeed(&core.data_dirs.game_dir) {
+                                            tracing::error!("Auto FPS status save failed: {error}");
+                                            auto.fail("status_save_failed");
+                                        }
+                                    } else {
+                                        auto.fail("benchmark_save_failed");
+                                    }
+                                    event_loop.exit();
+                                } else if !auto.running() && !auto.finished() {
+                                    match auto
+                                        .tick(Instant::now(), gfx.renderer.loaded_chunk_count())
+                                    {
+                                        Ok(true) => {
+                                            game.benchmark =
+                                                Some(crate::benchmark::Benchmark::new(
+                                                    gfx.renderer.gpu_name(),
+                                                    gfx.renderer.screen_width(),
+                                                    gfx.renderer.screen_height(),
+                                                    core.menu.render_distance,
+                                                ));
+                                            game.benchmark_result = None;
+                                            game.benchmark_saved = false;
+                                        }
+                                        Err(reason) => {
+                                            auto.fail(reason);
+                                            event_loop.exit();
+                                        }
+                                        Ok(false) => {}
+                                    }
+                                }
+                            } else {
+                                auto.fail("disconnected");
+                                event_loop.exit();
+                            }
+                        }
                         match update_result {
                             GameUpdateResult::None => AppPhase::InGame {
                                 gfx,
@@ -1014,6 +1158,16 @@ impl ApplicationHandler for App {
                                 AfterSaving::Menu,
                             ),
                             GameUpdateResult::Transfer(transfer) => {
+                                if self.auto_fps.is_some() {
+                                    return leave_world(
+                                        core,
+                                        gfx,
+                                        Panorama::new(),
+                                        connection,
+                                        world,
+                                        AfterSaving::Menu,
+                                    );
+                                }
                                 match transfer_connect_args(core, transfer) {
                                     Ok(args) => {
                                         drop(connection);
@@ -1107,6 +1261,7 @@ impl ApplicationHandler for App {
         event: DeviceEvent,
     ) {
         if self.core.probe.is_none()
+            && self.auto_fps.is_none()
             && let DeviceEvent::MouseMotion { delta } = event
             && self.core.input.is_cursor_captured()
             && matches!(self.phase.get(), AppPhase::InGame { game,.. } if !game.paused && !game.dead && !game.death_screen_open && !game.gui_open() && !game.chat.is_open())

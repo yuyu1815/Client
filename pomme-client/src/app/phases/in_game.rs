@@ -374,6 +374,7 @@ pub struct GameState {
     pub block_entity_anim: BlockEntityAnimStore,
     pub benchmark: Option<Benchmark>,
     pub benchmark_result: Option<BenchmarkResult>,
+    pub benchmark_saved: bool,
     /// In-flight/finished upload of the FPS result, while its overlay is shown.
     pub benchmark_upload: Option<UploadHandle>,
     /// Which pause screen is showing (main / benchmark submenu / chunk loader).
@@ -751,6 +752,7 @@ impl GameState {
             position_send_counter: 0,
             benchmark: None,
             benchmark_result: None,
+            benchmark_saved: false,
             benchmark_upload: None,
             pause_screen: PauseScreen::Main,
             chunk_load_bench: None,
@@ -3554,7 +3556,12 @@ pub fn update_game(
         });
         if done {
             let bench = game.benchmark.take().unwrap();
-            game.benchmark_result = Some(bench.finish(&core.data_dirs.game_dir));
+            let (result, saved) = bench.finish_with_save(&core.data_dirs.game_dir);
+            game.benchmark_saved = saved.is_ok();
+            if let Err(error) = saved {
+                tracing::error!("Failed to save benchmark: {error}");
+            }
+            game.benchmark_result = Some(result);
             game.benchmark_upload = None;
             core.apply_cursor_grab(&gfx.window, Some(game));
         }

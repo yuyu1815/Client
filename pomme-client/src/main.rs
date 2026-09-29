@@ -154,6 +154,7 @@ fn main() {
         presence,
         user,
         args.quick_access_multiplayer,
+        args.auto_fps_benchmark,
         args.render_probe_root,
     )
     .run()
