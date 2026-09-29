@@ -15,23 +15,24 @@ import {
   HiUserGroup,
   HiUserPlus,
 } from "react-icons/hi2";
+import { localeOf, translate } from "../lib/i18n";
 import { useAppStateContext } from "../lib/state";
 import { Page } from "../lib/types";
 
 interface NavItem {
   id: Page;
-  label: string;
+  labelKey: "home" | "installations" | "servers" | "friends" | "mods" | "news";
   icon: React.ReactNode;
   soon?: boolean;
 }
 
 const NAV_ITEMS: Array<NavItem> = [
-  { id: "home", label: "HOME", icon: <HiHome /> },
-  { id: "installations", label: "INSTALLATIONS", icon: <HiSquares2X2 /> },
-  { id: "servers", label: "SERVERS", icon: <HiServer /> },
-  { id: "friends", label: "FRIENDS", icon: <HiUserGroup /> },
-  { id: "mods", label: "MODS", icon: <HiPuzzlePiece />, soon: true },
-  { id: "news", label: "NEWS & UPDATES", icon: <HiNewspaper /> },
+  { id: "home", labelKey: "home", icon: <HiHome /> },
+  { id: "installations", labelKey: "installations", icon: <HiSquares2X2 /> },
+  { id: "servers", labelKey: "servers", icon: <HiServer /> },
+  { id: "friends", labelKey: "friends", icon: <HiUserGroup /> },
+  { id: "mods", labelKey: "mods", icon: <HiPuzzlePiece />, soon: true },
+  { id: "news", labelKey: "news", icon: <HiNewspaper /> },
 ];
 
 //
@@ -60,7 +61,9 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
     authLoading,
     authUrl,
     friendsList,
+    launcherSettings,
   } = useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
 
   const [version, setVersion] = useState("");
   useEffect(() => {
@@ -106,7 +109,9 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
             onClick={() => setPage(item.id)}
           >
             <span className="nav-icon">{item.icon}</span>
-            <span className="nav-text">{item.label}</span>
+            <span className="nav-text" lang={locale}>
+              {translate(locale, item.labelKey)}
+            </span>
             {item.soon && <span className="nav-soon">SOON</span>}
             {item.id === "friends" && incomingCount > 0 && (
               <span className="nav-badge">{incomingCount}</span>
@@ -146,16 +151,6 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
                   <span>{authLoading ? "Signing in..." : "Add account"}</span>
                 </button>
                 <button
-                  className="account-menu-btn"
-                  onClick={() => {
-                    setPage("settings");
-                    accountDropdown.close();
-                  }}
-                >
-                  <HiCog6Tooth />
-                  <span>Settings</span>
-                </button>
-                <button
                   className="account-menu-btn logout"
                   onClick={() => {
                     if (account) removeAccount(account.uuid);
@@ -172,6 +167,10 @@ export default function Navbar({ startAddAccount, switchAccount, removeAccount }
             {authLoading ? "Signing in..." : "SIGN IN"}
           </button>
         )}
+        <button className="account-menu-btn" onClick={() => setPage("settings")}>
+          <HiCog6Tooth />
+          <span lang={locale}>{translate(locale, "settingsNav")}</span>
+        </button>
         {authLoading && authUrl && (
           <button className="auth-copy-link" onClick={copyAuthUrl}>
             <HiClipboardDocument />

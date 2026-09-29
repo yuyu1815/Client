@@ -1,8 +1,17 @@
-import { createContext, createElement, ReactNode, useContext, useEffect, useState } from "react";
+import {
+  createContext,
+  createElement,
+  ReactNode,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { commands } from "../bindings";
 import { AuthAccount } from "../bindings/pomme_launcher/auth";
 import { GameVersion, PatchNote } from "../bindings/pomme_launcher/commands";
 import { LauncherSettings } from "../bindings/pomme_launcher/settings";
+import { createLanguageRequests } from "./languageRequests";
 import { useFriends } from "./friends";
 import { useDropdown } from "./hooks";
 import { useInstallations } from "./installations";
@@ -11,21 +20,39 @@ import { DownloadProgress, LaunchingStatus, OpenedDialog, Page } from "./types";
 
 const useLauncherSettings = () => {
   const [launcherSettings, setLauncherSettings] = useState<LauncherSettings>({
-    language: "English",
+    language: "en",
     keepLauncherOpen: true,
+    launchWithConsole: false,
+  });
+
+  const languageRequests = useRef(createLanguageRequests(commands.setLauncherLanguage));
+  const changedSettings = useRef({
+    language: false,
+    keepLauncherOpen: false,
     launchWithConsole: false,
   });
 
   useEffect(() => {
     commands
       .loadLauncherSettings()
-      .then((settings) => setLauncherSettings(settings))
+      .then((settings) => {
+        setLauncherSettings((prev) => ({
+          language: changedSettings.current.language ? prev.language : settings.language,
+          keepLauncherOpen: changedSettings.current.keepLauncherOpen
+            ? prev.keepLauncherOpen
+            : settings.keepLauncherOpen,
+          launchWithConsole: changedSettings.current.launchWithConsole
+            ? prev.launchWithConsole
+            : settings.launchWithConsole,
+        }));
+      })
       .catch(console.error);
   }, []);
 
   const setLanguage = async (language: string) => {
-    let res = await commands.setLauncherLanguage(language);
+    let res = await languageRequests.current.set(language);
     if (res.ok) {
+      changedSettings.current.language = true;
       setLauncherSettings((prev) => ({ ...prev, language }));
     } else {
       console.error("Error while setting `launcherLanguage: ", res.error);
@@ -34,6 +61,7 @@ const useLauncherSettings = () => {
   const setKeepLauncherOpen = async (keep: boolean) => {
     let res = await commands.setKeepLauncherOpen(keep);
     if (res.ok) {
+      changedSettings.current.keepLauncherOpen = true;
       setLauncherSettings((prev) => ({ ...prev, keepLauncherOpen: keep }));
     } else {
       console.error("Error while setting `keepLauncherOpen`: ", res.error);
@@ -42,6 +70,7 @@ const useLauncherSettings = () => {
   const setLaunchWithConsole = async (launch: boolean) => {
     let res = await commands.setLaunchWithConsole(launch);
     if (res.ok) {
+      changedSettings.current.launchWithConsole = true;
       setLauncherSettings((prev) => ({ ...prev, launchWithConsole: launch }));
     } else {
       console.error("Error while setting `launchWithConsole`: ", res.error);

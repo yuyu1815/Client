@@ -1,29 +1,42 @@
+import { localeOf, translate } from "../lib/i18n";
 import { useAppStateContext } from "../lib/state";
 
 export default function SettingsPage() {
   const { launcherSettings } = useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
+  const t = (key: Parameters<typeof translate>[1]) => translate(locale, key);
 
   return (
-    <div className="page settings-page">
-      <h2 className="page-heading">SETTINGS</h2>
+    <div className="page settings-page" lang={locale}>
+      <h2 className="page-heading">{t("settings")}</h2>
 
       <div className="settings-section">
-        <h3 className="settings-section-title">General</h3>
+        <h3 className="settings-section-title">{t("general")}</h3>
 
         <div className="settings-row">
           <div className="settings-row-info">
-            <span className="settings-row-label">Language</span>
-            <span className="settings-row-desc">Display language for the launcher</span>
+            <label className="settings-row-label" htmlFor="launcher-language">
+              {t("language")}
+            </label>
+            <span className="settings-row-desc">{t("languageDescription")}</span>
           </div>
           <div className="settings-row-control">
-            <button className="settings-select">{launcherSettings.language}</button>
+            <select
+              id="launcher-language"
+              className="settings-select"
+              value={locale}
+              onChange={(event) => launcherSettings.setLanguage(event.target.value)}
+            >
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+            </select>
           </div>
         </div>
 
         <div className="settings-row">
           <div className="settings-row-info">
-            <span className="settings-row-label">Keep launcher open</span>
-            <span className="settings-row-desc">Keep the launcher open after the game starts</span>
+            <span className="settings-row-label">{t("keepLauncherOpen")}</span>
+            <span className="settings-row-desc">{t("keepLauncherOpenDescription")}</span>
           </div>
           <div className="settings-row-control">
             <button
@@ -31,6 +44,8 @@ export default function SettingsPage() {
               onClick={() =>
                 launcherSettings.setKeepLauncherOpen(!launcherSettings.keepLauncherOpen)
               }
+              aria-label={t("keepLauncherOpen")}
+              aria-pressed={launcherSettings.keepLauncherOpen}
             >
               <div className="settings-toggle-knob" />
             </button>
@@ -39,10 +54,8 @@ export default function SettingsPage() {
 
         <div className="settings-row">
           <div className="settings-row-info">
-            <span className="settings-row-label">Launch with console</span>
-            <span className="settings-row-desc">
-              Automatically open a window with all output from the client- useful when debugging.
-            </span>
+            <span className="settings-row-label">{t("launchWithConsole")}</span>
+            <span className="settings-row-desc">{t("launchWithConsoleDescription")}</span>
           </div>
           <div className="settings-row-control">
             <button
@@ -50,6 +63,8 @@ export default function SettingsPage() {
               onClick={() =>
                 launcherSettings.setLaunchWithConsole(!launcherSettings.launchWithConsole)
               }
+              aria-label={t("launchWithConsole")}
+              aria-pressed={launcherSettings.launchWithConsole}
             >
               <div className="settings-toggle-knob" />
             </button>

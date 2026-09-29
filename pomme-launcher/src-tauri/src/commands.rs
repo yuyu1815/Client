@@ -739,6 +739,9 @@ pub async fn load_launcher_settings() -> LauncherSettings {
 #[tauri::command]
 #[specta::specta]
 pub async fn set_launcher_language(language: String) -> Result<(), String> {
+    if !matches!(language.as_str(), "en" | "ja") {
+        return Err(format!("Unsupported language: {language}"));
+    }
     LauncherSettings::update(|s| s.language = language).await
 }
 
