@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { commands, events } from "./bindings";
 import { PatchNote } from "./bindings/pomme_launcher/commands";
 import { ACTIVITY_IDLE } from "./lib/friends";
+import { localeOf, localized } from "./lib/i18n";
 import { useAppStateContext } from "./lib/state";
 import { handleLaunchType } from "./lib/types";
 
@@ -54,6 +55,7 @@ function App() {
     setCurrentActivity,
   } = useAppStateContext();
 
+  const locale = localeOf(launcherSettings.language);
   const { setIsOpen: setAccountDropdownOpen } = accountDropdown;
 
   const openPatchNote = useCallback(
@@ -128,7 +130,7 @@ function App() {
   const startAddAccount = useCallback(async () => {
     setAccountDropdownOpen(false);
     setAuthLoading(true);
-    setStatus("Signing in via Microsoft...");
+    setStatus(localized(locale, "Signing in via Microsoft...", "Microsoftでサインイン中..."));
     const res = await commands.addAccount();
     if (res.ok) {
       const acc = res.value;
@@ -138,14 +140,15 @@ function App() {
       });
       setActiveIndex(accounts.filter((a) => a.uuid !== acc.uuid).length);
       loadSkin(acc.uuid);
-      setStatus(`Signed in as ${acc.username}`);
+      setStatus(`${localized(locale, "Signed in as", "サインインしました:")} ${acc.username}`);
     } else {
-      setStatus(`Auth failed: ${res.error}`);
+      setStatus(`${localized(locale, "Auth failed", "認証に失敗しました")}: ${res.error}`);
     }
     setAuthLoading(false);
     setAuthUrl(null);
   }, [
     accounts,
+    locale,
     loadSkin,
     setAccountDropdownOpen,
     setAccounts,
@@ -207,15 +210,17 @@ function App() {
         16: "SIGSTKFLT",
       };
       const reason =
-        signal !== null ? `signal ${SIGNAL_NAMES[signal] ?? signal}` : `code ${code ?? "unknown"}`;
+        signal !== null
+          ? `${localized(locale, "signal", "シグナル")} ${SIGNAL_NAMES[signal] ?? signal}`
+          : `${localized(locale, "code", "終了コード")} ${code ?? localized(locale, "unknown", "不明")}`;
       const message =
         code === 1 && last_lines && last_lines.length > 0
           ? last_lines.map((line, i) => `${i + 1}: ${line}`).join("\n")
-          : "The game exited unexpectedly.";
+          : localized(locale, "The game exited unexpectedly.", "ゲームが予期せず終了しました。");
       setOpenedDialog({
         name: "alert_dialog",
         props: {
-          title: `Game exited (${reason})`,
+          title: `${localized(locale, "Game exited", "ゲームが終了しました")} (${reason})`,
           message,
         },
       });
@@ -223,12 +228,12 @@ function App() {
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [setCurrentActivity, setOpenedDialog]);
+  }, [locale, setCurrentActivity, setOpenedDialog]);
 
   const handleLaunch: handleLaunchType = useCallback(
     async ({ serverIp, serverVersion, install } = {}) => {
       if (gameRunningRef.current) {
-        setStatus("Game already running");
+        setStatus(localized(locale, "Game already running", "ゲームはすでに起動しています"));
         setTimeout(() => setStatus(""), 3000);
         return;
       }
@@ -244,7 +249,9 @@ function App() {
       }
 
       if (!currentInstall) {
-        setStatus("No installation selected");
+        setStatus(
+          localized(locale, "No installation selected", "インストールが選択されていません"),
+        );
         setTimeout(() => setStatus(""), 3000);
         return;
       }
@@ -254,15 +261,19 @@ function App() {
       } else {
         setLaunchingStatus("installing");
       }
-      setStatus("Checking assets...");
+      setStatus(localized(locale, "Checking assets...", "アセットを確認中..."));
 
       const err = await ensureAssets(currentInstall.version);
       if (err instanceof Error) {
         setOpenedDialog({
           name: "alert_dialog",
           props: {
-            title: "Failed to download assets",
-            message: `Failed to download assets for ${currentInstall.version}:\n${err.message}`,
+            title: localized(
+              locale,
+              "Failed to download assets",
+              "アセットのダウンロードに失敗しました",
+            ),
+            message: `${localized(locale, "Failed to download assets for", "次のバージョンのアセットのダウンロードに失敗しました:")} ${currentInstall.version}:\n${err.message}`,
           },
         });
         setDownloadProgress(null);
@@ -271,7 +282,7 @@ function App() {
       }
 
       setLaunchingStatus("launching");
-      setStatus("Launching Pomme...");
+      setStatus(localized(locale, "Launching Pomme...", "Pommeを起動中..."));
       const res = await commands.launchGame(
         currentInstall.id,
         account?.uuid ?? null,
@@ -297,6 +308,7 @@ function App() {
     },
     [
       installations,
+      locale,
       ensureAssets,
       activeInstall,
       downloadedVersions,
@@ -318,10 +330,12 @@ function App() {
         setInstallations(res.value);
         setActiveInstall((prev) => prev ?? res.value[0]);
       } else {
-        setStatus("Failed to load installations: " + res.error);
+        setStatus(
+          `${localized(locale, "Failed to load installations", "インストール一覧の読み込みに失敗しました")}: ${res.error}`,
+        );
       }
     });
-  }, [setInstallations, setActiveInstall, setStatus]);
+  }, [locale, setInstallations, setActiveInstall, setStatus]);
 
   useEffect(() => {
     commands.getDownloadedVersions().then((versions) => {

@@ -3,6 +3,7 @@ import { HiChevronDown, HiCube, HiPlay } from "react-icons/hi2";
 import { PatchNote } from "../bindings/pomme_launcher/commands";
 import SkinRunner from "../components/SkinRunner";
 import { useDropdown } from "../lib/hooks";
+import { localeOf, localized } from "../lib/i18n";
 import { useAppStateContext } from "../lib/state";
 import { handleLaunchType } from "../lib/types";
 
@@ -23,17 +24,21 @@ export default function Homepage({ handleLaunch, openPatchNote }: HomepageProps)
     downloadProgress,
     skinUrl,
     setOpenedDialog,
+    launcherSettings,
   } = useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
 
   const { ref: versionDropdownRef, ...versionDropdown } = useDropdown();
 
   return (
-    <div className="page home-page">
+    <div className="page home-page" lang={locale}>
       <div className="hero-banner">
         <div className="hero-overlay" />
         <div className="hero-content">
           <h1 className="hero-title">POMME</h1>
-          <p className="hero-subtitle">RUST-NATIVE MINECRAFT CLIENT</p>
+          <p className="hero-subtitle">
+            {localized(locale, "RUST-NATIVE MINECRAFT CLIENT", "Rust製Minecraftクライアント")}
+          </p>
         </div>
       </div>
 
@@ -57,13 +62,13 @@ export default function Homepage({ handleLaunch, openPatchNote }: HomepageProps)
           <span className="play-text">
             {launchingStatus === null
               ? downloadedVersions.has(activeInstall?.version ?? "")
-                ? "PLAY"
-                : "INSTALL"
+                ? localized(locale, "PLAY", "プレイ")
+                : localized(locale, "INSTALL", "インストール")
               : launchingStatus === "checking_assets"
-                ? "Checking assets..."
+                ? localized(locale, "Checking assets...", "アセットを確認中...")
                 : launchingStatus === "installing"
-                  ? "Installing..."
-                  : "Launching..."}
+                  ? localized(locale, "Installing...", "インストール中...")
+                  : localized(locale, "Launching...", "起動中...")}
           </span>
         </button>
       </div>
@@ -72,7 +77,8 @@ export default function Homepage({ handleLaunch, openPatchNote }: HomepageProps)
         <button className="version-badge" onClick={versionDropdown.toggle}>
           <HiCube className="version-badge-icon" />
           <span className="version-item-id">
-            {activeInstall?.name || "No installation selected"}
+            {activeInstall?.name ||
+              localized(locale, "No installation selected", "インストールが選択されていません")}
           </span>
           <span className="version-item-type" hidden={!activeInstall}>
             {activeInstall?.version || ""}
@@ -92,7 +98,9 @@ export default function Homepage({ handleLaunch, openPatchNote }: HomepageProps)
                     setOpenedDialog({ name: "installation_dialog", props: { type: "new" } });
                   }}
                 >
-                  <span className="version-item-id">Create a new installation</span>
+                  <span className="version-item-id">
+                    {localized(locale, "Create a new installation", "新しいインストールを作成")}
+                  </span>
                 </button>
               ) : (
                 installations.map((inst) => (
@@ -141,13 +149,15 @@ export default function Homepage({ handleLaunch, openPatchNote }: HomepageProps)
       {!downloadProgress && status && <div className="status-toast">{status}</div>}
 
       <div className="news-section">
-        <h2 className="news-heading">LATEST NEWS</h2>
+        <h2 className="news-heading">{localized(locale, "LATEST NEWS", "最新ニュース")}</h2>
         <div className="news-grid">
           {news.slice(0, 3).map((item) => (
             <div className="news-card" key={item.version} onClick={() => openPatchNote(item)}>
               <div className="news-card-img">
-                <img src={item.image_url} alt={item.title} className="news-card-img-bg" />
-                <span className="news-type-badge">{item.entry_type}</span>
+                <img src={item.image_url} alt={item.title} lang="en" className="news-card-img-bg" />
+                <span className="news-type-badge" lang="en">
+                  {item.entry_type}
+                </span>
               </div>
 
               <div className="news-card-body">
@@ -156,13 +166,21 @@ export default function Homepage({ handleLaunch, openPatchNote }: HomepageProps)
                   <span className="news-card-arrow">→</span>
                 </div>
 
-                <h3 className="news-title">{item.title}</h3>
+                <h3 className="news-title" lang="en">
+                  {item.title}
+                </h3>
                 <hr className="news-rule" />
-                <p className="news-desc">{item.summary}</p>
+                <p className="news-desc" lang="en">
+                  {item.summary}
+                </p>
               </div>
             </div>
           ))}
-          {news.length === 0 && <p className="news-loading">Loading patch notes...</p>}
+          {news.length === 0 && (
+            <p className="news-loading">
+              {localized(locale, "Loading patch notes...", "パッチノートを読み込み中...")}
+            </p>
+          )}
         </div>
       </div>
     </div>

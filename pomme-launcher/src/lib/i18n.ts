@@ -39,6 +39,10 @@ const messages = {
   },
 } satisfies Record<Locale, Record<string, string>>;
 
+export function localized(locale: Locale, en: string, ja: string): string {
+  return locale === "ja" ? ja : en;
+}
+
 export function localeOf(value: string | undefined): Locale {
   return value === "ja" || value === "Japanese" ? "ja" : "en";
 }

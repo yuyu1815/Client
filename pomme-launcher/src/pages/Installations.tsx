@@ -12,6 +12,7 @@ import {
 } from "react-icons/hi2";
 import { commands } from "../bindings";
 import { formatRelativeDate } from "../lib/helpers";
+import { localeOf, localized } from "../lib/i18n";
 import { useAppStateContext } from "../lib/state";
 import type { handleLaunchType } from "../lib/types";
 
@@ -28,7 +29,9 @@ export default function InstallationsPage({ handleLaunch }: InstallationsPagePro
     setPage,
     setOpenedDialog,
     downloadedVersions,
+    launcherSettings,
   } = useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -39,16 +42,16 @@ export default function InstallationsPage({ handleLaunch }: InstallationsPagePro
   }, [setInstallations]);
 
   return (
-    <div className="page installs-page">
+    <div className="page installs-page" lang={locale}>
       <div className="installs-header">
-        <h2 className="page-heading">INSTALLATIONS</h2>
+        <h2 className="page-heading">{localized(locale, "INSTALLATIONS", "インストール")}</h2>
         <button
           className="installs-new-btn"
           onClick={() => {
             setOpenedDialog({ name: "installation_dialog", props: { type: "new" } });
           }}
         >
-          <HiPlus /> New Installation
+          <HiPlus /> {localized(locale, "New Installation", "新しいインストール")}
         </button>
       </div>
 
@@ -69,7 +72,9 @@ export default function InstallationsPage({ handleLaunch }: InstallationsPagePro
               <span className="install-card-version">{inst.version}</span>
             </div>
             <span className="install-card-played">
-              {inst.last_played ? formatRelativeDate(inst.last_played) : "Never"}
+              {inst.last_played
+                ? formatRelativeDate(inst.last_played)
+                : localized(locale, "Never", "なし")}
             </span>
             <button
               className="install-play-btn"
@@ -81,11 +86,11 @@ export default function InstallationsPage({ handleLaunch }: InstallationsPagePro
             >
               {downloadedVersions.has(inst.version) ? (
                 <>
-                  <HiPlay /> Play
+                  <HiPlay /> {localized(locale, "Play", "プレイ")}
                 </>
               ) : (
                 <>
-                  <BiSolidDownload /> Install
+                  <BiSolidDownload /> {localized(locale, "Install", "インストール")}
                 </>
               )}
             </button>
@@ -106,14 +111,14 @@ export default function InstallationsPage({ handleLaunch }: InstallationsPagePro
                     props: { type: "edit", installation: { ...inst } },
                   });
                 }}
-                title="Edit"
+                title={localized(locale, "Edit", "編集")}
               >
                 <HiPencil />
               </button>
 
               <button
                 className="install-action-btn"
-                title="Duplicate"
+                title={localized(locale, "Duplicate", "複製")}
                 onClick={() => {
                   const dup = {
                     ...inst,
@@ -133,13 +138,17 @@ export default function InstallationsPage({ handleLaunch }: InstallationsPagePro
               {!inst.is_latest && (
                 <button
                   className="install-action-btn delete"
-                  title="Delete"
+                  title={localized(locale, "Delete", "削除")}
                   onClick={() => {
                     setOpenedDialog({
                       name: "confirm_dialog",
                       props: {
-                        title: `Deleting ${inst.name}`,
-                        message: "Are you sure you want to delete this installation?",
+                        title: localized(locale, `Deleting ${inst.name}`, `${inst.name}を削除`),
+                        message: localized(
+                          locale,
+                          "Are you sure you want to delete this installation?",
+                          "このインストールを削除してもよろしいですか？",
+                        ),
                         onConfirm: async () => {
                           const index = installations.findIndex((i) => i.id === inst.id);
                           const res = await commands.deleteInstallation(inst.id);

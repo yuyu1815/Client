@@ -5,6 +5,7 @@ import { commands } from "../../bindings";
 import { Installation, InstallationError } from "../../bindings/pomme_launcher/installations";
 import { isAbsolutePath, normalizeDirectoryName } from "../../lib/helpers";
 import { useDropdown } from "../../lib/hooks";
+import { localized, localeOf } from "../../lib/i18n";
 import { useAppStateContext } from "../../lib/state";
 
 export type InstallationDialogProps =
@@ -12,33 +13,48 @@ export type InstallationDialogProps =
   | { type: "edit"; installation: Installation }
   | { type: "dupl"; installation: Installation; original_id: string };
 
-function mapInstallationError(error: InstallationError): { name?: string; dir?: string } {
+function mapInstallationError(
+  error: InstallationError,
+  locale: "en" | "ja",
+): { name?: string; dir?: string } {
+  const t = (en: string, ja: string) => localized(locale, en, ja);
   switch (error.kind) {
     case "InvalidName":
-      return { name: "Invalid name" };
+      return { name: t("Invalid name", "無効な名前です") };
     case "NameTooLong":
-      return { name: `Name too long (max ${error.detail} characters)` };
+      return {
+        name: t(
+          `Name too long (max ${error.detail} characters)`,
+          `名前が長すぎます（最大${error.detail}文字）`,
+        ),
+      };
     case "InvalidPath":
-      return { dir: "Invalid path" };
+      return { dir: t("Invalid path", "無効なパスです") };
     case "InvalidCharacter":
-      return { dir: `Invalid character: ${error.detail}` };
+      return { dir: t(`Invalid character: ${error.detail}`, `無効な文字: ${error.detail}`) };
     case "ReservedName":
-      return { dir: `Reserved name: ${error.detail}` };
+      return { dir: t(`Reserved name: ${error.detail}`, `予約された名前: ${error.detail}`) };
     case "DirectoryAlreadyExists":
-      return { dir: "Directory already exists" };
+      return { dir: t("Directory already exists", "ディレクトリは既に存在します") };
     case "InstallNotFound":
-      return { dir: `Install ${error.detail} not found.` };
+      return {
+        dir: t(
+          `Install ${error.detail} not found.`,
+          `インストール「${error.detail}」が見つかりません。`,
+        ),
+      };
     case "Io":
-      return { dir: `IO error: ${error.detail}` };
+      return { dir: t(`IO error: ${error.detail}`, `IOエラー: ${error.detail}`) };
     case "Json":
-      return { dir: `JSON error: ${error.detail}` };
+      return { dir: t(`JSON error: ${error.detail}`, `JSONエラー: ${error.detail}`) };
     case "Other":
-      return { dir: `Unexpected error: ${error.detail}` };
+      return { dir: t(`Unexpected error: ${error.detail}`, `予期しないエラー: ${error.detail}`) };
   }
 }
 
 export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) {
   const {
+    launcherSettings,
     versions,
     setInstallations,
     setActiveInstall,
@@ -48,6 +64,8 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
     setDownloadProgress,
     setOpenedDialog,
   } = useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
+  const t = (en: string, ja: string) => localized(locale, en, ja);
 
   function createEmptyInstallation(): Installation {
     return {
@@ -80,6 +98,7 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
   return (
     <div
       className="dialog"
+      lang={locale}
       onClick={(e) => {
         e.stopPropagation();
         if (versionDropdown.isOpen) versionDropdown.close();
@@ -87,15 +106,15 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
     >
       <h2 className="dialog-title">
         {dialogType === "edit"
-          ? "Edit Installation"
+          ? t("Edit Installation", "インストールを編集")
           : dialogType === "dupl"
-            ? "Duplicate Installation"
-            : "New Installation"}
+            ? t("Duplicate Installation", "インストールを複製")
+            : t("New Installation", "新規インストール")}
       </h2>
 
       <div className="dialog-fields">
         <div className="dialog-field">
-          <label>NAME</label>
+          <label>{t("NAME", "名前")}</label>
           <input
             disabled={editingInstall.is_latest}
             value={editingInstall.name}
@@ -112,13 +131,13 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
                 };
               });
             }}
-            placeholder="My Installation"
+            placeholder={t("My Installation", "マイインストール")}
             autoFocus
           />
           <span className={`dialog-field-info ${nameError ? "error" : ""}`}>{nameError}</span>
         </div>
         <div className="dialog-field">
-          <label>VERSION</label>
+          <label>{t("VERSION", "バージョン")}</label>
           <div className="custom-select-wrapper" ref={versionDropdownRef}>
             <button className="custom-select" onClick={versionDropdown.toggle} type="button">
               <span>{editingInstall.version}</span>
@@ -143,7 +162,7 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
                       });
                     }}
                   />
-                  <span>Show snapshots</span>
+                  <span>{t("Show snapshots", "スナップショットを表示")}</span>
                 </label>
                 <div className="custom-select-list">
                   {versions.map((v) => (
@@ -168,7 +187,7 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
           <span className={`dialog-field-info error`}>{versionError || ""}</span>
         </div>
         <div className="dialog-field">
-          <label>GAME DIRECTORY</label>
+          <label>{t("GAME DIRECTORY", "ゲームディレクトリ")}</label>
           <div className="dialog-browse">
             <input
               value={editingInstall.directory}
@@ -182,6 +201,7 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
             />
             <button
               className="dialog-browse-btn"
+              aria-label={t("Browse for directory", "ディレクトリを参照")}
               onClick={async () => {
                 const path = await openNativeDialog({ directory: true });
                 if (path) {
@@ -197,12 +217,12 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
             {dirError ||
               (!isAbsolutePath(editingInstall.directory) &&
                 editingInstall.directory !== normalizeDirectoryName(editingInstall.directory) &&
-                "Will be created as: " +
+                t("Will be created as: ", "作成先: ") +
                   normalizeDirectoryName(editingInstall.directory || "my-installation"))}
           </span>
         </div>
         <div className="dialog-field">
-          <label>RESOLUTION</label>
+          <label>{t("RESOLUTION", "解像度")}</label>
           <div className="dialog-resolution">
             <input
               type="number"
@@ -233,7 +253,7 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
 
       <div className="dialog-actions">
         <button className="dialog-cancel" onClick={() => setOpenedDialog(null)}>
-          Cancel
+          {t("Cancel", "キャンセル")}
         </button>
         <button
           className="dialog-save"
@@ -250,7 +270,7 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
               : normalizeDirectoryName(editingInstall.directory || editedInstall.name);
 
             if (editingInstall.version === "") {
-              setVersionError("Invalid version");
+              setVersionError(t("Invalid version", "無効なバージョンです"));
               return;
             }
 
@@ -260,7 +280,7 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
                 : commands.duplicateInstallation(dialogProps.original_id, editedInstall));
 
               if (!installResult.ok) {
-                const mapped = mapInstallationError(installResult.error);
+                const mapped = mapInstallationError(installResult.error, locale);
                 if (mapped.name) setNameError(mapped.name);
                 if (mapped.dir) setDirError(mapped.dir);
                 return;
@@ -271,13 +291,22 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
 
               setOpenedDialog(null);
               setPage("home");
-              setDownloadProgress({ downloaded: 0, total: 1, status: "Starting install..." });
+              setDownloadProgress({
+                downloaded: 0,
+                total: 1,
+                status: t("Starting install...", "インストールを開始中..."),
+              });
 
               const ensureAssetsResult = await commands.ensureAssets(install.version);
               if (ensureAssetsResult.ok) {
-                setStatus(`${install.name} ready`);
+                setStatus(t(`${install.name} ready`, `${install.name} 準備完了`));
               } else {
-                setStatus(`Install failed: ${ensureAssetsResult.error}`);
+                setStatus(
+                  t(
+                    `Install failed: ${ensureAssetsResult.error}`,
+                    `インストールに失敗しました: ${ensureAssetsResult.error}`,
+                  ),
+                );
               }
 
               setDownloadProgress(null);
@@ -288,7 +317,7 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
                 editedInstall,
               );
               if (!editInstallResult.ok) {
-                const mapped = mapInstallationError(editInstallResult.error);
+                const mapped = mapInstallationError(editInstallResult.error, locale);
                 if (mapped.name) setNameError(mapped.name);
                 if (mapped.dir) setDirError(mapped.dir);
                 return;
@@ -301,7 +330,11 @@ export function InstallationDialog({ ...dialogProps }: InstallationDialogProps) 
             }
           }}
         >
-          {dialogType === "new" ? "Install" : dialogType === "edit" ? "Save" : "Duplicate"}
+          {dialogType === "new"
+            ? t("Install", "インストール")
+            : dialogType === "edit"
+              ? t("Save", "保存")
+              : t("Duplicate", "複製")}
         </button>
       </div>
     </div>

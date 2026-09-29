@@ -20,6 +20,7 @@ import {
   HiTrash,
 } from "react-icons/hi2";
 import { useDropdown } from "../lib/hooks";
+import { localized, localeOf } from "../lib/i18n";
 import { useAppStateContext } from "../lib/state";
 import { handleLaunchType, Server } from "../lib/types";
 
@@ -31,12 +32,14 @@ function ServerMenu({
   onEdit,
   onRemove,
   onClose,
+  locale,
 }: {
   anchorRef: React.RefObject<HTMLButtonElement | null>;
   menuRef: React.RefObject<HTMLDivElement | null>;
   onEdit: () => void;
   onRemove: () => void;
   onClose: () => void;
+  locale: "en" | "ja";
 }) {
   const [pos, setPos] = useState({ top: 0, left: 0 });
 
@@ -51,6 +54,7 @@ function ServerMenu({
     <div
       ref={menuRef}
       className="server-menu"
+      lang={locale}
       style={{ position: "fixed", top: pos.top, left: pos.left, zIndex: 1000 }}
       onPointerDown={(e) => e.stopPropagation()}
     >
@@ -60,7 +64,7 @@ function ServerMenu({
           onClose();
         }}
       >
-        <HiPencil /> Edit
+        <HiPencil /> {localized(locale, "Edit", "編集")}
       </button>
       <div className="server-menu-divider" />
       <button
@@ -70,7 +74,7 @@ function ServerMenu({
           onClose();
         }}
       >
-        <HiTrash /> Remove
+        <HiTrash /> {localized(locale, "Remove", "削除")}
       </button>
     </div>,
     document.body,
@@ -93,7 +97,8 @@ function SortableServer({
   });
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   const { ref: menuRef, isOpen: menuOpen, toggle: toggleMenu, close: closeMenu } = useDropdown();
-  const { setPage } = useAppStateContext();
+  const { setPage, launcherSettings } = useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -129,7 +134,9 @@ function SortableServer({
             : "—"}
         </span>
         <span className={`server-ping ${pingClass(s.ping)}`}>
-          {s.ping >= 0 ? `${numFormatter.format(s.ping)}ms` : "offline"}
+          {s.ping >= 0
+            ? `${numFormatter.format(s.ping)}ms`
+            : localized(locale, "offline", "オフライン")}
         </span>
         <button
           className="install-play-btn"
@@ -139,7 +146,7 @@ function SortableServer({
             handleLaunch({ serverIp: s.ip, serverVersion: s.version });
           }}
         >
-          <HiPlay /> Join
+          <HiPlay /> {localized(locale, "Join", "参加")}
         </button>
         <button
           ref={menuBtnRef}
@@ -158,6 +165,7 @@ function SortableServer({
             onEdit={() => startEdit(s)}
             onRemove={() => removeServer(s.id)}
             onClose={closeMenu}
+            locale={locale}
           />
         )}
       </div>
@@ -166,7 +174,9 @@ function SortableServer({
 }
 
 export default function ServersPage({ handleLaunch }: { handleLaunch: handleLaunchType }) {
-  const { servers, moveServer, removeServer, pingAll, setOpenedDialog } = useAppStateContext();
+  const { servers, moveServer, removeServer, pingAll, setOpenedDialog, launcherSettings } =
+    useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
 
@@ -190,12 +200,13 @@ export default function ServersPage({ handleLaunch }: { handleLaunch: handleLaun
   const [spinning, setSpinning] = useState(false);
 
   return (
-    <div className="page servers-page">
+    <div className="page servers-page" lang={locale}>
       <div className="servers-header">
-        <h2 className="page-heading">SERVERS</h2>
+        <h2 className="page-heading">{localized(locale, "SERVERS", "サーバー")}</h2>
         <div className="servers-actions">
           <button
             className={`servers-refresh-btn ${spinning ? "spinning" : ""}`}
+            aria-label={localized(locale, "Refresh servers", "サーバーを更新")}
             onClick={() => {
               setSpinning(true);
               pingAll();
@@ -208,13 +219,19 @@ export default function ServersPage({ handleLaunch }: { handleLaunch: handleLaun
             className="servers-add-btn"
             onClick={() => setOpenedDialog({ name: "server_dialog", props: { type: "new" } })}
           >
-            <HiPlus /> Add Server
+            <HiPlus /> {localized(locale, "Add Server", "サーバーを追加")}
           </button>
         </div>
       </div>
 
       {servers.length === 0 && (
-        <p className="servers-empty">No servers added. Click "Add Server" to get started.</p>
+        <p className="servers-empty">
+          {localized(
+            locale,
+            'No servers added. Click "Add Server" to get started.',
+            "サーバーがありません。「サーバーを追加」をクリックして追加してください。",
+          )}
+        </p>
       )}
 
       <DndContext

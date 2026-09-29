@@ -1,10 +1,14 @@
 import { useState } from "react";
+import { localized, localeOf } from "../../lib/i18n";
 import { useAppStateContext } from "../../lib/state";
 
 export type FriendSettingsDialogProps = Record<string, never>;
 
 export function FriendSettingsDialog(_props: FriendSettingsDialogProps) {
-  const { friendsSettings, updateFriendSettings, setOpenedDialog } = useAppStateContext();
+  const { friendsSettings, updateFriendSettings, setOpenedDialog, launcherSettings } =
+    useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
+  const t = (en: string, ja: string) => localized(locale, en, ja);
   const [pending, setPending] = useState(false);
 
   const loading = friendsSettings === null;
@@ -21,20 +25,26 @@ export function FriendSettingsDialog(_props: FriendSettingsDialogProps) {
   };
 
   return (
-    <div className="dialog" onClick={(e) => e.stopPropagation()}>
-      <h2 className="dialog-title">Friend Settings</h2>
+    <div className="dialog" lang={locale} onClick={(e) => e.stopPropagation()}>
+      <h2 className="dialog-title">{t("Friend Settings", "フレンド設定")}</h2>
 
       <div className="dialog-fields">
         <SettingRow
-          label="Show in Friends List"
-          desc="Other players can see you in their friends lists"
+          label={t("Show in Friends List", "フレンドリストに表示")}
+          desc={t(
+            "Other players can see you in their friends lists",
+            "他のプレイヤーのフレンドリストに表示されます",
+          )}
           value={settings.show_in_list}
           disabled={loading || pending}
           onToggle={() => apply(!settings.show_in_list, settings.accept_invites)}
         />
         <SettingRow
-          label="Allow Requests"
-          desc="Other players can send you friend requests"
+          label={t("Allow Requests", "リクエストを許可")}
+          desc={t(
+            "Other players can send you friend requests",
+            "他のプレイヤーからフレンドリクエストを受け取ります",
+          )}
           value={settings.accept_invites}
           disabled={loading || pending}
           onToggle={() => apply(settings.show_in_list, !settings.accept_invites)}
@@ -43,7 +53,7 @@ export function FriendSettingsDialog(_props: FriendSettingsDialogProps) {
 
       <div className="dialog-actions">
         <button className="dialog-confirm" onClick={() => setOpenedDialog(null)}>
-          Close
+          {t("Close", "閉じる")}
         </button>
       </div>
     </div>

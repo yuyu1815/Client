@@ -1,10 +1,12 @@
 import { HiArrowPath, HiCheck, HiCog6Tooth, HiPlay, HiPlus, HiXMark } from "react-icons/hi2";
+import { localized, localeOf } from "../lib/i18n";
 import { Friend, isOffline, PresenceEntry } from "../lib/friends";
 import { useAppStateContext } from "../lib/state";
 import { handleLaunchType } from "../lib/types";
 
 export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaunchType }) {
   const {
+    launcherSettings,
     account,
     friendsList,
     friendsSorted,
@@ -18,12 +20,19 @@ export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaun
     clearFriendsError,
     setOpenedDialog,
   } = useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
+  const t = (en: string, ja: string) => localized(locale, en, ja);
 
   if (!account) {
     return (
-      <div className="page friends-page">
-        <h2 className="page-heading">FRIENDS</h2>
-        <p className="servers-empty">Sign in to view your friends list.</p>
+      <div className="page friends-page" lang={locale}>
+        <h2 className="page-heading">{t("FRIENDS", "フレンド")}</h2>
+        <p className="servers-empty">
+          {t(
+            "Sign in to view your friends list.",
+            "フレンドリストを見るにはサインインしてください。",
+          )}
+        </p>
       </div>
     );
   }
@@ -39,26 +48,26 @@ export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaun
     });
 
   return (
-    <div className="page friends-page">
+    <div className="page friends-page" lang={locale}>
       <div className="friends-header">
-        <h2 className="page-heading">FRIENDS</h2>
+        <h2 className="page-heading">{t("FRIENDS", "フレンド")}</h2>
         <div className="friends-header-actions">
           <button
             className="friends-settings-btn"
             onClick={refreshPresence}
-            title="Refresh presence"
+            title={t("Refresh presence", "オンライン状態を更新")}
           >
             <HiArrowPath />
           </button>
           <button
             className="friends-settings-btn"
             onClick={() => setOpenedDialog({ name: "friend_settings_dialog", props: {} })}
-            title="Friend settings"
+            title={t("Friend settings", "フレンド設定")}
           >
             <HiCog6Tooth />
           </button>
           <button className="servers-add-btn" onClick={openAddDialog}>
-            <HiPlus /> Add Friend
+            <HiPlus /> {t("Add Friend", "フレンドを追加")}
           </button>
         </div>
       </div>
@@ -70,11 +79,12 @@ export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaun
       )}
 
       <FriendsSection
-        title="Friends"
+        title={t("Friends", "フレンド")}
         friends={friends}
         skinUrls={friendsSkins}
         presence={friendsPresence}
-        emptyMessage="You haven't added any friends yet."
+        locale={locale}
+        emptyMessage={t("You haven't added any friends yet.", "フレンドはまだいません。")}
         renderActions={(uuid, p) => {
           const rawAddr = p?.status === "PLAYING_SERVER" ? p.joinInfo?.value : undefined;
           const joinAddress =
@@ -85,17 +95,17 @@ export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaun
                 <button
                   className="friends-btn accept"
                   onClick={() => handleLaunch({ serverIp: joinAddress })}
-                  title={`Join ${joinAddress}`}
+                  title={`${t("Join", "参加")} ${joinAddress}`}
                 >
-                  <HiPlay /> Join
+                  <HiPlay /> {t("Join", "参加")}
                 </button>
               )}
               <button
                 className="friends-btn"
                 onClick={() => removeFriend(uuid)}
-                title="Remove friend"
+                title={t("Remove friend", "フレンドを削除")}
               >
-                <HiXMark /> Remove
+                <HiXMark /> {t("Remove", "削除")}
               </button>
             </>
           );
@@ -103,36 +113,46 @@ export default function FriendsPage({ handleLaunch }: { handleLaunch: handleLaun
       />
 
       <FriendsSection
-        title="Incoming Requests"
+        title={t("Incoming Requests", "受信したリクエスト")}
         friends={incoming}
         skinUrls={friendsSkins}
         presence={friendsPresence}
+        locale={locale}
         hideWhenEmpty
         renderActions={(uuid) => (
           <>
             <button
               className="friends-btn accept"
               onClick={() => acceptFriendRequest(uuid)}
-              title="Accept"
+              title={t("Accept", "承認")}
             >
-              <HiCheck /> Accept
+              <HiCheck /> {t("Accept", "承認")}
             </button>
-            <button className="friends-btn" onClick={() => removeFriend(uuid)} title="Decline">
-              <HiXMark /> Decline
+            <button
+              className="friends-btn"
+              onClick={() => removeFriend(uuid)}
+              title={t("Decline", "拒否")}
+            >
+              <HiXMark /> {t("Decline", "拒否")}
             </button>
           </>
         )}
       />
 
       <FriendsSection
-        title="Outgoing Requests"
+        title={t("Outgoing Requests", "送信したリクエスト")}
         friends={outgoing}
         skinUrls={friendsSkins}
         presence={friendsPresence}
+        locale={locale}
         hideWhenEmpty
         renderActions={(uuid) => (
-          <button className="friends-btn" onClick={() => removeFriend(uuid)} title="Cancel request">
-            <HiXMark /> Cancel
+          <button
+            className="friends-btn"
+            onClick={() => removeFriend(uuid)}
+            title={t("Cancel request", "リクエストをキャンセル")}
+          >
+            <HiXMark /> {t("Cancel", "キャンセル")}
           </button>
         )}
       />
@@ -145,6 +165,7 @@ function FriendsSection({
   friends,
   skinUrls,
   presence,
+  locale,
   emptyMessage,
   hideWhenEmpty,
   renderActions,
@@ -153,6 +174,7 @@ function FriendsSection({
   friends: Friend[];
   skinUrls: Record<string, string>;
   presence: Record<string, PresenceEntry>;
+  locale: "en" | "ja";
   emptyMessage?: string;
   hideWhenEmpty?: boolean;
   renderActions: (uuid: string, presence: PresenceEntry | undefined) => React.ReactNode;
@@ -172,6 +194,7 @@ function FriendsSection({
             friend={f}
             skinUrl={skinUrls[f.profileId]}
             presence={presence[f.profileId]}
+            locale={locale}
           >
             {renderActions(f.profileId, presence[f.profileId])}
           </FriendRow>
@@ -185,11 +208,13 @@ function FriendRow({
   friend,
   skinUrl,
   presence,
+  locale,
   children,
 }: {
   friend: Friend;
   skinUrl: string | undefined;
   presence: PresenceEntry | undefined;
+  locale: "en" | "ja";
   children: React.ReactNode;
 }) {
   const offline = isOffline(presence);
@@ -201,7 +226,7 @@ function FriendRow({
       />
       <div className="mock-friend-info">
         <span className={`mock-friend-name ${offline ? "off" : ""}`}>{friend.name}</span>
-        <span className="mock-friend-status">{formatStatus(presence)}</span>
+        <span className="mock-friend-status">{formatStatus(presence, locale)}</span>
       </div>
       <div className={`mock-dot ${offline ? "off" : "on"}`} />
       <div className="friends-actions">{children}</div>
@@ -209,37 +234,56 @@ function FriendRow({
   );
 }
 
-function formatStatus(presence: PresenceEntry | undefined): string {
+function formatStatus(presence: PresenceEntry | undefined, locale: "en" | "ja"): string {
+  const t = (en: string, ja: string) => localized(locale, en, ja);
   if (!presence || presence.status === "OFFLINE") {
-    const seen = formatLastSeen(presence?.lastUpdated);
-    return seen ? `Offline · ${seen}` : "Offline";
+    const seen = formatLastSeen(presence?.lastUpdated, locale);
+    return seen ? `${t("Offline", "オフライン")} · ${seen}` : t("Offline", "オフライン");
   }
   switch (presence.status) {
     case "ONLINE":
-      return "Online";
+      return t("Online", "オンライン");
     case "PLAYING_OFFLINE":
-      return "In singleplayer";
+      return t("In singleplayer", "シングルプレイ中");
     case "PLAYING_REALMS":
-      return "Playing Realms";
+      return t("Playing Realms", "Realmsをプレイ中");
     case "PLAYING_SERVER":
       return presence.joinInfo?.value
-        ? `Playing: ${presence.joinInfo.value}`
-        : "Playing multiplayer";
+        ? `${t("Playing:", "プレイ中:")} ${presence.joinInfo.value}`
+        : t("Playing multiplayer", "マルチプレイ中");
     case "PLAYING_HOSTED_SERVER":
-      return "Hosting local world";
+      return t("Hosting local world", "ローカルワールドをホスト中");
     default:
       return presence.status;
   }
 }
 
-function formatLastSeen(iso: string | null | undefined): string {
+function formatLastSeen(iso: string | null | undefined, locale: "en" | "ja"): string {
   if (!iso) return "";
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return "";
   const deltaSec = Math.max(0, (Date.now() - then) / 1000);
-  if (deltaSec < 60) return "just now";
-  if (deltaSec < 3600) return `${Math.floor(deltaSec / 60)}m ago`;
-  if (deltaSec < 86400) return `${Math.floor(deltaSec / 3600)}h ago`;
-  if (deltaSec < 604800) return `${Math.floor(deltaSec / 86400)}d ago`;
-  return new Date(then).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  if (deltaSec < 60) return localized(locale, "just now", "たった今");
+  if (deltaSec < 3600)
+    return localized(
+      locale,
+      `${Math.floor(deltaSec / 60)}m ago`,
+      `${Math.floor(deltaSec / 60)}分前`,
+    );
+  if (deltaSec < 86400)
+    return localized(
+      locale,
+      `${Math.floor(deltaSec / 3600)}h ago`,
+      `${Math.floor(deltaSec / 3600)}時間前`,
+    );
+  if (deltaSec < 604800)
+    return localized(
+      locale,
+      `${Math.floor(deltaSec / 86400)}d ago`,
+      `${Math.floor(deltaSec / 86400)}日前`,
+    );
+  return new Date(then).toLocaleDateString(locale === "ja" ? "ja-JP" : "en-US", {
+    month: "short",
+    day: "numeric",
+  });
 }

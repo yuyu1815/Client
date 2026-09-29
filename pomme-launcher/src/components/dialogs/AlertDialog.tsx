@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { localized, localeOf } from "../../lib/i18n";
 import { useAppStateContext } from "../../lib/state";
 
 export type AlertDialogProps = {
@@ -8,11 +9,12 @@ export type AlertDialogProps = {
 };
 
 export default function AlertDialog(dialogProps: AlertDialogProps) {
-  const { setOpenedDialog } = useAppStateContext();
+  const { setOpenedDialog, launcherSettings } = useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
   const [loading, setLoading] = useState(false);
 
   return (
-    <div className="dialog" onClick={(e) => e.stopPropagation()}>
+    <div className="dialog" lang={locale} onClick={(e) => e.stopPropagation()}>
       <h2 className="dialog-title">{dialogProps.title}</h2>
       <div className="dialog-fields">
         <p className="dialog-text">{dialogProps.message}</p>
@@ -34,7 +36,7 @@ export default function AlertDialog(dialogProps: AlertDialogProps) {
             }
           }}
         >
-          {loading ? "..." : "OK"}
+          {loading ? "..." : localized(locale, "OK", "OK")}
         </button>
       </div>
     </div>

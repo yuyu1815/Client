@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { localized, localeOf } from "../../lib/i18n";
 import { useAppStateContext } from "../../lib/state";
 
 export type ConfirmDialogProps = {
@@ -9,11 +10,12 @@ export type ConfirmDialogProps = {
 };
 
 export function ConfirmDialog(dialogProps: ConfirmDialogProps) {
-  const { setOpenedDialog } = useAppStateContext();
+  const { setOpenedDialog, launcherSettings } = useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
   const [loading, setLoading] = useState(false);
 
   return (
-    <div className="dialog" onClick={(e) => e.stopPropagation()}>
+    <div className="dialog" lang={locale} onClick={(e) => e.stopPropagation()}>
       <h2 className="dialog-title">{dialogProps.title}</h2>
 
       <div className="dialog-fields">
@@ -34,7 +36,7 @@ export function ConfirmDialog(dialogProps: ConfirmDialogProps) {
             }
           }}
         >
-          Cancel
+          {localized(locale, "Cancel", "キャンセル")}
         </button>
 
         <button
@@ -53,7 +55,7 @@ export function ConfirmDialog(dialogProps: ConfirmDialogProps) {
             }
           }}
         >
-          {loading ? "..." : "Confirm"}
+          {loading ? "..." : localized(locale, "Confirm", "確認")}
         </button>
       </div>
     </div>

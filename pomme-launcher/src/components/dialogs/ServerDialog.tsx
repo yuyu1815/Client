@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { HiChevronDown } from "react-icons/hi2";
 import { useDropdown } from "../../lib/hooks";
+import { localized, localeOf } from "../../lib/i18n";
+import { shouldSubmitEnter } from "../../lib/shouldSubmitEnter.mjs";
 import { useAppStateContext } from "../../lib/state";
 import { Server } from "../../lib/types";
 
@@ -22,17 +24,20 @@ function ServerCategoryInput({
   setCustomCategory,
 }: ServerCategoryInputProps) {
   const { ref: categoryDropdownRef, ...categoryDropdown } = useDropdown();
+  const { launcherSettings } = useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
+  const t = (en: string, ja: string) => localized(locale, en, ja);
 
   return (
     <div className="dialog-field">
-      <label>CATEGORY</label>
+      <label>{t("CATEGORY", "カテゴリー")}</label>
       <div className="custom-select-wrapper" ref={categoryDropdownRef}>
         <div className="creatable-select">
           {customCategory ? (
             <>
               <input
                 className="creatable-select-input"
-                placeholder="New category name"
+                placeholder={t("New category name", "新しいカテゴリー名")}
                 value={category}
                 onChange={(e) => setCategory(e.target.value)}
                 autoFocus
@@ -49,7 +54,7 @@ function ServerCategoryInput({
               onClick={categoryDropdown.toggle}
               type="button"
             >
-              <span>{category}</span>
+              <span>{category === UNCATEGORIZED ? t(UNCATEGORIZED, "未分類") : category}</span>
               <HiChevronDown
                 className={`custom-select-arrow ${categoryDropdown.isOpen ? "open" : ""}`}
               />
@@ -68,7 +73,7 @@ function ServerCategoryInput({
                   categoryDropdown.close();
                 }}
               >
-                <span>{UNCATEGORIZED}</span>
+                <span>{t(UNCATEGORIZED, "未分類")}</span>
               </button>
               {existingCategories.map((cat) => (
                 <button
@@ -91,7 +96,7 @@ function ServerCategoryInput({
                   categoryDropdown.close();
                 }}
               >
-                <span>+ New category</span>
+                <span>+ {t("New category", "新しいカテゴリー")}</span>
               </button>
             </div>
           </div>
@@ -104,7 +109,10 @@ function ServerCategoryInput({
 export type ServerDialogProps = { type: "new" } | { type: "edit"; server: Server };
 
 export function ServerDialog(dialogProps: ServerDialogProps) {
-  const { servers, addServer, editServer, setOpenedDialog } = useAppStateContext();
+  const { servers, addServer, editServer, setOpenedDialog, launcherSettings } =
+    useAppStateContext();
+  const locale = localeOf(launcherSettings.language);
+  const t = (en: string, ja: string) => localized(locale, en, ja);
 
   const [serverName, setServerName] = useState(
     dialogProps.type === "edit" ? dialogProps.server.name : "",
@@ -140,30 +148,35 @@ export function ServerDialog(dialogProps: ServerDialogProps) {
   return (
     <div
       className="dialog"
+      lang={locale}
       onClick={(e) => {
         e.stopPropagation();
       }}
     >
-      <h2 className="dialog-title">{dialogProps.type === "edit" ? "Edit Server" : "Add Server"}</h2>
+      <h2 className="dialog-title">
+        {dialogProps.type === "edit"
+          ? t("Edit Server", "サーバーを編集")
+          : t("Add Server", "サーバーを追加")}
+      </h2>
 
       <div className="dialog-fields">
         <div className="dialog-field">
-          <label>SERVER NAME</label>
+          <label>{t("SERVER NAME", "サーバー名")}</label>
           <input
             value={serverName}
             onChange={(e) => setServerName(e.target.value)}
-            placeholder="My Server"
+            placeholder={t("My Server", "マイサーバー")}
             autoFocus
           />
         </div>
 
         <div className="dialog-field">
-          <label>SERVER ADDRESS</label>
+          <label>{t("SERVER ADDRESS", "サーバーアドレス")}</label>
           <input
             value={serverAddress}
             onChange={(e) => setServerAddress(e.target.value)}
             placeholder="play.example.com"
-            onKeyDown={(e) => e.key === "Enter" && handleConfirm()}
+            onKeyDown={(e) => shouldSubmitEnter(e) && handleConfirm()}
           />
         </div>
 
@@ -178,10 +191,10 @@ export function ServerDialog(dialogProps: ServerDialogProps) {
 
       <div className="dialog-actions">
         <button className="dialog-cancel" onClick={() => setOpenedDialog(null)}>
-          Cancel
+          {t("Cancel", "キャンセル")}
         </button>
         <button className="dialog-save" onClick={handleConfirm}>
-          {dialogProps.type === "edit" ? "Save" : "Add"}
+          {dialogProps.type === "edit" ? t("Save", "保存") : t("Add", "追加")}
         </button>
       </div>
     </div>
