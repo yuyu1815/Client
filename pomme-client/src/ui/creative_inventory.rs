@@ -335,6 +335,7 @@ pub fn build_creative_inventory(
     right_clicked: bool,
     scroll_delta: f32,
     events: &[crate::ui::text_edit::TextInputEvent],
+    preedit: Option<(&str, usize)>,
     chat_key: bool,
     hotbar_swap: Option<u8>,
     swap_offhand: bool,
@@ -460,10 +461,6 @@ pub fn build_creative_inventory(
 
         let scroll_row_offset = (state.scroll * max_scroll_rows as f32).round() as usize;
         let item_offset = scroll_row_offset * GRID_COLS;
-
-        if matches!(state.tab, CreativeTab::Search) {
-            draw_search_box(elements, &state.search, ox, oy, scale, text_width_fn);
-        }
 
         for row in 0..GRID_ROWS {
             for col in 0..GRID_COLS {
@@ -642,6 +639,17 @@ pub fn build_creative_inventory(
         }
     }
 
+    if matches!(state.tab, CreativeTab::Search) {
+        draw_search_box(
+            elements,
+            &state.search,
+            ox,
+            oy,
+            scale,
+            preedit,
+            text_width_fn,
+        );
+    }
     push_tab_tooltip(elements, ox, oy, scale, &tt);
 
     let outside = !hit_test(cursor, [ox, oy, inv_w, inv_h]);
@@ -1359,6 +1367,7 @@ fn draw_search_box(
     ox: f32,
     oy: f32,
     scale: f32,
+    preedit: Option<(&str, usize)>,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) {
     let x = ox + SEARCH_BOX_X * scale;
@@ -1368,8 +1377,11 @@ fn draw_search_box(
     let fs = FONT_SIZE * scale;
     let text_y = y + (h - fs) / 2.0;
     let wf = |t: &str| text_width_fn(t, fs);
-    let info = field.render_info(SEARCH_BOX_W * scale, true, &wf);
+    let mut info = field.render_info(SEARCH_BOX_W * scale, true, &wf);
     let shown = &field.value()[info.display_start..info.display_end];
+    if preedit.is_some() {
+        info.caret_visible = false;
+    }
 
     crate::ui::common::push_field_text(
         elements,
@@ -1385,6 +1397,108 @@ fn draw_search_box(
         None,
         &wf,
     );
+    if let Some((text, caret)) = preedit.filter(|(text, _)| !text.is_empty()) {
+        let (px, start, end, cx) = search_preedit_layout(
+            text,
+            caret,
+            x + pad + wf(&shown[..info.caret_byte]),
+            x + pad,
+            x + SEARCH_BOX_W * scale,
+            &wf,
+        );
+        let color = rgb(0xffdd55);
+        elements.push(MenuElement::Text {
+            x: px,
+            y: text_y,
+            text: text[start..end].into(),
+            scale: fs,
+            color,
+            centered: false,
+        });
+        elements.push(MenuElement::Rect {
+            x: px,
+            y: text_y + fs,
+            w: wf(&text[start..end]),
+            h: scale,
+            corner_radius: 0.0,
+            color,
+        });
+        elements.push(MenuElement::Rect {
+            x: cx,
+            y: text_y - scale,
+            w: scale,
+            h: fs + 2.0 * scale,
+            corner_radius: 0.0,
+            color: WHITE,
+        });
+    }
+}
+
+/// Physical-pixel caret position, from the same box geometry and scroll slice
+/// used to render the creative search field.
+pub fn search_ime_cursor_area(
+    field: &crate::ui::text_edit::TextFieldState,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    preedit: Option<(&str, usize)>,
+    text_width_fn: &dyn Fn(&str, f32) -> f32,
+) -> (f32, f32, f32) {
+    let scale = gs.min(screen_w / TEX_W).min(screen_h / TEX_H);
+    let x = (screen_w - TEX_W * scale) / 2.0 + SEARCH_BOX_X * scale;
+    let y = (screen_h - TEX_H * scale) / 2.0 + SEARCH_BOX_Y * scale;
+    let fs = FONT_SIZE * scale;
+    let wf = |s: &str| text_width_fn(s, fs);
+    let info = field.render_info(SEARCH_BOX_W * scale, true, &wf);
+    let shown = &field.value()[info.display_start..info.display_end];
+    let caret_x = x + scale + wf(&shown[..info.caret_byte]);
+    let caret_x = if let Some((text, caret)) = preedit.filter(|(text, _)| !text.is_empty()) {
+        search_preedit_layout(
+            text,
+            caret,
+            caret_x,
+            x + scale,
+            x + SEARCH_BOX_W * scale,
+            &wf,
+        )
+        .3
+    } else {
+        caret_x
+    };
+    (
+        caret_x.clamp(x + scale, x + SEARCH_BOX_W * scale),
+        y + (SEARCH_BOX_H * scale - fs) / 2.0,
+        fs,
+    )
+}
+
+// Keep long compositions inside the narrow box, preserving the preedit caret.
+fn search_preedit_layout(
+    text: &str,
+    caret: usize,
+    caret_x: f32,
+    left: f32,
+    right: f32,
+    wf: &dyn Fn(&str) -> f32,
+) -> (f32, usize, usize, f32) {
+    let caret = if text.is_char_boundary(caret) {
+        caret
+    } else {
+        text.len()
+    };
+    let mut start = 0;
+    while start < caret && wf(&text[start..caret]) > right - left {
+        start += text[start..].chars().next().unwrap().len_utf8();
+    }
+    let mut end = text.len();
+    while end > caret && wf(&text[start..end]) > right - left {
+        end = text[..end].char_indices().last().unwrap().0;
+    }
+    let px = caret_x
+        .min((right - wf(&text[start..end])).max(left))
+        .max(left);
+    let cx = (px + wf(&text[start..caret])).min(right);
+    (px, start, end, cx)
 }
 
 /// Returns `true` if the click was consumed by the scrollbar.
@@ -1518,4 +1632,54 @@ fn search_names_cached() -> &'static [String] {
             .map(|(kind, _)| crate::lang::item_display_name_for(locale, *kind).to_lowercase())
             .collect()
     })
+}
+
+#[cfg(test)]
+mod ime_tests {
+    use super::*;
+
+    #[test]
+    fn unicode_search_scroll_and_preedit_caret_stay_in_physical_box() {
+        let mut field = crate::ui::text_edit::TextFieldState::new(50);
+        let wf = |s: &str| s.chars().count() as f32 * 8.0;
+        field.set_value("石石石石石石石石石石石石石石石", 80.0, &wf);
+        assert!(field.render_info(80.0, true, &wf).display_start > 0);
+        let renderer_width = |s: &str, _fs: f32| wf(s);
+        let (x, y, fs) = search_ime_cursor_area(
+            &field,
+            390.0,
+            272.0,
+            2.0,
+            Some(("にほんご日本語", "にほんご".len())),
+            &renderer_width,
+        );
+        let left = (390.0 - TEX_W * 2.0) / 2.0 + SEARCH_BOX_X * 2.0;
+        assert!((left..=left + SEARCH_BOX_W * 2.0).contains(&x));
+        assert!(y > 0.0 && fs > 0.0);
+        let mut elements = Vec::new();
+        draw_search_box(
+            &mut elements,
+            &field,
+            0.0,
+            0.0,
+            2.0,
+            Some(("にほんご日本語", "にほんご".len())),
+            &renderer_width,
+        );
+        assert!(elements.iter().any(|e| matches!(e,
+            MenuElement::Rect { x: rect_x, y: rect_y, color, .. }
+                if *rect_x == x && *rect_y == y - 2.0 && *color == WHITE
+        )));
+        let (_, start, end, caret) = search_preedit_layout(
+            "日本語日本語日本語日本語",
+            "日本語日本語日本語日本語".len(),
+            left + 159.0,
+            left + 2.0,
+            left + 160.0,
+            &wf,
+        );
+        assert!("日本語日本語日本語日本語".is_char_boundary(start));
+        assert!("日本語日本語日本語日本語".is_char_boundary(end));
+        assert!(caret <= left + 160.0);
+    }
 }

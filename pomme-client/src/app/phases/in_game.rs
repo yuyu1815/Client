@@ -820,6 +820,19 @@ impl GameState {
             TextOwner::Book
         } else if self.dialog_open() {
             TextOwner::Dialog
+        } else if self.creative_inventory_open
+            && self.creative_state.tab.captures_typing()
+            && !self.chat.is_open()
+            && !self.options_from_game
+            && !self.paused
+            && !self.inventory_open
+            && self.open_container.is_none()
+            && self.book_view.is_none()
+            && self.win_credits.is_none()
+            && self.code_of_conduct.is_none()
+            && self.game_mode_switcher.is_none()
+        {
+            TextOwner::CreativeSearch
         } else if self.gui_open() || self.options_from_game || self.paused {
             TextOwner::Other
         } else if self.chat.is_focused() {
@@ -4266,6 +4279,8 @@ pub fn update_game(
         let scroll_delta = core.input.consume_menu_scroll();
         // `typed`/`backspace` come from the frame's single drain up top; a
         // second drain here would always read empty.
+        let creative_has_focus = game.text_owner() == input::TextOwner::CreativeSearch;
+        let creative_preedit = core.input.chat_preedit().filter(|_| creative_has_focus);
         let action = crate::ui::creative_inventory::build_creative_inventory(
             &mut elements,
             &mut game.creative_state,
@@ -4276,7 +4291,12 @@ pub fn update_game(
             middle_clicked,
             right_clicked,
             scroll_delta,
-            &text_events,
+            if creative_has_focus {
+                &text_events
+            } else {
+                &[]
+            },
+            creative_preedit,
             core.input.key_just_pressed(winit::keyboard::KeyCode::KeyT),
             core.input.hotbar_key_just_pressed(),
             core.input.key_just_pressed(winit::keyboard::KeyCode::KeyF),
@@ -4315,6 +4335,20 @@ pub fn update_game(
                 }
             }
             crate::ui::creative_inventory::CreativeAction::None => {}
+        }
+        if game.text_owner() == input::TextOwner::CreativeSearch {
+            let (x, y, fs) = crate::ui::creative_inventory::search_ime_cursor_area(
+                &game.creative_state.search,
+                sw,
+                sh,
+                gs,
+                core.input.chat_preedit(),
+                &|t, s| gfx.renderer.menu_text_width(t, s),
+            );
+            gfx.window.set_ime_cursor_area(
+                winit::dpi::PhysicalPosition::new(x as i32, y as i32),
+                winit::dpi::PhysicalSize::new(1, fs.max(1.0) as u32),
+            );
         }
         core.input.clear_just_pressed_actions();
     }

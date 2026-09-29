@@ -552,10 +552,18 @@ impl ApplicationHandler for App {
                     {
                         self.core.input.chat_enter_event(code, false);
                     }
-                    if !(event.state.is_pressed()
+                    let composing_edit = event.state.is_pressed()
                         && matches!(event.physical_key, PhysicalKey::Code(code)
-                            if self.core.input.composing_edit_key(code)))
+                            if self.core.input.composing_edit_key(code));
+                    if event.state.is_pressed()
+                        && matches!(self.core.input.text_owner(), crate::app::input::TextOwner::CreativeSearch)
+                        && (composing_edit
+                            || matches!(event.physical_key, PhysicalKey::Code(code)
+                                if self.core.input.chat_enter_event(code, true)))
                     {
+                        return app;
+                    }
+                    if !composing_edit {
                         self.core.input.on_key_event(&event);
                     }
 
@@ -1317,13 +1325,13 @@ impl ApplicationHandler for App {
         if let AppPhase::InGame { game, .. } = self.phase.get() {
             self.core.input.set_text_owner(game.text_owner());
         }
-        // Only the un-covered chat EditBox owns IME for now. A late Commit
-        // after closing or losing focus must not reach another screen.
+        // Only the un-covered chat or creative search field owns IME. A late
+        // Commit after closing or losing focus must not reach another screen.
         let allowed = self.core.probe.is_none()
             && self.auto_fps.is_none()
             && matches!(self.phase.get(), AppPhase::InGame { gfx, game, .. }
-                if gfx.window.has_focus() && game.text_owner() == crate::app::input::TextOwner::Chat
-                    && game.level_load.is_none());
+                if gfx.window.has_focus()
+                    && matches!(game.text_owner(), crate::app::input::TextOwner::Chat | crate::app::input::TextOwner::CreativeSearch));
         if allowed != self.chat_ime_allowed {
             self.chat_ime_allowed = allowed;
             if !allowed {

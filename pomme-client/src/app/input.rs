@@ -185,7 +185,7 @@ pub struct InputState {
     /// `keyPressed` + `charTyped` callback pair. Drained once per frame by
     /// whichever screen owns the focused field.
     text_events: Vec<crate::ui::text_edit::TextInputEvent>,
-    /// Only chat owns IME; preedit is never part of the submitted value.
+    /// Only the active text owner receives IME; preedit is never submitted.
     ime_preedit: Option<(String, usize)>,
     ime_enter_seen: bool,
     ime_enter_held: bool,
@@ -211,6 +211,7 @@ pub(crate) enum TextOwner {
     #[default]
     None,
     Chat,
+    CreativeSearch,
     Sign,
     Book,
     Dialog,
@@ -783,16 +784,20 @@ impl InputState {
         }
     }
 
+    pub(crate) fn text_owner(&self) -> TextOwner {
+        self.text_owner
+    }
+
     pub fn chat_preedit(&self) -> Option<(&str, usize)> {
         self.ime_preedit
             .as_ref()
             .map(|(s, caret)| (s.as_str(), *caret))
     }
 
-    /// Called only while chat owns focus. An empty preedit still composes:
-    /// Windows sends Preedit("", None) immediately before Commit.
+    /// An empty preedit still composes: Windows sends Preedit("", None)
+    /// immediately before Commit. The active owner is checked again here.
     pub fn on_chat_ime(&mut self, ime: Ime, focused: bool) {
-        if !focused {
+        if !focused || !matches!(self.text_owner, TextOwner::Chat | TextOwner::CreativeSearch) {
             return;
         }
         match ime {
@@ -842,13 +847,13 @@ impl InputState {
     /// Used by both the press-only screen dispatch and the release path in
     /// the window dispatcher; only a fresh press may submit chat.
     pub(crate) fn chat_enter_event(&mut self, code: KeyCode, pressed: bool) -> bool {
-        self.text_owner == TextOwner::Chat
+        matches!(self.text_owner, TextOwner::Chat | TextOwner::CreativeSearch)
             && matches!(code, KeyCode::Enter | KeyCode::NumpadEnter)
             && self.chat_enter_key(pressed)
     }
 
     pub(crate) fn composing_edit_key(&self, code: KeyCode) -> bool {
-        self.text_owner == TextOwner::Chat
+        matches!(self.text_owner, TextOwner::Chat | TextOwner::CreativeSearch)
             && self.ime_preedit.is_some()
             && matches!(
                 code,
@@ -863,6 +868,24 @@ impl InputState {
                     | KeyCode::PageUp
                     | KeyCode::PageDown
             )
+            || (self.text_owner == TextOwner::CreativeSearch
+                && self.ime_preedit.is_some()
+                && (code == KeyCode::Escape
+                    || hotbar_slot(code).is_some()
+                    || matches!(
+                        code,
+                        KeyCode::Digit0
+                            | KeyCode::Numpad0
+                            | KeyCode::Numpad1
+                            | KeyCode::Numpad2
+                            | KeyCode::Numpad3
+                            | KeyCode::Numpad4
+                            | KeyCode::Numpad5
+                            | KeyCode::Numpad6
+                            | KeyCode::Numpad7
+                            | KeyCode::Numpad8
+                            | KeyCode::Numpad9
+                    )))
     }
 
     pub fn on_menu_key_event(&mut self, event: &winit::event::KeyEvent) {
@@ -1259,6 +1282,54 @@ mod ime_tests {
         input.on_menu_input(Some(KeyCode::KeyA), true, Some("a")); // independent key
         assert!(matches!(input.drain_text_events().as_slice(),
             [TextInputEvent::Commit(text), TextInputEvent::Key { code: KeyCode::KeyA, .. }, TextInputEvent::Char('a')] if text == "a"));
+    }
+
+    #[test]
+    fn creative_search_composition_and_owner_change() {
+        let mut input = InputState::released();
+        let mut search = crate::ui::text_edit::TextFieldState::new(50);
+        let mut clipboard = crate::ui::text_edit::SystemClipboard;
+        let width = |s: &str| s.chars().count() as f32;
+        input.set_text_owner(TextOwner::CreativeSearch);
+        input.on_chat_ime(Ime::Preedit("いし".into(), None), true);
+        assert_eq!(search.value(), "");
+        for code in [
+            KeyCode::Digit1,
+            KeyCode::Numpad2,
+            KeyCode::Escape,
+            KeyCode::Backspace,
+            KeyCode::ArrowLeft,
+        ] {
+            assert!(input.composing_edit_key(code));
+            input.on_menu_input(Some(code), true, None);
+        }
+        input.on_menu_input(Some(KeyCode::Enter), true, None);
+        assert!(!input.enter_pressed());
+        assert!(input.drain_text_events().is_empty());
+        input.on_chat_ime(Ime::Preedit("".into(), None), true);
+        input.on_chat_ime(Ime::Commit("石".into()), true);
+        for event in input.drain_text_events() {
+            search.handle(&event, &mut clipboard, 80.0, &width);
+        }
+        assert_eq!(search.value(), "石");
+        input.set_text_owner(TextOwner::Other); // switched tab or world
+        input.on_chat_ime(Ime::Commit("遅延".into()), true);
+        input.set_text_owner(TextOwner::CreativeSearch);
+        input.on_chat_ime(Ime::Commit("遅延".into()), true);
+        assert!(input.drain_text_events().is_empty());
+        assert_eq!(search.value(), "石");
+        input.on_menu_input(Some(KeyCode::Digit1), true, Some("1"));
+        assert!(!input.composing_edit_key(KeyCode::Digit1));
+        assert!(matches!(
+            input.drain_text_events().as_slice(),
+            [
+                TextInputEvent::Key {
+                    code: KeyCode::Digit1,
+                    ..
+                },
+                TextInputEvent::Char('1')
+            ]
+        ));
     }
 
     #[test]
