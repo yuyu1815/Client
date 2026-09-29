@@ -1169,6 +1169,8 @@ pub struct ProjectileDisplay {
     pub prev: Position,
     pub current: Position,
     pub velocity: DVec3,
+    /// Last flight vector for an arrow stopped by predicted block collision.
+    pub impact_velocity: Option<DVec3>,
     pub stopped: bool,
     pub on_ground: bool,
     pub in_ground: bool,
@@ -1333,6 +1335,7 @@ impl EntityStore {
             display.prev = position;
             display.current = position;
             display.velocity = velocity;
+            display.impact_velocity = None;
             display.stopped = display.in_ground || display.on_ground;
         }
     }
@@ -1345,11 +1348,13 @@ impl EntityStore {
             if let Some(display) = &mut vehicle.projectile {
                 display.velocity = velocity;
                 if velocity.length_squared() > 1.0e-8 {
+                    display.impact_velocity = None;
                     display.on_ground = false;
                     // AbstractArrow releases inGround on a new nonzero motion.
                     display.in_ground = false;
                 }
-                display.stopped = display.in_ground || display.on_ground;
+                display.stopped =
+                    display.in_ground || display.on_ground || display.impact_velocity.is_some();
             }
         }
     }
@@ -1365,6 +1370,7 @@ impl EntityStore {
                 prev: vehicle.position,
                 current: vehicle.position,
                 velocity: vehicle.velocity,
+                impact_velocity: None,
                 stopped: false,
                 on_ground: false,
                 in_ground: false,
@@ -1469,6 +1475,9 @@ impl EntityStore {
                 display.current = (from + motion * (t - backoff)).into();
                 if arrow {
                     display.stopped = true;
+                    display.impact_velocity = Some(motion);
+                    display.velocity = DVec3::ZERO;
+                    continue;
                 }
                 // Snowballs are removed on an authoritative server hit/removal;
                 // do not turn a local block prediction into permanent removal.
@@ -1492,6 +1501,8 @@ impl EntityStore {
             if display.stopped {
                 display.prev = vehicle.position;
                 display.current = vehicle.position;
+            } else {
+                display.impact_velocity = None;
             }
         }
     }
@@ -1519,6 +1530,8 @@ impl EntityStore {
                 if in_ground {
                     display.prev = vehicle.position;
                     display.current = vehicle.position;
+                } else if !display.stopped {
+                    display.impact_velocity = None;
                 }
             }
         }

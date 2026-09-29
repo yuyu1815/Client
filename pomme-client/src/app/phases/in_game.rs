@@ -7,7 +7,7 @@ use azalea_protocol::packets::game::{
     ServerboundClientInformation, ServerboundCommandSuggestion, ServerboundGamePacket,
 };
 use azalea_registry::builtin::{BlockEntityKind, EntityKind};
-use glam::FloatExt as _;
+use glam::{DVec3, FloatExt as _};
 
 use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::level_load::LevelLoadTracker;
@@ -5129,10 +5129,13 @@ fn arrow_render_infos(
                 .projectile
                 .as_ref()
                 .map_or(entity.position, |p| p.position(partial_tick));
-            let velocity = entity
-                .projectile
-                .as_ref()
-                .map_or(entity.velocity, |p| p.velocity);
+            let velocity = entity.projectile.as_ref().map_or(entity.velocity, |p| {
+                if p.stopped {
+                    p.impact_velocity.unwrap_or(DVec3::ZERO)
+                } else {
+                    p.velocity
+                }
+            });
             let (yaw, pitch) = if velocity.length_squared() > 1.0e-8 {
                 (
                     (velocity.x.atan2(velocity.z).to_degrees()) as f32,
@@ -6725,6 +6728,49 @@ mod tests {
         let arrows = arrow_render_infos(&store, 1.0);
         let arrow = &arrows[0];
         assert_eq!((arrow.body_y_rot_deg, arrow.head_x_rot_deg), (12.0, 13.0));
+        // Grounding packets win over a nonzero flight velocity in rendering.
+        store.set_vehicle_motion(1, glam::DVec3::Y);
+        store.set_projectile_grounded(1, true);
+        let arrow = &arrow_render_infos(&store, 1.0)[0];
+        assert_eq!((arrow.body_y_rot_deg, arrow.head_x_rot_deg), (12.0, 13.0));
+    }
+
+    #[test]
+    fn ceiling_hit_arrow_keeps_impact_pitch_and_zero_velocity() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::DVec3;
+
+        use crate::entity::components::{LookDirection, Position};
+        crate::world::block::init("26.2");
+        let mut chunks = crate::world::chunk::ChunkStore::new(1);
+        let _loaded = chunks.chunk_storage.upsert(
+            azalea_core::position::ChunkPos::new(0, 0),
+            azalea_world::chunk::Chunk::default(),
+        );
+        chunks.set_block_state(
+            2,
+            71,
+            2,
+            crate::world::block::first_state_of("stone").unwrap(),
+        );
+        let mut store = crate::entity::EntityStore::new();
+        store.set_vehicle_spawn_transform(
+            1,
+            Position::new(2.5, 70.975, 2.5),
+            DVec3::new(0.0, 0.05, 0.0),
+            LookDirection::new(0.0, 0.0),
+        );
+        store.set_vehicle_kind(1, EntityKind::Arrow);
+        for _ in 0..3 {
+            store.tick_projectile_displays(&chunks);
+            let p = store.vehicles[&1].projectile.as_ref().unwrap();
+            assert!(p.stopped);
+            assert_eq!(p.velocity, DVec3::ZERO);
+            assert_eq!(arrow_render_infos(&store, 1.0)[0].head_x_rot_deg, 90.0);
+        }
+        // A later zero-motion packet must not turn the embedded arrow around.
+        store.set_vehicle_motion(1, DVec3::ZERO);
+        assert_eq!(arrow_render_infos(&store, 1.0)[0].head_x_rot_deg, 90.0);
     }
 
     #[test]
