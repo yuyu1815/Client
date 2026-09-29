@@ -809,6 +809,26 @@ impl GameState {
         self.code_of_conduct.is_some() || self.dialog_open()
     }
 
+    /// Topmost screen wins, even if chat is still marked focused beneath it.
+    pub(crate) fn text_owner(&self) -> input::TextOwner {
+        use input::TextOwner;
+        if self.level_load.is_some() {
+            TextOwner::Other
+        } else if self.sign_edit.is_some() {
+            TextOwner::Sign
+        } else if self.book_edit.is_some() {
+            TextOwner::Book
+        } else if self.dialog_open() {
+            TextOwner::Dialog
+        } else if self.gui_open() || self.options_from_game || self.paused {
+            TextOwner::Other
+        } else if self.chat.is_focused() {
+            TextOwner::Chat
+        } else {
+            TextOwner::None
+        }
+    }
+
     pub fn gui_open(&self) -> bool {
         self.win_credits.is_some()
             || self.code_of_conduct.is_some()
@@ -2732,6 +2752,7 @@ pub fn update_game(
 
     let disconnect_reason =
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
+    core.input.set_text_owner(game.text_owner());
     if let Some(transfer) = game.pending_server_transfer.take() {
         game.tab_score_state.set_visible(false);
         return GameUpdateResult::Transfer(transfer);
@@ -2949,7 +2970,9 @@ pub fn update_game(
     } else {
         Vec::new()
     };
-    game.recipe_book.handle_text_events(&text_events);
+    if game.text_owner() == input::TextOwner::Other {
+        game.recipe_book.handle_text_events(&text_events);
+    }
     let text_sw = gfx.renderer.screen_width() as f32;
     let text_gs = hud::gui_scale(
         text_sw,
@@ -2958,9 +2981,9 @@ pub fn update_game(
     );
     let text_fs = common::FONT_SIZE * text_gs;
     let chat_was_open = game.chat.is_open();
-    if game.dialog_open() {
-        // The dialog, or the ConfirmScreen over it, replaces ChatScreen and
-        // takes its input; `build_server_screens` hands the typing on.
+    if game.text_owner() != input::TextOwner::Chat {
+        // The top screen replaces ChatScreen; server screens consume their
+        // text below, not through the still-open chat field.
     } else if let Some(msg) = game.chat.handle_key_input(
         &text_events,
         enter,
@@ -4384,6 +4407,7 @@ pub fn update_game(
         &text_events,
     );
 
+    core.input.set_text_owner(game.text_owner());
     if game.chat.is_open() && !dialog_open && core.input.cursor_moved_this_frame() {
         let icon = if game
             .chat

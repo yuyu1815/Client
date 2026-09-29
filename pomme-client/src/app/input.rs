@@ -190,7 +190,7 @@ pub struct InputState {
     ime_enter_seen: bool,
     ime_enter_held: bool,
     ime_commit_guard: bool,
-    ime_last_commit: Option<String>,
+    text_owner: TextOwner,
     enter_pressed: bool,
     escape_pressed: bool,
     tab_pressed: bool,
@@ -204,6 +204,17 @@ pub struct InputState {
     strong_rumble_effect: Option<Effect>,
     active_gamepad_id: Option<GamepadId>,
     recent_actions: HashMap<Action, bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TextOwner {
+    #[default]
+    None,
+    Chat,
+    Sign,
+    Book,
+    Dialog,
+    Other,
 }
 
 #[derive(Default)]
@@ -276,7 +287,7 @@ impl InputState {
             ime_enter_seen: false,
             ime_enter_held: false,
             ime_commit_guard: false,
-            ime_last_commit: None,
+            text_owner: TextOwner::None,
             enter_pressed: false,
             escape_pressed: false,
             tab_pressed: false,
@@ -754,9 +765,22 @@ impl InputState {
         self.ime_enter_seen = false;
         self.ime_enter_held = false;
         self.ime_commit_guard = false;
-        self.ime_last_commit = None;
         self.enter_pressed = false;
         self.text_events.clear();
+    }
+
+    /// Change the sole recipient before draining, including after network
+    /// packets.
+    pub(crate) fn set_text_owner(&mut self, owner: TextOwner) {
+        if self.text_owner != owner {
+            self.clear_chat_ime();
+            self.tab_pressed = false;
+            self.up_pressed = false;
+            self.down_pressed = false;
+            self.page_up_pressed = false;
+            self.page_down_pressed = false;
+            self.text_owner = owner;
+        }
     }
 
     pub fn chat_preedit(&self) -> Option<(&str, usize)> {
@@ -777,7 +801,6 @@ impl InputState {
                     .map(|(_, end)| end)
                     .filter(|&i| text.is_char_boundary(i));
                 self.ime_preedit = Some((text.clone(), caret.unwrap_or(text.len())));
-                self.ime_last_commit = None;
                 self.enter_pressed = false;
             }
             Ime::Commit(text) => {
@@ -789,7 +812,6 @@ impl InputState {
                 // If Commit precedes its KeyboardInput, suppress that key.
                 self.ime_commit_guard = !self.ime_enter_seen;
                 self.ime_enter_seen = false;
-                self.ime_last_commit = Some(text.clone());
                 self.text_events
                     .push(crate::ui::text_edit::TextInputEvent::Commit(text));
             }
@@ -817,20 +839,57 @@ impl InputState {
         false
     }
 
+    /// Used by both the press-only screen dispatch and the release path in
+    /// the window dispatcher; only a fresh press may submit chat.
+    pub(crate) fn chat_enter_event(&mut self, code: KeyCode, pressed: bool) -> bool {
+        self.text_owner == TextOwner::Chat
+            && matches!(code, KeyCode::Enter | KeyCode::NumpadEnter)
+            && self.chat_enter_key(pressed)
+    }
+
+    pub(crate) fn composing_edit_key(&self, code: KeyCode) -> bool {
+        self.text_owner == TextOwner::Chat
+            && self.ime_preedit.is_some()
+            && matches!(
+                code,
+                KeyCode::Backspace
+                    | KeyCode::Delete
+                    | KeyCode::ArrowLeft
+                    | KeyCode::ArrowRight
+                    | KeyCode::ArrowUp
+                    | KeyCode::ArrowDown
+                    | KeyCode::Home
+                    | KeyCode::End
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+            )
+    }
+
     pub fn on_menu_key_event(&mut self, event: &winit::event::KeyEvent) {
-        if let PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) = event.physical_key
-            && self.chat_enter_key(event.state.is_pressed())
-        {
+        let code = match event.physical_key {
+            PhysicalKey::Code(code) => Some(code),
+            _ => None,
+        };
+        self.on_menu_input(code, event.state.is_pressed(), event.text.as_deref());
+    }
+
+    // Same screen dispatch as on_menu_key_event, with winit's platform-private
+    // KeyEvent stripped so ordered keyboard/IME interactions are testable.
+    fn on_menu_input(&mut self, code: Option<KeyCode>, pressed: bool, text: Option<&str>) {
+        if code.is_some_and(|code| self.chat_enter_event(code, pressed)) {
             return;
         }
-        if !event.state.is_pressed() {
+        if !pressed {
+            return;
+        }
+        if code.is_some_and(|code| self.composing_edit_key(code)) {
             return;
         }
 
         // The ordered event stream for caret-editing text fields. Chars are
         // suppressed while the edit modifier is held, like GLFW's char
         // callback for Ctrl (Cmd) chords.
-        if let PhysicalKey::Code(code) = event.physical_key {
+        if let Some(code) = code {
             self.text_events
                 .push(crate::ui::text_edit::TextInputEvent::Key {
                     code,
@@ -838,17 +897,10 @@ impl InputState {
                 });
         }
         let state = self.modifiers.state();
-        let duplicate_commit = event.text.as_ref().is_some_and(|text| {
-            self.ime_last_commit
-                .as_ref()
-                .is_some_and(|commit| commit == text)
-        });
-        self.ime_last_commit = None;
-        if let Some(text) = &event.text
+        if let Some(text) = text
             && !state.control_key()
             && !state.super_key()
             && self.ime_preedit.is_none()
-            && !duplicate_commit
         {
             for ch in text.chars() {
                 if !ch.is_control() {
@@ -858,7 +910,7 @@ impl InputState {
             }
         }
 
-        if let PhysicalKey::Code(code) = event.physical_key {
+        if let Some(code) = code {
             match code {
                 KeyCode::Enter | KeyCode::NumpadEnter => self.enter_pressed = true,
                 KeyCode::Escape => self.escape_pressed = true,
@@ -1135,26 +1187,90 @@ mod ime_tests {
         let mut input = InputState::released();
         let mut chat = ChatState::new();
         chat.open(ChatMethod::Message, None);
+        input.set_text_owner(TextOwner::Chat);
         input.on_chat_ime(Ime::Preedit("にほん".into(), Some((0, 3))), true);
         assert_eq!(input.chat_preedit(), Some(("にほん", 3)));
         assert_eq!(frame(&mut input, &mut chat), None); // preedit is not sent
         input.on_chat_ime(Ime::Preedit("日本".into(), Some((1, 2))), true);
         assert_eq!(input.chat_preedit(), Some(("日本", "日本".len()))); // invalid UTF-8 offset
         input.on_chat_ime(Ime::Preedit(String::new(), None), true);
-        assert!(input.chat_enter_key(true)); // candidate confirmation, not send
+        input.on_menu_input(Some(KeyCode::Enter), true, None); // candidate confirmation
+        assert!(!input.enter_pressed());
         input.on_chat_ime(Ime::Commit("日本語".into()), true);
-        assert!(input.chat_enter_key(true)); // repeat of confirmation key
+        input.on_menu_input(Some(KeyCode::Enter), true, None); // repeat
+        assert!(!input.enter_pressed());
         assert_eq!(frame(&mut input, &mut chat), None);
         assert!(chat.is_open());
-        assert!(input.chat_enter_key(false));
-        assert!(!input.chat_enter_key(true)); // next independent Enter
-        input.enter_pressed = true;
+        assert!(input.chat_enter_event(KeyCode::Enter, false));
+        input.on_menu_input(Some(KeyCode::Enter), true, None); // next independent Enter
         assert_eq!(frame(&mut input, &mut chat), Some("日本語".into()));
         assert!(!chat.is_open());
-        input.clear_chat_ime();
+        input.set_text_owner(TextOwner::None);
         input.on_chat_ime(Ime::Commit("遅延".into()), false);
         input.on_chat_ime(Ime::Commit("遅延".into()), true); // even after a new chat opens
         assert!(input.drain_text_events().is_empty());
+    }
+
+    #[test]
+    fn owner_change_drops_queued_chat_commit_not_new_editor_text() {
+        let mut input = InputState::released();
+        input.set_text_owner(TextOwner::Chat);
+        input.on_chat_ime(Ime::Preedit("a".into(), None), true);
+        input.on_chat_ime(Ime::Commit("a".into()), true);
+        input.set_text_owner(TextOwner::Sign); // server packet arrives before drain
+        assert!(input.drain_text_events().is_empty());
+        assert_eq!(input.chat_preedit(), None);
+        input.text_events.push(TextInputEvent::Char('b'));
+        assert!(matches!(
+            input.drain_text_events().as_slice(),
+            [TextInputEvent::Char('b')]
+        ));
+        input.set_text_owner(TextOwner::Book);
+        input.set_text_owner(TextOwner::None); // GUI closed
+        assert!(input.drain_text_events().is_empty());
+    }
+
+    #[test]
+    fn composing_keys_and_independent_identical_character() {
+        let mut input = InputState::released();
+        input.set_text_owner(TextOwner::Chat);
+        input.on_chat_ime(Ime::Preedit("a".into(), None), true);
+        for code in [
+            KeyCode::Backspace,
+            KeyCode::Delete,
+            KeyCode::ArrowLeft,
+            KeyCode::ArrowRight,
+            KeyCode::ArrowUp,
+            KeyCode::ArrowDown,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            assert!(input.composing_edit_key(code));
+            input.on_menu_input(Some(code), true, None);
+        }
+        assert!(input.drain_text_events().is_empty());
+        assert!(!input.up_pressed());
+        assert!(!input.down_pressed());
+        input.on_chat_ime(Ime::Commit("a".into()), true);
+        input.on_chat_ime(Ime::Disabled, true);
+        assert!(!input.composing_edit_key(KeyCode::ArrowUp));
+        input.on_menu_input(Some(KeyCode::KeyA), true, Some("a")); // independent key
+        assert!(matches!(input.drain_text_events().as_slice(),
+            [TextInputEvent::Commit(text), TextInputEvent::Key { code: KeyCode::KeyA, .. }, TextInputEvent::Char('a')] if text == "a"));
+    }
+
+    #[test]
+    fn world_transition_cancels_preedit_and_queued_commit() {
+        let mut input = InputState::released();
+        input.set_text_owner(TextOwner::Chat);
+        input.on_chat_ime(Ime::Preedit("stale".into(), None), true);
+        input.on_chat_ime(Ime::Commit("stale".into()), true);
+        input.set_text_owner(TextOwner::Other); // level load after respawn
+        assert!(input.drain_text_events().is_empty());
+        assert!(input.chat_preedit().is_none());
+        assert!(!input.chat_enter_event(KeyCode::Enter, true));
     }
 
     #[test]
@@ -1162,16 +1278,16 @@ mod ime_tests {
         let mut input = InputState::released();
         let mut chat = ChatState::new();
         chat.open(ChatMethod::Message, None);
+        input.set_text_owner(TextOwner::Chat);
         input.on_chat_ime(Ime::Preedit("かな".into(), None), true);
         input.on_chat_ime(Ime::Preedit(String::new(), None), true);
         input.on_chat_ime(Ime::Commit("仮名".into()), true);
-        assert!(input.chat_enter_key(true));
+        input.on_menu_input(Some(KeyCode::Enter), true, None);
         assert_eq!(frame(&mut input, &mut chat), None);
-        input.chat_enter_key(false);
+        input.chat_enter_event(KeyCode::Enter, false);
         input.text_events.push(TextInputEvent::Char('a'));
         assert_eq!(frame(&mut input, &mut chat), None);
-        assert!(!input.chat_enter_key(true));
-        input.enter_pressed = true;
+        input.on_menu_input(Some(KeyCode::Enter), true, None);
         assert_eq!(frame(&mut input, &mut chat), Some("仮名a".into()));
     }
 }

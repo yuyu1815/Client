@@ -3717,6 +3717,7 @@ impl AppCore {
                     // app-wide input state, so a reconnect would otherwise
                     // report the last session's slot.
                     self.input.set_selected_slot(0);
+                    self.input.clear_chat_ime();
                     game.start_level_load();
                     // `startWaitingForNewLevel` swaps in the level-loading
                     // screen, replacing a configuration-phase dialog.
@@ -3756,6 +3757,7 @@ impl AppCore {
                     game.do_limited_crafting = false;
                     // `startWaitingForNewLevel` replaces an open dialog here too.
                     game.server_dialog = None;
+                    self.input.clear_chat_ime();
                     game.start_level_load();
                     game.player.reset_for_respawn(keep_entity_data);
                     game.interaction.reset_player_transients_for_respawn();

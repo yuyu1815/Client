@@ -547,7 +547,17 @@ impl ApplicationHandler for App {
                         renderer.request_screenshot();
                     }
 
-                    self.core.input.on_key_event(&event);
+                    if !event.state.is_pressed()
+                        && let PhysicalKey::Code(code) = event.physical_key
+                    {
+                        self.core.input.chat_enter_event(code, false);
+                    }
+                    if !(event.state.is_pressed()
+                        && matches!(event.physical_key, PhysicalKey::Code(code)
+                            if self.core.input.composing_edit_key(code)))
+                    {
+                        self.core.input.on_key_event(&event);
+                    }
 
                     match app {
                         AppPhase::Setup { .. } | AppPhase::SavingWorld { .. } => app,
@@ -635,7 +645,7 @@ impl ApplicationHandler for App {
                                         &connection,
                                         &mut game,
                                     );
-                                } else if game.chat.is_open() {
+                                } else if game.text_owner() == crate::app::input::TextOwner::Chat {
                                     match code {
                                         KeyCode::Escape => {
                                             let closed = game.chat.handle_escape();
@@ -1307,12 +1317,16 @@ impl ApplicationHandler for App {
             }
             _ => {}
         }
+        if let AppPhase::InGame { game, .. } = self.phase.get() {
+            self.core.input.set_text_owner(game.text_owner());
+        }
         // Only the un-covered chat EditBox owns IME for now. A late Commit
         // after closing or losing focus must not reach another screen.
         let allowed = self.core.probe.is_none()
             && self.auto_fps.is_none()
             && matches!(self.phase.get(), AppPhase::InGame { gfx, game, .. }
-                if gfx.window.has_focus() && game.chat.is_focused() && !game.dialog_open());
+                if gfx.window.has_focus() && game.text_owner() == crate::app::input::TextOwner::Chat
+                    && game.level_load.is_none());
         if allowed != self.chat_ime_allowed {
             self.chat_ime_allowed = allowed;
             if !allowed {
