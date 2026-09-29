@@ -125,6 +125,12 @@ fn preview_box_rect(rect: [f32; 4], extent: vk::Extent2D) -> Option<vk::Rect2D> 
     })
 }
 
+// Vanilla EntityRenderDispatcher's view scale: view distance is capped at 20
+// chunks for entities, independent of the chunk/BE rendering paths.
+fn entity_view_scale(render_distance: u32, percent: u32) -> f32 {
+    (render_distance as f32 / 8.0).clamp(1.0, 2.5) * percent as f32 / 100.0
+}
+
 // Constructed once per frame and consumed immediately, never stored.
 #[allow(clippy::large_enum_variant)]
 enum RenderMode<'a> {
@@ -150,6 +156,7 @@ enum RenderMode<'a> {
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
+        entity_distance_percent: u32,
         chunks: &'a crate::world::chunk::ChunkStore,
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
@@ -1581,6 +1588,7 @@ impl Renderer {
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
+        entity_distance_percent: u32,
         chunks: &crate::world::chunk::ChunkStore,
         player_preview: Option<PlayerPreview>,
         book_preview: Option<BookPreview>,
@@ -1710,6 +1718,7 @@ impl Renderer {
                 weather,
                 cloud_mode,
                 render_distance,
+                entity_distance_percent,
                 chunks,
                 player_preview,
                 book_preview,
@@ -2370,6 +2379,7 @@ impl Renderer {
                 weather,
                 cloud_mode,
                 render_distance,
+                entity_distance_percent,
                 chunks,
                 player_preview,
                 book_preview,
@@ -2427,10 +2437,9 @@ impl Renderer {
                 }
 
                 let ent_frustum = self.camera.frustum_planes();
-                // Vanilla EntityRenderer uses the bounding box's average size
-                // times 64, scaled by the effective view distance (default
-                // entityDistanceScaling = 1).
-                let entity_view_scale = (*render_distance as f32 / 8.0).clamp(1.0, 2.5);
+                // Only the entity-model path uses this cull; chunk/BE paths stay unchanged.
+                let entity_view_scale =
+                    entity_view_scale(*render_distance, *entity_distance_percent);
                 let pass_start = benchmark_timing.then(std::time::Instant::now);
                 let (entity_pose_ms, entity_pose_count) = self.entity_renderer.draw(
                     cmd,

@@ -2970,6 +2970,43 @@ mod tests {
         assert!(!entity_visible(&slime, &frustum, glam::DVec3::ZERO, 1.0));
     }
 
+    #[test]
+    fn entity_distance_slider_changes_mob_visibility_at_rd8_and_12() {
+        use azalea_registry::builtin::EntityKind;
+
+        use super::{EntityRenderInfo, entity_visible};
+        use crate::entity::components::Position;
+        use crate::renderer::entity_view_scale;
+
+        let frustum = [[0.0, 0.0, 0.0, 1000.0]; 6];
+        let mut zombie = EntityRenderInfo {
+            entity_kind: EntityKind::Zombie,
+            position: Position::new(80.0, 0.0, 0.0),
+            ..Default::default()
+        };
+        let visible = |info: &EntityRenderInfo, rd, percent| {
+            entity_visible(
+                info,
+                &frustum,
+                glam::DVec3::ZERO,
+                entity_view_scale(rd, percent),
+            )
+        };
+        assert_eq!(entity_view_scale(8, 100), 1.0);
+        assert_eq!(entity_view_scale(12, 100), 1.5);
+        assert_eq!(entity_view_scale(8, 50), 0.5);
+        assert_eq!(entity_view_scale(12, 500), 7.5);
+        assert!(!visible(&zombie, 8, 50));
+        assert!(!visible(&zombie, 8, 100));
+        assert!(visible(&zombie, 8, 500));
+        assert!(!visible(&zombie, 12, 50));
+        assert!(visible(&zombie, 12, 100));
+        assert!(visible(&zombie, 12, 500));
+        zombie.position = Position::new(40.0, 0.0, 0.0);
+        assert!(!visible(&zombie, 8, 50));
+        assert!(visible(&zombie, 12, 50));
+    }
+
     /// Bakes every mob model; `generate_cube_vertices`' UV seam
     /// `debug_assert!` fires for any mesh that straddles its sheet.
     #[test]

@@ -180,6 +180,7 @@ impl MainMenu {
     fn discrete_slider_span(&self, prefix: &str) -> Option<f32> {
         Some(match prefix {
             "Render Distance:" => self.render_distance_max() as f32 - 2.0,
+            "Entity Distance:" => 18.0,
             "Chunk Detail:" => 40.0,
             "Simulation Distance:" => 27.0,
             "Max Framerate:" => 25.0,
@@ -222,6 +223,7 @@ impl MainMenu {
             self.render_distance.min(rd_max)
         );
         let cd = format!("Chunk Detail: {} chunks", self.chunk_detail);
+        let ed = format!("Entity Distance: {}%", self.entity_distance_percent);
         let sd = format!("Simulation Distance: {} chunks", self.simulation_distance);
         let mf = if self.max_framerate >= super::MAX_FRAMERATE_UNLIMITED {
             "Max Framerate: Unlimited".to_string()
@@ -265,7 +267,7 @@ impl MainMenu {
             OptRow::Pair("Smooth Lighting: ON", &clouds_label),
             OptRow::PairLeft(&cd),
             OptRow::Pair("Particles: All", "Mipmap Levels: 4"),
-            OptRow::Pair("Entity Shadows: ON", "Entity Distance: 100%"),
+            OptRow::Pair("Entity Shadows: ON", &ed),
             OptRow::Pair("Menu Background Blur: 50%", "Cloud Range: 128"),
             OptRow::Pair("Cutout Leaves: Fancy", "Improved Transparency: OFF"),
             OptRow::Pair("Texture Filtering: None", "Max Anisotropy: 1"),
@@ -280,6 +282,10 @@ impl MainMenu {
         let mf_frac = (self.max_framerate as f32 - 10.0) / 250.0;
         let sliders: &[(&str, f32)] = &[
             ("Render Distance:", rd_frac),
+            (
+                "Entity Distance:",
+                (self.entity_distance_percent - 50) as f32 / 450.0,
+            ),
             ("Chunk Detail:", cd_frac),
             ("Simulation Distance:", sd_frac),
             ("Max Framerate:", mf_frac),
@@ -298,7 +304,6 @@ impl MainMenu {
             "Particles:",
             "Mipmap Levels:",
             "Entity Shadows:",
-            "Entity Distance:",
             "Menu Background Blur:",
             "Cloud Range:",
             "Cutout Leaves:",
@@ -1132,6 +1137,9 @@ impl MainMenu {
             let span = self.discrete_slider_span(prefix).unwrap_or(1.0);
             match *prefix {
                 "Render Distance:" => self.render_distance = (2.0 + v * span).round() as u32,
+                "Entity Distance:" => {
+                    self.entity_distance_percent = 50 + 25 * (v * span).round() as u32
+                }
                 "Chunk Detail:" => self.chunk_detail = (8.0 + v * span).round() as u32,
                 "Simulation Distance:" => {
                     self.simulation_distance = (5.0 + v * span).round() as u32
@@ -1881,6 +1889,28 @@ mod tests {
         // Locked, the first arrow did nothing; unlocked, one step is
         // `1 / (150 - 8)` GUI units.
         assert!((grid.menu.sensitivity - (0.5 + 1.0 / 142.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn entity_distance_slider_steps_and_snaps() {
+        let mut grid = Grid::with_slider("First", "Entity Distance: 100%", "Entity Distance:");
+        grid.menu.entity_distance_percent = 100;
+        grid.sliders[0].1 = 2.0 / 18.0;
+        grid.frame(&MenuInput::default());
+        grid.frame(&tab());
+        grid.frame(&tab());
+        grid.frame(&key(KeyCode::ArrowRight));
+        assert_eq!(grid.menu.entity_distance_percent, 125);
+        grid.sliders[0].1 = 3.0 / 18.0;
+        grid.frame(&key(KeyCode::ArrowLeft));
+        assert_eq!(grid.menu.entity_distance_percent, 100);
+        assert_eq!(
+            grid.menu.discrete_slider_span("Entity Distance:"),
+            Some(18.0)
+        );
+        // The right widget spans x=405..555; dragging near 14% snaps to 125%.
+        grid.frame(&click(429.0));
+        assert_eq!(grid.menu.entity_distance_percent, 125);
     }
 
     #[test]

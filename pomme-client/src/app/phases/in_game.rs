@@ -4786,6 +4786,7 @@ pub fn update_game(
             core.menu.cloud_mode
         },
         effective_rd,
+        core.menu.entity_distance_percent,
         &game.chunk_store,
         player_preview,
         book_preview,

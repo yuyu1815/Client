@@ -30,6 +30,8 @@ use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 struct Settings {
     gui_scale: u32,
     render_distance: u32,
+    #[serde(default = "default_entity_distance_percent")]
+    entity_distance_percent: u32,
     #[serde(default = "default_chunk_detail")]
     chunk_detail: u32,
     simulation_distance: u32,
@@ -107,6 +109,14 @@ struct Settings {
     chat: ChatOptions,
 }
 
+fn default_entity_distance_percent() -> u32 {
+    100
+}
+
+fn entity_distance_percent(value: u32) -> u32 {
+    ((value.clamp(50, 500) - 50 + 12) / 25) * 25 + 50
+}
+
 fn default_fov() -> u32 {
     70
 }
@@ -162,6 +172,7 @@ impl Default for Settings {
         Self {
             gui_scale: 0,
             render_distance: 12,
+            entity_distance_percent: 100,
             chunk_detail: 8,
             simulation_distance: 12,
             fov: 70,
@@ -578,6 +589,7 @@ pub struct MainMenu {
     last_click_index: Option<usize>,
     pub gui_scale_setting: u32,
     pub render_distance: u32,
+    pub entity_distance_percent: u32,
     /// Radius of full-detail meshing (LOD 0), in chunks; coarser LODs start
     /// beyond it. Pomme-custom: vanilla has no LOD, this buys its look back
     /// within a VRAM budget.
@@ -713,6 +725,7 @@ impl MainMenu {
             last_click_index: None,
             gui_scale_setting: settings.gui_scale,
             render_distance: settings.render_distance,
+            entity_distance_percent: entity_distance_percent(settings.entity_distance_percent),
             chunk_detail: settings.chunk_detail,
             simulation_distance: settings.simulation_distance,
             server_render_distance: 0,
@@ -839,6 +852,7 @@ impl MainMenu {
             &Settings {
                 gui_scale: self.gui_scale_setting,
                 render_distance: self.render_distance,
+                entity_distance_percent: self.entity_distance_percent,
                 chunk_detail: self.chunk_detail,
                 simulation_distance: self.simulation_distance,
                 fov: self.fov,
@@ -1191,6 +1205,42 @@ impl MainMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entity_distance_settings_survive_save_and_legacy_load() {
+        let dir = std::env::temp_dir().join(format!(
+            "pomme-entity-distance-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        for percent in [50, 100, 500] {
+            save_settings(
+                &dir,
+                &Settings {
+                    entity_distance_percent: percent,
+                    ..Settings::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(load_settings(&dir).entity_distance_percent, percent);
+        }
+        let mut old: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("options.json")).unwrap())
+                .unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("entity_distance_percent");
+        std::fs::write(dir.join("options.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+        assert_eq!(load_settings(&dir).entity_distance_percent, 100);
+        std::fs::remove_dir_all(dir).unwrap();
+        for (stored, expected) in [(0, 50), (62, 50), (63, 75), (100, 100), (501, 500)] {
+            assert_eq!(entity_distance_percent(stored), expected);
+        }
+    }
 
     #[test]
     fn damage_tilt_defaults_to_full_strength_and_clamps_to_unit_range() {
