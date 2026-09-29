@@ -5358,6 +5358,77 @@ fn item_frame_base_position(
     position + normal * 0.46875
 }
 
+/// 26.2 ThrownItemRenderer: one camera-facing GROUND item at the packet
+/// transform, not a dropped-item cluster. No previous vehicle position is
+/// retained, so movement uses the latest authoritative packet position.
+#[allow(clippy::too_many_arguments)]
+fn snowball_render_infos(
+    entities: &crate::entity::EntityStore,
+    camera_pos: glam::DVec3,
+    camera_pivot: glam::DVec3,
+    anchor: glam::DVec3,
+    view_scale: f32,
+    camera_look: (f32, f32),
+    frustum: &[[f32; 4]; 6],
+    ground_transform: Option<glam::Mat4>,
+    nether_lighting: bool,
+    light_at: impl Fn(Position) -> f32,
+) -> Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo> {
+    use crate::renderer::pipelines::item_entity::ItemRenderInfo;
+
+    // A missing baked mesh cannot be submitted by ItemEntityPipeline::draw.
+    let Some(ground_transform) = ground_transform else {
+        return Vec::new();
+    };
+    let (yaw, pitch) = camera_look;
+    let billboard = glam::Mat4::from_rotation_y((180.0 - yaw).to_radians())
+        * glam::Mat4::from_rotation_x((-pitch).to_radians());
+    entities
+        .vehicles
+        .values()
+        .filter_map(|vehicle| {
+            if vehicle.kind != Some(azalea_registry::builtin::EntityKind::Snowball) {
+                return None;
+            }
+            let pos = *vehicle.position;
+            // Snowball is 0.25 cubed. EntityRenderDispatcher inflates the
+            // culling AABB by 0.5 on each side; distance uses getSize * 64.
+            if !crate::renderer::entity_distance_visible(pos, camera_pos, 0.25 * 64.0, view_scale) {
+                return None;
+            }
+            let center = (pos + glam::DVec3::Y * 0.125 - camera_pivot).as_vec3();
+            if frustum.iter().any(|p| {
+                p[0] * center.x + p[1] * center.y + p[2] * center.z + p[3]
+                    < -0.625 * (p[0].abs() + p[1].abs() + p[2].abs())
+            }) {
+                return None;
+            }
+            Some(ItemRenderInfo {
+                item_name: "minecraft:snowball".to_owned(),
+                raw_dye_rgb: None,
+                model_matrix: glam::Mat4::from_translation((pos - anchor).as_vec3())
+                    * billboard
+                    * ground_transform,
+                light: light_at(vehicle.position),
+                nether_lighting,
+                entity_uuid: None,
+                invisible: false,
+                actual_age: None,
+                actual_render_age: 0.0,
+                age_f: 0.0,
+                actual_spin: 0.0,
+                spin: 0.0,
+                bob_offset: 0.0,
+                actual_bob_offset: 0.0,
+                controlled_phase: false,
+                bob_controlled: false,
+                position: pos.to_array(),
+                stack_count: 1,
+            })
+        })
+        .collect()
+}
+
 fn build_item_render_infos(
     entity_store: &crate::entity::ItemEntityStore,
     entities: &crate::entity::EntityStore,
@@ -5481,6 +5552,24 @@ fn build_item_render_infos(
             pickup.count,
         );
     }
+
+    // Only Snowball currently maps to a thrown item. Do not infer other
+    // projectile item meshes (egg, etc.) from entity kinds here.
+    let snowball_mesh = renderer
+        .item_mesh_info("minecraft:snowball")
+        .map(|_| dropped_item_geometry(renderer, "minecraft:snowball").0);
+    infos.extend(snowball_render_infos(
+        entities,
+        camera_pos,
+        *renderer.camera_pivot_position(),
+        anchor,
+        entity_view_scale,
+        renderer.camera_effective_look_deg(),
+        &renderer.frustum_planes(),
+        snowball_mesh,
+        nether_lighting,
+        |pos| get_entity_light(chunk_store, pos),
+    ));
 
     // Frame bodies use the baked block/item_frame or block/glow_item_frame
     // model. The held stack is sent through the existing item mesh path; map
@@ -6393,6 +6482,78 @@ mod tests {
         assert_eq!((moved.body_y_rot_deg, moved.head_x_rot_deg), (90.0, 30.0));
         store.remove_entity(1);
         assert_eq!(arrow_render_infos(&store).len(), 1);
+    }
+
+    #[test]
+    fn snowball_vehicle_extracts_once_moves_and_disappears_without_item_store() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::{DVec3, Mat4, Vec3};
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::{LookDirection, Position};
+
+        let mut store = EntityStore::new();
+        for (id, kind) in [
+            (1, EntityKind::Snowball),
+            (2, EntityKind::Arrow),
+            (3, EntityKind::Egg),
+        ] {
+            store.set_vehicle_spawn_transform(
+                id,
+                Position::new(0.0, 0.0, 4.0),
+                DVec3::ZERO,
+                LookDirection::new(0.0, 0.0),
+            );
+            store.set_vehicle_kind(id, kind);
+        }
+        // Wide planes, then a narrow right boundary to exercise frustum cull.
+        let wide = [[0.0; 4]; 6];
+        let ground = Mat4::from_scale(Vec3::splat(0.5));
+        let extract =
+            |store: &EntityStore, camera: DVec3, scale: f32, planes: &[[f32; 4]; 6], mesh| {
+                super::snowball_render_infos(
+                    store,
+                    camera,
+                    DVec3::ZERO,
+                    DVec3::new(1.0, 0.0, 0.0),
+                    scale,
+                    (0.0, 0.0),
+                    planes,
+                    mesh,
+                    false,
+                    |_| 0.7,
+                )
+            };
+        let renders = extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground));
+        assert_eq!(renders.len(), 1);
+        assert_eq!(renders[0].item_name, "minecraft:snowball");
+        assert_eq!(renders[0].stack_count, 1);
+        assert_eq!(renders[0].position, [0.0, 0.0, 4.0]);
+        assert_eq!(renders[0].light, 0.7);
+        assert_eq!(
+            renders[0].model_matrix.transform_point3(Vec3::ZERO),
+            Vec3::new(-1.0, 0.0, 4.0),
+        );
+        assert_eq!(renders[0].model_matrix.x_axis.truncate().length(), 0.5);
+        assert_eq!(super::arrow_render_infos(&store).len(), 1);
+        assert!(extract(&store, DVec3::ZERO, 1.0, &wide, None).is_empty());
+        assert!(extract(&store, DVec3::ZERO, 0.0, &wide, Some(ground)).is_empty());
+        assert!(extract(&store, DVec3::new(17.0, 0.0, 4.0), 1.0, &wide, Some(ground)).is_empty());
+        let mut narrow = wide;
+        narrow[0] = [-1.0, 0.0, 0.0, -1.0];
+        assert!(extract(&store, DVec3::ZERO, 1.0, &narrow, Some(ground)).is_empty());
+
+        store.set_vehicle_transform(1, Position::new(2.0, 3.0, 5.0), DVec3::ZERO);
+        let moved = extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground));
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].position, [2.0, 3.0, 5.0]);
+        assert_eq!(
+            moved[0].model_matrix.transform_point3(Vec3::ZERO),
+            Vec3::new(1.0, 3.0, 5.0)
+        );
+        store.remove_entity(1); // EntitiesRemoved/unload lifecycle
+        assert!(extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground)).is_empty());
+        assert_eq!(super::arrow_render_infos(&store).len(), 1);
     }
 
     #[test]
