@@ -1284,6 +1284,21 @@ impl EntityStore {
         }
     }
 
+    /// A new dimension must not reuse old-world flights or projectile vehicles.
+    /// Keep the worker: its one pending job is drained and rejected by epoch.
+    pub(crate) fn replace_projectile_world(&mut self) -> Vec<i32> {
+        self.epoch = WORLD_EPOCH.fetch_add(1, Ordering::Relaxed);
+        let ids: Vec<_> = self
+            .vehicles
+            .iter()
+            .filter_map(|(&id, v)| v.projectile.is_some().then_some(id))
+            .collect();
+        for &id in &ids {
+            self.remove_entity(id);
+        }
+        ids
+    }
+
     /// EntityGetter.getEntityCollisions uses source.canCollideWith(target),
     /// which requires target.canBeCollidedWith(source). Ordinary living mobs
     /// (including players) return false: they push, not block movement.
@@ -2714,6 +2729,96 @@ mod tests {
             world.vehicles[&1].projectile.as_ref().unwrap().current.x,
             6.0
         );
+    }
+
+    #[test]
+    fn dimension_info_rejects_held_world_job_and_reuses_worker_for_new_projectiles() {
+        crate::world::block::init("26.2");
+        let chunks = ChunkStore::new(1);
+        let mut store = EntityStore::new();
+        let mut positions = HashMap::new();
+        for id in 0..16 {
+            let pos = Position::new(2.0, 70.0, 2.0);
+            store.set_vehicle_spawn_transform(id, pos, DVec3::X, LookDirection::default());
+            store.set_vehicle_kind(id, EntityKind::Arrow);
+            positions.insert(id, pos);
+        }
+        // An unrelated vehicle and living entities are not owned by this lifecycle.
+        store.set_vehicle_spawn_transform(
+            20,
+            Position::default(),
+            DVec3::ZERO,
+            LookDirection::default(),
+        );
+        store.set_vehicle_kind(20, EntityKind::Bat);
+        positions.insert(20, Position::default());
+        store.spawn_living(
+            21,
+            EntityKind::Cow,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        let (mut worker, jobs, results) = Worker::held();
+        worker.in_flight = false;
+        store.worker = Some(worker);
+        store.tick_projectile_displays(&chunks);
+        let old_job = jobs.try_recv().unwrap();
+        assert_eq!(old_job.inputs.len(), 16);
+        let old_epoch = old_job.epoch;
+
+        // This is the same cleanup invoked by AppCore's DimensionInfo event.
+        crate::app::core::clear_dimension_projectiles(&mut store, &mut positions);
+        assert_ne!(store.epoch, old_epoch);
+        assert!(store.worker.as_ref().unwrap().in_flight);
+        assert!(store.vehicles.values().all(|v| v.projectile.is_none()));
+        assert!(!positions.contains_key(&0));
+        assert_eq!(positions.len(), 1);
+        assert!(store.vehicles.contains_key(&20));
+        assert!(store.living.contains_key(&21));
+        // Reused ID must not inherit the old-world packet position baseline.
+        let new_pos = Position::new(100.0, 70.0, 2.0);
+        for id in 0..16 {
+            store.set_vehicle_spawn_transform(id, new_pos, DVec3::X, LookDirection::default());
+            store.set_vehicle_kind(id, EntityKind::Arrow);
+            positions.insert(id, new_pos);
+        }
+        let mut stale = projectile::flight(
+            old_job
+                .inputs
+                .into_iter()
+                .find(|input| input.id == 0)
+                .unwrap(),
+        );
+        stale.revision = store.vehicles[&0].projectile.as_ref().unwrap().revision;
+        stale.start = store.tick + 10; // make revision and future-tick checks pass
+        results
+            .send(projectile::Result {
+                epoch: old_epoch,
+                flights: vec![stale],
+            })
+            .unwrap();
+        store.tick_projectile_displays(&chunks);
+        let display = store.vehicles[&0].projectile.as_ref().unwrap();
+        assert!(display.current.x > 100.0);
+        assert!(display.frames.is_none() && display.next.is_none());
+        let new_job = jobs.try_recv().unwrap();
+        assert_eq!(new_job.epoch, store.epoch);
+        assert_eq!(new_job.inputs.len(), 16);
+        results
+            .send(projectile::Result {
+                epoch: new_job.epoch,
+                flights: new_job.inputs.into_iter().map(projectile::flight).collect(),
+            })
+            .unwrap();
+        store.tick_projectile_displays(&chunks);
+        let display = store.vehicles[&0].projectile.as_ref().unwrap();
+        assert!(
+            display.frames.is_some(),
+            "new-world flight renders via the retained worker"
+        );
+        assert!(display.current.x > 101.0 && display.current.x < 103.0);
     }
 
     #[test]

@@ -1851,6 +1851,7 @@ impl AppCore {
                     cardinal_light,
                     clock_id,
                 } => {
+                    clear_dimension_projectiles(&mut game.entity_store, &mut game.entity_positions);
                     game.item_cooldowns = Default::default();
                     game.world_border = Default::default();
                     tracing::info!(
@@ -4575,6 +4576,18 @@ impl AppCore {
         }
         game.last_sent_on_ground = game.player.on_ground;
         game.last_sent_horizontal_collision = game.player.horizontal_collision;
+    }
+}
+
+/// DimensionInfo follows Login/Respawn, not ordinary same-world chunk updates.
+/// The living store remains intact; only projectile vehicles and their packet
+/// position baselines belong to the discarded projectile world.
+pub(crate) fn clear_dimension_projectiles(
+    entities: &mut crate::entity::EntityStore,
+    entity_positions: &mut std::collections::HashMap<i32, Position>,
+) {
+    for id in entities.replace_projectile_world() {
+        entity_positions.remove(&id);
     }
 }
 
