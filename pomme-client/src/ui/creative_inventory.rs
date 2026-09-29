@@ -1453,12 +1453,18 @@ fn visible_items(state: &CreativeState) -> Vec<ItemStack> {
         ItemSource::Search => {
             let raw = state.search.value().to_lowercase();
             let needle = raw.strip_prefix('#').unwrap_or(&raw);
+            if needle.is_empty() {
+                return search_items_cached()
+                    .iter()
+                    .map(|(kind, _)| stack_of(*kind))
+                    .collect();
+            }
+            let names = search_names_cached();
             search_items_cached()
                 .iter()
-                .filter(|kind| {
-                    needle.is_empty() || item_resource_name(**kind).to_lowercase().contains(needle)
-                })
-                .map(|&kind| stack_of(kind))
+                .zip(names)
+                .filter(|((_, id), name)| search_matches(id, name, needle))
+                .map(|((kind, _), _)| stack_of(*kind))
                 .collect()
         }
         ItemSource::Empty => Vec::new(),
@@ -1473,8 +1479,12 @@ fn stack_of(kind: ItemKind) -> ItemStack {
     })
 }
 
-fn search_items_cached() -> &'static [ItemKind] {
-    static CACHE: OnceLock<Vec<ItemKind>> = OnceLock::new();
+pub(crate) fn search_matches(id: &str, name: &str, needle: &str) -> bool {
+    id.contains(needle) || name.contains(needle)
+}
+
+fn search_items_cached() -> &'static [(ItemKind, String)] {
+    static CACHE: OnceLock<Vec<(ItemKind, String)>> = OnceLock::new();
     CACHE.get_or_init(|| {
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
@@ -1482,11 +1492,30 @@ fn search_items_cached() -> &'static [ItemKind] {
             if let ItemSource::Static(list) = tab.meta().items {
                 for &kind in list {
                     if seen.insert(kind) {
-                        out.push(kind);
+                        out.push((kind, item_resource_name(kind).to_lowercase()));
                     }
                 }
             }
         }
         out
+    })
+}
+
+// The renderer loads language catalogs before any creative screen is drawn.
+// Cache each locale separately so changing language updates search immediately.
+fn search_names_cached() -> &'static [String] {
+    static ENGLISH: OnceLock<Vec<String>> = OnceLock::new();
+    static JAPANESE: OnceLock<Vec<String>> = OnceLock::new();
+    let locale = crate::lang::locale();
+    let cache = if locale == "ja_jp" {
+        &JAPANESE
+    } else {
+        &ENGLISH
+    };
+    cache.get_or_init(|| {
+        search_items_cached()
+            .iter()
+            .map(|(kind, _)| crate::lang::item_display_name_for(locale, *kind).to_lowercase())
+            .collect()
     })
 }

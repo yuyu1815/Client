@@ -106,6 +106,17 @@ pub fn translate_for(locale: &str, key: &str) -> Option<&'static str> {
 }
 
 pub fn item_display_name(kind: ItemKind) -> String {
+    item_display_name_for(locale(), kind)
+}
+
+pub fn item_display_name_for(locale: &str, kind: ItemKind) -> String {
+    item_display_name_with(kind, |key| translate_for(locale, key))
+}
+
+fn item_display_name_with<'a>(
+    kind: ItemKind,
+    translate: impl Fn(&str) -> Option<&'a str>,
+) -> String {
     let bare = item_resource_name(kind);
     let block_key = format!("block.minecraft.{bare}");
     if let Some(name) = translate(&block_key) {
@@ -147,12 +158,12 @@ mod tests {
         std::fs::create_dir_all(&indexes).unwrap();
         std::fs::write(
             jar.join("minecraft/lang/en_us.json"),
-            r#"{"greeting":"Hello %s","english_only":"English","empty":""}"#,
+            r#"{"greeting":"Hello %s","english_only":"English","empty":"","block.minecraft.stone":"Stone","block.minecraft.dirt":"Dirt"}"#,
         )
         .unwrap();
         std::fs::write(
             objects.join("12").join(hash),
-            r#"{"greeting":"こんにちは %s","empty":""}"#,
+            r#"{"greeting":"こんにちは %s","empty":"","block.minecraft.stone":"石","block.minecraft.dirt":"土"}"#,
         )
         .unwrap();
         std::fs::write(
@@ -167,10 +178,30 @@ mod tests {
         assert_eq!(lookup(&maps, "english_only", 1), Some("English"));
         assert_eq!(lookup(&maps, "empty", 1), Some(""));
         assert_eq!(lookup(&maps, "absent", 1), None);
+        let matches = |kind, locale, query: &str| {
+            let id = item_resource_name(kind);
+            let name =
+                item_display_name_with(kind, |key| lookup(&maps, key, u8::from(locale == "ja_jp")));
+            crate::ui::creative_inventory::search_matches(
+                &id.to_lowercase(),
+                &name.to_lowercase(),
+                &query.to_lowercase(),
+            )
+        };
+        assert!(matches(ItemKind::Stone, "ja_jp", "石"));
+        assert!(!matches(ItemKind::Dirt, "ja_jp", "石"));
+        assert!(!matches(ItemKind::Stone, "en_us", "石"));
+        assert!(matches(ItemKind::Stone, "ja_jp", "STONE"));
         std::fs::remove_file(objects.join("12").join(hash)).unwrap();
         let missing = catalogs(&jar, &index);
         assert!(missing.japanese.is_empty());
         assert_eq!(lookup(&missing, "greeting", 1), Some("Hello %s"));
+        let fallback = item_display_name_with(ItemKind::Stone, |key| lookup(&missing, key, 1));
+        assert!(!crate::ui::creative_inventory::search_matches(
+            "stone",
+            &fallback.to_lowercase(),
+            "石"
+        ));
         std::fs::remove_dir_all(root).unwrap();
     }
 }
