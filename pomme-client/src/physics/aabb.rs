@@ -44,6 +44,28 @@ impl Aabb {
         }
     }
 
+    /// Segment entry into a world-space collision box (fraction 0..1).
+    pub fn clip_segment(&self, from: DVec3, to: DVec3) -> Option<f64> {
+        if self.contains(from) {
+            return Some(0.0);
+        }
+        let delta = to - from;
+        let mut nearest = 1.0;
+        let mut hit = false;
+        for axis in [Axis::X, Axis::Y, Axis::Z] {
+            let d = component(delta, axis);
+            if d.abs() <= EPSILON {
+                continue;
+            }
+            let plane = component(if d > 0.0 { self.min } else { self.max }, axis);
+            if let Some(t) = clip_point(self, plane, axis, from, delta, nearest) {
+                nearest = t;
+                hit = true;
+            }
+        }
+        hit.then_some(nearest)
+    }
+
     /// Vanilla `AABB.contains`: half-open, so a point on a max face is outside.
     pub fn contains(&self, point: DVec3) -> bool {
         point.x >= self.min.x

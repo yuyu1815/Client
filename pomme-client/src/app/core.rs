@@ -3168,6 +3168,7 @@ impl AppCore {
                     {
                         game.entity_store
                             .set_vehicle_transform(id, position, velocity);
+                        game.entity_store.set_projectile_grounded(id, on_ground);
                     }
                 }
                 NetworkEvent::EntityMovedRotated {
@@ -3198,6 +3199,7 @@ impl AppCore {
                     {
                         game.entity_store
                             .set_vehicle_transform(id, position, velocity);
+                        game.entity_store.set_projectile_grounded(id, on_ground);
                     }
                 }
                 NetworkEvent::EntityRotated {
@@ -3316,6 +3318,7 @@ impl AppCore {
                             current_velocity,
                             LookDirection::new(y_rot_deg, x_rot_deg),
                         );
+                        game.entity_store.set_projectile_grounded(id, on_ground);
                         game.item_entity_store
                             .teleport(id, position, velocity, on_ground);
                         self.audio.update_entity_sound_position(id, position);
@@ -3567,6 +3570,7 @@ impl AppCore {
                     {
                         game.item_entity_store.set_shared_flags(id, flags);
                     }
+                    game.entity_store.set_projectile_metadata(id, index, value);
                     game.entity_store
                         .set_text_display_metadata(id, index, value);
                     game.entity_store.apply_entity_data(id, index, value);

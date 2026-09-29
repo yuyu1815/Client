@@ -1163,12 +1163,31 @@ pub enum RideAuthority {
     Client,
 }
 
+/// Render-only prediction; never a relative-move packet baseline.
+#[derive(Clone, Debug)]
+pub struct ProjectileDisplay {
+    pub prev: Position,
+    pub current: Position,
+    pub velocity: DVec3,
+    pub ticks: u8,
+    pub stopped: bool,
+    pub no_gravity: bool,
+}
+
+impl ProjectileDisplay {
+    pub fn position(&self, partial_tick: f32) -> Position {
+        self.prev
+            .lerp(self.current, f64::from(partial_tick.clamp(0.0, 1.0)))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VehicleState {
     /// Missing for SetPassengers-only placeholders.
     pub kind: Option<EntityKind>,
     pub position: Position,
     pub velocity: DVec3,
+    pub projectile: Option<ProjectileDisplay>,
     /// None until a real spawn transform arrives; SetPassengers may create
     /// placeholders.
     pub look_dir: Option<LookDirection>,
@@ -1259,6 +1278,7 @@ impl EntityStore {
                 .map_or(Position::default(), |e| e.position),
             kind: None,
             velocity: DVec3::ZERO,
+            projectile: None,
             look_dir: None,
             item_frame_direction: None,
             item_frame_item: azalea_inventory::ItemStack::Empty,
@@ -1288,6 +1308,7 @@ impl EntityStore {
             position,
             kind: None,
             velocity,
+            projectile: None,
             look_dir: None,
             item_frame_direction: None,
             item_frame_item: azalea_inventory::ItemStack::Empty,
@@ -1307,11 +1328,140 @@ impl EntityStore {
         });
         state.position = position;
         state.velocity = velocity;
+        if let Some(display) = &mut state.projectile {
+            display.prev = position;
+            display.current = position;
+            display.velocity = velocity;
+            display.ticks = 0;
+            display.stopped = false;
+        }
     }
 
     pub fn set_vehicle_kind(&mut self, id: i32, kind: EntityKind) {
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.kind = Some(kind);
+            vehicle.projectile = matches!(
+                kind,
+                EntityKind::Arrow | EntityKind::SpectralArrow | EntityKind::Snowball
+            )
+            .then_some(ProjectileDisplay {
+                prev: vehicle.position,
+                current: vehicle.position,
+                velocity: vehicle.velocity,
+                ticks: 0,
+                stopped: false,
+                no_gravity: false,
+            });
+        }
+    }
+
+    /// Bounded client-side visual tick; packet transforms stay untouched.
+    pub fn tick_projectile_displays(&mut self, chunks: &ChunkStore) {
+        use azalea_core::position::ChunkPos;
+
+        use crate::physics::aabb::Aabb;
+        use crate::physics::collision::collect_block_aabbs;
+        use crate::world::block::{FluidKind, fluid};
+
+        for vehicle in self.vehicles.values_mut() {
+            let Some(display) = &mut vehicle.projectile else {
+                continue;
+            };
+            display.prev = display.current;
+            let arrow = matches!(
+                vehicle.kind,
+                Some(EntityKind::Arrow | EntityKind::SpectralArrow)
+            );
+            let limit = if arrow { 20 } else { 10 };
+            if display.stopped || display.ticks >= limit {
+                continue;
+            }
+            let from = *display.current;
+            let to = from + display.velocity;
+            let min = from.min(to).floor().as_ivec3();
+            let max = from.max(to).floor().as_ivec3();
+            // ponytail: cap extraordinary packet velocities instead of scanning
+            // unbounded terrain; wait for authoritative correction.
+            if (max - min).max_element() > 8 {
+                display.stopped = true;
+                continue;
+            }
+            let mut loaded = true;
+            for cx in min.x.div_euclid(16)..=max.x.div_euclid(16) {
+                for cz in min.z.div_euclid(16)..=max.z.div_euclid(16) {
+                    if chunks.get_chunk(&ChunkPos::new(cx, cz)).is_none() {
+                        loaded = false;
+                    }
+                }
+            }
+            if !loaded {
+                continue;
+            }
+            let region = Aabb::new(
+                from.min(to) - DVec3::splat(0.001),
+                from.max(to) + DVec3::splat(0.001),
+            );
+            let hit = collect_block_aabbs(chunks, &region)
+                .iter()
+                .filter_map(|b| b.clip_segment(from, to))
+                .min_by(f64::total_cmp);
+            if let Some(t) = hit {
+                display.current = (from + (to - from) * t).into();
+                display.stopped = true;
+            } else {
+                display.current = to.into();
+                let water = fluid(chunks.get_block_state(
+                    from.x.floor() as i32,
+                    from.y.floor() as i32,
+                    from.z.floor() as i32,
+                ))
+                .kind
+                    == FluidKind::Water;
+                let drag = if water {
+                    if arrow { 0.6 } else { 0.8 }
+                } else {
+                    0.99
+                };
+                let gravity = if display.no_gravity {
+                    0.0
+                } else if arrow {
+                    0.05
+                } else {
+                    0.03
+                };
+                display.velocity = display.velocity * drag - DVec3::new(0.0, gravity, 0.0);
+            }
+            display.ticks += 1;
+        }
+    }
+
+    pub fn set_projectile_grounded(&mut self, id: i32, on_ground: bool) {
+        if on_ground
+            && let Some(vehicle) = self.vehicles.get_mut(&id)
+            && let Some(display) = &mut vehicle.projectile
+        {
+            display.stopped = true;
+            display.prev = vehicle.position;
+            display.current = vehicle.position;
+        }
+    }
+
+    pub fn set_projectile_metadata(&mut self, id: i32, index: u8, value: MetaValue) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id)
+            && let Some(display) = &mut vehicle.projectile
+        {
+            if let (5, MetaValue::Bool(no_gravity)) = (index, value) {
+                display.no_gravity = no_gravity;
+            }
+            // 26.2 AbstractArrow inGround index 10 conflicts with older wire
+            // metadata; only decode when the session protocol is 26.2.
+            if crate::version::session_protocol() == 776
+                && let (10, MetaValue::Bool(true)) = (index, value)
+            {
+                display.stopped = true;
+                display.prev = vehicle.position;
+                display.current = vehicle.position;
+            }
         }
     }
 

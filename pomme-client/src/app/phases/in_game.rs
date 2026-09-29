@@ -2855,6 +2855,8 @@ pub fn update_game(
             game.player.tick_sleep();
         }
         game.item_entity_store.tick(&game.chunk_store);
+        game.entity_store
+            .tick_projectile_displays(&game.chunk_store);
         let chunks = &game.chunk_store;
         let player = &game.player;
         let entities = &game.entity_store;
@@ -4689,7 +4691,7 @@ pub fn update_game(
     }
 
     if !benchmark_running {
-        entity_renders.extend(arrow_render_infos(&game.entity_store));
+        entity_renders.extend(arrow_render_infos(&game.entity_store, partial_tick));
     }
 
     let sky_partial_tick = if core.server_tick_frozen {
@@ -5108,9 +5110,11 @@ pub fn update_game(
     GameUpdateResult::None
 }
 
-/// Projectile transforms are updated by spawn/move/rotate/teleport packets in
-/// EntityStore.
-fn arrow_render_infos(store: &crate::entity::EntityStore) -> Vec<EntityRenderInfo> {
+/// Extract visual interpolation independently from packet movement baselines.
+fn arrow_render_infos(
+    store: &crate::entity::EntityStore,
+    partial_tick: f32,
+) -> Vec<EntityRenderInfo> {
     store
         .vehicles
         .values()
@@ -5121,11 +5125,27 @@ fn arrow_render_infos(store: &crate::entity::EntityStore) -> Vec<EntityRenderInf
                 _ => return None,
             };
             let look = entity.look_dir?;
+            let pos = entity
+                .projectile
+                .as_ref()
+                .map_or(entity.position, |p| p.position(partial_tick));
+            let velocity = entity
+                .projectile
+                .as_ref()
+                .map_or(entity.velocity, |p| p.velocity);
+            let (yaw, pitch) = if velocity.length_squared() > 1.0e-8 {
+                (
+                    (velocity.z.atan2(velocity.x).to_degrees() - 90.0) as f32,
+                    (-velocity.y.atan2(velocity.x.hypot(velocity.z)).to_degrees()) as f32,
+                )
+            } else {
+                (look.y_rot_deg(), look.x_rot_deg())
+            };
             Some(EntityRenderInfo {
-                position: entity.position,
-                simulation_position: entity.position,
-                body_y_rot_deg: look.y_rot_deg(),
-                head_x_rot_deg: look.x_rot_deg(),
+                position: pos,
+                simulation_position: pos,
+                body_y_rot_deg: yaw,
+                head_x_rot_deg: pitch,
                 entity_kind: EntityKind::Arrow,
                 variant_index,
                 ..Default::default()
@@ -5430,12 +5450,12 @@ fn item_frame_base_position(
 
 const SNOWBALL_ITEM_NAME: &str = "snowball";
 
-/// 26.2 ThrownItemRenderer: one camera-facing GROUND item at the packet
-/// transform, not a dropped-item cluster. No previous vehicle position is
-/// retained, so movement uses the latest authoritative packet position.
+/// 26.2 ThrownItemRenderer: one camera-facing GROUND item at the
+/// interpolated display position, not a dropped-item cluster.
 #[allow(clippy::too_many_arguments)]
 fn snowball_render_infos(
     entities: &crate::entity::EntityStore,
+    partial_tick: f32,
     camera_pos: glam::DVec3,
     camera_pivot: glam::DVec3,
     anchor: glam::DVec3,
@@ -5462,7 +5482,10 @@ fn snowball_render_infos(
             if vehicle.kind != Some(azalea_registry::builtin::EntityKind::Snowball) {
                 return None;
             }
-            let pos = *vehicle.position;
+            let pos = *vehicle
+                .projectile
+                .as_ref()
+                .map_or(vehicle.position, |p| p.position(partial_tick));
             // Snowball is 0.25 cubed. EntityRenderDispatcher inflates the
             // culling AABB by 0.5 on each side; distance uses getSize * 64.
             if !crate::renderer::entity_distance_visible(pos, camera_pos, 0.25 * 64.0, view_scale) {
@@ -5481,7 +5504,7 @@ fn snowball_render_infos(
                 model_matrix: glam::Mat4::from_translation((pos - anchor).as_vec3())
                     * billboard
                     * ground_transform,
-                light: light_at(vehicle.position),
+                light: light_at(pos.into()),
                 nether_lighting,
                 entity_uuid: None,
                 invisible: false,
@@ -5632,6 +5655,7 @@ fn build_item_render_infos(
         .map(|_| dropped_item_geometry(renderer, SNOWBALL_ITEM_NAME).0);
     infos.extend(snowball_render_infos(
         entities,
+        partial_tick,
         camera_pos,
         *renderer.camera_pivot_position(),
         anchor,
@@ -6523,6 +6547,147 @@ mod tests {
     }
 
     #[test]
+    fn projectile_display_interpolates_without_changing_packet_position() {
+        crate::world::block::init("26.2");
+        use azalea_registry::builtin::EntityKind;
+        use glam::DVec3;
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::{LookDirection, Position};
+        let mut chunks = crate::world::chunk::ChunkStore::new(1);
+        let _chunk = chunks.chunk_storage.upsert(
+            azalea_core::position::ChunkPos::new(0, 0),
+            azalea_world::chunk::Chunk::default(),
+        );
+        let mut store = EntityStore::new();
+        store.set_vehicle_spawn_transform(
+            4,
+            Position::new(2.0, 70.0, 2.0),
+            DVec3::X,
+            LookDirection::new(-90.0, 0.0),
+        );
+        store.set_vehicle_kind(4, EntityKind::Arrow);
+        store.tick_projectile_displays(&chunks);
+        assert_eq!(store.vehicles[&4].position, Position::new(2.0, 70.0, 2.0));
+        assert_eq!(
+            arrow_render_infos(&store, 0.5)[0].position,
+            Position::new(2.5, 70.0, 2.0)
+        );
+        // Multiple render extractions in one tick cannot advance simulation.
+        for _ in 0..10 {
+            assert_eq!(
+                arrow_render_infos(&store, 1.0)[0].position,
+                Position::new(3.0, 70.0, 2.0)
+            );
+        }
+        assert_eq!(store.vehicles[&4].projectile.as_ref().unwrap().ticks, 1);
+        store.set_vehicle_transform(4, Position::new(3.25, 71.0, 2.0), DVec3::Y);
+        assert_eq!(
+            arrow_render_infos(&store, 0.5)[0].position,
+            Position::new(3.25, 71.0, 2.0)
+        );
+        store.remove_entity(4);
+        store.set_vehicle_spawn_transform(
+            4,
+            Position::new(1.0, 70.0, 1.0),
+            DVec3::X,
+            LookDirection::new(0.0, 0.0),
+        );
+        store.set_vehicle_kind(4, EntityKind::Snowball);
+        assert_eq!(store.vehicles[&4].projectile.as_ref().unwrap().ticks, 0);
+        store.tick_projectile_displays(&chunks);
+        let snowball = super::snowball_render_infos(
+            &store,
+            0.5,
+            DVec3::new(0.0, 70.0, 0.0),
+            DVec3::ZERO,
+            DVec3::ZERO,
+            1.0,
+            (0.0, 0.0),
+            &[[0.0; 4]; 6],
+            Some(glam::Mat4::IDENTITY),
+            false,
+            |_| 1.0,
+        );
+        assert_eq!(snowball[0].position, [1.5, 70.0, 1.0]);
+        assert_eq!(
+            store.vehicles[&4].projectile.as_ref().unwrap().velocity.y,
+            -0.03
+        );
+        for _ in 0..12 {
+            store.tick_projectile_displays(&chunks);
+        }
+        let display = store.vehicles[&4].projectile.as_ref().unwrap();
+        assert_eq!(display.ticks, 10); // no unbounded ghosts without correction
+        assert_eq!(display.prev, display.current);
+        assert_eq!(store.vehicles[&4].position, Position::new(1.0, 70.0, 1.0));
+    }
+
+    #[test]
+    fn projectile_visual_tick_stops_at_terrain_and_unknown_chunks() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::DVec3;
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::{LookDirection, Position};
+        crate::world::block::init("26.2");
+        let mut chunks = crate::world::chunk::ChunkStore::new(1);
+        let mut store = EntityStore::new();
+        store.set_vehicle_spawn_transform(
+            4,
+            Position::new(2.0, 70.0, 2.0),
+            DVec3::new(2.0, 0.0, 0.0),
+            LookDirection::new(0.0, 0.0),
+        );
+        store.set_vehicle_kind(4, EntityKind::Snowball);
+        store.tick_projectile_displays(&chunks);
+        assert_eq!(
+            store.vehicles[&4].projectile.as_ref().unwrap().current,
+            store.vehicles[&4].position
+        );
+        let _chunk = chunks.chunk_storage.upsert(
+            azalea_core::position::ChunkPos::new(0, 0),
+            azalea_world::chunk::Chunk::default(),
+        );
+        chunks.set_block_state(
+            3,
+            70,
+            2,
+            crate::world::block::first_state_of("stone").unwrap(),
+        );
+        store.tick_projectile_displays(&chunks);
+        let projectile = store.vehicles[&4].projectile.as_ref().unwrap();
+        assert!(projectile.stopped);
+        assert_eq!(projectile.current.x, 3.0);
+        store.tick_projectile_displays(&chunks);
+        assert_eq!(
+            store.vehicles[&4].projectile.as_ref().unwrap().current.x,
+            3.0
+        );
+        store.set_vehicle_transform(4, Position::new(5.0, 70.0, 2.0), DVec3::ZERO);
+        assert!(!store.vehicles[&4].projectile.as_ref().unwrap().stopped);
+        store.set_projectile_grounded(4, true);
+        assert!(store.vehicles[&4].projectile.as_ref().unwrap().stopped);
+        store.set_vehicle_transform(4, Position::new(5.0, 70.0, 2.0), DVec3::X);
+        store.set_projectile_metadata(4, 5, crate::entity::MetaValue::Bool(true));
+        store.tick_projectile_displays(&chunks);
+        assert_eq!(
+            store.vehicles[&4].projectile.as_ref().unwrap().velocity.y,
+            0.0
+        );
+        store.set_vehicle_spawn_transform(
+            5,
+            Position::new(7.0, 70.0, 2.0),
+            DVec3::X,
+            LookDirection::new(0.0, 0.0),
+        );
+        store.set_vehicle_kind(5, EntityKind::Minecart);
+        store.tick_projectile_displays(&chunks);
+        assert!(store.vehicles[&5].projectile.is_none());
+        assert_eq!(store.vehicles[&5].position.x, 7.0);
+    }
+
+    #[test]
     fn spawned_arrows_render_and_follow_packet_transforms() {
         use azalea_registry::builtin::EntityKind;
         use glam::DVec3;
@@ -6540,20 +6705,20 @@ mod tests {
             );
             store.set_vehicle_kind(id, kind);
         }
-        let renders = arrow_render_infos(&store);
+        let renders = arrow_render_infos(&store, 1.0);
         assert_eq!(renders.len(), 2);
         assert!(renders.iter().any(|r| r.variant_index == 0));
         assert!(renders.iter().any(|r| r.variant_index == 1));
         store.set_vehicle_transform(1, Position::new(4.0, 5.0, 6.0), DVec3::ZERO);
         store.set_vehicle_rotation(1, LookDirection::new(90.0, 30.0));
-        let moved = arrow_render_infos(&store)
+        let moved = arrow_render_infos(&store, 1.0)
             .into_iter()
             .find(|r| r.variant_index == 0)
             .unwrap();
         assert_eq!(moved.position, Position::new(4.0, 5.0, 6.0));
         assert_eq!((moved.body_y_rot_deg, moved.head_x_rot_deg), (90.0, 30.0));
         store.remove_entity(1);
-        assert_eq!(arrow_render_infos(&store).len(), 1);
+        assert_eq!(arrow_render_infos(&store, 1.0).len(), 1);
     }
 
     #[test]
@@ -6585,6 +6750,7 @@ mod tests {
             |store: &EntityStore, camera: DVec3, scale: f32, planes: &[[f32; 4]; 6], mesh| {
                 super::snowball_render_infos(
                     store,
+                    1.0,
                     camera,
                     DVec3::ZERO,
                     DVec3::new(1.0, 0.0, 0.0),
@@ -6607,7 +6773,7 @@ mod tests {
             Vec3::new(-1.0, 0.0, 4.0),
         );
         assert_eq!(renders[0].model_matrix.x_axis.truncate().length(), 0.5);
-        assert_eq!(super::arrow_render_infos(&store).len(), 1);
+        assert_eq!(super::arrow_render_infos(&store, 1.0).len(), 1);
         assert!(extract(&store, DVec3::ZERO, 1.0, &wide, None).is_empty());
         assert!(extract(&store, DVec3::ZERO, 0.0, &wide, Some(ground)).is_empty());
         assert!(extract(&store, DVec3::new(17.0, 0.0, 4.0), 1.0, &wide, Some(ground)).is_empty());
@@ -6625,7 +6791,7 @@ mod tests {
         );
         store.remove_entity(1); // EntitiesRemoved/unload lifecycle
         assert!(extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground)).is_empty());
-        assert_eq!(super::arrow_render_infos(&store).len(), 1);
+        assert_eq!(super::arrow_render_infos(&store, 1.0).len(), 1);
     }
 
     #[test]
@@ -6675,6 +6841,7 @@ mod tests {
         store.set_vehicle_kind(1, EntityKind::Snowball);
         let renders = super::snowball_render_infos(
             &store,
+            1.0,
             DVec3::ZERO,
             DVec3::ZERO,
             DVec3::ZERO,
