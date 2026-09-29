@@ -1177,6 +1177,117 @@ pub struct ProjectileDisplay {
     pub no_gravity: bool,
 }
 
+/// Owned tick input: copy on the main thread, integrate on either thread.
+/// The sweep stores only touched block cells and parsed piston collision.
+pub struct ProjectileStepInput {
+    display: ProjectileDisplay,
+    arrow: bool,
+    gravity: f64,
+    drag: f64,
+    motion: DVec3,
+    blocks: crate::physics::collision::BlockCollisionSnapshot,
+}
+
+impl ProjectileStepInput {
+    pub fn capture(
+        chunks: &ChunkStore,
+        display: &ProjectileDisplay,
+        arrow: bool,
+    ) -> Result<Self, crate::physics::collision::SnapshotError> {
+        use crate::physics::collision::{BlockCollisionSnapshot, SnapshotError};
+        const SAFE: f64 = (i32::MAX - 32) as f64;
+        let from = *display.current;
+        if !from.is_finite()
+            || from.abs().max_element() >= SAFE
+            || !display.velocity.is_finite()
+            || display.velocity.length_squared() > 64.0
+        {
+            return Err(SnapshotError::UnsafeBounds);
+        }
+        let gravity = if display.no_gravity {
+            0.0
+        } else if arrow {
+            0.05
+        } else {
+            0.03
+        };
+        let water = fluid(chunks.get_block_state(
+            from.x.floor() as i32,
+            from.y.floor() as i32,
+            from.z.floor() as i32,
+        ))
+        .kind
+            == FluidKind::Water;
+        let drag = if water {
+            if arrow { 0.6 } else { 0.8_f32 as f64 }
+        } else if arrow {
+            0.99
+        } else {
+            0.99_f32 as f64
+        };
+        // Snowballs: gravity -> inertia -> movement; arrows: movement -> drag ->
+        // gravity.
+        let motion = if arrow {
+            display.velocity
+        } else {
+            (display.velocity - DVec3::new(0.0, gravity, 0.0)) * drag
+        };
+        let to = from + motion;
+        if !to.is_finite() || to.abs().max_element() >= SAFE || motion.length_squared() > 64.0 {
+            return Err(SnapshotError::UnsafeBounds);
+        }
+        let region = Aabb::new(
+            from.min(to) - DVec3::splat(0.001),
+            from.max(to) + DVec3::splat(0.001),
+        );
+        let blocks = BlockCollisionSnapshot::capture(chunks, region, from, to)?;
+        Ok(Self {
+            display: display.clone(),
+            arrow,
+            gravity,
+            drag,
+            motion,
+            blocks,
+        })
+    }
+
+    /// Pure fixed-tick kernel. Neither world nor entity store is read here.
+    pub fn integrate(mut self) -> ProjectileDisplay {
+        let from = *self.display.current;
+        let to = from + self.motion;
+        let hit = self
+            .blocks
+            .collect_block_aabbs()
+            .iter()
+            .filter_map(|b| b.clip_segment(from, to))
+            .min_by(f64::total_cmp);
+        if let Some(t) = hit {
+            let backoff = if self.arrow && self.motion.length_squared() > 0.0 {
+                (0.05 / self.motion.length()).min(t)
+            } else {
+                0.0
+            };
+            self.display.current = (from + self.motion * (t - backoff)).into();
+            if self.arrow {
+                self.display.stopped = true;
+                self.display.impact_velocity = Some(self.motion);
+                self.display.velocity = DVec3::ZERO;
+                return self.display;
+            }
+            // Snowballs are removed on an authoritative server hit/removal;
+            // a local collision must not permanently remove them.
+        } else {
+            self.display.current = to.into();
+        }
+        self.display.velocity = if self.arrow {
+            self.motion * self.drag - DVec3::new(0.0, self.gravity, 0.0)
+        } else {
+            self.motion
+        };
+        self.display
+    }
+}
+
 impl ProjectileDisplay {
     pub fn position(&self, partial_tick: f32) -> Position {
         self.prev
@@ -1383,112 +1494,25 @@ impl EntityStore {
     /// stay untouched. ponytail: block-only collision; entity hits and
     /// fluid effects need full world/entity physics.
     pub fn tick_projectile_displays(&mut self, chunks: &ChunkStore) {
-        use azalea_core::position::ChunkPos;
-
-        use crate::physics::aabb::Aabb;
-        use crate::physics::collision::collect_block_aabbs;
-        use crate::world::block::{FluidKind, fluid};
-
-        'projectiles: for vehicle in self.vehicles.values_mut() {
+        for vehicle in self.vehicles.values_mut() {
             let Some(display) = &mut vehicle.projectile else {
                 continue;
             };
             display.prev = display.current;
+            if display.stopped {
+                continue;
+            }
             let arrow = matches!(
                 vehicle.kind,
                 Some(EntityKind::Arrow | EntityKind::SpectralArrow)
             );
-            if display.stopped {
-                continue;
-            }
-            let from = *display.current;
-            let gravity = if display.no_gravity {
-                0.0
-            } else if arrow {
-                0.05
-            } else {
-                0.03
-            };
-            // Validate untrusted packet values before block probes, float-to-int
-            // conversion, AABB expansion, or scanning collision cells.
-            // Leave a margin for ceil() and Aabb::block(x + 1).
-            const SAFE: f64 = (i32::MAX - 32) as f64;
-            if !from.is_finite()
-                || from.abs().max_element() >= SAFE
-                || !display.velocity.is_finite()
-                || display.velocity.length_squared() > 64.0
-            {
-                display.stopped = true;
-                continue;
-            }
-            let water = fluid(chunks.get_block_state(
-                from.x.floor() as i32,
-                from.y.floor() as i32,
-                from.z.floor() as i32,
-            ))
-            .kind
-                == FluidKind::Water;
-            let drag = if water {
-                if arrow { 0.6 } else { 0.8_f32 as f64 }
-            } else if arrow {
-                0.99
-            } else {
-                0.99_f32 as f64
-            };
-            // Snowballs: gravity -> inertia -> movement; arrows: movement -> drag ->
-            // gravity.
-            let motion = if arrow {
-                display.velocity
-            } else {
-                (display.velocity - DVec3::new(0.0, gravity, 0.0)) * drag
-            };
-            let to = from + motion;
-            if !to.is_finite() || to.abs().max_element() >= SAFE || motion.length_squared() > 64.0 {
-                display.stopped = true;
-                continue;
-            }
-            let min = from.min(to).floor().as_ivec3();
-            let max = from.max(to).floor().as_ivec3();
-            for cx in min.x.div_euclid(16)..=max.x.div_euclid(16) {
-                for cz in min.z.div_euclid(16)..=max.z.div_euclid(16) {
-                    if chunks.get_chunk(&ChunkPos::new(cx, cz)).is_none() {
-                        continue 'projectiles;
-                    }
+            match ProjectileStepInput::capture(chunks, display, arrow) {
+                Ok(input) => *display = input.integrate(),
+                Err(crate::physics::collision::SnapshotError::MissingChunk) => {}
+                Err(crate::physics::collision::SnapshotError::UnsafeBounds) => {
+                    display.stopped = true
                 }
             }
-            let region = Aabb::new(
-                from.min(to) - DVec3::splat(0.001),
-                from.max(to) + DVec3::splat(0.001),
-            );
-            let hit = collect_block_aabbs(chunks, &region)
-                .iter()
-                .filter_map(|b| b.clip_segment(from, to))
-                .min_by(f64::total_cmp);
-            if let Some(t) = hit {
-                // AbstractArrow backs out of the block by 0.05 along its flight
-                // direction, without crossing back beyond this tick's start.
-                let backoff = if arrow && motion.length_squared() > 0.0 {
-                    (0.05 / motion.length()).min(t)
-                } else {
-                    0.0
-                };
-                display.current = (from + motion * (t - backoff)).into();
-                if arrow {
-                    display.stopped = true;
-                    display.impact_velocity = Some(motion);
-                    display.velocity = DVec3::ZERO;
-                    continue;
-                }
-                // Snowballs are removed on an authoritative server hit/removal;
-                // do not turn a local block prediction into permanent removal.
-            } else {
-                display.current = to.into();
-            }
-            display.velocity = if arrow {
-                motion * drag - DVec3::new(0.0, gravity, 0.0)
-            } else {
-                motion
-            };
         }
     }
 
@@ -2273,6 +2297,62 @@ mod tests {
         store.set_vehicle_spawn_transform(1, position, velocity, LookDirection::default());
         store.set_vehicle_kind(1, kind);
         store
+    }
+
+    #[test]
+    fn owned_fixed_tick_matches_sync_and_is_frozen_after_world_edit() {
+        fn assert_send<T: Send + 'static>() {}
+        assert_send::<ProjectileStepInput>();
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        chunks.partial_storage.set(
+            &ChunkPos::new(0, 0),
+            Some(azalea_world::chunk::Chunk::default()),
+            &mut chunks.chunk_storage,
+        );
+        chunks.set_block_state(
+            2,
+            70,
+            2,
+            crate::world::block::first_state_of("water").unwrap(),
+        );
+        chunks.set_block_state(
+            3,
+            70,
+            2,
+            crate::world::block::first_state_of("stone").unwrap(),
+        );
+        let mut store = projectile(EntityKind::Arrow, Position::new(2.0, 70.5, 2.5), DVec3::X);
+        let mut before = store.vehicles[&1].projectile.as_ref().unwrap().clone();
+        before.prev = before.current;
+        let input = ProjectileStepInput::capture(&chunks, &before, true).unwrap();
+        let snowball = projectile(
+            EntityKind::Snowball,
+            Position::new(2.0, 70.5, 2.5),
+            DVec3::X,
+        );
+        let water_input = ProjectileStepInput::capture(
+            &chunks,
+            snowball.vehicles[&1].projectile.as_ref().unwrap(),
+            false,
+        )
+        .unwrap();
+        store.tick_projectile_displays(&chunks);
+        let expected = store.vehicles[&1].projectile.as_ref().unwrap();
+        assert!(expected.stopped);
+        assert!((expected.current.x - 2.95).abs() < 1e-12);
+        chunks.set_block_state(3, 70, 2, azalea_block::BlockState::AIR);
+        chunks.set_block_state(2, 70, 2, azalea_block::BlockState::AIR);
+        chunks.unload_chunk(&ChunkPos::new(0, 0));
+        let snowball_result = water_input.integrate();
+        assert!((snowball_result.current.x - (2.0 + 0.8_f32 as f64)).abs() < 1e-12);
+        assert!((snowball_result.velocity.x - 0.8_f32 as f64).abs() < 1e-12);
+        let result = input.integrate();
+        assert_eq!(result.current, expected.current);
+        assert_eq!(result.prev, expected.prev);
+        assert_eq!(result.velocity, expected.velocity);
+        assert_eq!(result.impact_velocity, expected.impact_velocity);
+        assert_eq!(store.vehicles[&1].position, Position::new(2.0, 70.5, 2.5));
     }
 
     #[test]

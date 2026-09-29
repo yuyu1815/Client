@@ -1,3 +1,5 @@
+use azalea_block::BlockState;
+use azalea_core::position::{BlockPos, ChunkPos};
 use glam::{DVec3, dvec3};
 
 use super::aabb::Aabb;
@@ -19,8 +21,102 @@ fn collect_block_aabbs_for_player(
     region: &Aabb,
     player: Option<(f64, bool, bool, f32)>,
 ) -> Vec<Aabb> {
-    let mut aabbs = Vec::new();
+    collect_block_aabbs_with(region, player, |bx, by, bz| {
+        let state = chunk_store.get_block_state(bx, by, bz);
+        let piston = (crate::world::block::block_id(state) == "moving_piston")
+            .then(|| chunk_store.block_entities.get(&BlockPos::new(bx, by, bz)))
+            .flatten()
+            .and_then(|entity| crate::world::block_entity::moving_block_collision(&entity.nbt));
+        (state, piston)
+    })
+}
 
+/// Owned block cells, including the source water cell when inside the sweep.
+/// Only state and parsed piston collision are retained, not chunk locks or NBT.
+pub struct BlockCollisionSnapshot {
+    region: Aabb,
+    cells: Vec<(BlockState, Option<(BlockState, DVec3)>)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SnapshotError {
+    UnsafeBounds,
+    MissingChunk,
+}
+
+impl BlockCollisionSnapshot {
+    /// Missing columns just outside the segment still read as air.
+    pub fn capture(
+        store: &ChunkStore,
+        region: Aabb,
+        from: DVec3,
+        to: DVec3,
+    ) -> Result<Self, SnapshotError> {
+        // Leave room for ceil() and Aabb::block(x + 1).
+        if !from.is_finite()
+            || !to.is_finite()
+            || !region.min.is_finite()
+            || !region.max.is_finite()
+            || region.min.min_element() <= i32::MIN as f64 + 2.0
+            || region.max.max_element() >= i32::MAX as f64 - 2.0
+            || region.min.x > region.max.x
+            || region.min.y > region.max.y
+            || region.min.z > region.max.z
+            || from.min(to).cmplt(region.min).any()
+            || from.max(to).cmpgt(region.max).any()
+        {
+            return Err(SnapshotError::UnsafeBounds);
+        }
+        let min = region.min.floor().as_ivec3();
+        let max = region.max.ceil().as_ivec3();
+        let extent = max.as_i64vec3() - min.as_i64vec3();
+        let volume = extent
+            .x
+            .checked_mul(extent.y)
+            .and_then(|v| v.checked_mul(extent.z))
+            .ok_or(SnapshotError::UnsafeBounds)?;
+        if volume > 4096 {
+            return Err(SnapshotError::UnsafeBounds);
+        }
+        let segment_min = from.min(to).floor().as_ivec3();
+        let segment_max = from.max(to).floor().as_ivec3();
+        for cx in segment_min.x.div_euclid(16)..=segment_max.x.div_euclid(16) {
+            for cz in segment_min.z.div_euclid(16)..=segment_max.z.div_euclid(16) {
+                if store.get_chunk(&ChunkPos::new(cx, cz)).is_none() {
+                    return Err(SnapshotError::MissingChunk);
+                }
+            }
+        }
+        let mut cells = Vec::with_capacity(volume as usize);
+        for y in min.y..max.y {
+            for z in min.z..max.z {
+                for x in min.x..max.x {
+                    let state = store.get_block_state(x, y, z);
+                    let piston = (crate::world::block::block_id(state) == "moving_piston")
+                        .then(|| store.block_entities.get(&BlockPos::new(x, y, z)))
+                        .flatten()
+                        .and_then(|entity| {
+                            crate::world::block_entity::moving_block_collision(&entity.nbt)
+                        });
+                    cells.push((state, piston));
+                }
+            }
+        }
+        Ok(Self { region, cells })
+    }
+
+    pub fn collect_block_aabbs(&self) -> Vec<Aabb> {
+        let mut cells = self.cells.iter().copied();
+        collect_block_aabbs_with(&self.region, None, |_, _, _| cells.next().unwrap())
+    }
+}
+
+fn collect_block_aabbs_with(
+    region: &Aabb,
+    player: Option<(f64, bool, bool, f32)>,
+    mut cell: impl FnMut(i32, i32, i32) -> (BlockState, Option<(BlockState, DVec3)>),
+) -> Vec<Aabb> {
+    let mut aabbs = Vec::new();
     let min_x = region.min.x.floor() as i32;
     let min_y = region.min.y.floor() as i32;
     let min_z = region.min.z.floor() as i32;
@@ -31,13 +127,9 @@ fn collect_block_aabbs_for_player(
     for by in min_y..max_y {
         for bz in min_z..max_z {
             for bx in min_x..max_x {
-                let state = chunk_store.get_block_state(bx, by, bz);
+                let (state, piston) = cell(bx, by, bz);
                 if crate::world::block::block_id(state) == "moving_piston" {
-                    let pos = azalea_core::position::BlockPos::new(bx, by, bz);
-                    if let Some((moved, progress_offset)) =
-                        chunk_store.block_entities.get(&pos).and_then(|entity| {
-                            crate::world::block_entity::moving_block_collision(&entity.nbt)
-                        })
+                    if let Some((moved, progress_offset)) = piston
                         && has_collision(moved)
                     {
                         let origin = dvec3(bx as f64, by as f64, bz as f64) + progress_offset;
@@ -369,6 +461,142 @@ pub fn resolve_collision_for_player(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_snapshot_matches(chunks: &ChunkStore, region: Aabb, from: DVec3, to: DVec3) {
+        let snapshot = BlockCollisionSnapshot::capture(chunks, region, from, to).unwrap();
+        let direct = collect_block_aabbs(chunks, &region);
+        let owned = snapshot.collect_block_aabbs();
+        assert_eq!(direct.len(), owned.len());
+        for (a, b) in direct.iter().zip(owned.iter()) {
+            assert_eq!((a.min, a.max), (b.min, b.max));
+        }
+    }
+
+    #[test]
+    fn owned_sweep_matches_air_solid_partial_debug_and_piston_and_survives_unload() {
+        use azalea_registry::builtin::BlockEntityKind;
+        use simdnbt::owned::NbtCompound;
+
+        use crate::world::block::{DebugWorld, first_state_of};
+        use crate::world::block_entity::StoredBlockEntity;
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        let pos = ChunkPos::new(0, 0);
+        chunks.partial_storage.set(
+            &pos,
+            Some(azalea_world::chunk::Chunk::default()),
+            &mut chunks.chunk_storage,
+        );
+        let region = Aabb::new(dvec3(1.0, 70.0, 2.0), dvec3(6.0, 71.0, 3.0));
+        let from = dvec3(1.0, 70.5, 2.5);
+        let to = dvec3(5.0, 70.5, 2.5);
+        assert_snapshot_matches(&chunks, region, from, to);
+        chunks.set_block_state(2, 70, 2, first_state_of("stone").unwrap());
+        chunks.set_block_state(3, 70, 2, first_state_of("oak_slab").unwrap());
+        assert_snapshot_matches(&chunks, region, from, to);
+        let mut moved = NbtCompound::new();
+        moved.insert("Name", "minecraft:stone");
+        let mut nbt = NbtCompound::new();
+        nbt.insert("blockState", moved);
+        nbt.insert("progress", 0.5_f32);
+        nbt.insert("extending", 1_i8);
+        nbt.insert("source", 0_i8);
+        nbt.insert("facing", "east");
+        chunks.set_block_state(4, 70, 2, first_state_of("moving_piston").unwrap());
+        chunks.block_entities.insert(
+            BlockPos::new(4, 70, 2),
+            StoredBlockEntity::new(BlockEntityKind::Piston, nbt),
+        );
+        assert_snapshot_matches(&chunks, region, from, to);
+        let snapshot = BlockCollisionSnapshot::capture(&chunks, region, from, to).unwrap();
+        assert!(
+            snapshot
+                .collect_block_aabbs()
+                .iter()
+                .any(|b| b.min.x == 3.5)
+        );
+        let before: Vec<_> = snapshot
+            .collect_block_aabbs()
+            .iter()
+            .map(|b| (b.min, b.max))
+            .collect();
+        chunks.set_block_state(2, 70, 2, azalea_block::BlockState::AIR);
+        chunks.unload_chunk(&pos);
+        assert_eq!(
+            before,
+            snapshot
+                .collect_block_aabbs()
+                .iter()
+                .map(|b| (b.min, b.max))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            BlockCollisionSnapshot::capture(&chunks, region, from, to).err(),
+            Some(SnapshotError::MissingChunk)
+        );
+        chunks.partial_storage.set(
+            &pos,
+            Some(azalea_world::chunk::Chunk::default()),
+            &mut chunks.chunk_storage,
+        );
+        chunks.debug_world = Some(DebugWorld::new());
+        let debug_region = Aabb::new(dvec3(1.0, 70.0, 3.0), dvec3(2.0, 71.0, 4.0));
+        assert_snapshot_matches(
+            &chunks,
+            debug_region,
+            dvec3(1.0, 70.5, 3.5),
+            dvec3(1.5, 70.5, 3.5),
+        );
+    }
+
+    #[test]
+    fn sweep_requires_segment_columns_but_not_padding_columns() {
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        chunks.partial_storage.set(
+            &ChunkPos::new(0, 0),
+            Some(azalea_world::chunk::Chunk::default()),
+            &mut chunks.chunk_storage,
+        );
+        let from = dvec3(15.5, 70.0, 1.5);
+        let to = dvec3(15.9995, 70.0, 1.5);
+        let region = Aabb::new(from.min(to) - DVec3::splat(0.001), to + DVec3::splat(0.001));
+        assert_snapshot_matches(&chunks, region, from, to);
+        assert_eq!(
+            BlockCollisionSnapshot::capture(&chunks, region, from, dvec3(16.0, 70.0, 1.5)).err(),
+            Some(SnapshotError::MissingChunk)
+        );
+    }
+
+    #[test]
+    fn owned_sweep_rejects_unsafe_and_excessive_bounds() {
+        fn assert_send<T: Send + 'static>() {}
+        assert_send::<BlockCollisionSnapshot>();
+        let chunks = ChunkStore::new(1);
+        assert_eq!(
+            BlockCollisionSnapshot::capture(
+                &chunks,
+                Aabb::new(DVec3::ZERO, DVec3::ONE),
+                DVec3::ZERO,
+                dvec3(i32::MAX as f64, 0.0, 0.0),
+            )
+            .err(),
+            Some(SnapshotError::UnsafeBounds)
+        );
+        for region in [
+            Aabb::new(dvec3(f64::NAN, 0.0, 0.0), DVec3::ONE),
+            Aabb::new(DVec3::ZERO, dvec3(100_000.0, 2.0, 2.0)),
+            Aabb::new(
+                dvec3(i32::MAX as f64, 0.0, 0.0),
+                dvec3(i32::MAX as f64, 1.0, 1.0),
+            ),
+        ] {
+            assert_eq!(
+                BlockCollisionSnapshot::capture(&chunks, region, DVec3::ZERO, DVec3::ZERO).err(),
+                Some(SnapshotError::UnsafeBounds)
+            );
+        }
+    }
 
     #[test]
     fn collision_distance_below_vanilla_epsilon_is_zeroed() {
