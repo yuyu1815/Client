@@ -7,6 +7,17 @@ launcher-dev *args:
 launcher-build *args:
     @pnpm --filter pomme-launcher tauri build {{ args }}
 
+# Explicit opt-in only: `just auto-benchmark <server>` (optional account UUID as second arg).
+# Build client separately (`mise run build`) before running; never run this in CI.
+auto-benchmark server account_id="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{account_id}}" ]; then
+        mise exec -- cargo run -p pomme-launcher --locked -- --auto-benchmark "{{server}}" "{{account_id}}"
+    else
+        mise exec -- cargo run -p pomme-launcher --locked -- --auto-benchmark "{{server}}"
+    fi
+
 launcher-pre-pr:
     @cargo fmt -p pomme-launcher -- --check
     @cargo clippy -p pomme-launcher --release --all-targets --all-features -- -D warnings

@@ -8,6 +8,18 @@ fn main() {
         unsafe { std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "0") };
     }
 
+    // Opt-in only: a normal launcher invocation never touches benchmark state.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let benchmark = if args.first().is_some_and(|a| a == "--auto-benchmark") {
+        if !(args.len() == 2 || args.len() == 3) {
+            println!("usage: --auto-benchmark <server> [account-id]");
+            std::process::exit(2);
+        }
+        Some((args[1].clone(), args.get(2).cloned()))
+    } else {
+        None
+    };
+
     let builder = pomme_launcher::get_builder();
 
     #[cfg(debug_assertions)]
@@ -20,6 +32,33 @@ fn main() {
             builder.mount_events(app);
             pomme_launcher::storage::ensure_dirs();
             app.manage(pomme_launcher::AppState::default());
+            if let Some((server, account_id)) = benchmark.as_ref() {
+                // Keep the launcher out of the way; the client/game window remains visible.
+                if let Some(window) = app.get_webview_window("main") {
+                    window.hide()?;
+                }
+                let handle = app.handle().clone();
+                let server = server.clone();
+                let account_id = account_id.clone();
+                tauri::async_runtime::spawn(async move {
+                    let result = pomme_launcher::auto_benchmark::run(
+                        handle.clone(),
+                        &server,
+                        account_id.as_deref(),
+                    )
+                    .await;
+                    match result {
+                        Ok(path) => {
+                            println!("{}", path.display());
+                            handle.exit(0);
+                        }
+                        Err(reason) => {
+                            println!("{reason}");
+                            handle.exit(1);
+                        }
+                    }
+                });
+            }
             Ok(())
         })
         .plugin(tauri_plugin_shell::init())

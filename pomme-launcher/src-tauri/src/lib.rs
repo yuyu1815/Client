@@ -1,4 +1,5 @@
 mod auth;
+pub mod auto_benchmark;
 mod client_updater;
 mod commands;
 mod downloader;

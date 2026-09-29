@@ -370,94 +370,23 @@ pub async fn launch_game(
     override_version: Option<String>,
     debug_enabled: Option<bool>,
 ) -> Result<String, String> {
-    // Prefer a local dev build (target/); otherwise download the latest release.
-    let exe = match find_client_binary() {
-        Ok(local) => local,
-        Err(_) => crate::client_updater::ensure_client(&app).await?,
-    };
     let account = uuid.as_deref().and_then(crate::auth::try_restore);
-    let username = account
-        .as_ref()
-        .map(|a| a.username.clone())
-        .unwrap_or_else(|| "Steve".into());
-
-    let token: String = (0..32)
-        .map(|_| format!("{:02x}", rand::random::<u8>()))
-        .collect();
-    let token_path = std::env::temp_dir().join("pomme_launch_token");
-    std::fs::write(&token_path, &token).map_err(|e| e.to_string())?;
-
     let install = installations::registry::find_by_id(&installations::Id::from(install_id))
         .map_err(|e| e.to_string())?;
-    let version = override_version.unwrap_or_else(|| install.version.into());
-    let install_path: String = install.directory.into();
-
-    let mut cmd = tokio::process::Command::new(&exe);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    // macOS releases bundle MoltenVK next to the client; point the Vulkan loader
-    // at the bundled ICD. Absent for local dev builds, which use system Vulkan.
-    #[cfg(target_os = "macos")]
-    if let Some(icd) = exe
-        .parent()
-        .map(|d| d.join("MoltenVK_icd.json"))
-        .filter(|p| p.exists())
-    {
-        cmd.env("VK_ICD_FILENAMES", &icd);
-    }
-
-    if debug_enabled.unwrap_or(false) {
-        cmd.env("RUST_LOG", "debug");
-        cmd.env("RUST_BACKTRACE", "full");
-
-        match app.webview_windows().get("console") {
-            None => {
-                WebviewWindowBuilder::new(&app, "console", WebviewUrl::App("console".into()))
-                    .title("Pomme Debugger")
-                    .decorations(false)
-                    .build()
-                    .unwrap();
-            }
-            Some(window) => {
-                let _ = ConsoleMessageEvent::Reset.emit(&app);
-                let _ = window.set_focus();
-            }
-        }
-    }
-
-    cmd.arg("--version")
-        .arg(&version)
-        .arg("--username")
-        .arg(&username)
-        .arg("--assets-dir")
-        .arg(storage::assets_dir().to_string_lossy().as_ref())
-        .arg("--versions-dir")
-        .arg(storage::versions_dir().to_string_lossy().as_ref())
-        .arg("--launch-token")
-        .arg(token_path.to_string_lossy().as_ref())
-        .arg("--game-dir")
-        .arg(install_path);
-
-    if let Some(acc) = &account {
-        cmd.arg("--uuid")
-            .arg(&acc.uuid)
-            .arg("--access-token")
-            .arg(&acc.access_token);
-    }
-    if let Some(server_ip) = &server_ip {
-        cmd.arg("--quick-access-multiplayer").arg(server_ip);
-    }
-
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    // The client is a console-subsystem binary; without this, Windows pops a
-    // terminal window for it alongside the game.
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut child = spawn_game(
+        &app,
+        install,
+        account.as_ref(),
+        server_ip.as_deref(),
+        override_version,
+        debug_enabled.unwrap_or(false),
+        false,
+    )
+    .await?;
+    let username = account
+        .as_ref()
+        .map(|a| a.username.as_str())
+        .unwrap_or("Steve");
 
     let stdout = child.stdout.take().expect("couldn't take stdout");
     let stderr = child.stderr.take().expect("couldn't take stderr");
@@ -546,6 +475,107 @@ pub async fn launch_game(
     });
 
     Ok(format!("Launched as {username}"))
+}
+
+// Shared launch path: the opt-in runner must not reimplement token handling or
+// client arguments.
+pub(crate) async fn spawn_game(
+    app: &AppHandle,
+    install: Installation,
+    account: Option<&crate::auth::AuthAccount>,
+    server_ip: Option<&str>,
+    override_version: Option<String>,
+    debug_enabled: bool,
+    auto_fps: bool,
+) -> Result<tokio::process::Child, String> {
+    // Prefer a local dev build (target/); otherwise download the latest release.
+    let exe = match find_client_binary() {
+        Ok(local) => local,
+        Err(_) => crate::client_updater::ensure_client(app).await?,
+    };
+    let username = account.map(|a| a.username.as_str()).unwrap_or("Steve");
+
+    let token: String = (0..32)
+        .map(|_| format!("{:02x}", rand::random::<u8>()))
+        .collect();
+    let token_path = std::env::temp_dir().join("pomme_launch_token");
+    std::fs::write(&token_path, &token).map_err(|e| e.to_string())?;
+
+    let version = override_version.unwrap_or_else(|| install.version.into());
+    let install_path: String = install.directory.into();
+
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    if auto_fps {
+        cmd.kill_on_drop(true);
+    }
+
+    // macOS releases bundle MoltenVK next to the client; point the Vulkan loader
+    // at the bundled ICD. Absent for local dev builds, which use system Vulkan.
+    #[cfg(target_os = "macos")]
+    if let Some(icd) = exe
+        .parent()
+        .map(|d| d.join("MoltenVK_icd.json"))
+        .filter(|p| p.exists())
+    {
+        cmd.env("VK_ICD_FILENAMES", &icd);
+    }
+
+    if debug_enabled {
+        cmd.env("RUST_LOG", "debug");
+        cmd.env("RUST_BACKTRACE", "full");
+
+        match app.webview_windows().get("console") {
+            None => {
+                WebviewWindowBuilder::new(app, "console", WebviewUrl::App("console".into()))
+                    .title("Pomme Debugger")
+                    .decorations(false)
+                    .build()
+                    .unwrap();
+            }
+            Some(window) => {
+                let _ = ConsoleMessageEvent::Reset.emit(app);
+                let _ = window.set_focus();
+            }
+        }
+    }
+
+    cmd.arg("--version")
+        .arg(&version)
+        .arg("--username")
+        .arg(&username)
+        .arg("--assets-dir")
+        .arg(storage::assets_dir().to_string_lossy().as_ref())
+        .arg("--versions-dir")
+        .arg(storage::versions_dir().to_string_lossy().as_ref())
+        .arg("--launch-token")
+        .arg(token_path.to_string_lossy().as_ref())
+        .arg("--game-dir")
+        .arg(install_path);
+
+    if let Some(acc) = &account {
+        cmd.arg("--uuid")
+            .arg(&acc.uuid)
+            .arg("--access-token")
+            .arg(&acc.access_token);
+    }
+    if let Some(server_ip) = server_ip {
+        cmd.arg("--quick-access-multiplayer").arg(server_ip);
+    }
+    if auto_fps {
+        cmd.arg("--auto-fps-benchmark");
+    }
+
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    // The client is a console-subsystem binary; without this, Windows pops a
+    // terminal window for it alongside the game.
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+
+    cmd.spawn().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
