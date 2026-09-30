@@ -210,18 +210,9 @@ pub enum NetworkEvent {
         patch: Option<(u8, u8, u8, u8, Vec<u8>)>,
         decorations: Option<Vec<crate::world::maps::MapDecoration>>,
     },
-    EntityArmorUpdate {
-        entity_id: i32,
-        armor: u32,
-    },
-    EntityMaxHealthUpdate {
-        entity_id: i32,
-        max_health: f32,
-    },
     EntityAttributeUpdate {
         entity_id: i32,
-        attribute: String,
-        value: f64,
+        snapshot: azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot,
     },
     ContainerContent {
         container_id: i32,

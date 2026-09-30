@@ -23,7 +23,6 @@ const GROUND_ACCEL_FACTOR: f32 = 0.216_000_02;
 // Both are widened into the double-backed attribute system before
 // Player.getSpeed casts the final value back to float.
 const MOVEMENT_SPEED_ATTRIBUTE: f64 = 0.1_f32 as f64;
-const SPRINT_SPEED_MODIFIER: f64 = 0.3_f32 as f64;
 // SNEAKING_SPEED is a double attribute (default 0.3), then LocalPlayer casts it
 // to float before scaling its Vec2 input.
 const SNEAKING_SPEED: f32 = 0.3_f64 as f32;
@@ -102,7 +101,13 @@ pub fn tick_with_context(
 
     // Vanilla `LocalPlayer.modifyInput` keeps the entire input pipeline in
     // float: damping, item-use slowdown, sneaking slowdown, then square remap.
-    let (forward, strafe) = movement_input(input, player.crouching, use_speed_multiplier);
+    let sneak_speed = player.attribute_value("minecraft:sneaking_speed", 0.3) as f32;
+    let (forward, strafe) = movement_input_with_sneaking_speed(
+        input,
+        player.crouching,
+        use_speed_multiplier,
+        sneak_speed,
+    );
     let forward_pressed = input.key_pressed(KeyCode::KeyW)
         || input
             .get_gamepad_movement_axes()
@@ -134,6 +139,10 @@ pub fn tick_with_context(
             player.velocity.y += f64::from(input_ya * player.fly_speed * 3.0);
         }
     }
+
+    // LivingEntity.aiStep, after Entity's fluid impulses and LocalPlayer's
+    // flight input, before jumping and travel (also water/lava/gliding).
+    zero_small_velocity(player);
 
     // Climbable blocks use the jump input for upward movement, independently
     // of the grounded/fluid jump path below.
@@ -272,6 +281,7 @@ pub fn tick_dead_with_context(
     reset_fall_distance_for_tick(player);
     player.tick_eye_height();
 
+    zero_small_velocity(player);
     let (sin_y_rot, cos_y_rot) = vanilla_yaw_sin_cos(player.look_dir.y_rot_deg());
     travel(
         player,
@@ -324,9 +334,22 @@ fn update_fly_state(player: &mut LocalPlayer, input: &InputState, sin_y_rot: f32
     }
 }
 
+fn zero_small_velocity(player: &mut LocalPlayer) {
+    // 26.2 LivingEntity.aiStep: PLAYER uses the horizontal vector magnitude,
+    // not a per-axis epsilon. Vertical has its own strict .003 threshold.
+    if player.velocity.x * player.velocity.x + player.velocity.z * player.velocity.z < 9.0e-6 {
+        player.velocity.x = 0.0;
+        player.velocity.z = 0.0;
+    }
+    if player.velocity.y.abs() < 0.003 {
+        player.velocity.y = 0.0;
+    }
+    player.collision_delta = [DVec3::ZERO; 2];
+}
+
 fn jump_from_ground(player: &mut LocalPlayer, sin_y_rot: f32, cos_y_rot: f32) {
-    let jump = player.attribute_value("minecraft:generic.jump_strength", f64::from(JUMP_VELOCITY));
-    player.velocity.y = jump.max(player.velocity.y);
+    let jump = player.attribute_value("minecraft:jump_strength", f64::from(JUMP_VELOCITY)) as f32;
+    player.velocity.y = f64::from(jump).max(player.velocity.y);
 
     if player.sprinting {
         player.velocity.x += f64::from(-sin_y_rot) * SPRINT_JUMP_BOOST;
@@ -408,7 +431,7 @@ fn tick_water(
     }
 
     let mut water_walker =
-        player.attribute_value("minecraft:generic.water_movement_efficiency", 0.0) as f32;
+        player.attribute_value("minecraft:water_movement_efficiency", 0.0) as f32;
     if !player.on_ground {
         water_walker *= 0.5;
     }
@@ -624,6 +647,7 @@ fn apply_collision_with_context(
     cos_y_rot: f32,
 ) {
     if player.game_mode == 3 {
+        player.collision_delta = [*player.velocity; 2];
         player.position += *player.velocity;
         player.on_ground = false;
         player.horizontal_collision = false;
@@ -665,7 +689,7 @@ fn apply_collision_with_context(
         player.flying,
     );
     let step_height =
-        player.attribute_value("minecraft:generic.step_height", f64::from(STEP_HEIGHT));
+        f64::from(player.attribute_value("minecraft:step_height", f64::from(STEP_HEIGHT)) as f32);
     let (resolved, on_ground) = super::collision::resolve_collision_for_player(
         chunk_store,
         aabb,
@@ -680,6 +704,8 @@ fn apply_collision_with_context(
             player.fall_distance,
         )),
     );
+
+    player.collision_delta = [delta, resolved];
 
     // Vanilla horizontal collision flags use Mth.equal(double, double), whose
     // epsilon is the widened float constant 1.0E-5f.
@@ -1134,17 +1160,12 @@ fn friction_for_block_id(id: &str) -> f32 {
     }
 }
 
-fn movement_speed(player: &LocalPlayer) -> f32 {
-    let mut speed =
-        player.attribute_value("minecraft:generic.movement_speed", MOVEMENT_SPEED_ATTRIBUTE);
-    if player.sprinting {
-        speed *= 1.0 + SPRINT_SPEED_MODIFIER;
-    }
-    speed as f32
+pub(crate) fn movement_speed(player: &LocalPlayer) -> f32 {
+    player.attribute_value("minecraft:movement_speed", MOVEMENT_SPEED_ATTRIBUTE) as f32
 }
 
-fn effective_gravity(player: &LocalPlayer) -> f64 {
-    let gravity = player.attribute_value("minecraft:generic.gravity", GRAVITY);
+pub(crate) fn effective_gravity(player: &LocalPlayer) -> f64 {
+    let gravity = player.attribute_value("minecraft:gravity", GRAVITY);
     if player.velocity.y < 0.0
         && player.effects.sorted_desc().iter().any(|effect| {
             crate::mob_effect::info(effect.effect_id)
@@ -1235,6 +1256,15 @@ pub(crate) fn movement_input(
     crouching: bool,
     use_speed_multiplier: f32,
 ) -> (f32, f32) {
+    movement_input_with_sneaking_speed(input, crouching, use_speed_multiplier, SNEAKING_SPEED)
+}
+
+fn movement_input_with_sneaking_speed(
+    input: &InputState,
+    crouching: bool,
+    use_speed_multiplier: f32,
+    sneaking_speed: f32,
+) -> (f32, f32) {
     // Keep the LocalPlayer input pipeline in float exactly like vanilla. Pomme's
     // analog stick is already clamped to unit length; keyboard input is first
     // normalized just like KeyboardInput.tick(). `strafe` follows vanilla xxa:
@@ -1269,8 +1299,8 @@ pub(crate) fn movement_input(
     forward *= use_speed_multiplier;
 
     if crouching {
-        strafe *= SNEAKING_SPEED;
-        forward *= SNEAKING_SPEED;
+        strafe *= sneaking_speed;
+        forward *= sneaking_speed;
     }
 
     let (strafe, forward) = square_movement(strafe, forward);
@@ -1337,6 +1367,287 @@ fn vanilla_look_y(pitch_degrees: f32) -> f64 {
 mod tests {
     use super::*;
     use crate::player::{CROUCH_EYE_HEIGHT, STANDING_EYE_HEIGHT};
+
+    fn flat_floor() -> ChunkStore {
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        chunks.partial_storage.set(
+            &azalea_core::position::ChunkPos::new(0, 0),
+            Some(azalea_world::chunk::Chunk::default()),
+            &mut chunks.chunk_storage,
+        );
+        for x in 0..16 {
+            for z in 0..16 {
+                chunks.set_block_state(
+                    x,
+                    60,
+                    z,
+                    crate::world::block::first_state_of("stone").unwrap(),
+                );
+            }
+        }
+        chunks
+    }
+
+    #[test]
+    fn authoritative_native_packet_event_local_player_tick_and_log() {
+        use azalea_core::attribute_modifier_operation::AttributeModifierOperation as Op;
+        use azalea_inventory::components::AttributeModifier;
+        use azalea_protocol::packets::ProtocolPacket;
+        use azalea_protocol::packets::game::ClientboundGamePacket as C;
+        use azalea_protocol::packets::game::c_update_attributes::{
+            AttributeSnapshot, ClientboundUpdateAttributes,
+        };
+        use azalea_registry::builtin::Attribute;
+        let chunks = flat_floor();
+        for sprint_id in ["sprinting", "662a6b8dda3e4c1c881396ea6097278d"] {
+            let modifiers = vec![
+                AttributeModifier {
+                    id: "test:add".into(),
+                    amount: 0.05,
+                    operation: Op::AddValue,
+                },
+                AttributeModifier {
+                    id: "test:base".into(),
+                    amount: 0.2,
+                    operation: Op::AddMultipliedBase,
+                },
+                AttributeModifier {
+                    id: "test:total".into(),
+                    amount: 0.1,
+                    operation: Op::AddMultipliedTotal,
+                },
+                AttributeModifier {
+                    id: sprint_id.into(),
+                    amount: 0.3_f32 as f64,
+                    operation: Op::AddMultipliedTotal,
+                },
+            ];
+            let packet = C::UpdateAttributes(ClientboundUpdateAttributes {
+                entity_id: azalea_core::entity_id::MinecraftEntityId(7),
+                values: vec![
+                    AttributeSnapshot {
+                        attribute: Attribute::MovementSpeed,
+                        base: 0.2,
+                        modifiers: modifiers.clone(),
+                    },
+                    AttributeSnapshot {
+                        attribute: Attribute::JumpStrength,
+                        base: 0.6,
+                        modifiers: vec![],
+                    },
+                    AttributeSnapshot {
+                        attribute: Attribute::MaxHealth,
+                        base: 40.0,
+                        modifiers: vec![AttributeModifier {
+                            id: "test:health".into(),
+                            amount: 0.5,
+                            operation: Op::AddMultipliedTotal,
+                        }],
+                    },
+                    AttributeSnapshot {
+                        attribute: Attribute::Armor,
+                        base: 8.0,
+                        modifiers: vec![AttributeModifier {
+                            id: "test:armor".into(),
+                            amount: 2.0,
+                            operation: Op::AddValue,
+                        }],
+                    },
+                ],
+            });
+            let bytes = azalea_protocol::write::serialize_packet(&packet).unwrap();
+            let mut cursor = std::io::Cursor::new(&bytes[..]);
+            use azalea_buf::AzBufVar;
+            let id = u32::azalea_read_var(&mut cursor).unwrap();
+            assert_eq!(id, packet.id());
+            let C::UpdateAttributes(decoded) = C::read(id, &mut cursor).unwrap() else {
+                panic!("packet")
+            };
+            let mut player = LocalPlayer::new();
+            player.entity_id = 7;
+            player.health = 11.0;
+            let mut entities = crate::entity::EntityStore::new();
+            for snapshot in decoded.values {
+                let crate::net::NetworkEvent::EntityAttributeUpdate {
+                    entity_id,
+                    snapshot,
+                } = crate::net::handler::attribute_event(decoded.entity_id.0, snapshot)
+                else {
+                    panic!("event")
+                };
+                crate::app::core::apply_entity_attribute(
+                    &mut player,
+                    &mut entities,
+                    entity_id,
+                    snapshot,
+                );
+            }
+            assert_eq!(player.attributes["movement_speed"].modifiers, modifiers);
+            assert_eq!(
+                (player.health, player.max_health, player.armor),
+                (11.0, 60.0, 10)
+            );
+            assert!(
+                (player.attribute_value("minecraft:generic.movement_speed", 0.0) - 0.33).abs()
+                    < 1e-14
+            );
+            let mut input = InputState::released();
+            input.set_test_key(KeyCode::KeyW, true);
+            input.set_test_key(KeyCode::ControlLeft, true);
+            player.position = dvec3(4.5, 61.0, 4.5).into();
+            player.on_ground = true;
+            player.velocity.y = -GRAVITY * f64::from(VERTICAL_DRAG);
+            tick(&mut player, &input, &chunks, 1.0, false);
+            assert!(player.sprinting);
+            let speed = (0.33 * (1.0 + 0.3_f32 as f64)) as f32;
+            assert_eq!(movement_speed(&player), speed);
+            let expected = f64::from(INPUT_DAMPING)
+                * f64::from(speed * (GROUND_ACCEL_FACTOR / BLOCK_FRICTION.powi(3)));
+            assert!((player.position.z - 4.5 - expected).abs() < 1e-14);
+            let log = crate::movement_record::own_attributes(&player);
+            assert_eq!(log["movement_speed"]["base"], 0.2);
+            assert_eq!(
+                log["movement_speed"]["modifiers"].as_array().unwrap().len(),
+                4
+            );
+            assert_eq!(
+                log["movement_speed"]["effective"].as_f64().unwrap() as f32,
+                movement_speed(&player)
+            );
+            assert_eq!(
+                log["movement_speed"]["modifiers"][0]["operation"],
+                "add_value"
+            );
+            input.set_test_key(KeyCode::Space, true);
+            tick(&mut player, &input, &chunks, 1.0, false);
+            assert_eq!(player.collision_delta[0].y, f64::from(0.6_f32));
+            // Other entity updates must never overwrite the local snapshot.
+            crate::app::core::apply_entity_attribute(
+                &mut player,
+                &mut entities,
+                99,
+                AttributeSnapshot {
+                    attribute: Attribute::MovementSpeed,
+                    base: 3.0,
+                    modifiers: vec![],
+                },
+            );
+            assert_eq!(player.attributes["movement_speed"].base, 0.2);
+            tick(&mut player, &InputState::released(), &chunks, 1.0, false);
+            assert!(!player.sprinting);
+            assert_eq!(movement_speed(&player), 0.33);
+            assert_eq!(player.attributes["movement_speed"].modifiers, modifiers);
+        }
+    }
+
+    #[test]
+    fn canonical_aliases_and_sprint_state_do_not_stack_or_discard_other_modifiers() {
+        let mut player = LocalPlayer::new();
+        player.set_attribute_value("minecraft:generic.movement_speed", 0.2);
+        assert_eq!(player.attribute_value("minecraft:movement_speed", 0.0), 0.2);
+        player.set_attribute_value("minecraft:movement_speed", 0.3);
+        assert_eq!(player.attributes.len(), 1);
+        assert_eq!(
+            player.attribute_value("minecraft:generic.movement_speed", 0.0),
+            0.3
+        );
+        assert_eq!(
+            crate::player::canonical_attribute("minecraft:horse.jump_strength"),
+            "jump_strength"
+        );
+        assert_eq!(
+            crate::player::canonical_attribute("custom:generic.movement_speed"),
+            "custom:generic.movement_speed"
+        );
+        player.sprinting = true;
+        assert_eq!(
+            movement_speed(&player),
+            (0.3 * (1.0 + 0.3_f32 as f64)) as f32
+        );
+        player.sprinting = false;
+        assert_eq!(movement_speed(&player), 0.3);
+    }
+
+    #[test]
+    fn tiny_velocity_is_zeroed_before_travel_in_ground_air_water_and_flight() {
+        let floor = flat_floor();
+        let water = flat_floor();
+        water.set_block_state(
+            4,
+            61,
+            4,
+            crate::world::block::find_state("water", &[("level", "0")]),
+        );
+        for (chunks, ground, flying) in [
+            (&floor, true, false),
+            (&floor, false, false),
+            (&water, false, false),
+            (&floor, false, true),
+        ] {
+            for (vx, vz, should_zero) in [
+                (0.002193, 0.0, true),
+                (0.002, 0.002, true),
+                (0.003, 0.0, false),
+                (0.0022, 0.0022, false),
+            ] {
+                let mut player = LocalPlayer::new();
+                player.position = dvec3(4.5, 61.0, 4.5).into();
+                player.on_ground = ground;
+                player.flying = flying;
+                player.velocity = crate::entity::components::Velocity::new(vx, 0.00299, vz);
+                tick(&mut player, &InputState::released(), chunks, 1.0, false);
+                let delta = *player.position - dvec3(4.5, 61.0, 4.5);
+                if should_zero {
+                    assert_eq!((delta.x, delta.z), (0.0, 0.0));
+                } else {
+                    assert!((delta.x - vx).abs() < 1e-14 && (delta.z - vz).abs() < 1e-14);
+                }
+                assert_eq!(player.collision_delta[0].y, 0.0);
+            }
+        }
+        let mut dead = LocalPlayer::new();
+        dead.position = dvec3(4.5, 61.0, 4.5).into();
+        dead.velocity.x = 0.002193;
+        tick_dead(&mut dead, &floor);
+        assert_eq!(dead.position.x, 4.5);
+        for y in [0.003, -0.003] {
+            let mut player = LocalPlayer::new();
+            player.velocity = crate::entity::components::Velocity::new(0.0, y, 0.0);
+            zero_small_velocity(&mut player);
+            assert_eq!(player.velocity.y, y);
+        }
+    }
+
+    #[test]
+    fn default_walk_and_sprint_keep_vanilla_steady_tick_displacement() {
+        let chunks = flat_floor();
+        for (sprint, expected_bps) in [(false, 4.317177), (true, 5.612330)] {
+            let mut player = LocalPlayer::new();
+            player.position = dvec3(4.5, 61.0, 4.5).into();
+            player.on_ground = true;
+            let mut input = InputState::released();
+            input.set_test_key(KeyCode::KeyW, true);
+            input.set_test_key(KeyCode::ControlLeft, sprint);
+            let mut delta = 0.0;
+            for _ in 0..60 {
+                // Stay over the same flat floor without changing momentum.
+                player.position.z = 4.5;
+                tick(&mut player, &input, &chunks, 1.0, false);
+                delta = player.position.z - 4.5;
+            }
+            assert!(
+                (delta * 20.0 - expected_bps).abs() < 1e-5,
+                "{sprint}: {}; grounded={} friction={} vel={:?} pos={:?} speed={}",
+                delta * 20.0,
+                player.on_ground,
+                block_friction(&chunks, player.position),
+                player.velocity,
+                player.position,
+                movement_speed(&player)
+            );
+        }
+    }
 
     #[test]
     fn player_width_stops_at_negative_two_block_face() {
@@ -1423,7 +1734,7 @@ mod tests {
         assert_eq!(effective_gravity(&player), 0.04);
         let (sin, cos) = vanilla_yaw_sin_cos(0.0);
         jump_from_ground(&mut player, sin, cos);
-        assert_eq!(player.velocity.y, 0.6);
+        assert_eq!(player.velocity.y, f64::from(0.6_f32));
     }
 
     #[test]

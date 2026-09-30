@@ -6,6 +6,9 @@ pub mod tab_list;
 
 use std::collections::HashMap;
 
+use azalea_core::attribute_modifier_operation::AttributeModifierOperation as Op;
+use azalea_inventory::components::AttributeModifier;
+use azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot;
 use glam::{dvec2, dvec3};
 use inventory::Inventory;
 
@@ -70,6 +73,78 @@ fn should_swim(
         } else {
             under_water && feet_in_water
         }
+}
+
+/// Normalize pre-1.21.2 names at the attribute boundary, not at physics
+/// callers.
+pub(crate) fn canonical_attribute(id: &str) -> &str {
+    let path = id.strip_prefix("minecraft:").unwrap_or(id);
+    if id.contains(':') && !id.starts_with("minecraft:") {
+        return id;
+    }
+    path.strip_prefix("generic.")
+        .or_else(|| path.strip_prefix("player."))
+        .or_else(|| path.strip_prefix("horse."))
+        .or_else(|| path.strip_prefix("zombie."))
+        .unwrap_or(path)
+}
+
+#[derive(Clone, Debug)]
+pub struct AttributeData {
+    pub base: f64,
+    pub modifiers: Vec<AttributeModifier>,
+}
+
+impl AttributeData {
+    /// LivingEntity.setSprinting replaces ONLY the vanilla sprint identity.
+    /// Keep the received snapshot intact for diagnostics and every other mod.
+    pub fn value(&self, sprinting: Option<bool>) -> f64 {
+        let modifiers = || {
+            self.modifiers
+                .iter()
+                .filter(|m| sprinting.is_none() || !is_sprinting_modifier(&m.id))
+        };
+        let mut base = self.base;
+        for m in modifiers().filter(|m| m.operation == Op::AddValue) {
+            base += m.amount;
+        }
+        let mut value = base;
+        for m in modifiers().filter(|m| m.operation == Op::AddMultipliedBase) {
+            value += base * m.amount;
+        }
+        for m in modifiers().filter(|m| m.operation == Op::AddMultipliedTotal) {
+            value *= 1.0 + m.amount;
+        }
+        if sprinting == Some(true) {
+            value *= 1.0 + 0.3_f32 as f64;
+        }
+        value
+    }
+}
+
+fn is_sprinting_modifier(id: &azalea_registry::identifier::Identifier) -> bool {
+    // Pre-1.21 UUIDs are normalized by translate_modifier_uuid. The old
+    // "Sprinting speed boost" display name was never part of the wire format.
+    id.namespace() == "minecraft"
+        && matches!(id.path(), "sprinting" | "662a6b8dda3e4c1c881396ea6097278d")
+}
+
+pub(crate) fn sanitize_attribute(id: &str, value: f64) -> f64 {
+    let (min, max) = match canonical_attribute(id) {
+        "movement_speed" => (0.0, 1024.0),
+        "jump_strength" => (0.0, 32.0),
+        "step_height" => (0.0, 10.0),
+        "gravity" => (-1.0, 1.0),
+        "sneaking_speed" | "water_movement_efficiency" => (0.0, 1.0),
+        "max_health" => (1.0, 1024.0),
+        "armor" => (0.0, 30.0),
+        _ => return value,
+    };
+    if value.is_nan() {
+        min
+    } else {
+        value.clamp(min, max)
+    }
 }
 
 pub struct LocalPlayer {
@@ -148,9 +223,10 @@ pub struct LocalPlayer {
     pub experience_progress: f32,
     pub total_experience: u32,
     pub effects: crate::mob_effect::ActiveMobEffects,
-    /// Resolved vanilla attribute values keyed by registry id. Movement speed
-    /// excludes the tick-local sprint multiplier.
-    pub attributes: HashMap<String, f64>,
+    /// Authoritative base/modifiers, keyed by canonical vanilla registry path.
+    pub attributes: HashMap<String, AttributeData>,
+    /// Entity.move request/resolution, before travel's end-of-tick drag.
+    pub collision_delta: [glam::DVec3; 2],
 }
 
 impl LocalPlayer {
@@ -220,15 +296,52 @@ impl LocalPlayer {
             total_experience: 0,
             effects: crate::mob_effect::ActiveMobEffects::default(),
             attributes: HashMap::new(),
+            collision_delta: [glam::DVec3::ZERO; 2],
         }
     }
 
     pub fn set_attribute_value(&mut self, id: impl Into<String>, value: f64) {
-        self.attributes.insert(id.into(), value);
+        let id = id.into();
+        self.attributes.insert(
+            canonical_attribute(&id).to_owned(),
+            AttributeData {
+                base: value,
+                modifiers: Vec::new(),
+            },
+        );
+    }
+
+    pub fn apply_attribute(&mut self, snapshot: AttributeSnapshot) {
+        let id = snapshot.attribute.to_string();
+        let id = canonical_attribute(&id);
+        let data = AttributeData {
+            base: snapshot.base,
+            modifiers: snapshot.modifiers,
+        };
+        let value = sanitize_attribute(id, data.value(None));
+        match id {
+            "max_health" => self.max_health = value as f32,
+            "armor" => self.armor = value.round() as u32,
+            _ => {}
+        }
+        self.attributes.insert(id.to_owned(), data);
     }
 
     pub fn attribute_value(&self, id: &str, default: f64) -> f64 {
-        self.attributes.get(id).copied().unwrap_or(default)
+        let id = canonical_attribute(id);
+        sanitize_attribute(
+            id,
+            self.attributes.get(id).map_or_else(
+                || {
+                    if id == "movement_speed" && self.sprinting {
+                        default * (1.0 + 0.3_f32 as f64)
+                    } else {
+                        default
+                    }
+                },
+                |data| data.value((id == "movement_speed").then_some(self.sprinting)),
+            ),
+        )
     }
 
     pub fn reset_death_time(&mut self) {

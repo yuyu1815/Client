@@ -24,6 +24,16 @@ use crate::ui::server_dialog::DialogReference;
 use crate::ui::text::format_text_spans;
 use crate::world::block::model::CardinalLightType;
 
+pub(crate) fn attribute_event(
+    entity_id: i32,
+    snapshot: azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot,
+) -> NetworkEvent {
+    NetworkEvent::EntityAttributeUpdate {
+        entity_id,
+        snapshot,
+    }
+}
+
 fn dialog_holder_reference(
     holder: &azalea_registry::Holder<azalea_registry::data::Dialog, simdnbt::owned::Nbt>,
 ) -> DialogReference {
@@ -522,49 +532,8 @@ pub async fn handle_game_packet(
             });
         }
         ClientboundGamePacket::UpdateAttributes(p) => {
-            use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
-            use azalea_registry::builtin::Attribute;
             for snapshot in &p.values {
-                let base = snapshot.base;
-                let mut add = 0.0f64;
-                let mut mul_base = 0.0f64;
-                let mut mul_total = 1.0f64;
-                for m in &snapshot.modifiers {
-                    match m.operation {
-                        AttributeModifierOperation::AddValue => add += m.amount,
-                        AttributeModifierOperation::AddMultipliedBase => mul_base += m.amount,
-                        AttributeModifierOperation::AddMultipliedTotal => {
-                            mul_total *= 1.0 + m.amount
-                        }
-                    }
-                }
-                let value = (base + add) * (1.0 + mul_base) * mul_total;
-                let event = match snapshot.attribute {
-                    Attribute::Armor => NetworkEvent::EntityArmorUpdate {
-                        entity_id: p.entity_id.0,
-                        armor: value.clamp(0.0, 30.0).round() as u32,
-                    },
-                    // Vanilla RangedAttribute MAX_HEALTH clamps to 1..1024.
-                    Attribute::MaxHealth => NetworkEvent::EntityMaxHealthUpdate {
-                        entity_id: p.entity_id.0,
-                        max_health: value.clamp(1.0, 1024.0) as f32,
-                    },
-                    Attribute::MovementSpeed | Attribute::JumpStrength | Attribute::StepHeight => {
-                        NetworkEvent::EntityAttributeUpdate {
-                            entity_id: p.entity_id.0,
-                            attribute: match snapshot.attribute {
-                                Attribute::MovementSpeed => "minecraft:movement_speed",
-                                Attribute::JumpStrength => "minecraft:jump_strength",
-                                Attribute::StepHeight => "minecraft:step_height",
-                                _ => unreachable!(),
-                            }
-                            .to_owned(),
-                            value,
-                        }
-                    }
-                    _ => continue,
-                };
-                let _ = event_tx.try_send(event);
+                let _ = event_tx.try_send(attribute_event(p.entity_id.0, snapshot.clone()));
             }
         }
         ClientboundGamePacket::PlayerAbilities(p) => {

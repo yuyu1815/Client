@@ -2318,6 +2318,51 @@ fn translate_update_attributes_765() {
     );
 }
 
+#[test]
+fn legacy_movement_attribute_alias_and_sprint_uuid_reach_local_physics() {
+    let mut old = Vec::new();
+    wire::write_varint(
+        &mut old,
+        old_id(765, Direction::Clientbound, "update_attributes"),
+    );
+    wire::write_varint(&mut old, 7);
+    wire::write_varint(&mut old, 1);
+    let key = "minecraft:generic.movement_speed";
+    wire::write_varint(&mut old, key.len() as u32);
+    old.extend_from_slice(key.as_bytes());
+    old.extend_from_slice(&0.2_f64.to_be_bytes());
+    wire::write_varint(&mut old, 1);
+    old.extend_from_slice(
+        uuid::Uuid::parse_str("662a6b8d-da3e-4c1c-8813-96ea6097278d")
+            .unwrap()
+            .as_bytes(),
+    );
+    old.extend_from_slice(&(0.3_f32 as f64).to_be_bytes());
+    old.push(2);
+    let ClientboundGamePacket::UpdateAttributes(p) = translate_and_decode(765, old) else {
+        panic!("packet")
+    };
+    assert_eq!(
+        p.values[0].attribute,
+        azalea_registry::builtin::Attribute::MovementSpeed
+    );
+    let mut player = crate::player::LocalPlayer::new();
+    player.entity_id = 7;
+    let mut entities = crate::entity::EntityStore::new();
+    let crate::net::NetworkEvent::EntityAttributeUpdate {
+        entity_id,
+        snapshot,
+    } = crate::net::handler::attribute_event(p.entity_id.0, p.values[0].clone())
+    else {
+        panic!("event")
+    };
+    crate::app::core::apply_entity_attribute(&mut player, &mut entities, entity_id, snapshot);
+    assert_eq!(crate::physics::movement::movement_speed(&player), 0.2);
+    player.sprinting = true;
+    assert_eq!(crate::physics::movement::movement_speed(&player), 0.26);
+    assert_eq!(player.attributes["movement_speed"].modifiers.len(), 1);
+}
+
 /// 1.20.4 `level_particles` led with the particle type id; it moves to
 /// just before the payload and `alwaysShow` is synthesized.
 #[test]

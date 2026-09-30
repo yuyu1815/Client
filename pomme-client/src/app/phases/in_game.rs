@@ -395,6 +395,7 @@ pub struct GameState {
     /// Last frame's `update_game` CPU phase timings, for the chunk-load
     /// benchmark's worst-frame breakdown.
     pub last_update_phases: crate::benchmark::UpdatePhases,
+    pub movement_frame_id: u64,
     /// Monotonic content generation per column, bumped on every edit (and chunk
     /// load). This is the dirty marker: a column needs (re)meshing whenever its
     /// `content_gen` outruns what was last enqueued, regardless of visibility,
@@ -768,6 +769,7 @@ impl GameState {
             chunk_load_abort: false,
             chunk_load_upload: None,
             last_update_phases: crate::benchmark::UpdatePhases::default(),
+            movement_frame_id: 0,
             content_gen: HashMap::new(),
             next_content_gen: 0,
             meshed: HashMap::new(),
@@ -3015,13 +3017,13 @@ pub fn update_game(
     }
 
     // Menus never pause the simulation; tick_physics substitutes neutral input.
+    game.movement_frame_id = game.movement_frame_id.wrapping_add(1);
+    let accumulator_before = core.tick_accumulator;
     core.tick_accumulator += dt;
     let fixed_tick_start = game.benchmark.is_some().then(std::time::Instant::now);
     let mut fixed_tick_count = 0;
     while core.tick_accumulator >= TICK_RATE {
-        if fixed_tick_start.is_some() {
-            fixed_tick_count += 1;
-        }
+        fixed_tick_count += 1;
         game.tick_count = game.tick_count.wrapping_add(1);
         if game
             .item_activation
@@ -3115,11 +3117,14 @@ pub fn update_game(
             game.xp_display_start_tick = game.tick_count as i64;
         }
         connection.packet_tx.recorder.record("local", "fixed_tick", || {
-            Some(serde_json::json!({"player":crate::movement_record::player(game),"client_loaded":game.client_loaded,"dead":game.dead}))
+            Some(serde_json::json!({"frame_id":game.movement_frame_id,"tick_in_frame":fixed_tick_count,"player":crate::movement_record::player(game),"client_loaded":game.client_loaded,"dead":game.dead}))
         });
         AppCore::send_client_tick_end(connection);
         core.tick_accumulator -= TICK_RATE;
     }
+    connection.packet_tx.recorder.record("local", "movement_frame", || {
+        Some(serde_json::json!({"frame_id":game.movement_frame_id,"raw_dt":raw_dt,"simulation_dt":dt,"accumulator_before":accumulator_before,"accumulator_after":core.tick_accumulator,"ticks":fixed_tick_count}))
+    });
     game.last_update_phases.fixed_tick_count = fixed_tick_count;
     game.last_update_phases.fixed_tick_ms = fixed_tick_start
         .map(|start| start.elapsed().as_secs_f32() * 1000.0)

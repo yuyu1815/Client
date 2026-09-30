@@ -322,9 +322,32 @@ fn inbound(p: &C) -> Option<Value> {
     };
     Some(named(p, fields))
 }
+pub(crate) fn own_attributes(p: &crate::player::LocalPlayer) -> Value {
+    Value::Object(p.attributes.iter().map(|(id, data)| {
+        (id.clone(), json!({"base":data.base,"modifiers":data.modifiers,"effective":p.attribute_value(id, data.base)}))
+    }).collect())
+}
+
 pub fn player(game: &crate::app::phases::in_game::GameState) -> Value {
     let p = &game.player;
-    json!({"tick":game.tick_count,"entity_id":p.entity_id,"position":[p.position.x,p.position.y,p.position.z],"velocity":[p.velocity.x,p.velocity.y,p.velocity.z],"on_ground":p.on_ground,"yaw_pitch":[p.look_dir.y_rot_deg(),p.look_dir.x_rot_deg()],"riding":game.riding_vehicle_id,"vehicle":game.controlled_vehicle_id.and_then(|id| game.entity_store.living.get(&id)).map(|v|json!({"position":[v.position.x,v.position.y,v.position.z],"velocity":[v.velocity.x,v.velocity.y,v.velocity.z]}))})
+    let attributes = own_attributes(p);
+    let floor = game.chunk_store.get_block_state(
+        p.prev_position.x.floor() as i32,
+        (p.prev_position.y - f64::from(0.500_001_f32)).floor() as i32,
+        p.prev_position.z.floor() as i32,
+    );
+    json!({"own_attributes":attributes,
+        "effective_movement_speed_f32":crate::physics::movement::movement_speed(p),
+        "effective_jump_strength_f32":p.attribute_value("minecraft:jump_strength", f64::from(0.42_f32)) as f32,
+        "effective_gravity":crate::physics::movement::effective_gravity(p),
+        "sprinting":p.sprinting,"crouching":p.crouching,"swimming":p.swimming,
+        "in_water":p.in_water,"in_lava":p.in_lava,"fall_flying":p.fall_flying,
+        "effects":p.effects.sorted_desc().iter().map(|e|json!({"id":e.effect_id,"amplifier":e.amplifier,"duration":e.duration})).collect::<Vec<_>>(),
+        "abilities":{"flying":p.flying,"may_fly":p.may_fly,"fly_speed":p.fly_speed,"walk_speed":p.walk_speed,"invulnerable":p.invulnerable,"instabuild":p.instabuild},
+        "floor_state":floor.id(),"block_friction_f32":crate::physics::movement::block_friction(&game.chunk_store,p.prev_position),
+        "pre_collision_delta":game.riding_vehicle_id.is_none().then(||p.collision_delta[0].to_array()),"post_collision_delta":game.riding_vehicle_id.is_none().then(||p.collision_delta[1].to_array()),
+        "tick_position_delta":[p.position.x-p.prev_position.x,p.position.y-p.prev_position.y,p.position.z-p.prev_position.z],
+        "tick":game.tick_count,"entity_id":p.entity_id,"position":[p.position.x,p.position.y,p.position.z],"velocity":[p.velocity.x,p.velocity.y,p.velocity.z],"on_ground":p.on_ground,"yaw_pitch":[p.look_dir.y_rot_deg(),p.look_dir.x_rot_deg()],"riding":game.riding_vehicle_id,"vehicle":game.controlled_vehicle_id.and_then(|id| game.entity_store.living.get(&id)).map(|v|json!({"position":[v.position.x,v.position.y,v.position.z],"velocity":[v.velocity.x,v.velocity.y,v.velocity.z]}))})
 }
 pub fn applied(mut data: Value, game: &crate::app::phases::in_game::GameState) -> Value {
     fn after(data: &mut Value, game: &crate::app::phases::in_game::GameState) {
@@ -368,6 +391,12 @@ pub fn event(
         }
         E::SectionBlocksUpdate { updates } => {
             json!({"event":"section_blocks_update","count":updates.len(),"truncated":updates.len()>4096,"updates":updates.iter().take(4096).map(|(p,s)|json!({"block":block(p),"before_state":game.chunk_store.get_block_state(p.x,p.y,p.z).id(),"server_state":s.id()})).collect::<Vec<_>>()})
+        }
+        E::EntityAttributeUpdate {
+            entity_id,
+            snapshot,
+        } if *entity_id == game.player.entity_id => {
+            json!({"event":"own_attribute","entity_id":entity_id,"attribute":snapshot.attribute.to_string(),"base":snapshot.base,"modifiers":snapshot.modifiers})
         }
         E::BlockChangedAck { seq } => json!({"event":"block_ack","sequence":seq}),
         _ => return None,

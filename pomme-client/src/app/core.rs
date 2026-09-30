@@ -643,6 +643,32 @@ fn send_mounted_movement(
     true
 }
 
+pub(crate) fn apply_entity_attribute(
+    player: &mut LocalPlayer,
+    entities: &mut crate::entity::EntityStore,
+    entity_id: i32,
+    snapshot: azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot,
+) {
+    let key = snapshot.attribute.to_string();
+    let value = crate::player::sanitize_attribute(
+        &key,
+        crate::player::AttributeData {
+            base: snapshot.base,
+            modifiers: snapshot.modifiers.clone(),
+        }
+        .value(None),
+    );
+    entities.set_attribute(entity_id, key, value);
+    if let Some(entity) = entities.living.get_mut(&entity_id)
+        && snapshot.attribute == azalea_registry::builtin::Attribute::MaxHealth
+    {
+        entity.max_health = value as f32;
+    }
+    if entity_id == player.entity_id {
+        player.apply_attribute(snapshot);
+    }
+}
+
 /// Actual horse land/air travel and passenger-follow portion of the fixed game
 /// tick. Returns false for other mounts/on foot; those retain their existing
 /// travel path.
@@ -2236,11 +2262,6 @@ impl AppCore {
                 } => {
                     game.maps.apply(map_id, scale, locked, patch, decorations);
                 }
-                NetworkEvent::EntityArmorUpdate { entity_id, armor } => {
-                    if entity_id == game.player.entity_id {
-                        game.player.armor = armor;
-                    }
-                }
                 NetworkEvent::UpdateMobEffect { entity_id, effect } => {
                     if entity_id == game.player.entity_id {
                         game.player.effects.update(effect);
@@ -2259,21 +2280,14 @@ impl AppCore {
                 }
                 NetworkEvent::EntityAttributeUpdate {
                     entity_id,
-                    attribute,
-                    value,
+                    snapshot,
                 } => {
-                    game.entity_store.set_attribute(entity_id, attribute, value);
-                }
-                NetworkEvent::EntityMaxHealthUpdate {
-                    entity_id,
-                    max_health,
-                } => {
-                    if entity_id == game.player.entity_id {
-                        game.player.max_health = max_health;
-                    }
-                    if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
-                        e.max_health = max_health;
-                    }
+                    apply_entity_attribute(
+                        &mut game.player,
+                        &mut game.entity_store,
+                        entity_id,
+                        snapshot,
+                    );
                 }
                 NetworkEvent::SetPlayerInventory { slot, item } => {
                     if set_player_inventory_slot(&mut game.player.inventory, slot, item) {
@@ -4423,6 +4437,8 @@ impl AppCore {
         let entity_boxes = game
             .entity_store
             .collision_aabbs(game.player.entity_id, &region);
+        let use_speed_multiplier = game.interaction.use_speed_multiplier();
+        let slow_due_to_using_item = game.interaction.slow_due_to_using_item();
         if !tick_ridden_horse(
             &mut game.entity_store,
             &game.chunk_store,
@@ -4437,8 +4453,8 @@ impl AppCore {
                 &game.chunk_store,
                 &entity_boxes,
                 Some(game.world_border.bounds_at(0.0)),
-                game.interaction.use_speed_multiplier(),
-                game.interaction.slow_due_to_using_item(),
+                use_speed_multiplier,
+                slow_due_to_using_item,
             );
         }
         // Mounted movement skips movement::tick_with_context, which normally
@@ -4545,7 +4561,7 @@ impl AppCore {
                 biome_climate: &game.biome_climate,
             },
         );
-        connection.packet_tx.recorder.record("local", "movement_tick", || Some(serde_json::json!({"player":crate::movement_record::player(game),"input":movement_input(input)})));
+        connection.packet_tx.recorder.record("local", "movement_tick", || Some(serde_json::json!({"player":crate::movement_record::player(game),"input":movement_input(input),"item_speed_multiplier":use_speed_multiplier,"slow_due_to_using_item":slow_due_to_using_item})));
         if let Some(hand) = game.interaction.take_writable_book_open() {
             use azalea_inventory::ItemStack;
             use azalea_protocol::packets::game::s_interact::InteractionHand;
