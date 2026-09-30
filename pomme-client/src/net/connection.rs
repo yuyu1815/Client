@@ -41,6 +41,9 @@ pub enum ConnectionError {
     #[error("disconnected by server: {0}")]
     Disconnected(String),
 
+    #[error("server requested transfer")]
+    Transferred,
+
     #[error("encryption failed: {0}")]
     Encryption(String),
 
@@ -76,6 +79,8 @@ pub enum Transport {
 
 pub struct ConnectArgs {
     pub transport: Transport,
+    /// Transfer is explicit even when no cookies were supplied.
+    pub is_transfer: bool,
     pub username: String,
     pub uuid: uuid::Uuid,
     pub access_token: Option<String>,
@@ -92,6 +97,7 @@ pub struct ConnectionHandle {
 
 impl Drop for ConnectionHandle {
     fn drop(&mut self) {
+        self.packet_tx.recorder.stop("disconnect_or_app_exit");
         self.task.abort();
         // The session is over: restore the launched version's wire protocol
         // and block table so nothing stale leaks into the next one.
@@ -104,9 +110,22 @@ pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> Conn
     let (event_tx, event_rx) = crossbeam_channel::bounded(4096);
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<Outbound>();
     let game_packet_tx = packet_tx.clone();
-    let packet_tx = PacketSender::new(packet_tx);
+    let recorder = std::sync::Arc::new(crate::movement_record::Recorder::default());
+    let packet_tx = PacketSender::with_recorder(packet_tx, recorder.clone());
     let task = rt.spawn(async move {
-        if let Err(e) = connect_to_server(args, event_tx.clone(), game_packet_tx, packet_rx).await {
+        let result = connect_recorded(
+            args,
+            event_tx.clone(),
+            game_packet_tx,
+            packet_rx,
+            recorder.clone(),
+        )
+        .await;
+        recorder.stop("disconnect");
+        if let Err(e) = result {
+            if matches!(e, ConnectionError::Transferred) {
+                return;
+            }
             tracing::error!("Network error: {e}");
             let reason = friendly_error_reason(&e);
             send_terminal_event(&event_tx, NetworkEvent::Disconnected { reason }).await;
@@ -123,10 +142,28 @@ pub async fn connect_to_server(
     args: ConnectArgs,
     event_tx: Sender<NetworkEvent>,
     game_packet_tx: mpsc::UnboundedSender<Outbound>,
+    game_packet_rx: mpsc::UnboundedReceiver<Outbound>,
+) -> Result<(), ConnectionError> {
+    connect_recorded(
+        args,
+        event_tx,
+        game_packet_tx,
+        game_packet_rx,
+        Default::default(),
+    )
+    .await
+}
+
+async fn connect_recorded(
+    args: ConnectArgs,
+    event_tx: Sender<NetworkEvent>,
+    game_packet_tx: mpsc::UnboundedSender<Outbound>,
     mut game_packet_rx: mpsc::UnboundedReceiver<Outbound>,
+    recorder: std::sync::Arc<crate::movement_record::Recorder>,
 ) -> Result<(), ConnectionError> {
     let ConnectArgs {
         transport,
+        is_transfer,
         username,
         uuid,
         access_token,
@@ -135,6 +172,11 @@ pub async fn connect_to_server(
         mut server_cookies,
     } = args;
 
+    let intention = if is_transfer {
+        ClientIntention::Transfer
+    } else {
+        ClientIntention::Login
+    };
     let mut conn = match transport {
         Transport::Remote { server, protocol } => {
             let server_addr: ServerAddr = server
@@ -142,7 +184,7 @@ pub async fn connect_to_server(
                 .try_into()
                 .map_err(|_| ConnectionError::InvalidAddress(server.clone()))?;
             negotiate_wire_version(&server_addr, protocol).await?;
-            super::resolve::connect(&server_addr, ClientIntention::Login).await?
+            super::resolve::connect(&server_addr, intention).await?
         }
         Transport::Memory(end) => {
             // The integrated server speaks the native protocol, so there is
@@ -152,8 +194,7 @@ pub async fn connect_to_server(
                 assert!(pomme_singleplayer::PROTOCOL == pomme_protocol::version::NATIVE.protocol);
             adopt_wire_protocol(pomme_protocol::version::NATIVE.protocol);
             let mut conn = Conn::from_memory(end);
-            super::resolve::send_intention(&mut conn, "localhost", 0, ClientIntention::Login)
-                .await?;
+            super::resolve::send_intention(&mut conn, "localhost", 0, intention).await?;
             conn
         }
     };
@@ -226,6 +267,7 @@ pub async fn connect_to_server(
         conn,
         &event_tx,
         GameLoopArgs {
+            recorder,
             outbound_tx: game_packet_tx,
             outbound_rx: game_packet_rx,
             joined,
@@ -786,9 +828,7 @@ async fn config_sequence(
                             "Could not deliver server transfer to app: {e}"
                         ))
                     })?;
-                return Err(ConnectionError::Disconnected(
-                    "Server requested transfer; waiting for application reconnect".into(),
-                ));
+                return Err(ConnectionError::Transferred);
             }
             ClientboundConfigPacket::ResourcePackPush(p) => {
                 tracing::info!(
@@ -1007,6 +1047,7 @@ fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -
 }
 
 struct GameLoopArgs {
+    recorder: std::sync::Arc<crate::movement_record::Recorder>,
     outbound_tx: mpsc::UnboundedSender<Outbound>,
     outbound_rx: mpsc::UnboundedReceiver<Outbound>,
     joined: Joined,
@@ -1023,6 +1064,7 @@ async fn game_loop(
     args: GameLoopArgs,
 ) -> Result<(), ConnectionError> {
     let GameLoopArgs {
+        recorder,
         outbound_tx,
         mut outbound_rx,
         joined,
@@ -1037,7 +1079,7 @@ async fn game_loop(
         mut deferred_login,
     } = joined;
     let mut chat_types = chat_types_from_registry_holder(&configured.registries);
-    let sender = PacketSender::new(outbound_tx);
+    let sender = PacketSender::with_recorder(outbound_tx, recorder.clone());
     let mut batch_size_calculator = super::chunk_batch::ChunkBatchSizeCalculator::default();
     // ChunkStore also starts with overworld defaults before any DimensionInfo.
     let mut current_dimension = (384, -64);
@@ -1061,7 +1103,13 @@ async fn game_loop(
                 client_information: super::client_information(view_distance, chat_options),
             },
         );
-        write_game_frame(&mut conn.writer, translation, serialize_frame(&info)?).await?;
+        write_game_frame(
+            &mut conn.writer,
+            translation,
+            serialize_frame(&info)?,
+            &recorder,
+        )
+        .await?;
 
         let brand = ServerboundGamePacket::CustomPayload(
             azalea_protocol::packets::game::s_custom_payload::ServerboundCustomPayload {
@@ -1069,7 +1117,13 @@ async fn game_loop(
                 data: super::brand_payload().into(),
             },
         );
-        write_game_frame(&mut conn.writer, translation, serialize_frame(&brand)?).await?;
+        write_game_frame(
+            &mut conn.writer,
+            translation,
+            serialize_frame(&brand)?,
+            &recorder,
+        )
+        .await?;
     }
     loop {
         let raw = if let Some(raw) = deferred_login.take() {
@@ -1080,14 +1134,14 @@ async fn game_loop(
             // server on a bounded pipe can deadlock; split the writer out.
             tokio::select! {
                 Some(out) = outbound_rx.recv() => {
-                    if let Some(frame) = outbound_frame(out, translation, &mut chat, &shared_tree)? {
-                        write_game_frame(&mut conn.writer, translation, frame).await?;
+                    if let Some(frame) = recorded_outbound_frame(out, translation, &mut chat, &shared_tree, &recorder)? {
+                        write_game_frame(&mut conn.writer, translation, frame, &recorder).await?;
                     }
                     continue;
                 }
                 Some(key_pair) = key_pair_rx.recv() => {
                     if let Some(frame) = chat.key_pair_ready(key_pair) {
-                        write_game_frame(&mut conn.writer, translation, frame).await?;
+                        write_game_frame(&mut conn.writer, translation, frame, &recorder).await?;
                     }
                     continue;
                 }
@@ -1120,6 +1174,12 @@ async fn game_loop(
                 }
             }
         }
+        let wire_id = if recorder.active() {
+            use azalea_buf::AzBufVar;
+            u32::azalea_read_var(&mut std::io::Cursor::new(raw.as_ref())).ok()
+        } else {
+            None
+        };
         let raw = match translation {
             Some(t) => match t.translate_game_frame(raw) {
                 Some(raw) => raw,
@@ -1157,6 +1217,7 @@ async fn game_loop(
         }
         match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
             Ok(mut packet) => {
+                recorder.inbound(&packet, wire_id);
                 if matches!(packet, ClientboundGamePacket::StartConfiguration(_)) {
                     // Vanilla clears the client level before acknowledging
                     // (ClientPacketListener.handleConfigurationStart); chat
@@ -1166,19 +1227,30 @@ async fn game_loop(
                     // miss this ack; the next login resets the tracker anyway.
                     let _ = event_tx.try_send(NetworkEvent::Reconfiguring);
                     while let Ok(out) = outbound_rx.try_recv() {
-                        if let Some(frame) =
-                            outbound_frame(out, translation, &mut chat, &shared_tree)?
-                        {
-                            write_game_frame(&mut conn.writer, translation, frame).await?;
+                        if let Some(frame) = recorded_outbound_frame(
+                            out,
+                            translation,
+                            &mut chat,
+                            &shared_tree,
+                            &recorder,
+                        )? {
+                            write_game_frame(&mut conn.writer, translation, frame, &recorder)
+                                .await?;
                         }
                     }
                     if let Some(frame) = chat.flush_ack() {
-                        write_game_frame(&mut conn.writer, translation, frame).await?;
+                        write_game_frame(&mut conn.writer, translation, frame, &recorder).await?;
                     }
                     let ack = ServerboundGamePacket::ConfigurationAcknowledged(
                         azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged,
                     );
-                    write_game_frame(&mut conn.writer, translation, serialize_frame(&ack)?).await?;
+                    write_game_frame(
+                        &mut conn.writer,
+                        translation,
+                        serialize_frame(&ack)?,
+                        &recorder,
+                    )
+                    .await?;
                     let next = config_sequence(
                         &mut conn,
                         view_distance,
@@ -1234,9 +1306,7 @@ async fn game_loop(
                                 "Could not deliver server transfer to app: {e}"
                             ))
                         })?;
-                    return Err(ConnectionError::Disconnected(
-                        "Server requested transfer; waiting for application reconnect".into(),
-                    ));
+                    return Err(ConnectionError::Transferred);
                 }
                 let handler = handle_game_packet(
                     &packet,
@@ -1260,13 +1330,13 @@ async fn game_loop(
                             break;
                         }
                         Some(out) = outbound_rx.recv() => {
-                            if let Some(frame) = outbound_frame(out, translation, &mut chat, &shared_tree)? {
-                                write_game_frame(&mut conn.writer, translation, frame).await?;
+                            if let Some(frame) = recorded_outbound_frame(out, translation, &mut chat, &shared_tree, &recorder)? {
+                                write_game_frame(&mut conn.writer, translation, frame, &recorder).await?;
                             }
                         }
                         Some(key_pair) = key_pair_rx.recv() => {
                             if let Some(frame) = chat.key_pair_ready(key_pair) {
-                                write_game_frame(&mut conn.writer, translation, frame).await?;
+                                write_game_frame(&mut conn.writer, translation, frame, &recorder).await?;
                             }
                         }
                         _ = chat_tick.tick() => chat.tick(),
@@ -1276,6 +1346,30 @@ async fn game_loop(
             Err(e) => skip_malformed_packet(e)?,
         }
     }
+}
+
+fn recorded_outbound_frame(
+    out: Outbound,
+    translation: Option<&super::translate::Translation>,
+    chat: &mut ChatSender,
+    tree: &crate::net::commands::SharedCommandTree,
+    recorder: &crate::movement_record::Recorder,
+) -> Result<Option<Vec<u8>>, ConnectionError> {
+    let observation = if recorder.active() {
+        match &out {
+            Outbound::Packet(p) => crate::movement_record::outbound(p),
+            Outbound::Raw(frame) => crate::movement_record::outbound_frame(frame),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    recorder.record("outbound", "dequeued", || observation.clone());
+    let result = outbound_frame(out, translation, chat, tree);
+    if result.is_err() {
+        recorder.record("outbound", "encode_failed", || observation);
+    }
+    result
 }
 
 /// The frame one queued outbound item writes, if any.
@@ -1364,13 +1458,42 @@ async fn write_game_frame(
     writer: &mut RawWriter,
     translation: Option<&super::translate::Translation>,
     frame: Vec<u8>,
+    recorder: &crate::movement_record::Recorder,
 ) -> Result<(), ConnectionError> {
+    let observation = if recorder.active() {
+        crate::movement_record::outbound_frame(&frame)
+    } else {
+        None
+    };
     let frames = match translation {
         Some(t) if t.translates_outbound() => t.translate_outbound_game_frame(frame),
         _ => vec![frame],
     };
+    if frames.is_empty() {
+        recorder.record("outbound", "translation_suppressed", || observation.clone());
+    }
     for frame in frames {
-        writer.write(&frame).await?;
+        let result = writer.write(&frame).await;
+        recorder.record(
+            "outbound",
+            if result.is_ok() {
+                "transport_write_success"
+            } else {
+                "transport_write_failed"
+            },
+            || {
+                observation.clone().map(|mut data| {
+                    use azalea_buf::AzBufVar;
+                    data["wire_id"] = serde_json::json!(
+                        u32::azalea_read_var(&mut std::io::Cursor::new(frame.as_slice())).ok()
+                    );
+                    data["error_kind"] =
+                        serde_json::json!(result.as_ref().err().map(|e| format!("{:?}", e.kind())));
+                    data
+                })
+            },
+        );
+        result?;
     }
     Ok(())
 }
@@ -1435,6 +1558,109 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn movement_capture_uses_real_queue_and_shared_transport_dispatcher() {
+        use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+        use azalea_protocol::packets::game::c_player_position::ClientboundPlayerPosition;
+        use azalea_protocol::packets::game::s_player_input::ServerboundPlayerInput;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = crate::test_util::test_temp_dir("movement-dispatch");
+        std::fs::create_dir_all(&dir).unwrap();
+        let recorder = std::sync::Arc::new(crate::movement_record::Recorder::default());
+        recorder.start(&rt, &dir);
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let sender = PacketSender::with_recorder(tx, recorder.clone());
+            let packet = ServerboundGamePacket::PlayerInput(ServerboundPlayerInput {
+                forward: true,
+                ..Default::default()
+            });
+            sender.send(packet);
+            let (client, peer) = super::super::conn::memory_pipes();
+            let mut conn = Conn::from_memory(client);
+            let mut chat = ChatSender::new(
+                uuid::Uuid::nil(),
+                uuid::Uuid::nil(),
+                None,
+                mpsc::unbounded_channel().0,
+            );
+            let tree = Default::default();
+            let frame = recorded_outbound_frame(
+                rx.recv().await.unwrap(),
+                None,
+                &mut chat,
+                &tree,
+                &recorder,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(crate::movement_record::outbound_frame(&frame).is_some());
+            write_game_frame(&mut conn.writer, None, frame.clone(), &recorder)
+                .await
+                .unwrap();
+            drop(peer);
+            let (mut failed_end, failed_peer) = super::super::conn::memory_pipes();
+            tokio::io::AsyncWriteExt::shutdown(&mut failed_end.tx)
+                .await
+                .unwrap();
+            let mut failed_conn = Conn::from_memory(failed_end);
+            let failed = write_game_frame(&mut failed_conn.writer, None, frame, &recorder).await;
+            drop(failed_peer);
+            if failed.is_ok() {
+                recorder.stop("test_failure");
+            }
+            assert!(failed.is_err());
+            recorder.inbound(
+                &ClientboundGamePacket::PlayerPosition(ClientboundPlayerPosition {
+                    id: 3,
+                    change: PositionMoveRotation {
+                        pos: azalea_core::position::Vec3::new(0.0, 64.0, 0.0),
+                        delta: azalea_core::position::Vec3::ZERO,
+                        look_direction: azalea_entity::LookDirection::default(),
+                    },
+                    relative: RelativeMovements::default(),
+                }),
+                Some(1),
+            );
+            recorder.record("local", "applied", || {
+                Some(serde_json::json!({"teleport_id":3,"before":[1,64,0],"after":[0,64,0]}))
+            });
+            recorder.stop("disconnect");
+        });
+        let start = std::time::Instant::now();
+        while recorder.status().starts_with("Draining") {
+            assert!(start.elapsed().as_secs() < 5);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(recorder.status().starts_with("Ended"));
+        let path = std::fs::read_dir(&dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let text = std::fs::read_to_string(path).unwrap();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        let stages: Vec<_> = rows.iter().filter_map(|v| v["stage"].as_str()).collect();
+        assert_eq!(
+            stages,
+            [
+                "queue_attempt",
+                "queued",
+                "dequeued",
+                "transport_write_success",
+                "transport_write_failed",
+                "received",
+                "applied"
+            ]
+        );
+        assert_eq!(rows.last().unwrap()["reason"], "disconnect");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn full_world_queue_disconnects_game_loop_without_partial_chunk() {
         use std::sync::Arc;
@@ -1486,6 +1712,7 @@ mod tests {
                 Conn::from_memory(client_end),
                 &event_tx,
                 GameLoopArgs {
+                    recorder: Default::default(),
                     outbound_tx,
                     outbound_rx,
                     joined: Joined {
@@ -1695,6 +1922,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_transfer_intention_is_independent_of_cookies() {
+        use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
+
+        use crate::net::conn::memory_pipes;
+
+        for is_transfer in [false, true] {
+            let (client_end, server_end) = memory_pipes();
+            let mut peer = Conn::from_memory(server_end);
+            let (event_tx, _event_rx) = crossbeam_channel::bounded(64);
+            let (packet_tx, packet_rx) = mpsc::unbounded_channel();
+            let cookies = if is_transfer {
+                Default::default()
+            } else {
+                std::collections::HashMap::from([("minecraft:session".into(), vec![1])])
+            };
+            let client = tokio::spawn(connect_to_server(
+                ConnectArgs {
+                    transport: Transport::Memory(client_end),
+                    is_transfer,
+                    username: "Steve".into(),
+                    uuid: uuid::Uuid::nil(),
+                    access_token: None,
+                    view_distance: 8,
+                    chat_options: crate::ui::chat::ChatOptions::default(),
+                    server_cookies: cookies,
+                },
+                event_tx,
+                packet_tx,
+                packet_rx,
+            ));
+            let ServerboundHandshakePacket::Intention(packet) = read_test_packet(&mut peer).await;
+            assert_eq!(packet.intention as i32, if is_transfer { 3 } else { 2 });
+            client.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn login_custom_query_is_answered_with_same_transaction_id_and_no_payload() {
         use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
         use azalea_protocol::packets::login::c_custom_query::ClientboundCustomQuery;
@@ -1710,6 +1974,7 @@ mod tests {
         let client = tokio::spawn(connect_to_server(
             ConnectArgs {
                 transport: Transport::Memory(client_end),
+                is_transfer: false,
                 username: "Steve".into(),
                 uuid: Uuid::nil(),
                 access_token: None,
@@ -1762,6 +2027,7 @@ mod tests {
         let client = tokio::spawn(connect_to_server(
             ConnectArgs {
                 transport: Transport::Memory(client_end),
+                is_transfer: false,
                 username: "Steve".into(),
                 uuid: Uuid::nil(),
                 access_token: None,
@@ -1818,6 +2084,7 @@ mod tests {
         let client = tokio::spawn(connect_to_server(
             ConnectArgs {
                 transport: Transport::Memory(client_end),
+                is_transfer: false,
                 username: "Steve".into(),
                 uuid: Uuid::nil(),
                 access_token: None,
@@ -2116,9 +2383,14 @@ mod tests {
             if transfer.host == "next.example"
                 && transfer.port == 25570
                 && transfer.cookies.get(&key) == Some(&vec![4, 5, 6])));
-        assert!(
-            matches!(tokio::time::timeout(std::time::Duration::from_secs(2), client).await.expect("client timed out").unwrap(), Err(ConnectionError::Disconnected(reason)) if reason.contains("transfer"))
-        );
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), client)
+                .await
+                .expect("client timed out")
+                .unwrap(),
+            Err(ConnectionError::Transferred)
+        ));
+        assert!(event_rx.try_recv().is_err(), "transfer is not a disconnect");
     }
 
     #[tokio::test]
@@ -2158,9 +2430,14 @@ mod tests {
         assert_eq!(transfer.host, "game.example");
         assert_eq!(transfer.port, 25571);
         assert_eq!(transfer.cookies.get(&key), Some(&vec![7, 8, 9]));
-        assert!(
-            matches!(tokio::time::timeout(std::time::Duration::from_secs(2), client).await.expect("client timed out").unwrap(), Err(ConnectionError::Disconnected(reason)) if reason.contains("transfer"))
-        );
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), client)
+                .await
+                .expect("client timed out")
+                .unwrap(),
+            Err(ConnectionError::Transferred)
+        ));
+        assert!(event_rx.try_recv().is_err(), "transfer is not a disconnect");
     }
 
     #[tokio::test]
@@ -2190,6 +2467,7 @@ mod tests {
         let client = tokio::spawn(connect_to_server(
             ConnectArgs {
                 transport: Transport::Memory(client_end),
+                is_transfer: false,
                 username: "ConfiguredName".to_owned(),
                 uuid: Uuid::nil(),
                 access_token: None,

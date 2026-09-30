@@ -272,6 +272,7 @@ impl GuiItemPipeline {
         mesh_key: &str,
         original_name: &str,
         is_block: bool,
+        profile: Option<&crate::world::block_entity::PlayerHeadProfileSource>,
     ) {
         let Some((buffer, vertex_count)) = item_entity.gui_mesh_handle(mesh_key) else {
             return;
@@ -293,7 +294,24 @@ impl GuiItemPipeline {
         } else {
             self.pipeline
         };
+        let texture_set = if original_name == "player_head" {
+            let Some(set) = item_entity.head_texture_set(profile) else {
+                return;
+            };
+            set
+        } else {
+            self.atlas_set
+        };
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, pipeline);
+        // Mesh owner's set=1 is layout-compatible; always restore atlas for
+        // the following non-head bake, including after a profiled head.
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            1,
+            &[texture_set],
+            &[],
+        );
         cmd.bind_vertex_buffers(0, &[buffer], &[0]);
         push_model_light(cmd, self.pipeline_layout, &model, 1.0);
         let unorm_atlas_target = 1.0_f32;

@@ -64,6 +64,7 @@ use crate::renderer::pipelines::item_entity::ItemEntityPipeline;
 use crate::renderer::pipelines::world_border::{WorldBorderPipeline, extract_border};
 use crate::ui::font::FontSources;
 use crate::world::block::registry::BlockRegistry;
+use crate::world::block_entity::PlayerHeadProfileSource;
 use crate::world::border::WorldBorder;
 
 #[derive(Error, Debug)]
@@ -149,7 +150,7 @@ enum RenderMode<'a> {
     World {
         show_hand: bool,
         overlay: Vec<MenuElement>,
-        swing_progress: f32,
+        hand_animation: pipelines::hand::HandAnimation,
         use_anim: Option<pipelines::held_item::UseAnim>,
         held_item: (
             Option<pipelines::held_item::HeldItemInfo>,
@@ -312,9 +313,14 @@ impl Renderer {
             ..
         } = font_sources;
         let size = window.inner_size();
-        let placed_head_skins =
-            placed_head_skin::PlacedHeadSkinCache::load(jar_assets_dir, asset_index)
-                .map_err(RendererError::HeadSkin)?;
+        let activation_pack_dirs: Vec<_> =
+            packs.active_pack_dirs().map(Path::to_path_buf).collect();
+        let placed_head_skins = placed_head_skin::PlacedHeadSkinCache::load(
+            jar_assets_dir,
+            asset_index,
+            &activation_pack_dirs,
+        )
+        .map_err(RendererError::HeadSkin)?;
 
         let registry_handle = {
             let jar_assets_dir = jar_assets_dir.to_path_buf();
@@ -660,7 +666,7 @@ impl Renderer {
             registry,
             jar_assets_dir: jar_assets_dir.to_path_buf(),
             asset_index: asset_index.clone(),
-            activation_pack_dirs: packs.active_pack_dirs().map(Path::to_path_buf).collect(),
+            activation_pack_dirs,
             atlas,
             chunk_pipeline,
             hand_pipeline,
@@ -1462,6 +1468,57 @@ impl Renderer {
         )
     }
 
+    /// Call immediately AFTER the predicted/authoritative ChunkStore write,
+    /// BEFORE enqueueing its priority remesh. `previous` is the pre-write
+    /// state. false means unsupported geometry/cap: keep the normal async
+    /// fallback.
+    pub fn show_block_edit(
+        &mut self,
+        dispatcher: &chunk::mesher::MeshDispatcher,
+        chunks: &crate::world::chunk::ChunkStore,
+        animations: &crate::world::block_entity_anim::BlockEntityAnimStore,
+        pos: azalea_core::position::BlockPos,
+        previous: BlockState,
+    ) -> bool {
+        self.chunk_buffers
+            .edits
+            .admit(dispatcher, chunks, animations, pos, previous)
+            .is_ok()
+    }
+
+    pub(crate) fn set_edit_recorder(
+        &mut self,
+        recorder: &std::sync::Arc<crate::movement_record::Recorder>,
+    ) {
+        self.chunk_buffers.edits.recorder = Some(recorder.clone());
+    }
+
+    pub(crate) fn record_edit_mesh_result(
+        &self,
+        mesh: &ChunkMeshData,
+        stale: bool,
+        current_revision: u64,
+    ) {
+        if let Some(recorder) = &self.chunk_buffers.edits.recorder {
+            recorder.record("local", "visual_edit_mesh_result", || Some(serde_json::json!({
+                "column":[mesh.pos.x,mesh.pos.z],"sections":[mesh.replaced.start,mesh.replaced.end],
+                "generation":mesh.content_gen,"column_revision":mesh.column_revision,
+                "current_column_revision":current_revision,"upload_epoch":mesh.upload_epoch,"stale":stale
+            })));
+        }
+    }
+
+    /// REQUIRED after every priority enqueue, including stale-result retries.
+    /// Exact edit generation, not a network ACK or a bulk column generation.
+    pub fn expect_block_edit_mesh(
+        &mut self,
+        col: ChunkPos,
+        sections: std::ops::Range<i32>,
+        generation: u64,
+    ) {
+        self.chunk_buffers.edits.expect(col, sections, generation);
+    }
+
     /// Pose of a chest whose geometry belongs to an accepted chunk allocation.
     /// This does not account for section fade or visibility culling.
     pub fn resident_chunk_chest_open(&self, pos: &azalea_core::position::BlockPos) -> Option<bool> {
@@ -1539,16 +1596,17 @@ impl Renderer {
 
     /// Prepare CPU full-sheet skins; called before render_world using the app's
     /// existing runtime. This never constructs a GPU texture or descriptor.
-    pub(crate) fn update_placed_head_skins(
+    pub(crate) fn update_head_skins<'a>(
         &mut self,
-        heads: &[BlockEntityRenderInfo],
+        sources: impl Iterator<Item = &'a PlayerHeadProfileSource> + Clone,
         rt: &tokio::runtime::Runtime,
     ) {
         self.placed_head_skins.update(
-            heads
-                .iter()
-                .filter_map(|head| head.player_head_profile_source.as_ref()),
+            sources,
             rt,
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &self.activation_pack_dirs,
         );
     }
 
@@ -1582,11 +1640,21 @@ impl Renderer {
         hide_cursor: bool,
         show_hand: bool,
         overlay: Vec<MenuElement>,
-        swing_progress: f32,
+        hand_animation: pipelines::hand::HandAnimation,
         use_anim: Option<pipelines::held_item::UseAnim>,
         held_item: (
-            Option<(String, f32, Option<[u8; 3]>)>,
-            Option<(String, f32, Option<[u8; 3]>)>,
+            Option<(
+                String,
+                f32,
+                Option<[u8; 3]>,
+                Option<PlayerHeadProfileSource>,
+            )>,
+            Option<(
+                String,
+                f32,
+                Option<[u8; 3]>,
+                Option<PlayerHeadProfileSource>,
+            )>,
         ),
         destroy_info: Option<(BlockPos, u32, BlockState)>,
         show_chunk_borders: bool,
@@ -1613,15 +1681,6 @@ impl Renderer {
         // so timings always belong to this render attempt.
         self.last_timings = RenderTimings::default();
         let prepare_start = benchmark_timing.then(std::time::Instant::now);
-        // CPU completions were drained by update_placed_head_skins before this
-        // call. Upload before recording so newly ready heads switch this frame.
-        self.block_entity_pipeline.update_player_head_textures(
-            &self.ctx.device,
-            self.ctx.graphics_queue,
-            self.ctx.command_pool,
-            &self.ctx.allocator,
-            &self.placed_head_skins,
-        );
         // Refresh the far plane before this frame's view/projection and fog.
         self.held_item_gate_trace = Some(serde_json::json!({
             "showHand": show_hand,
@@ -1665,27 +1724,25 @@ impl Renderer {
             }
         }
 
+        let mut resolve_held = |(name, light, raw_dye_rgb, player_head_profile_source): (
+            String,
+            f32,
+            Option<[u8; 3]>,
+            Option<PlayerHeadProfileSource>,
+        )| {
+            let name = self.resolve_dye_variant_key(&name, raw_dye_rgb);
+            let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
+            pipelines::held_item::HeldItemInfo {
+                name,
+                light,
+                has_3d_model,
+                nether_lighting: dimension == "minecraft:the_nether",
+                player_head_profile_source,
+            }
+        };
         let held_item = (
-            held_item.0.map(|(name, light, raw_dye_rgb)| {
-                let name = self.resolve_dye_variant_key(&name, raw_dye_rgb);
-                let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
-                pipelines::held_item::HeldItemInfo {
-                    name,
-                    light,
-                    has_3d_model,
-                    nether_lighting: dimension == "minecraft:the_nether",
-                }
-            }),
-            held_item.1.map(|(name, light, raw_dye_rgb)| {
-                let name = self.resolve_dye_variant_key(&name, raw_dye_rgb);
-                let has_3d_model = self.ensure_item_mesh(&name).is_block_model;
-                pipelines::held_item::HeldItemInfo {
-                    name,
-                    light,
-                    has_3d_model,
-                    nether_lighting: dimension == "minecraft:the_nether",
-                }
-            }),
+            held_item.0.map(&mut resolve_held),
+            held_item.1.map(resolve_held),
         );
         // Clear to the sky color: the strip between the sky disc's edge and the
         // terrain shows the clear color, so it must match the sky/terrain or it
@@ -1714,7 +1771,7 @@ impl Renderer {
             RenderMode::World {
                 show_hand,
                 overlay,
-                swing_progress,
+                hand_animation,
                 use_anim,
                 held_item,
                 destroy_info,
@@ -1780,7 +1837,16 @@ impl Renderer {
         self.ctx.device.wait_idle().unwrap();
         self.block_entity_pipeline
             .invalidate_player_head_textures(&self.ctx.device, &self.ctx.allocator);
+        self.item_entity_pipeline
+            .clear_head_textures(&self.ctx.device, &self.ctx.allocator);
         self.activation_pack_dirs = packs.active_pack_dirs().map(Path::to_path_buf).collect();
+        if let Err(error) = self.placed_head_skins.reload(
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &self.activation_pack_dirs,
+        ) {
+            tracing::warn!("Keeping previous head fallback after reload failure: {error}");
+        }
         if let Some(pipeline) = self.activation_pipeline.as_mut() {
             pipeline.update_display_resources(
                 &self.jar_assets_dir,
@@ -1903,31 +1969,35 @@ impl Renderer {
         let uuid_str = uuid.to_string().replace('-', "");
         let skin = rt.block_on(async { fetch_skin_texture(&uuid_str).await });
         match skin {
-            Ok(skin) => {
-                // In-flight frames may still reference the old skin texture,
-                // hand mesh, and preview pipeline about to be destroyed.
-                let _ = self.ctx.device.wait_idle();
-                self.hand_pipeline.reload_skin(
-                    &self.ctx.device,
-                    self.ctx.graphics_queue,
-                    self.ctx.command_pool,
-                    &self.ctx.allocator,
-                    &skin,
-                );
-                self.skin_preview
-                    .destroy(&self.ctx.device, &self.ctx.allocator);
-                self.skin_preview = SkinPreviewPipeline::new(
-                    &self.ctx.device,
-                    self.swapchain.render_pass,
-                    &self.ctx.allocator,
-                    self.hand_pipeline.skin_view(),
-                    self.hand_pipeline.skin_sampler(),
-                    skin.slim,
-                );
-                self.update_player_entity_skin(uuid, &skin);
-            }
+            Ok(skin) => self.update_local_player_skin(uuid, &skin),
             Err(e) => tracing::warn!("Failed to load player skin: {e}"),
         }
+    }
+
+    pub(crate) fn update_local_player_skin(&mut self, uuid: &uuid::Uuid, skin: &SkinData) {
+        // In-flight frames can still reference the old hand/preview sheet.
+        self.ctx
+            .device
+            .wait_idle()
+            .expect("wait before replacing local skin");
+        self.hand_pipeline.reload_skin(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            skin,
+        );
+        self.skin_preview
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.skin_preview = SkinPreviewPipeline::new(
+            &self.ctx.device,
+            self.swapchain.render_pass,
+            &self.ctx.allocator,
+            self.hand_pipeline.skin_view(),
+            self.hand_pipeline.skin_sampler(),
+            skin.slim,
+        );
+        self.update_player_entity_skin(uuid, skin);
     }
 
     pub fn update_player_entity_skin(&mut self, uuid: &uuid::Uuid, skin: &SkinData) {
@@ -2092,6 +2162,23 @@ impl Renderer {
             self.recreate_swapchain()?;
         }
 
+        // CPU admission/drain precedes this frame. Publish before recording any
+        // GUI/held/world commands, so pending heads switch on the same frame.
+        self.item_entity_pipeline.sync_head_textures(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            &self.placed_head_skins,
+        );
+        self.block_entity_pipeline.update_player_head_textures(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            &self.placed_head_skins,
+        );
+
         let frame = self.ctx.frame_index;
         let fence = self.ctx.in_flight_fences[frame];
         let image_available = self.ctx.image_available_semaphores[frame];
@@ -2107,6 +2194,8 @@ impl Renderer {
         self.block_entity_pipeline
             .begin_frame(frame, &self.ctx.device, &self.ctx.allocator);
         self.chunk_buffers.begin_frame();
+        let edit_mask = self.chunk_buffers.prepare_edits(frame);
+        self.chunk_pipeline.update_edit_mask(frame, &edit_mask);
         self.map_quad_pipeline.begin_frame(&self.ctx.device, frame);
         self.screenshot
             .collect_ready(frame, &self.ctx.device, &self.ctx.allocator);
@@ -2214,6 +2303,7 @@ impl Renderer {
         ];
 
         let mut original_names: HashMap<String, String> = HashMap::new();
+        let mut head_profiles = HashMap::new();
         let menu_elements: &mut Vec<MenuElement> = match &mut mode {
             RenderMode::World { overlay, .. } => overlay,
             RenderMode::MainMenu { elements, .. } => elements,
@@ -2222,11 +2312,22 @@ impl Renderer {
             if let MenuElement::ItemIcon {
                 item_name,
                 stack_dye_rgb,
+                player_head_profile_source,
                 ..
             } = elem
             {
                 let original = item_name.clone();
-                if matches!(original.as_str(), "player_head" | "conduit") {
+                if original == "player_head" {
+                    let key = pipelines::gui_item_atlas::player_head_slot_key(
+                        player_head_profile_source.as_ref(),
+                        self.placed_head_skins.revision(),
+                    );
+                    original_names.insert(key.clone(), original);
+                    head_profiles.insert(key.clone(), player_head_profile_source.clone());
+                    *item_name = key;
+                    continue;
+                }
+                if original == "conduit" {
                     continue;
                 }
                 let variant = self.resolve_dye_variant_key(&original, *stack_dye_rgb);
@@ -2311,6 +2412,14 @@ impl Renderer {
             self.gui_item_atlas.begin_bake_pass(cmd);
             self.gui_item_pipeline.bind_for_bake_pass(cmd);
             for job in &bake_list {
+                let original = original_names
+                    .get(&job.name)
+                    .map_or(job.name.as_str(), String::as_str);
+                let mesh_key = if original == "player_head" {
+                    original
+                } else {
+                    &job.name
+                };
                 if job.needs_clear {
                     self.gui_item_atlas.clear_slot_color(cmd, &job.slot);
                 }
@@ -2322,11 +2431,10 @@ impl Renderer {
                     sx,
                     sy,
                     self.gui_item_atlas.slot_px(),
-                    &job.name,
-                    original_names
-                        .get(&job.name)
-                        .map_or(job.name.as_str(), String::as_str),
+                    mesh_key,
+                    original,
                     job.is_block,
+                    head_profiles.get(&job.name).and_then(Option::as_ref),
                 );
             }
             self.gui_item_atlas.end_bake_pass(cmd);
@@ -2375,7 +2483,7 @@ impl Renderer {
             RenderMode::World {
                 show_hand,
                 overlay,
-                swing_progress,
+                hand_animation,
                 use_anim,
                 held_item,
                 destroy_info,
@@ -2417,8 +2525,10 @@ impl Renderer {
                 let pass_start = benchmark_timing.then(std::time::Instant::now);
                 self.chunk_pipeline.bind(cmd, frame, false);
                 self.chunk_buffers.draw_indirect(cmd, frame, false);
+                self.chunk_buffers.draw_edits(cmd, frame, false);
                 self.chunk_pipeline.bind(cmd, frame, true);
                 self.chunk_buffers.draw_indirect(cmd, frame, true);
+                self.chunk_buffers.draw_edits(cmd, frame, true);
                 if let Some(start) = pass_start {
                     self.last_timings.chunk_draw_ms = start.elapsed().as_secs_f32() * 1000.0;
                 }
@@ -2642,14 +2752,15 @@ impl Renderer {
                     let hud_fov = self.camera.hud_fov_radians();
                     // Vanilla applies bobHurt (death + hurt) and bobView to the
                     // first-person arm/item pose stack as well as the world.
-                    let view_effect = self.camera.view_effect_matrix();
+                    let view_effect = self.camera.view_effect_matrix() * hand_animation.view_follow;
                     if let Some(item) = &held_item.0 {
                         self.held_item_pipeline.update_and_draw(
                             cmd,
                             frame,
                             aspect,
                             hud_fov,
-                            *swing_progress,
+                            hand_animation.swing_progress[0],
+                            hand_animation.inverse_height[0],
                             *use_anim,
                             false,
                             item,
@@ -2663,7 +2774,8 @@ impl Renderer {
                             frame,
                             aspect,
                             hud_fov,
-                            *swing_progress,
+                            hand_animation.swing_progress[1],
+                            hand_animation.inverse_height[1],
                             *use_anim,
                             true,
                             item,
@@ -2677,7 +2789,8 @@ impl Renderer {
                             frame,
                             aspect,
                             hud_fov,
-                            *swing_progress,
+                            hand_animation.swing_progress[0],
+                            hand_animation.inverse_height[0],
                             view_effect,
                         );
                     }
@@ -2834,6 +2947,10 @@ impl Renderer {
                             // handle.
                             has_3d_model,
                             nether_lighting: false,
+                            player_head_profile_source:
+                                crate::world::block_entity::player_head_profile_source_from_item(
+                                    draw.stack,
+                                ),
                         };
                         pipeline.update_activation_and_draw(
                             cmd,

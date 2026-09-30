@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use azalea_block::BlockState;
 use serde::{Deserialize, Serialize};
@@ -84,9 +85,6 @@ pub struct BlockRegistry {
     flat_item_tints: HashMap<String, model::ItemTint>,
     item_ground_transforms: HashMap<String, glam::Mat4>,
     item_fixed_transforms: HashMap<String, glam::Mat4>,
-    /// Block name -> its single `BlockState`, for one-state blocks (see
-    /// `placeable_block_for_item`).
-    placeable_blocks: HashMap<&'static str, BlockState>,
 }
 
 fn baked_choices_satisfy(
@@ -110,7 +108,6 @@ impl BlockRegistry {
             flat_item_tints: HashMap::new(),
             item_ground_transforms: HashMap::new(),
             item_fixed_transforms: HashMap::new(),
-            placeable_blocks: HashMap::new(),
         }
     }
 
@@ -172,15 +169,12 @@ impl BlockRegistry {
             flat_item_tints,
             item_ground_transforms,
             item_fixed_transforms,
-            placeable_blocks: build_placeable_blocks(),
         }
     }
 
-    /// Resolves a held item's registry name (unprefixed, e.g. `"stone"`) to the
-    /// `BlockState` to predict on placement, or `None` if the item is not a
-    /// single-state block. Item and block share a registry name for this set.
+    /// All mapped BlockItems start from the active protocol's vanilla default.
     pub fn placeable_block_for_item(&self, item_name: &str) -> Option<BlockState> {
-        self.placeable_blocks.get(item_name).copied()
+        super::default_state_of(block_for_item(item_name)?)
     }
 
     pub fn get_item_model(&self, name: &str) -> Option<&BakedModel> {
@@ -456,18 +450,37 @@ impl BlockRegistry {
     }
 }
 
-/// Builds the block-name -> single-`BlockState` map from the block table,
-/// keeping only names that map to exactly one state.
-fn build_placeable_blocks() -> HashMap<&'static str, BlockState> {
-    let mut seen: HashMap<&'static str, Option<BlockState>> = HashMap::new();
-    for (state, data) in super::all_states() {
-        seen.entry(data.id)
-            .and_modify(|v| *v = None)
-            .or_insert(Some(state));
-    }
-    seen.into_iter()
-        .filter_map(|(name, state)| state.map(|s| (name, s)))
-        .collect()
+#[derive(Deserialize)]
+struct BlockItemDefinition {
+    block: String,
+}
+
+#[derive(Deserialize)]
+struct PlacementData {
+    block_items: HashMap<String, BlockItemDefinition>,
+    replaceable: HashSet<String>,
+}
+
+fn placement_data() -> &'static PlacementData {
+    static DATA: OnceLock<PlacementData> = OnceLock::new();
+    DATA.get_or_init(|| {
+        // Extracted from the existing Steel vanilla data by tools/placement-data.mjs.
+        serde_json::from_str(include_str!("data/placement-26.2.json"))
+            .expect("invalid placement data")
+    })
+}
+
+/// BlockItem capability is independent of whether we can predict its state.
+/// The extracted association also covers aliases such as redstone and string.
+pub fn block_for_item(item_name: &str) -> Option<&'static str> {
+    placement_data()
+        .block_items
+        .get(item_name)
+        .map(|item| item.block.as_str())
+}
+
+pub(super) fn block_is_replaceable(block_name: &str) -> bool {
+    placement_data().replaceable.contains(block_name)
 }
 
 /// Whether every `key=value` constraint holds for `props`. A value may list
@@ -543,6 +556,22 @@ mod item_particle_tests {
     use super::*;
 
     #[test]
+    fn every_mapped_block_item_predicts_its_active_default_state() {
+        super::super::init("26.2");
+        let registry = BlockRegistry::test_empty();
+        for (item, definition) in &placement_data().block_items {
+            let expected = super::super::default_state_of(&definition.block)
+                .unwrap_or_else(|| panic!("missing block {} for {item}", definition.block));
+            assert_eq!(
+                registry.placeable_block_for_item(item),
+                Some(expected),
+                "{item}"
+            );
+        }
+        assert_eq!(registry.placeable_block_for_item("stick"), None);
+    }
+
+    #[test]
     fn item_model_component_selects_mapped_icon_without_guessing_missing_overrides() {
         let registry = BlockRegistry {
             textures: HashMap::new(),
@@ -554,7 +583,6 @@ mod item_particle_tests {
             flat_item_tints: HashMap::new(),
             item_ground_transforms: HashMap::new(),
             item_fixed_transforms: HashMap::new(),
-            placeable_blocks: HashMap::new(),
             item_particle_icons: HashMap::from([
                 ("stone".into(), "base_particle".into()),
                 ("alternate".into(), "override_particle".into()),

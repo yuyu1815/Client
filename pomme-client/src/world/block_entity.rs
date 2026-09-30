@@ -5,6 +5,32 @@ use azalea_core::position::BlockPos;
 use azalea_registry::builtin::BlockEntityKind;
 use simdnbt::owned::NbtCompound;
 
+pub fn is_sign_kind(kind: BlockEntityKind) -> bool {
+    matches!(kind, BlockEntityKind::Sign | BlockEntityKind::HangingSign)
+}
+
+/// Official SignBlockEntity / HangingSignBlockEntity font-pixel limits.
+pub fn sign_text_size(hanging: bool) -> (f32, f32) {
+    if hanging { (60.0, 9.0) } else { (90.0, 10.0) }
+}
+
+pub fn sign_text_colors(dye: [f32; 3], glowing: bool, light: f32) -> ([f32; 3], [f32; 3]) {
+    let black = dye == [29.0 / 255.0, 29.0 / 255.0, 33.0 / 255.0];
+    let dark = if black && glowing {
+        [0.941, 0.922, 0.922]
+    } else {
+        dye.map(|c| c * 0.4)
+    };
+    (
+        if glowing {
+            dye
+        } else {
+            dark.map(|c| c * light)
+        },
+        dark,
+    )
+}
+
 #[derive(Clone)]
 pub struct StoredBlockEntity {
     #[allow(dead_code)]
@@ -18,7 +44,7 @@ pub struct StoredBlockEntity {
 
 impl StoredBlockEntity {
     pub fn new(kind: BlockEntityKind, nbt: NbtCompound) -> Self {
-        let is_sign = kind == BlockEntityKind::Sign;
+        let is_sign = is_sign_kind(kind);
         Self {
             kind,
             sign_front: is_sign.then(|| sign_lines(&nbt, true)),
@@ -30,125 +56,263 @@ impl StoredBlockEntity {
     }
 
     pub fn update_nbt(&mut self, nbt: NbtCompound) {
-        self.sign_front = (self.kind == BlockEntityKind::Sign).then(|| sign_lines(&nbt, true));
-        self.sign_back = (self.kind == BlockEntityKind::Sign).then(|| sign_lines(&nbt, false));
+        self.sign_front = is_sign_kind(self.kind).then(|| sign_lines(&nbt, true));
+        self.sign_back = is_sign_kind(self.kind).then(|| sign_lines(&nbt, false));
         self.player_head_profile_source =
             (self.kind == BlockEntityKind::Skull).then(|| player_head_profile_source(&nbt));
         self.nbt = nbt;
     }
 }
 
-/// Stable, non-URL identity for a player-head texture source.
+/// Complete cache identity: static profiles must never become online lookups.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PlayerHeadProfileSource {
-    ResourceTexture(String),
-    EmbeddedTexturesProperty(String),
-    Profile(String),
+    Static {
+        name: Option<String>,
+        id: Option<uuid::Uuid>,
+        properties: Vec<PlayerHeadProfileProperty>,
+        patch: PlayerHeadSkinPatch,
+    },
+    DynamicName {
+        name: String,
+        patch: PlayerHeadSkinPatch,
+    },
+    DynamicId {
+        id: uuid::Uuid,
+        patch: PlayerHeadSkinPatch,
+    },
     Default,
 }
 
-/// Parse only the 26.2 `profile` field; never interpret NBT as a URL or path.
-pub fn player_head_profile_source(nbt: &NbtCompound) -> PlayerHeadProfileSource {
-    use simdnbt::owned::{NbtList, NbtTag};
-    let Some(profile) = nbt.get("profile") else {
-        return PlayerHeadProfileSource::Default;
-    };
-    if let NbtTag::String(name) = profile {
-        let name = name.to_str();
-        return if name.is_empty() {
-            PlayerHeadProfileSource::Default
-        } else {
-            PlayerHeadProfileSource::Profile(name.into_owned())
-        };
-    }
-    let Some(profile) = profile.compound() else {
-        return PlayerHeadProfileSource::Default;
-    };
-    if let Some(NbtTag::String(texture)) = profile.get("texture") {
-        let texture = texture.to_str();
-        if valid_player_head_resource_texture(&texture) {
-            return PlayerHeadProfileSource::ResourceTexture(texture.into_owned());
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PlayerHeadProfileProperty {
+    pub name: String,
+    pub value: String,
+    pub signature: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PlayerHeadSkinPatch {
+    pub texture: Option<String>,
+    pub cape: Option<String>,
+    pub elytra: Option<String>,
+    pub model: Option<String>,
+}
+
+impl PlayerHeadProfileSource {
+    pub fn patch(&self) -> Option<&PlayerHeadSkinPatch> {
+        match self {
+            Self::Static { patch, .. }
+            | Self::DynamicName { patch, .. }
+            | Self::DynamicId { patch, .. } => Some(patch),
+            Self::Default => None,
         }
     }
-    let property = profile
-        .get("properties")
-        .and_then(|tag| tag.compound())
-        .and_then(|props| props.get("textures"))
-        .and_then(|tag| match tag {
-            NbtTag::List(NbtList::Compound(values)) => values.iter().find_map(|value| {
-                if value.get("name")?.string()?.to_str() == "textures" {
-                    Some(value.get("value")?.string()?.to_str().into_owned())
-                } else {
-                    None
-                }
-            }),
-            NbtTag::Compound(props) => props.get("textures").and_then(|tag| match tag {
-                NbtTag::List(NbtList::String(values)) => {
-                    values.first().map(|v| v.to_str().into_owned())
-                }
-                _ => None,
-            }),
-            _ => None,
-        });
-    if let Some(value) = property {
-        return PlayerHeadProfileSource::EmbeddedTexturesProperty(value);
+}
+
+fn profile_source(
+    name: Option<String>,
+    id: Option<uuid::Uuid>,
+    mut properties: Vec<PlayerHeadProfileProperty>,
+    mut patch: PlayerHeadSkinPatch,
+    full: bool,
+) -> PlayerHeadProfileSource {
+    for value in [&mut patch.texture, &mut patch.cape, &mut patch.elytra]
+        .into_iter()
+        .flatten()
+    {
+        let id = crate::assets::AssetId::parse(value);
+        *value = format!("{}:{}", id.namespace, id.path);
     }
-    let id = profile
-        .get("id")
-        .and_then(|tag| tag.int_array())
-        .and_then(|v| {
-            (v.len() == 4).then(|| {
-                v.iter()
-                    .flat_map(|n| n.to_be_bytes())
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-            })
+    // Authlib map key order is irrelevant; order within each key is retained.
+    properties.sort_by(|a, b| a.name.cmp(&b.name));
+    if !full && properties.is_empty() {
+        match (&name, id) {
+            (Some(name), None) => {
+                return PlayerHeadProfileSource::DynamicName {
+                    name: name.clone(),
+                    patch,
+                };
+            }
+            (None, Some(id)) => return PlayerHeadProfileSource::DynamicId { id, patch },
+            _ => {}
+        }
+    }
+    PlayerHeadProfileSource::Static {
+        name,
+        id,
+        properties,
+        patch,
+    }
+}
+
+/// Shared item/placed-head contract, extracted directly from Azalea components.
+pub fn player_head_profile_source_from_item(
+    stack: &azalea_inventory::ItemStack,
+) -> Option<PlayerHeadProfileSource> {
+    use azalea_inventory::components::{PartialOrFullProfile, PlayerModelType, Profile};
+    let profile = stack.get_component::<Profile>()?;
+    let (name, id, properties, full) = match profile.unpack.as_ref() {
+        PartialOrFullProfile::Partial(p) => (p.name.clone(), p.id, &p.properties, false),
+        PartialOrFullProfile::Full(p) => (
+            Some(p.name.clone()),
+            Some(p.uuid),
+            p.properties.as_ref(),
+            true,
+        ),
+    };
+    let properties = properties
+        .map
+        .iter()
+        .map(|(name, p)| PlayerHeadProfileProperty {
+            name: name.clone(),
+            value: p.value.clone(),
+            signature: p.signature.clone(),
         })
-        .filter(|id| valid_profile_id(id));
-    let name = profile
-        .get("name")
-        .and_then(|tag| tag.string())
-        .map(|v| v.to_str().into_owned())
-        .filter(|name| valid_profile_name(name));
-    id.or(name).map_or(
-        PlayerHeadProfileSource::Default,
-        PlayerHeadProfileSource::Profile,
-    )
+        .collect();
+    let patch = &profile.skin_patch;
+    let resource = |v: &Option<azalea_inventory::components::ResourceTexture>| {
+        v.as_ref().map(|v| v.id.to_string())
+    };
+    Some(profile_source(
+        name,
+        id,
+        properties,
+        PlayerHeadSkinPatch {
+            texture: resource(&patch.body),
+            cape: resource(&patch.cape),
+            elytra: resource(&patch.elytra),
+            model: patch.model.map(|model| {
+                match model {
+                    PlayerModelType::Slim => "slim",
+                    PlayerModelType::Wide => "wide",
+                }
+                .to_owned()
+            }),
+        },
+        full,
+    ))
+}
+
+/// Decode the official list-of-properties and legacy map-of-string-lists
+/// codecs. Invalid fields fail closed; no NBT value is interpreted as a URL or
+/// disk path.
+pub fn player_head_profile_source(nbt: &NbtCompound) -> PlayerHeadProfileSource {
+    fn parse(tag: &simdnbt::owned::NbtTag) -> Option<PlayerHeadProfileSource> {
+        use simdnbt::owned::NbtList;
+        if let Some(name) = tag.string() {
+            let name = name.to_str().into_owned();
+            return valid_profile_name(&name).then(|| PlayerHeadProfileSource::DynamicName {
+                name,
+                patch: PlayerHeadSkinPatch::default(),
+            });
+        }
+        let compound = tag.compound()?;
+        let string = |key| -> Option<Option<String>> {
+            match compound.get(key) {
+                None => Some(None),
+                Some(v) => Some(Some(v.string()?.to_str().into_owned())),
+            }
+        };
+        let name = string("name")?;
+        if name.as_ref().is_some_and(|name| !valid_profile_name(name)) {
+            return None;
+        }
+        let id = match compound.get("id") {
+            None => None,
+            Some(tag) => {
+                let ints = tag.int_array()?;
+                if ints.len() != 4 {
+                    return None;
+                }
+                let mut bytes = [0; 16];
+                for (chunk, n) in bytes.chunks_exact_mut(4).zip(ints) {
+                    chunk.copy_from_slice(&n.to_be_bytes());
+                }
+                Some(uuid::Uuid::from_bytes(bytes))
+            }
+        };
+        let mut properties = Vec::new();
+        match compound.get("properties") {
+            None | Some(simdnbt::owned::NbtTag::List(NbtList::Empty)) => {}
+            Some(simdnbt::owned::NbtTag::List(NbtList::Compound(list))) if list.len() <= 16 => {
+                for p in list {
+                    properties.push(PlayerHeadProfileProperty {
+                        name: p.get("name")?.string()?.to_str().into_owned(),
+                        value: p.get("value")?.string()?.to_str().into_owned(),
+                        signature: match p.get("signature") {
+                            None => None,
+                            Some(v) => Some(v.string()?.to_str().into_owned()),
+                        },
+                    });
+                }
+            }
+            Some(tag) => {
+                let map = tag.compound()?;
+                if map.len() > 16 {
+                    return None;
+                }
+                for (name, values) in map.iter() {
+                    match values.list()? {
+                        NbtList::Empty => {}
+                        NbtList::String(values) if properties.len() + values.len() <= 16 => {
+                            for value in values {
+                                properties.push(PlayerHeadProfileProperty {
+                                    name: name.to_str().into_owned(),
+                                    value: value.to_str().into_owned(),
+                                    signature: None,
+                                });
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+        }
+        let bounded = |v: &str, max| v.len() <= max * 3 && v.encode_utf16().count() <= max;
+        if properties.iter().any(|p| {
+            !bounded(&p.name, 64)
+                || !bounded(&p.value, 32767)
+                || p.signature.as_ref().is_some_and(|v| !bounded(v, 1024))
+        }) {
+            return None;
+        }
+        let patch = PlayerHeadSkinPatch {
+            texture: string("texture")?,
+            cape: string("cape")?,
+            elytra: string("elytra")?,
+            model: string("model")?,
+        };
+        if [&patch.texture, &patch.cape, &patch.elytra]
+            .iter()
+            .any(|v| {
+                v.as_ref()
+                    .is_some_and(|v| !valid_player_head_resource_texture(v))
+            })
+            || patch
+                .model
+                .as_ref()
+                .is_some_and(|v| !matches!(v.as_str(), "slim" | "wide"))
+        {
+            return None;
+        }
+        Some(profile_source(name, id, properties, patch, false))
+    }
+    nbt.get("profile")
+        .and_then(parse)
+        .unwrap_or(PlayerHeadProfileSource::Default)
 }
 
 pub fn valid_player_head_resource_texture(value: &str) -> bool {
-    let Some((namespace, path)) = value.split_once(':') else {
+    if value.len() > 32767 {
         return false;
-    };
-    fn component(s: &str) -> bool {
-        !s.is_empty()
-            && s.bytes().all(|b| {
-                b.is_ascii_lowercase()
-                    || b.is_ascii_digit()
-                    || matches!(b, b'_' | b'-' | b'.' | b'/')
-            })
-            && !s.starts_with('/')
-            && !s
-                .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
     }
-    component(namespace) && !namespace.contains('/') && component(path) && !path.contains('%')
-}
-
-fn valid_profile_id(id: &str) -> bool {
-    (id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
-        || (id.len() == 36
-            && id.bytes().enumerate().all(|(i, b)| {
-                if [8, 13, 18, 23].contains(&i) {
-                    b == b'-'
-                } else {
-                    b.is_ascii_hexdigit()
-                }
-            }))
+    let id = crate::assets::AssetId::parse(value);
+    crate::assets::valid_asset_key(&id.asset_key("textures", ".png"))
 }
 
 fn valid_profile_name(name: &str) -> bool {
-    (1..=16).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    crate::player::valid_player_name(name)
 }
 
 /// Extract the four vanilla-rendered text lines for one sign face. The NBT
@@ -201,9 +365,8 @@ fn component_plain_text(value: &serde_json::Value) -> String {
     }
 }
 
-// TODO: Sign world text is still not rendered. `sign_lines` currently flattens
-// component JSON to plain text, so correct vanilla styling, wrapping, dye/glow
-// colors, and fullbright glow require the world-text renderer path.
+// Sign components are flattened to plain text; rich component styling is not
+// preserved.
 /// Blocks the block-entity pipeline draws in place of chunk geometry. The
 /// chunk mesher skips these (their block models are particle-texture-only,
 /// which would otherwise fall back to a full cube of that texture); other
@@ -220,11 +383,9 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
         "player_head" | "player_wall_head" => Some(BlockEntityKind::Skull),
         s if s.ends_with("copper_golem_statue") => Some(BlockEntityKind::CopperGolemStatue),
         s if s == "shulker_box" || s.ends_with("_shulker_box") => Some(BlockEntityKind::ShulkerBox),
-        s if (s.ends_with("_sign") || s.ends_with("_wall_sign"))
-            && !s.ends_with("_hanging_sign") =>
-        {
-            Some(BlockEntityKind::Sign)
-        }
+        // Hanging boards must stay in the chunk-model path (the mesher treats
+        // non-Sign rendered kinds as BE-only geometry).
+        s if s.ends_with("_sign") && !s.ends_with("_hanging_sign") => Some(BlockEntityKind::Sign),
         _ => None,
     }
 }
@@ -262,6 +423,7 @@ fn is_rendered(kind: BlockEntityKind) -> bool {
             | BlockEntityKind::EnderChest
             | BlockEntityKind::ShulkerBox
             | BlockEntityKind::Sign
+            | BlockEntityKind::HangingSign
             | BlockEntityKind::CopperGolemStatue
             | BlockEntityKind::Conduit
             | BlockEntityKind::Skull
@@ -279,7 +441,12 @@ pub fn sync_block_entity(
     state: BlockState,
 ) {
     let id = crate::world::block::block_id(state);
-    if let Some(kind) = rendered_kind(id) {
+    let kind = if id.ends_with("_hanging_sign") {
+        Some(BlockEntityKind::HangingSign)
+    } else {
+        rendered_kind(id)
+    };
+    if let Some(kind) = kind {
         if map.get(&pos).is_none_or(|e| e.kind != kind) {
             map.insert(pos, StoredBlockEntity::new(kind, NbtCompound::default()));
         }
@@ -463,6 +630,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sign_colors_share_dye_darkening_and_fullbright_glow() {
+        let dye = [0.8, 0.4, 0.2];
+        let (lit, dark) = sign_text_colors(dye, false, 0.5);
+        assert_eq!(dark, dye.map(|c| c * 0.4));
+        assert_eq!(lit, dark.map(|c| c * 0.5));
+        assert_eq!(sign_text_colors(dye, true, 0.0), (dye, dark));
+        let black = [29.0 / 255.0, 29.0 / 255.0, 33.0 / 255.0];
+        assert_eq!(
+            sign_text_colors(black, true, 0.0),
+            (black, [0.941, 0.922, 0.922])
+        );
+    }
+
+    #[test]
     fn player_head_resource_identifier_rejects_traversal_and_non_asset_paths() {
         assert!(valid_player_head_resource_texture(
             "minecraft:entity/player/slim/steve"
@@ -481,10 +662,9 @@ mod tests {
 
     #[test]
     fn profile_identifiers_are_strictly_validated() {
-        assert!(valid_profile_id("0123456789abcdef0123456789abcdef"));
-        assert!(!valid_profile_id("not-a-uuid"));
         assert!(valid_profile_name("Player_1"));
-        assert!(!valid_profile_name("../player"));
+        assert!(!valid_profile_name("player name"));
+        assert!(!valid_profile_name(&"a".repeat(17)));
     }
 
     #[test]
@@ -541,7 +721,10 @@ mod tests {
         let mut entity = StoredBlockEntity::new(BlockEntityKind::Skull, first.clone());
         assert_eq!(
             entity.player_head_profile_source,
-            Some(PlayerHeadProfileSource::Profile("Player_1".into()))
+            Some(PlayerHeadProfileSource::DynamicName {
+                name: "Player_1".into(),
+                patch: PlayerHeadSkinPatch::default()
+            })
         );
         assert_eq!(
             entity.clone().player_head_profile_source,
@@ -558,7 +741,10 @@ mod tests {
         entity.update_nbt(second);
         assert_eq!(
             entity.player_head_profile_source,
-            Some(PlayerHeadProfileSource::Profile("Player_2".into()))
+            Some(PlayerHeadProfileSource::DynamicName {
+                name: "Player_2".into(),
+                patch: PlayerHeadSkinPatch::default()
+            })
         );
         assert_eq!(
             entity.player_head_profile_source,
@@ -582,13 +768,100 @@ mod tests {
     }
 
     #[test]
-    fn standing_and_wall_signs_use_the_sign_renderer_but_hanging_signs_do_not() {
+    fn item_profile_retains_full_contents_and_matches_nbt_contract() {
+        use azalea_auth::game_profile::{GameProfileProperties, ProfilePropertyValue};
+        use azalea_inventory::components::{
+            PartialOrFullProfile, PartialProfile, PlayerModelType, PlayerSkinPatch, Profile,
+            ResourceTexture,
+        };
+        use azalea_inventory::{ItemStack, ItemStackData};
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+        let mut properties = GameProfileProperties::default();
+        properties.map.insert(
+            "textures".into(),
+            ProfilePropertyValue {
+                value: "encoded".into(),
+                signature: Some("signed".into()),
+            },
+        );
+        let profile = Profile {
+            unpack: Box::new(PartialOrFullProfile::Partial(PartialProfile {
+                name: Some("Alex".into()),
+                id: Some(uuid::Uuid::nil()),
+                properties,
+            })),
+            skin_patch: Box::new(PlayerSkinPatch {
+                body: Some(ResourceTexture {
+                    id: "minecraft:entity/custom".parse().unwrap(),
+                }),
+                model: Some(PlayerModelType::Wide),
+                ..Default::default()
+            }),
+        };
+        let mut item = ItemStackData::new(ItemKind::PlayerHead, 1);
+        // SAFETY: Profile is inserted under its matching component kind.
+        unsafe {
+            item.component_patch
+                .unchecked_insert_component(DataComponentKind::Profile, Some(profile.into()));
+        }
+        let source = player_head_profile_source_from_item(&ItemStack::from(item)).unwrap();
+        assert_eq!(
+            source,
+            PlayerHeadProfileSource::Static {
+                name: Some("Alex".into()),
+                id: Some(uuid::Uuid::nil()),
+                properties: vec![PlayerHeadProfileProperty {
+                    name: "textures".into(),
+                    value: "encoded".into(),
+                    signature: Some("signed".into())
+                }],
+                patch: PlayerHeadSkinPatch {
+                    texture: Some("minecraft:entity/custom".into()),
+                    model: Some("wide".into()),
+                    ..Default::default()
+                },
+            }
+        );
+        let mut property = NbtCompound::new();
+        property.insert("name", "textures");
+        property.insert("value", "encoded");
+        property.insert("signature", "signed");
+        let mut profile = NbtCompound::new();
+        profile.insert("name", "Alex");
+        profile.insert("id", simdnbt::owned::NbtTag::IntArray(vec![0; 4]));
+        profile.insert(
+            "properties",
+            simdnbt::owned::NbtList::Compound(vec![property]),
+        );
+        profile.insert("texture", "entity/custom"); // omitted namespace normalizes too
+        profile.insert("model", "wide");
+        let mut nbt = NbtCompound::new();
+        nbt.insert("profile", profile);
+        assert_eq!(player_head_profile_source(&nbt), source);
+        assert!(player_head_profile_source_from_item(&ItemStack::Empty).is_none());
+    }
+
+    #[test]
+    fn standing_wall_and_hanging_signs_use_their_text_renderers() {
         assert_eq!(rendered_kind("oak_sign"), Some(BlockEntityKind::Sign));
         assert_eq!(
             rendered_kind("spruce_wall_sign"),
             Some(BlockEntityKind::Sign)
         );
         assert_eq!(rendered_kind("oak_hanging_sign"), None);
+        assert_eq!(rendered_kind("oak_wall_hanging_sign"), None);
+        crate::world::block::init("26.2");
+        let mut entries = HashMap::new();
+        let pos = BlockPos::new(0, 64, 0);
+        for name in ["oak_hanging_sign", "oak_wall_hanging_sign"] {
+            sync_block_entity(
+                &mut entries,
+                pos,
+                crate::world::block::first_state_of(name).unwrap(),
+            );
+            assert_eq!(entries[&pos].kind, BlockEntityKind::HangingSign);
+            assert!(entries[&pos].sign_front.is_some());
+        }
         assert!(is_block_entity_block("oak_sign"));
     }
 

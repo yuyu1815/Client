@@ -1277,6 +1277,7 @@ impl MenuOverlayPipeline {
                     item_name,
                     tint,
                     stack_dye_rgb: _,
+                    player_head_profile_source: _,
                 } => {
                     if let Some(uv) = item_atlas_uvs.get(item_name) {
                         push_quad(
@@ -2306,6 +2307,7 @@ pub enum MenuElement {
         item_name: String,
         tint: [f32; 4],
         stack_dye_rgb: Option<[u8; 3]>,
+        player_head_profile_source: Option<crate::world::block_entity::PlayerHeadProfileSource>,
     },
     McText {
         x: f32,
@@ -2418,6 +2420,10 @@ pub enum MenuElement {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SpriteId {
+    SignBoard {
+        wood: u8,
+        hanging: bool,
+    },
     MapDecoration(crate::world::maps::MapDecorationAsset),
     BookBackground,
     BookPageForward,
@@ -2495,6 +2501,7 @@ pub enum SpriteId {
     SmokerBackground,
     Generic54Top,
     Generic54Bottom,
+    HopperBackground,
     ShulkerBoxBackground,
     AnvilBackground,
     AnvilTextField,
@@ -2559,6 +2566,36 @@ pub enum SpriteId {
     SlotHighlightFront,
     RecipeBookButton,
     RecipeBookButtonHighlighted,
+    RecipeBookBackground,
+    RecipeSearchField,
+    RecipeSearchFieldHighlighted,
+    RecipeBookTab,
+    RecipeBookTabSelected,
+    RecipeFilterEnabled,
+    RecipeFilterEnabledHighlighted,
+    RecipeFilterDisabled,
+    RecipeFilterDisabledHighlighted,
+    FurnaceRecipeFilterEnabled,
+    FurnaceRecipeFilterEnabledHighlighted,
+    FurnaceRecipeFilterDisabled,
+    FurnaceRecipeFilterDisabledHighlighted,
+    RecipePageBackward,
+    RecipePageBackwardHighlighted,
+    RecipePageForward,
+    RecipePageForwardHighlighted,
+    RecipeSlotCraftable,
+    RecipeSlotUncraftable,
+    RecipeSlotManyCraftable,
+    RecipeSlotManyUncraftable,
+    RecipeOverlay,
+    RecipeCraftingOverlay,
+    RecipeCraftingOverlayHighlighted,
+    RecipeCraftingOverlayDisabled,
+    RecipeCraftingOverlayDisabledHighlighted,
+    RecipeFurnaceOverlay,
+    RecipeFurnaceOverlayHighlighted,
+    RecipeFurnaceOverlayDisabled,
+    RecipeFurnaceOverlayDisabledHighlighted,
     ButtonNormal,
     ButtonHover,
     ButtonDisabled,
@@ -3210,6 +3247,151 @@ fn build_sprite_atlas(
             0.0,
         ),
         (
+            SpriteId::RecipeSearchField,
+            "minecraft/textures/gui/sprites/widget/text_field.png",
+            1.0,
+        ),
+        (
+            SpriteId::RecipeSearchFieldHighlighted,
+            "minecraft/textures/gui/sprites/widget/text_field_highlighted.png",
+            1.0,
+        ),
+        (
+            SpriteId::RecipeBookTab,
+            "minecraft/textures/gui/sprites/recipe_book/tab.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeBookTabSelected,
+            "minecraft/textures/gui/sprites/recipe_book/tab_selected.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeFilterEnabled,
+            "minecraft/textures/gui/sprites/recipe_book/filter_enabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeFilterEnabledHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/filter_enabled_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeFilterDisabled,
+            "minecraft/textures/gui/sprites/recipe_book/filter_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeFilterDisabledHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/filter_disabled_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::FurnaceRecipeFilterEnabled,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_filter_enabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::FurnaceRecipeFilterEnabledHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_filter_enabled_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::FurnaceRecipeFilterDisabled,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_filter_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::FurnaceRecipeFilterDisabledHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_filter_disabled_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipePageBackward,
+            "minecraft/textures/gui/sprites/recipe_book/page_backward.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipePageBackwardHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/page_backward_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipePageForward,
+            "minecraft/textures/gui/sprites/recipe_book/page_forward.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipePageForwardHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/page_forward_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeSlotCraftable,
+            "minecraft/textures/gui/sprites/recipe_book/slot_craftable.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeSlotUncraftable,
+            "minecraft/textures/gui/sprites/recipe_book/slot_uncraftable.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeSlotManyCraftable,
+            "minecraft/textures/gui/sprites/recipe_book/slot_many_craftable.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeSlotManyUncraftable,
+            "minecraft/textures/gui/sprites/recipe_book/slot_many_uncraftable.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeOverlay,
+            "minecraft/textures/gui/sprites/recipe_book/overlay_recipe.png",
+            4.0,
+        ),
+        (
+            SpriteId::RecipeCraftingOverlay,
+            "minecraft/textures/gui/sprites/recipe_book/crafting_overlay.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeCraftingOverlayHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/crafting_overlay_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeCraftingOverlayDisabled,
+            "minecraft/textures/gui/sprites/recipe_book/crafting_overlay_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeCraftingOverlayDisabledHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/crafting_overlay_disabled_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeFurnaceOverlay,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_overlay.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeFurnaceOverlayHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_overlay_highlighted.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeFurnaceOverlayDisabled,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_overlay_disabled.png",
+            0.0,
+        ),
+        (
+            SpriteId::RecipeFurnaceOverlayDisabledHighlighted,
+            "minecraft/textures/gui/sprites/recipe_book/furnace_overlay_disabled_highlighted.png",
+            0.0,
+        ),
+        (
             SpriteId::ButtonNormal,
             "minecraft/textures/gui/sprites/widget/button.png",
             3.0,
@@ -3653,6 +3835,24 @@ fn build_sprite_atlas(
             0.0,
         )
     });
+    let sign_sprites = crate::renderer::pipelines::block_entity::SIGN_WOOD_NAMES
+        .iter()
+        .enumerate()
+        .flat_map(|(wood, name)| {
+            [false, true].map(move |hanging| {
+                (
+                    SpriteId::SignBoard {
+                        wood: wood as u8,
+                        hanging,
+                    },
+                    format!(
+                        "minecraft/textures/gui/{}/{name}.png",
+                        if hanging { "hanging_signs" } else { "signs" }
+                    ),
+                    0.0,
+                )
+            })
+        });
     let mut images: Vec<(SpriteId, Vec<u8>, u32, u32, f32)> = Vec::new();
     for (id, asset_key, border) in sprites
         .iter()
@@ -3660,6 +3860,7 @@ fn build_sprite_atlas(
         .chain(effect_icons)
         .chain(boss_bar_sprites)
         .chain(map_decoration_sprites)
+        .chain(sign_sprites)
     {
         let path = resolve_asset_path(jar_assets_dir, asset_index, &asset_key);
         match crate::assets::load_image(&path) {
@@ -3842,6 +4043,13 @@ fn build_sprite_atlas(
             INV_TEX_H,
         ),
         (
+            SpriteId::HopperBackground,
+            "minecraft/textures/gui/container/hopper.png",
+            0,
+            INV_TEX_W,
+            133,
+        ),
+        (
             SpriteId::Generic54Top,
             "minecraft/textures/gui/container/generic_54.png",
             0,
@@ -3928,6 +4136,34 @@ fn build_sprite_atlas(
                 tracing::warn!("Failed to load sprite {id:?}: {e}");
                 images.push((id, vec![255, 0, 255, 255], 1, 1, 0.0));
             }
+        }
+    }
+
+    // RecipeBookComponent blits (1,1) 147x166 from its 256x256 texture.
+    let path = resolve_asset_path(
+        jar_assets_dir,
+        asset_index,
+        "minecraft/textures/gui/recipe_book.png",
+    );
+    match crate::assets::load_image(&path) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let x = rgba.width() / 256;
+            let y = rgba.height() / 256;
+            let w = (rgba.width() * 147 / 256).max(1);
+            let h = (rgba.height() * 166 / 256).max(1);
+            let crop = image::imageops::crop_imm(&rgba, x, y, w, h).to_image();
+            images.push((SpriteId::RecipeBookBackground, crop.into_raw(), w, h, 0.0));
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load recipe-book background: {e}");
+            images.push((
+                SpriteId::RecipeBookBackground,
+                vec![255, 0, 255, 255],
+                1,
+                1,
+                0.0,
+            ));
         }
     }
 

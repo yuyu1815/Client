@@ -125,6 +125,7 @@ impl Fluid {
 /// classifies and textures every block) index this directly.
 struct BlockData {
     id: &'static str,
+    default_state: BlockState,
     properties: PropMap,
     behavior: BlockBehavior,
     /// Collision shape; see `block_shape::partial_shape` for the encoding.
@@ -138,6 +139,9 @@ struct BlockData {
     /// Approximate `BlockStateBase.blocksMotion`: legacy solidity, except
     /// cobweb and bamboo sapling (dynamic powder snow is not solid).
     blocks_motion: bool,
+    /// Vanilla BlockBehaviour's replaceable flag, not context-dependent
+    /// merging.
+    replaceable: bool,
     fluid: Fluid,
     light: LightProps,
 }
@@ -149,12 +153,11 @@ struct BlockFile {
     blocks: Vec<BlockEntry>,
 }
 
-// The data files also carry a `default_id` per block; nothing client-side
-// consumes it yet, so serde skips it.
 #[derive(serde::Deserialize)]
 struct BlockEntry {
     name: String,
     first_id: u32,
+    default_id: u32,
     /// `(key, values)` in state-enumeration order; the last property varies
     /// fastest across consecutive state ids.
     #[serde(default)]
@@ -406,6 +409,9 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
         let collides = state_entry.c != 0;
 
         let count: u32 = props.iter().map(|(_, vs)| vs.len() as u32).product();
+        assert!((block.first_id..block.first_id + count).contains(&block.default_id));
+        let default_state =
+            BlockState::try_from(block.default_id).expect("default state fits id repr");
         let face_indices = light_face_indices(state_entry, count as usize);
         for offset in 0..count {
             let mut pairs = Vec::with_capacity(props.len());
@@ -449,6 +455,7 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
                 };
             table.push(BlockData {
                 id: name,
+                default_state,
                 properties,
                 behavior,
                 shape,
@@ -456,6 +463,7 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
                 is_air,
                 collides,
                 blocks_motion,
+                replaceable: registry::block_is_replaceable(name),
                 fluid,
                 light,
             });
@@ -552,6 +560,7 @@ fn table() -> &'static Vec<BlockData> {
 fn block_data(state: BlockState) -> &'static BlockData {
     static UNKNOWN: std::sync::LazyLock<BlockData> = std::sync::LazyLock::new(|| BlockData {
         id: "unknown",
+        default_state: BlockState::AIR,
         properties: PropMap::from_pairs(Vec::new()),
         behavior: DEFAULT_BEHAVIOR,
         shape: None,
@@ -559,6 +568,7 @@ fn block_data(state: BlockState) -> &'static BlockData {
         is_air: false,
         collides: true,
         blocks_motion: true,
+        replaceable: false,
         fluid: NO_FLUID,
         light: BEDROCK_LIGHT,
     });
@@ -577,6 +587,15 @@ fn all_states() -> impl Iterator<Item = (BlockState, &'static BlockData)> {
 /// fallback for unloaded-chunk reads.
 pub(crate) fn first_state_of(name: &str) -> Option<BlockState> {
     all_states().find(|(_, d)| d.id == name).map(|(s, _)| s)
+}
+
+/// Vanilla default state in the active protocol's id space, not its first
+/// state.
+pub(crate) fn default_state_of(name: &str) -> Option<BlockState> {
+    table()
+        .iter()
+        .find(|data| data.id == name)
+        .map(|data| data.default_state)
 }
 
 /// Exact registered-state lookup for serialized block-state properties.
@@ -714,6 +733,12 @@ pub fn has_collision(state: BlockState) -> bool {
     block_data(state).collides
 }
 
+/// Vanilla base replaceable flag. Item/context checks belong to the placement
+/// caller.
+pub fn is_replaceable(state: BlockState) -> bool {
+    block_data(state).replaceable
+}
+
 /// Fluid `FlowingFluid.getFlow` uses this independently of entity collision.
 pub fn blocks_motion(state: BlockState) -> bool {
     block_data(state).blocks_motion
@@ -837,6 +862,18 @@ mod tests {
         assert_eq!(props.get("facing"), Some("south"));
         assert_eq!(props.get("type"), Some("single"));
         assert_eq!(props.get("waterlogged"), Some("false"));
+    }
+
+    #[test]
+    fn default_states_use_registered_default_not_first_state() {
+        setup();
+        for name in ["oak_log", "oak_slab", "oak_sign", "chest"] {
+            let file: BlockFile = serde_json::from_str(BLOCK_DATA[NATIVE_SLOT].blocks).unwrap();
+            let entry = file.blocks.iter().find(|entry| entry.name == name).unwrap();
+            assert_ne!(entry.first_id, entry.default_id, "{name}");
+            assert_eq!(u32::from(default_state_of(name).unwrap()), entry.default_id);
+        }
+        assert!(default_state_of("missing_block").is_none());
     }
 
     #[test]

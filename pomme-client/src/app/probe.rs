@@ -396,6 +396,7 @@ impl Probe {
                     item_name: item_name.clone(),
                     tint: [1.0, 1.0, 1.0, 1.0],
                     stack_dye_rgb: None,
+                    player_head_profile_source: None,
                 },
             );
         }

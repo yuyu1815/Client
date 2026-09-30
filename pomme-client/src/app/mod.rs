@@ -183,6 +183,7 @@ fn transfer_connect_args_for(
             server,
             protocol: None,
         },
+        is_transfer: true,
         username: username.to_owned(),
         uuid,
         access_token,
@@ -391,6 +392,7 @@ impl ApplicationHandler for App {
                                 server: server_ip,
                                 protocol: None,
                             },
+                            is_transfer: false,
                             username: self.core.user.username.clone(),
                             uuid: self.core.user.uuid,
                             access_token: self.core.user.access_token.clone(),
@@ -1444,6 +1446,7 @@ mod transfer_tests {
             args.transport,
             Transport::Remote { ref server, protocol: None } if server == "example.org:25566"
         ));
+        assert!(args.is_transfer);
         assert_eq!(args.username, "player");
         assert_eq!(args.uuid, uuid);
         assert_eq!(args.access_token.as_deref(), Some("secret-token"));

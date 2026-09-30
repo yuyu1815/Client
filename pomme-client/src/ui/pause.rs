@@ -28,6 +28,8 @@ pub enum PauseAction {
     ReportBugs,
     OpenBenchmark,
     StartFpsBenchmark,
+    StartMovementRecording,
+    StopMovementRecording,
     OpenChunkLoader,
     StartChunkLoad(u32),
     Back,
@@ -44,6 +46,7 @@ pub fn build_pause_menu(
     screen: PauseScreen,
     server_rd: u32,
     singleplayer: bool,
+    recording: bool,
 ) -> PauseAction {
     match screen {
         // The F3+Esc pause renders nothing; update_game skips building it.
@@ -74,6 +77,18 @@ pub fn build_pause_menu(
                 (
                     crate::lang::ui("Chunk Loader", "チャンク読み込み"),
                     PauseAction::OpenChunkLoader,
+                ),
+                (
+                    if recording {
+                        crate::lang::ui("Stop movement recording", "移動・行動記録を停止")
+                    } else {
+                        crate::lang::ui("Record movement / actions", "移動・行動記録を開始")
+                    },
+                    if recording {
+                        PauseAction::StopMovementRecording
+                    } else {
+                        PauseAction::StartMovementRecording
+                    },
                 ),
                 (crate::lang::ui("Back", "戻る"), PauseAction::Back),
             ],
@@ -288,6 +303,57 @@ fn build_main(
     }
 
     action
+}
+
+#[cfg(test)]
+mod movement_tests {
+    use super::*;
+    #[test]
+    fn benchmark_menu_record_start_stop_click_path() {
+        for recording in [false, true] {
+            let mut elements = Vec::new();
+            build_pause_menu(
+                &mut elements,
+                800.0,
+                600.0,
+                (0.0, 0.0),
+                false,
+                1.0,
+                PauseScreen::Benchmark,
+                8,
+                false,
+                recording,
+            );
+            let cursor = elements
+                .iter()
+                .find_map(|element| match element {
+                    MenuElement::Text { x, y, text, .. }
+                        if text.contains("movement") || text.contains("移動・行動") =>
+                    {
+                        Some((*x, *y + 2.0))
+                    }
+                    _ => None,
+                })
+                .expect("recording button must be visible");
+            let action = build_pause_menu(
+                &mut Vec::new(),
+                800.0,
+                600.0,
+                cursor,
+                true,
+                1.0,
+                PauseScreen::Benchmark,
+                8,
+                false,
+                recording,
+            );
+            assert!(matches!(
+                (recording, action),
+                (false, PauseAction::StartMovementRecording)
+                    | (true, PauseAction::StopMovementRecording)
+            ));
+        }
+    }
 }
 
 /// A simple centered column of full-width buttons under a title, used by the

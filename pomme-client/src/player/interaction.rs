@@ -94,6 +94,18 @@ struct ServerVerifiedState {
     player_pos: DVec3,
 }
 
+/// Submitted placement awaiting its server-owned inventory count/ACK.
+#[derive(Clone, Copy)]
+struct PlacementUse {
+    seq: u32,
+    kind: ItemKind,
+    count: i32,
+    pos: BlockPos,
+    previous: BlockState,
+    prediction: Option<BlockState>,
+    rejected: bool,
+}
+
 /// An in-progress item use (eating/drinking), vanilla
 /// `LivingEntity.useItem` + `useItemRemaining` plus the `Consumable`
 /// component data resolved at start.
@@ -119,6 +131,8 @@ pub struct InteractionState {
     carried_slot: u8,
     last_teleport_seq: u32,
     pending_predictions: HashMap<BlockPos, ServerVerifiedState>,
+    /// Pre-write states; drained after interaction/ACK, before priority remesh.
+    visual_edits: Vec<(BlockPos, BlockState)>,
     is_destroying: bool,
     destroy_pos: BlockPos,
     /// Held stack captured when the break started, vanilla `destroyingItem`;
@@ -133,7 +147,15 @@ pub struct InteractionState {
     using_item: Option<ActiveUse>,
     using_bow: bool,
     swinging: bool,
+    swinging_hand: InteractionHand,
     swing_time: i32,
+    /// ItemInHandRenderer heights, indexed main/off hand.
+    hand_height: [f32; 2],
+    o_hand_height: [f32; 2],
+    pending_placement_uses: [Option<PlacementUse>; 2],
+    /// LocalPlayer xBob/yBob (pitch/yaw), independent of world-camera bob.
+    hand_view_bob: glam::Vec2,
+    o_hand_view_bob: glam::Vec2,
     attack_anim: f32,
     o_attack_anim: f32,
     /// Vanilla `Player.attackStrengthTicker`. The companion `itemSwapTicker`
@@ -154,6 +176,7 @@ impl InteractionState {
             carried_slot: 0,
             last_teleport_seq: 0,
             pending_predictions: HashMap::new(),
+            visual_edits: Vec::new(),
             is_destroying: false,
             destroy_pos: BlockPos {
                 x: -1,
@@ -170,12 +193,22 @@ impl InteractionState {
             using_item: None,
             using_bow: false,
             swinging: false,
+            swinging_hand: InteractionHand::MainHand,
             swing_time: 0,
+            hand_height: [0.0; 2],
+            o_hand_height: [0.0; 2],
+            pending_placement_uses: [None; 2],
+            hand_view_bob: glam::Vec2::ZERO,
+            o_hand_view_bob: glam::Vec2::ZERO,
             attack_anim: 0.0,
             o_attack_anim: 0.0,
             attack_strength_ticker: 0,
             last_item_in_main_hand: None,
         }
+    }
+
+    pub fn take_visual_edits(&mut self) -> Vec<(BlockPos, BlockState)> {
+        std::mem::take(&mut self.visual_edits)
     }
 
     /// Vanilla `retainKnownServerState`: an existing entry only gets its
@@ -219,9 +252,12 @@ impl InteractionState {
         audio: &mut AudioEngine,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
+        recorder: &crate::movement_record::Recorder,
     ) {
         self.retain_known_server_state(pos, state, player_pos);
+        self.visual_edits.push((pos, state));
         chunks.set_block_state(pos.x, pos.y, pos.z, BlockState::AIR);
+        recorder.local_prediction(pos, state, BlockState::AIR, self.seq);
         mark_dirty(&pos, dirty_chunks);
         play_break_sound(audio, state, pos);
         effects.particles.add_destroy_block_effect(
@@ -249,6 +285,7 @@ impl InteractionState {
         // Keep the lowest block pos among overlapping reverts so the chosen snap
         // is deterministic (HashMap iteration order is not).
         let mut snap_to: Option<((i32, i32, i32), DVec3)> = None;
+        let visual_edits = &mut self.visual_edits;
         self.pending_predictions.retain(|pos, verified| {
             if verified.seq > seq {
                 return true;
@@ -259,6 +296,7 @@ impl InteractionState {
                     "Server did not confirm block change at {pos:?}, reverting to {:?}",
                     verified.state
                 );
+                visual_edits.push((*pos, current));
                 chunks.set_block_state(pos.x, pos.y, pos.z, verified.state);
                 mark_dirty(pos, dirty_chunks);
                 // Full-cube collision, as the engine has no per-shape voxels.
@@ -272,6 +310,17 @@ impl InteractionState {
             }
             false
         });
+        // ACK and inventory updates can straddle client ticks. Keep a confirmed
+        // placement waiting for its count update; discard rejections after the
+        // next count check (a falling block can consume an item then disappear).
+        for pending in self.pending_placement_uses.iter_mut().flatten() {
+            if pending.seq <= seq {
+                let current = chunks.get_block_state(pending.pos.x, pending.pos.y, pending.pos.z);
+                pending.rejected = pending
+                    .prediction
+                    .map_or(current == pending.previous, |state| current != state);
+            }
+        }
         snap_to.map(|(_, pos)| pos)
     }
 
@@ -291,22 +340,110 @@ impl InteractionState {
         self.o_attack_anim + diff * partial_tick
     }
 
-    fn start_swing(&mut self) {
+    pub fn hand_animation(
+        &self,
+        partial_tick: f32,
+        view: LookDirection,
+    ) -> crate::renderer::pipelines::hand::HandAnimation {
+        let mut swing_progress = [0.0; 2];
+        swing_progress[hand_index(self.swinging_hand)] = self.get_swing_progress(partial_tick);
+        let inverse_height = std::array::from_fn(|i| {
+            1.0 - (self.o_hand_height[i]
+                + (self.hand_height[i] - self.o_hand_height[i]) * partial_tick)
+        });
+        let bob = self.o_hand_view_bob.lerp(self.hand_view_bob, partial_tick);
+        crate::renderer::pipelines::hand::HandAnimation {
+            swing_progress,
+            inverse_height,
+            view_follow: glam::Mat4::from_rotation_x(
+                ((view.x_rot_deg() - bob.x) * 0.1).to_radians(),
+            ) * glam::Mat4::from_rotation_y(
+                ((view.y_rot_deg() - bob.y) * 0.1).to_radians(),
+            ),
+        }
+    }
+
+    /// Vanilla ItemInHandRenderer.itemUsed: only the successfully used hand
+    /// lowers.
+    pub fn item_used(&mut self, hand: InteractionHand) {
+        self.hand_height[hand_index(hand)] = 0.0;
+    }
+
+    fn placement_used(
+        &mut self,
+        hand: InteractionHand,
+        stack: &ItemStackData,
+        creative: bool,
+        pos: BlockPos,
+        previous: BlockState,
+        prediction: Option<BlockState>,
+    ) {
+        if creative {
+            self.item_used(hand);
+        } else {
+            // Inventory counts are server-owned here (prediction does not shrink
+            // stacks). Lower on the resulting count update, never on a rejected ACK.
+            self.pending_placement_uses[hand_index(hand)] = Some(PlacementUse {
+                seq: self.seq,
+                kind: stack.kind,
+                count: stack.count,
+                pos,
+                previous,
+                prediction,
+                rejected: false,
+            });
+        }
+    }
+
+    fn update_placement_heights(
+        &mut self,
+        main: Option<&ItemStackData>,
+        off: Option<&ItemStackData>,
+    ) {
+        for hand in [InteractionHand::MainHand, InteractionHand::OffHand] {
+            let index = hand_index(hand);
+            let Some(pending) = self.pending_placement_uses[index] else {
+                continue;
+            };
+            let stack = stack_for_hand(hand, main, off);
+            if stack.is_none_or(|stack| stack.kind == pending.kind)
+                && stack.map_or(0, |stack| stack.count) != pending.count
+            {
+                self.item_used(hand);
+                self.pending_placement_uses[index] = None;
+            } else if pending.rejected || stack.is_some_and(|stack| stack.kind != pending.kind) {
+                self.pending_placement_uses[index] = None;
+            }
+        }
+    }
+
+    fn tick_hand_animation(&mut self, look: LookDirection) {
+        self.o_hand_height = self.hand_height;
+        for height in &mut self.hand_height {
+            *height += (1.0 - *height).clamp(-0.4, 0.4);
+        }
+        self.o_hand_view_bob = self.hand_view_bob;
+        self.hand_view_bob +=
+            (glam::Vec2::new(look.x_rot_deg(), look.y_rot_deg()) - self.hand_view_bob) * 0.5;
+    }
+
+    fn start_swing(&mut self, hand: InteractionHand) {
         if !self.swinging || self.swing_time >= SWING_DURATION / 2 || self.swing_time < 0 {
             self.swing_time = -1;
             self.swinging = true;
+            self.swinging_hand = hand;
         }
     }
 
     /// An attack or mining swing, always reported to the server.
     fn swing(&mut self, sender: &PacketSender) {
-        self.start_swing();
+        self.start_swing(InteractionHand::MainHand);
         send_swing(sender);
     }
 
     /// A swing from using an item or entity; see [`send_use_swing`].
     fn swing_use(&mut self, sender: &PacketSender, hand: InteractionHand) {
-        self.start_swing();
+        self.start_swing(hand);
         send_use_swing(sender, hand);
     }
 
@@ -388,10 +525,13 @@ impl InteractionState {
         has_projectile: bool,
         place_block: Option<BlockState>,
         offhand_place_block: Option<BlockState>,
+        offhand_on_cooldown: bool,
         hands_empty: bool,
         effects: &mut BreakEffects,
     ) -> Vec<BlockPos> {
         let mut dirty_chunks = Vec::new();
+        self.tick_hand_animation(look);
+        self.update_placement_heights(held_stack, offhand_stack);
 
         self.ensure_has_sent_carried_item(sender, selected_slot);
         if spectator {
@@ -478,6 +618,7 @@ impl InteractionState {
                 hand,
                 hand_on_cooldown,
                 offhand_stack,
+                offhand_on_cooldown,
                 has_projectile,
                 sneaking,
                 suppress_block_use,
@@ -723,7 +864,7 @@ impl InteractionState {
         audio: &mut AudioEngine,
         chunks: &ChunkStore,
         player_pos: DVec3,
-        player_aabb: Aabb,
+        _player_aabb: Aabb,
         eye_pos: DVec3,
         look: LookDirection,
         place_block: Option<BlockState>,
@@ -736,6 +877,7 @@ impl InteractionState {
         hand: InteractionHand,
         hand_on_cooldown: bool,
         offhand_stack: Option<&ItemStackData>,
+        offhand_on_cooldown: bool,
         has_projectile: bool,
         sneaking: bool,
         suppress_block_use: bool,
@@ -795,19 +937,21 @@ impl InteractionState {
                     return true;
                 }
             }
-            if place_block.is_some() && !hand_on_cooldown {
-                self.swing_use(sender, hand);
-                self.predict_place(
-                    hit,
-                    place_block,
-                    chunks,
-                    player_pos,
-                    player_aabb,
-                    dirty_chunks,
-                );
-                return true;
+            if let Some(result) = self.try_place_block(
+                hit,
+                place_block,
+                held_stack,
+                hand,
+                creative,
+                sender,
+                chunks,
+                player_pos,
+                look,
+                dirty_chunks,
+            ) {
+                return result;
             }
-            place_block.is_none() && held_stack.is_some()
+            held_stack.is_some()
         } else {
             false
         };
@@ -848,7 +992,7 @@ impl InteractionState {
         // server-authoritative here; block PASS is approximated above.
         if should_try_offhand(
             self.target.is_none(),
-            !hit_block || matches!(self.target, Some(HitResult::Block(_))) && place_block.is_none(),
+            !hit_block || matches!(self.target, Some(HitResult::Block(_))),
             used == ItemUseResult::Pass,
             offhand_stack.is_some(),
         ) {
@@ -865,17 +1009,19 @@ impl InteractionState {
                     },
                     seq: self.seq,
                 }));
-                if let Some(state) = offhand_place_block {
-                    self.swing_use(sender, InteractionHand::OffHand);
-                    self.predict_place(
-                        hit,
-                        Some(state),
-                        chunks,
-                        player_pos,
-                        player_aabb,
-                        dirty_chunks,
-                    );
-                    return true;
+                if let Some(result) = self.try_place_block(
+                    hit,
+                    offhand_place_block,
+                    offhand_stack,
+                    InteractionHand::OffHand,
+                    creative,
+                    sender,
+                    chunks,
+                    player_pos,
+                    look,
+                    dirty_chunks,
+                ) {
+                    return result;
                 }
             }
             return self.use_item(
@@ -889,7 +1035,7 @@ impl InteractionState {
                 food,
                 creative,
                 InteractionHand::OffHand,
-                false,
+                offhand_on_cooldown,
                 has_projectile,
                 effects,
             ) != ItemUseResult::Pass;
@@ -1022,6 +1168,12 @@ impl InteractionState {
         self.swing_time = 0;
         self.attack_anim = 0.0;
         self.o_attack_anim = 0.0;
+        self.swinging_hand = InteractionHand::MainHand;
+        self.hand_height = [0.0; 2];
+        self.o_hand_height = [0.0; 2];
+        self.hand_view_bob = glam::Vec2::ZERO;
+        self.o_hand_view_bob = glam::Vec2::ZERO;
+        self.pending_placement_uses = [None; 2];
         self.attack_strength_ticker = 0;
         self.last_item_in_main_hand = None;
     }
@@ -1198,38 +1350,45 @@ impl InteractionState {
         })
     }
 
-    /// Predicts placement locally for unambiguous single-state blocks,
-    /// mirroring `predict_destroy`: stores air for rollback, writes the
-    /// block, and marks it for remesh. `acknowledge` reverts it if the
-    /// server doesn't confirm. Skips anything not clearly placeable so the
-    /// worst case is just no prediction.
-    fn predict_place(
+    /// BlockItems optimistically succeed; only the server validates placement.
+    /// None means an empty/non-block item, which may PASS.
+    #[allow(clippy::too_many_arguments)]
+    fn try_place_block(
         &mut self,
         hit: BlockHitResult,
-        place_block: Option<BlockState>,
+        prediction: Option<BlockState>,
+        stack: Option<&ItemStackData>,
+        hand: InteractionHand,
+        creative: bool,
+        sender: &PacketSender,
         chunks: &ChunkStore,
         player_pos: DVec3,
-        player_aabb: Aabb,
+        look: LookDirection,
         dirty_chunks: &mut Vec<BlockPos>,
-    ) {
-        let Some(state) = place_block else {
-            return;
-        };
-        let pos = hit.block_pos.offset_with_direction(hit.face);
-
-        // Only predict into an empty cell; replacing grass/water isn't handled yet.
-        if !is_air(chunks.get_block_state(pos.x, pos.y, pos.z)) {
-            return;
+    ) -> Option<bool> {
+        let stack = stack.filter(|stack| stack.count > 0)?;
+        let item_name = item_resource_name(stack.kind);
+        let block_name = crate::world::block::registry::block_for_item(&item_name)?;
+        if let Some((pos, previous)) = placement_target(hit, block_name, chunks) {
+            let prediction = prediction
+                .or_else(|| crate::world::block::default_state_of(block_name))
+                .map(|state| placement_state(state, hit.face, look));
+            if let Some(state) = prediction {
+                self.retain_known_server_state(pos, previous, player_pos);
+                self.visual_edits.push((pos, previous));
+                chunks.set_block_state(pos.x, pos.y, pos.z, state);
+                sender
+                    .recorder
+                    .local_prediction(pos, previous, state, self.seq);
+                mark_dirty(&pos, dirty_chunks);
+            }
+            self.placement_used(hand, stack, creative, pos, previous, prediction);
+        } else if creative {
+            // Unloaded/out-of-height cells have no local state to retain or invent.
+            self.item_used(hand);
         }
-
-        // Don't predict a solid block overlapping the player; the server denies it.
-        if has_collision(state) && Aabb::block(pos.x, pos.y, pos.z).intersects(&player_aabb) {
-            return;
-        }
-
-        self.retain_known_server_state(pos, BlockState::AIR, player_pos);
-        chunks.set_block_state(pos.x, pos.y, pos.z, state);
-        mark_dirty(&pos, dirty_chunks);
+        self.swing_use(sender, hand);
+        Some(true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1282,6 +1441,7 @@ impl InteractionState {
                 audio,
                 effects,
                 dirty_chunks,
+                &sender.recorder,
             );
             return;
         }
@@ -1382,6 +1542,7 @@ impl InteractionState {
                 audio,
                 effects,
                 dirty_chunks,
+                &sender.recorder,
             );
             self.is_destroying = false;
             self.destroy_progress = 0.0;
@@ -1510,6 +1671,7 @@ fn opens_menu(state: BlockState) -> bool {
             | "trapped_chest"
             | "ender_chest"
             | "barrel"
+            | "hopper"
     ) || id.ends_with("shulker_box")
         || id.ends_with("anvil")
 }
@@ -1756,6 +1918,105 @@ fn mark_dirty(pos: &BlockPos, dirty: &mut Vec<BlockPos>) {
     }
 }
 
+/// Base canBeReplaced: do not merge slabs/piles or replace a block with its
+/// own item. Snow's other-item override only permits a single layer (26.2).
+fn can_replace_for_item(state: BlockState, block_name: &str) -> bool {
+    let name = crate::world::block::block_id(state);
+    if name == "snow" {
+        return block_name != "snow"
+            && crate::world::block::block_properties(state).get("layers") == Some("1");
+    }
+    crate::world::block::is_replaceable(state) && name != block_name
+}
+
+fn placement_target(
+    hit: BlockHitResult,
+    block_name: &str,
+    chunks: &ChunkStore,
+) -> Option<(BlockPos, BlockState)> {
+    let clicked = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
+    let pos = if can_replace_for_item(clicked, block_name) {
+        hit.block_pos
+    } else {
+        hit.block_pos.offset_with_direction(hit.face)
+    };
+    if pos.y < chunks.min_y()
+        || pos.y >= chunks.min_y() + chunks.height() as i32
+        || chunks
+            .get_chunk(&azalea_core::position::ChunkPos::new(
+                pos.x.div_euclid(16),
+                pos.z.div_euclid(16),
+            ))
+            .is_none()
+    {
+        return None;
+    }
+    let previous = chunks.get_block_state(pos.x, pos.y, pos.z);
+    Some((pos, previous))
+}
+
+fn placement_state(state: BlockState, face: Direction, look: LookDirection) -> BlockState {
+    use crate::world::block::{
+        block_id, block_properties, default_state_of, state_with_properties,
+    };
+    let name = block_id(state);
+    let wall = match name {
+        "torch" => Some("wall_torch".to_owned()),
+        "soul_torch" => Some("soul_wall_torch".to_owned()),
+        "redstone_torch" => Some("redstone_wall_torch".to_owned()),
+        name if name.ends_with("_sign") && !name.contains("hanging") => {
+            Some(name.replace("_sign", "_wall_sign"))
+        }
+        _ => None,
+    };
+    let horizontal_face = match face {
+        Direction::North => Some("north"),
+        Direction::South => Some("south"),
+        Direction::West => Some("west"),
+        Direction::East => Some("east"),
+        _ => None,
+    };
+    let wall_state = horizontal_face.and_then(|_| wall.as_deref().and_then(default_state_of));
+    let state = wall_state.unwrap_or(state);
+    let mut props: Vec<_> = block_properties(state)
+        .entries()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+    let facing = ["north", "east", "south", "west"]
+        [((look.y_rot_deg() / 90.0 + 0.5).floor() as i32).rem_euclid(4) as usize];
+    for (key, value) in &mut props {
+        match key.as_str() {
+            "axis" => {
+                *value = match face {
+                    Direction::West | Direction::East => "x",
+                    Direction::North | Direction::South => "z",
+                    _ => "y",
+                }
+                .to_owned()
+            }
+            "facing" => {
+                *value = if wall_state.is_some() {
+                    horizontal_face.unwrap()
+                } else {
+                    facing
+                }
+                .to_owned()
+            }
+            "rotation" => {
+                *value = (((look.y_rot_deg() + 180.0) * 16.0 / 360.0 + 0.5).floor() as i32)
+                    .rem_euclid(16)
+                    .to_string()
+            }
+            _ => {}
+        }
+    }
+    // ponytail: default + axis/facing/rotation only; support, merging,
+    // waterlogging, multi-cell and other context-dependent states rely on
+    // server reconciliation. Missing wall variants likewise keep the default
+    // until server correction.
+    state_with_properties(block_id(state), &props).unwrap_or(state)
+}
+
 fn entity_hit_wins(entity_dist_sq: f64, block_dist_sq: f64, reach: f64) -> bool {
     entity_dist_sq < block_dist_sq && entity_dist_sq < reach * reach
 }
@@ -1819,8 +2080,17 @@ pub fn raycast(
                 z: bz,
             };
             let outline = block_shape::outline_shape(state);
-            if let Some((hit_point, face)) = clip_shape(origin, reach_end, block_pos, outline) {
-                return Some(border_hit(origin, hit_point, block_pos, face, world_border));
+            if let Some((hit_point, face, inside)) =
+                clip_with_interaction_override(origin, reach_end, block_pos, outline, state)
+            {
+                return Some(border_hit(
+                    origin,
+                    hit_point,
+                    block_pos,
+                    face,
+                    inside,
+                    world_border,
+                ));
             }
         }
         if t_max_x < t_max_y && t_max_x < t_max_z {
@@ -1847,6 +2117,7 @@ pub fn raycast(
         reach_end,
         block_pos,
         Direction::nearest(azalea_vec3(dir)).opposite(),
+        false,
         world_border,
     ))
     .filter(|hit| hit.world_border)
@@ -1857,6 +2128,7 @@ fn border_hit(
     raw_location: DVec3,
     original_block_pos: BlockPos,
     original_face: Direction,
+    inside: bool,
     world_border: &crate::world::border::WorldBorder,
 ) -> BlockHitResult {
     let world_border_hit = world_border.contains(origin.x, origin.z)
@@ -1884,7 +2156,7 @@ fn border_hit(
             original_face
         },
         hit_point,
-        inside: false,
+        inside: inside && !world_border_hit,
         world_border: world_border_hit,
     }
 }
@@ -1979,7 +2251,7 @@ fn clip_shape(
     to: DVec3,
     block_pos: BlockPos,
     boxes: &[LocalBox],
-) -> Option<(DVec3, Direction)> {
+) -> Option<(DVec3, Direction, bool)> {
     if boxes.is_empty() {
         return None;
     }
@@ -1991,11 +2263,30 @@ fn clip_shape(
         .iter()
         .any(|&b| Aabb::from_local(b, offset).contains(probe));
     if starts_inside {
-        return Some((probe, Direction::nearest(azalea_vec3(ray)).opposite()));
+        return Some((probe, Direction::nearest(azalea_vec3(ray)).opposite(), true));
     }
 
     let (t, face) = aabb::clip_boxes(boxes, offset, from, to)?;
-    Some((from + ray * t, face_direction(face)))
+    Some((from + ray * t, face_direction(face), false))
+}
+
+/// 26.2 BlockGetter.clipWithInteractionOverride: a closer interaction hit
+/// changes only the outline hit's face (including when the ray starts inside).
+fn clip_with_interaction_override(
+    from: DVec3,
+    to: DVec3,
+    block_pos: BlockPos,
+    outline: &[LocalBox],
+    state: BlockState,
+) -> Option<(DVec3, Direction, bool)> {
+    let (point, mut face, inside) = clip_shape(from, to, block_pos, outline)?;
+    if let Some((override_point, override_face, _)) =
+        clip_shape(from, to, block_pos, block_shape::interaction_shape(state))
+        && override_point.distance_squared(from) < point.distance_squared(from)
+    {
+        face = override_face;
+    }
+    Some((point, face, inside))
 }
 
 /// Vanilla `AABB.getDirection`: a ray entering a box's min face on an axis is
@@ -2066,6 +2357,13 @@ pub(crate) fn send_swap_offhand(sender: &PacketSender) {
     );
 }
 
+fn hand_index(hand: InteractionHand) -> usize {
+    match hand {
+        InteractionHand::MainHand => 0,
+        InteractionHand::OffHand => 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use azalea_registry::HolderSet;
@@ -2077,6 +2375,17 @@ mod tests {
         pub(super) static CONSUME_SOUND_REQUESTS: std::cell::Cell<usize> = const {
             std::cell::Cell::new(0)
         };
+    }
+
+    #[test]
+    fn hopper_block_use_is_consumed_by_menu() {
+        crate::world::block::init("26.2");
+        assert!(opens_menu(
+            crate::world::block::first_state_of("hopper").unwrap()
+        ));
+        assert!(!opens_menu(
+            crate::world::block::first_state_of("stone").unwrap()
+        ));
     }
 
     #[test]
@@ -2105,6 +2414,114 @@ mod tests {
         let mut border = crate::world::border::WorldBorder::default();
         border.set_size(10.0);
         (chunks, border)
+    }
+
+    #[test]
+    fn hopper_raycast_uses_hollow_outline_and_only_overrides_the_face() {
+        let (chunks, _) = border_test_world();
+        let border = crate::world::border::WorldBorder::default();
+        let pos = BlockPos::new(2, 64, 2);
+        for (facing, spout, floor) in [
+            ("down", [2.5, 64.0, 2.5], 0.0),
+            ("north", [2.5, 64.0, 2.1], 0.25),
+            ("south", [2.5, 64.0, 2.9], 0.25),
+            ("west", [2.1, 64.0, 2.5], 0.25),
+            ("east", [2.9, 64.0, 2.5], 0.25),
+        ] {
+            let state = crate::world::block::find_state("hopper", &[("facing", facing)]);
+            chunks.set_block_state(pos.x, pos.y, pos.z, state);
+            let hit = raycast(
+                DVec3::from_array(spout) - DVec3::Y,
+                Vec3::Y,
+                3.0,
+                &chunks,
+                &border,
+            )
+            .unwrap();
+            assert_eq!(hit.block_pos, pos);
+            assert_eq!(hit.face, Direction::Down);
+            assert_eq!(hit.hit_point.y, 64.0 + floor, "{facing} spout");
+
+            let from = dvec3(2.5, 65.06, 2.1);
+            let dir = Vec3::new(0.0, -0.3, 1.0).normalize();
+            let to = from + dir.as_dvec3() * 3.0;
+            let raw = clip_shape(from, to, pos, block_shape::outline_shape(state)).unwrap();
+            assert_eq!(raw.1, Direction::North, "inner wall, not full-cube top");
+            let hit = raycast(from, dir, 3.0, &chunks, &border).unwrap();
+            assert_eq!(hit.face, Direction::Up, "entry through the top opening");
+            assert_eq!(hit.hit_point, raw.0, "override must not move the hit");
+            assert_eq!(hit.inside, raw.2);
+            assert!((hit.hit_point.z - 2.875).abs() < 1e-6);
+            let floor = raycast(dvec3(2.5, 65.2, 2.5), Vec3::NEG_Y, 2.0, &chunks, &border).unwrap();
+            assert_eq!(floor.hit_point.y, 64.0 + 11.0 / 16.0);
+            assert_eq!(floor.face, Direction::Up);
+            // Interaction shape alone must never produce a target.
+            assert!(raycast(dvec3(2.5, 65.1, 2.5), Vec3::NEG_Y, 0.2, &chunks, &border).is_none());
+        }
+        chunks.set_block_state(
+            2,
+            64,
+            2,
+            crate::world::block::find_state("hopper", &[("facing", "north")]),
+        );
+        let hit = raycast(dvec3(2.5, 64.55, 1.5), Vec3::Z, 3.0, &chunks, &border).unwrap();
+        assert_eq!(
+            hit.hit_point,
+            dvec3(2.5, 64.55, 2.25),
+            "interaction-only spout space is not the hit location"
+        );
+        let hit = raycast(dvec3(2.5, 64.8, 2.5), Vec3::NEG_Y, 1.0, &chunks, &border).unwrap();
+        assert!(!hit.inside, "inside the hollow is not inside the outline");
+        assert_eq!(hit.hit_point.y, 64.6875);
+        let from = dvec3(2.05, 64.8, 2.5);
+        let hit = raycast(from, Vec3::X, 1.0, &chunks, &border).unwrap();
+        assert!(
+            hit.inside,
+            "starting in the rim retains the outline's inside flag"
+        );
+        assert_eq!(hit.face, Direction::West);
+        assert_eq!(hit.hit_point, from + DVec3::X * INSIDE_PROBE_FRACTION);
+    }
+
+    #[test]
+    fn hopper_lower_space_does_not_block_entity_selection_or_blocks_behind_it() {
+        let (chunks, _) = border_test_world();
+        let border = crate::world::border::WorldBorder::default();
+        chunks.set_block_state(2, 64, 2, crate::world::block::find_state("hopper", &[]));
+        chunks.set_block_state(2, 64, 5, crate::world::block::find_state("stone", &[]));
+        let from = Position::new(2.1, 64.1, 1.5);
+        let hit = raycast(from.into(), Vec3::Z, REACH, &chunks, &border).unwrap();
+        assert_eq!(hit.block_pos, BlockPos::new(2, 64, 5));
+        let mut entities = EntityStore::new();
+        entities.spawn_living(
+            42,
+            EntityKind::Pig,
+            Position::new(2.1, 64.0, 4.25),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        let mut interaction = InteractionState::new();
+        interaction.update_target(
+            from,
+            LookDirection::default(),
+            &chunks,
+            &entities,
+            false,
+            &border,
+        );
+        assert!(matches!(interaction.target, Some(HitResult::Entity(hit)) if hit.entity_id == 42));
+        interaction.update_target(
+            Position::new(2.5, 64.4, 1.5),
+            LookDirection::default(),
+            &chunks,
+            &entities,
+            false,
+            &border,
+        );
+        assert!(
+            matches!(interaction.target, Some(HitResult::Block(hit)) if hit.block_pos == BlockPos::new(2, 64, 2))
+        );
     }
 
     #[test]
@@ -2157,6 +2574,7 @@ mod tests {
             dvec3(8.0, 64.5, 0.5),
             BlockPos::new(8, 64, 0),
             Direction::West,
+            false,
             &border,
         );
         assert_eq!(not_a_border_hit.hit_point, dvec3(8.0, 64.5, 0.5));
@@ -2260,6 +2678,69 @@ mod tests {
         state.sync_using_item_flag(false);
         assert!(state.using_item.is_none());
         assert!(!state.using_bow);
+    }
+
+    #[test]
+    fn hand_animation_routes_only_the_accepted_swing_hand() {
+        for hand in [InteractionHand::MainHand, InteractionHand::OffHand] {
+            let mut state = InteractionState::new();
+            state.start_swing(hand);
+            state.update_swing();
+            state.update_swing();
+            let opposite = if hand == InteractionHand::MainHand {
+                InteractionHand::OffHand
+            } else {
+                InteractionHand::MainHand
+            };
+            // A rejected early restart must not redirect the in-flight swing.
+            state.start_swing(opposite);
+            let animation = state.hand_animation(0.5, LookDirection::default());
+            assert!(animation.swing_progress[hand_index(hand)] > 0.0);
+            assert_eq!(animation.swing_progress[hand_index(opposite)], 0.0);
+            state.swing_time = SWING_DURATION / 2;
+            state.start_swing(opposite);
+            assert_eq!(state.swinging_hand, opposite);
+        }
+    }
+
+    #[test]
+    fn item_used_lowers_only_its_hand_and_restores_point_four_per_tick() {
+        for hand in [InteractionHand::MainHand, InteractionHand::OffHand] {
+            let mut state = InteractionState::new();
+            for _ in 0..3 {
+                state.tick_hand_animation(LookDirection::default());
+            }
+            assert_eq!(state.hand_height, [1.0; 2]);
+            state.item_used(hand);
+            let i = hand_index(hand);
+            let other = 1 - i;
+            assert_eq!(state.hand_height[i], 0.0);
+            assert_eq!(state.hand_height[other], 1.0);
+            // itemUsed leaves the previous height untouched.
+            assert!((state.o_hand_height[i] - 0.8).abs() < 1e-6);
+            for expected in [0.4, 0.8, 1.0] {
+                state.tick_hand_animation(LookDirection::default());
+                assert!((state.hand_height[i] - expected).abs() < 1e-6);
+                let animation = state.hand_animation(0.5, LookDirection::default());
+                let inverse = 1.0 - (state.o_hand_height[i] + expected) * 0.5;
+                assert!((animation.inverse_height[i] - inverse).abs() < 1e-6);
+                assert_eq!(animation.inverse_height[other], 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn hand_view_follow_smooths_half_and_interpolates_before_tenth_angle_rotation() {
+        let mut state = InteractionState::new();
+        let look = LookDirection::new(80.0, 40.0);
+        state.tick_hand_animation(look);
+        assert_eq!(state.hand_view_bob, glam::Vec2::new(20.0, 40.0));
+        let animation = state.hand_animation(0.5, look);
+        let expected = glam::Mat4::from_rotation_x(3.0_f32.to_radians())
+            * glam::Mat4::from_rotation_y(6.0_f32.to_radians());
+        assert!(animation.view_follow.abs_diff_eq(expected, 1e-6));
+        state.tick_hand_animation(look);
+        assert_eq!(state.hand_view_bob, glam::Vec2::new(30.0, 60.0));
     }
 
     #[test]
@@ -2413,6 +2894,34 @@ mod tests {
         // successful placement also reports a client swing in this version.
         let cases = [
             (
+                "multistate log consumes main hand",
+                ItemKind::OakLog,
+                ItemKind::Stone,
+                false,
+                vec![Sent::On(MainHand, 1), Sent::Swing(MainHand)],
+            ),
+            (
+                "multistate stair consumes main hand",
+                ItemKind::OakStairs,
+                ItemKind::Stone,
+                false,
+                vec![Sent::On(MainHand, 1), Sent::Swing(MainHand)],
+            ),
+            (
+                "sign consumes main hand",
+                ItemKind::OakSign,
+                ItemKind::Stone,
+                false,
+                vec![Sent::On(MainHand, 1), Sent::Swing(MainHand)],
+            ),
+            (
+                "wall torch predicts its wall variant, not offhand fallback",
+                ItemKind::Torch,
+                ItemKind::Stone,
+                false,
+                vec![Sent::On(MainHand, 1), Sent::Swing(MainHand)],
+            ),
+            (
                 "stick + placeable offhand",
                 ItemKind::Stick,
                 ItemKind::Stone,
@@ -2457,8 +2966,16 @@ mod tests {
             let stone = crate::world::block::first_state_of("stone").unwrap();
             let hit = BlockHitResult {
                 block_pos: BlockPos::new(2, 64, 2),
-                face: Direction::Up,
-                hit_point: dvec3(2.5, 65.0, 2.5),
+                face: if main_kind == ItemKind::Torch {
+                    Direction::East
+                } else {
+                    Direction::Up
+                },
+                hit_point: if main_kind == ItemKind::Torch {
+                    dvec3(3.0, 64.5, 2.5)
+                } else {
+                    dvec3(2.5, 65.0, 2.5)
+                },
                 inside: false,
                 world_border: false,
             };
@@ -2467,6 +2984,8 @@ mod tests {
             let placed_pos = hit.block_pos.offset_with_direction(hit.face);
             assert!(is_air(chunks.get_block_state(2, 65, 2)), "{name}");
             let mut state = InteractionState::new();
+            state.hand_height = [1.0; 2];
+            state.o_hand_height = [1.0; 2];
             state.target = Some(HitResult::Block(hit));
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let sender = PacketSender::new(tx);
@@ -2489,8 +3008,8 @@ mod tests {
                     Aabb::from_center(player_pos, 0.3, 0.9),
                     player_pos + dvec3(0.0, 1.62, 0.0),
                     LookDirection::default(),
-                    None,
-                    (off_kind == ItemKind::Stone).then_some(stone),
+                    registry.placeable_block_for_item(&item_resource_name(main_kind)),
+                    registry.placeable_block_for_item(&item_resource_name(off_kind)),
                     Some(&main),
                     10, // hungry, so the offhand apple starts consuming
                     false,
@@ -2499,6 +3018,7 @@ mod tests {
                     MainHand,
                     false,
                     Some(&off),
+                    false,
                     false,
                     false,
                     false,
@@ -2525,10 +3045,27 @@ mod tests {
                 });
             }
             assert_eq!(actual, expected, "{name}");
-            let placed = main_kind == ItemKind::Stick && off_kind == ItemKind::Stone && !spectator;
+            if let Some(swing_hand) = actual.iter().find_map(|sent| match sent {
+                Sent::Swing(hand) => Some(*hand),
+                _ => None,
+            }) {
+                assert!(state.swinging, "{name}");
+                assert_eq!(state.swinging_hand, swing_hand, "{name}");
+            } else {
+                assert!(!state.swinging, "{name}");
+            }
+            let main_prediction = registry.placeable_block_for_item(&item_resource_name(main_kind));
+            let placed = !spectator
+                && (main_prediction.is_some()
+                    || main_kind == ItemKind::Stick && off_kind == ItemKind::Stone);
+            let predicted = if main_kind == ItemKind::Torch {
+                crate::world::block::find_state("wall_torch", &[("facing", "east")])
+            } else {
+                main_prediction.unwrap_or(stone)
+            };
             assert_eq!(
-                chunks.get_block_state(2, 65, 2),
-                if placed { stone } else { BlockState::AIR },
+                chunks.get_block_state(placed_pos.x, placed_pos.y, placed_pos.z),
+                if placed { predicted } else { BlockState::AIR },
                 "{name}",
             );
             assert_eq!(
@@ -2542,14 +3079,870 @@ mod tests {
                 "{name}"
             );
             if placed {
-                assert_eq!(state.pending_predictions[&placed_pos].seq, 3, "{name}");
+                assert_eq!(
+                    state.pending_predictions[&placed_pos].seq,
+                    if main_kind == ItemKind::Stick { 3 } else { 1 },
+                    "{name}"
+                );
             }
             assert_eq!(
                 state.using_item.as_ref().map(|use_| (use_.hand, use_.kind)),
                 (off_kind == ItemKind::Apple).then_some((OffHand, ItemKind::Apple)),
                 "{name}",
             );
+            if let Some(hand) = actual.iter().find_map(|sent| match sent {
+                Sent::Swing(hand) => Some(*hand),
+                _ => None,
+            }) {
+                // Survival never shrinks a stack speculatively. Only its server
+                // count change lowers that hand, including consuming the last item.
+                assert_eq!(state.hand_height, [1.0; 2], "{name}");
+                let (main_after, off_after) = if hand == MainHand {
+                    (None, Some(&off))
+                } else {
+                    (Some(&main), None)
+                };
+                state.update_placement_heights(main_after, off_after);
+                let mut expected_height = [1.0; 2];
+                expected_height[hand_index(hand)] = 0.0;
+                assert_eq!(state.hand_height, expected_height, "{name}");
+                state.tick_hand_animation(LookDirection::default());
+                expected_height[hand_index(hand)] = 0.4;
+                assert_eq!(state.hand_height, expected_height, "{name}");
+            }
         }
+    }
+
+    #[test]
+    fn start_use_item_predicts_even_when_server_may_reject_placement() {
+        use InteractionHand::{MainHand, OffHand};
+
+        use crate::net::sender::Outbound;
+
+        for (
+            name,
+            main_kind,
+            blocked,
+            overlap,
+            menu,
+            sneak,
+            cooldown,
+            off_cooldown,
+            expected_hand,
+        ) in [
+            (
+                "occupied",
+                ItemKind::Stone,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                Some(MainHand),
+            ),
+            (
+                "player collision",
+                ItemKind::Stone,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                Some(MainHand),
+            ),
+            (
+                "cooldown",
+                ItemKind::Stone,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                Some(MainHand),
+            ),
+            (
+                "offhand cooldown",
+                ItemKind::Stick,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Some(OffHand),
+            ),
+            (
+                "menu consumes use",
+                ItemKind::Stone,
+                false,
+                false,
+                true,
+                false,
+                false,
+                false,
+                None,
+            ),
+            (
+                "sneak bypasses menu",
+                ItemKind::Stone,
+                false,
+                false,
+                true,
+                true,
+                false,
+                false,
+                Some(MainHand),
+            ),
+            (
+                "creative main",
+                ItemKind::Stone,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                Some(MainHand),
+            ),
+            (
+                "creative offhand",
+                ItemKind::Stick,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                Some(OffHand),
+            ),
+        ] {
+            let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+            let stone = crate::world::block::first_state_of("stone").unwrap();
+            chunks.set_block_state(
+                2,
+                64,
+                2,
+                if menu {
+                    crate::world::block::first_state_of("hopper").unwrap()
+                } else {
+                    stone
+                },
+            );
+            if blocked {
+                chunks.set_block_state(2, 65, 2, stone);
+            }
+            let hit = BlockHitResult {
+                block_pos: BlockPos::new(2, 64, 2),
+                face: Direction::Up,
+                hit_point: dvec3(2.5, 65.0, 2.5),
+                inside: false,
+                world_border: false,
+            };
+            let player_pos = if overlap {
+                dvec3(2.5, 65.0, 2.5)
+            } else {
+                dvec3(0.5, 64.0, 0.5)
+            };
+            let mut state = InteractionState::new();
+            state.hand_height = [1.0; 2];
+            state.o_hand_height = [1.0; 2];
+            state.target = Some(HitResult::Block(hit));
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let sender = PacketSender::new(tx);
+            let biome_climate = HashMap::new();
+            let mut effects = BreakEffects {
+                particles: &mut particles,
+                registry: &registry,
+                biome_climate: &biome_climate,
+            };
+            let main = ItemStackData::new(main_kind, 64);
+            let off = ItemStackData::new(ItemKind::Stone, 64);
+            let mut dirty = Vec::new();
+            let consumed = state.start_use_item(
+                &sender,
+                &mut audio,
+                &chunks,
+                player_pos,
+                Aabb::from_center(player_pos, 0.3, 0.9),
+                player_pos + dvec3(0.0, 1.62, 0.0),
+                LookDirection::default(),
+                registry.placeable_block_for_item(&item_resource_name(main_kind)),
+                Some(stone),
+                Some(&main),
+                20,
+                true,
+                false,
+                &entities,
+                MainHand,
+                cooldown,
+                Some(&off),
+                off_cooldown,
+                false,
+                sneak,
+                sneak,
+                &mut effects,
+                &mut dirty,
+            );
+            assert_eq!(
+                consumed,
+                expected_hand.is_some() || menu && !sneak,
+                "{name}"
+            );
+            let mut swings = Vec::new();
+            let mut on_hands = Vec::new();
+            while let Ok(out) = rx.try_recv() {
+                let Outbound::Packet(packet) = out else {
+                    panic!("{name}: unexpected raw packet")
+                };
+                match *packet {
+                    ServerboundGamePacket::Swing(packet) => swings.push(packet.hand),
+                    ServerboundGamePacket::UseItemOn(packet) => on_hands.push(packet.hand),
+                    ServerboundGamePacket::UseItem(packet) => {
+                        assert_eq!(packet.hand, MainHand, "{name}")
+                    }
+                    packet => panic!("{name}: unexpected {packet:?}"),
+                }
+            }
+            assert_eq!(
+                swings,
+                expected_hand.into_iter().collect::<Vec<_>>(),
+                "{name}"
+            );
+            assert_eq!(
+                on_hands,
+                if main_kind == ItemKind::Stick {
+                    vec![MainHand, OffHand]
+                } else {
+                    vec![MainHand]
+                },
+                "{name}"
+            );
+            assert_eq!(state.swinging, expected_hand.is_some(), "{name}");
+            let mut heights = [1.0; 2];
+            if let Some(hand) = expected_hand {
+                heights[hand_index(hand)] = 0.0;
+                assert_eq!(state.swinging_hand, hand, "{name}");
+            }
+            assert_eq!(state.hand_height, heights, "{name}");
+            assert_eq!(
+                dirty,
+                if expected_hand.is_some() {
+                    vec![BlockPos::new(2, 65, 2)]
+                } else {
+                    vec![]
+                },
+                "{name}"
+            );
+            assert_eq!(state.use_delay, USE_DELAY, "{name}");
+            for height in [0.4, 0.8, 1.0] {
+                state.tick_hand_animation(LookDirection::default());
+                if let Some(hand) = expected_hand {
+                    heights[hand_index(hand)] = height;
+                }
+                assert_eq!(state.hand_height, heights, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn start_use_item_preserves_inside_and_restores_replaced_state_on_rejected_ack() {
+        use crate::net::sender::Outbound;
+        for replace_clicked in [true, false] {
+            let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+            let stone = crate::world::block::first_state_of("stone").unwrap();
+            let previous = if replace_clicked {
+                crate::world::block::first_state_of("short_grass").unwrap()
+            } else {
+                crate::world::block::water_source_state()
+            };
+            chunks.set_block_state(2, 64, 2, if replace_clicked { previous } else { stone });
+            let pos = BlockPos::new(2, if replace_clicked { 64 } else { 65 }, 2);
+            if !replace_clicked {
+                chunks.set_block_state(pos.x, pos.y, pos.z, previous);
+            }
+            let border = crate::world::border::WorldBorder::default();
+            let hit = raycast(dvec3(2.5, 64.5, 2.5), Vec3::NEG_Y, REACH, &chunks, &border).unwrap();
+            assert!(hit.inside);
+            assert_eq!(hit.face, Direction::Up);
+            let mut state = InteractionState::new();
+            state.target = Some(HitResult::Block(hit));
+            state.hand_height = [1.0; 2];
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let sender = PacketSender::new(tx);
+            let biome_climate = HashMap::new();
+            let mut effects = BreakEffects {
+                particles: &mut particles,
+                registry: &registry,
+                biome_climate: &biome_climate,
+            };
+            let stack = ItemStackData::new(ItemKind::Stone, 64);
+            let player_pos = dvec3(0.5, 64.0, 0.5);
+            let player = Aabb::from_center(player_pos, 0.3, 0.9);
+            let mut dirty = Vec::new();
+            assert!(state.start_use_item(
+                &sender,
+                &mut audio,
+                &chunks,
+                player_pos,
+                player,
+                player_pos + dvec3(0.0, 1.62, 0.0),
+                LookDirection::default(),
+                Some(stone),
+                None,
+                Some(&stack),
+                20,
+                false,
+                false,
+                &entities,
+                InteractionHand::MainHand,
+                false,
+                None,
+                false,
+                false,
+                false,
+                false,
+                &mut effects,
+                &mut dirty,
+            ));
+            match rx.try_recv().unwrap() {
+                Outbound::Packet(packet) => match *packet {
+                    ServerboundGamePacket::UseItemOn(packet) => {
+                        assert!(packet.block_hit.inside);
+                        assert_eq!(packet.block_hit.location, azalea_vec3(hit.hit_point));
+                    }
+                    packet => panic!("expected UseItemOn, got {packet:?}"),
+                },
+                _ => panic!("expected typed packet"),
+            }
+            assert!(
+                matches!(rx.try_recv(), Ok(Outbound::Packet(packet)) if matches!(*packet, ServerboundGamePacket::Swing(_)))
+            );
+            assert!(rx.try_recv().is_err());
+            assert_eq!(chunks.get_block_state(pos.x, pos.y, pos.z), stone);
+            assert_eq!(dirty, vec![pos]);
+            assert_eq!(state.pending_predictions[&pos].state, previous);
+            dirty.clear();
+            assert_eq!(state.acknowledge(1, &chunks, player, &mut dirty), None);
+            assert_eq!(chunks.get_block_state(pos.x, pos.y, pos.z), previous);
+            assert_eq!(dirty, vec![pos]);
+            state.update_placement_heights(Some(&stack), None);
+            assert_eq!(state.hand_height, [1.0; 2]);
+            assert!(state.pending_placement_uses.iter().all(Option::is_none));
+            // A later unrelated count change must not lower a rejected placement.
+            state.update_placement_heights(Some(&ItemStackData::new(ItemKind::Stone, 63)), None);
+            assert_eq!(state.hand_height, [1.0; 2]);
+        }
+    }
+
+    #[test]
+    fn immediate_edit_prediction_repick_collision_and_ack_rollback() {
+        use crate::net::sender::Outbound;
+        use crate::physics::collision::no_collision;
+
+        let (mut chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+        let col = azalea_core::position::ChunkPos::new(-1, 0);
+        let mut column = azalea_world::Chunk::default();
+        column.sections = vec![Default::default(); chunks.section_count() as usize].into();
+        chunks.load_decoded_chunk(col, column);
+        let stone = crate::world::block::first_state_of("stone").unwrap();
+        let dirt = crate::world::block::first_state_of("dirt").unwrap();
+        let pos = BlockPos::new(-1, -48, 2); // negative column + section boundary
+        let behind = BlockPos::new(-1, -48, 3);
+        chunks.set_block_state(pos.x, pos.y, pos.z, stone);
+        chunks.set_block_state(behind.x, behind.y, behind.z, stone);
+        let border = crate::world::border::WorldBorder::default();
+        let eye = Position::new(-0.5, -47.5, 0.5);
+        let look = LookDirection::default();
+        let probe = Aabb::from_center(dvec3(-0.5, -47.5, 2.5), 0.2, 0.2);
+        let player_pos = dvec3(-0.5, -49.0, 0.5);
+        let player = Aabb::from_center(player_pos, 0.3, 0.9);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let stack = ItemStackData::new(ItemKind::Dirt, 64);
+        let biome_climate = HashMap::new();
+        let mut effects = BreakEffects {
+            particles: &mut particles,
+            registry: &registry,
+            biome_climate: &biome_climate,
+        };
+        let mut state = InteractionState::new();
+        let mut dirty = Vec::new();
+        let mut before = Vec::new();
+        for previous in [stone, dirt, dirt] {
+            state.update_target(eye, look, &chunks, &entities, true, &border);
+            let Some(HitResult::Block(hit)) = state.target else {
+                panic!("missing target")
+            };
+            assert_eq!(hit.block_pos, pos);
+            assert!(!no_collision(&chunks, &probe));
+            state.start_destroy_block(
+                hit,
+                &chunks,
+                &sender,
+                &mut audio,
+                player_pos,
+                true,
+                true,
+                None,
+                &mut effects,
+                &mut dirty,
+            );
+            assert!(
+                matches!(rx.try_recv(), Ok(Outbound::Packet(p)) if matches!(&*p,
+                ServerboundGamePacket::PlayerAction(action) if action.pos == pos))
+            );
+            assert_eq!(chunks.get_block_state(pos.x, pos.y, pos.z), BlockState::AIR);
+            assert!(no_collision(&chunks, &probe)); // same world, no physics tick/mesh wait
+            state.update_target(eye, look, &chunks, &entities, true, &border);
+            let Some(HitResult::Block(hit)) = state.target else {
+                panic!("missing exposed target")
+            };
+            assert_eq!(hit.block_pos, behind);
+            assert_eq!(hit.face, Direction::North);
+            assert!(state.start_use_item(
+                &sender,
+                &mut audio,
+                &chunks,
+                player_pos,
+                player,
+                eye.into(),
+                look,
+                Some(dirt),
+                None,
+                Some(&stack),
+                20,
+                true,
+                false,
+                &entities,
+                InteractionHand::MainHand,
+                false,
+                None,
+                false,
+                false,
+                false,
+                false,
+                &mut effects,
+                &mut dirty
+            ));
+            assert!(
+                matches!(rx.try_recv(), Ok(Outbound::Packet(p)) if matches!(&*p,
+                ServerboundGamePacket::UseItemOn(packet) if packet.block_hit.block_pos == behind
+                    && packet.block_hit.direction == Direction::North))
+            );
+            assert!(
+                matches!(rx.try_recv(), Ok(Outbound::Packet(p)) if matches!(*p,
+                ServerboundGamePacket::Swing(_)))
+            );
+            assert_eq!(chunks.get_block_state(pos.x, pos.y, pos.z), dirt);
+            assert!(!no_collision(&chunks, &probe)); // overlap remains accepted
+            state.update_target(eye, look, &chunks, &entities, true, &border);
+            assert!(matches!(state.target, Some(HitResult::Block(hit)) if hit.block_pos == pos));
+            before.extend([(pos, previous), (pos, BlockState::AIR)]);
+        }
+        assert_eq!(dirty, vec![pos]);
+        assert_eq!(state.take_visual_edits(), before);
+        assert!(state.take_visual_edits().is_empty());
+        dirty.clear();
+        state.acknowledge(state.seq - 1, &chunks, player, &mut dirty);
+        assert!(dirty.is_empty());
+        assert!(state.take_visual_edits().is_empty()); // old ACK does not retire/update delta
+        state.acknowledge(state.seq, &chunks, player, &mut dirty);
+        assert_eq!(dirty, vec![pos]);
+        assert_eq!(state.take_visual_edits(), vec![(pos, dirt)]); // rollback re-enters delta
+        assert_eq!(chunks.get_block_state(pos.x, pos.y, pos.z), stone);
+        assert!(!no_collision(&chunks, &probe));
+        state.update_target(eye, look, &chunks, &entities, true, &border);
+        assert!(matches!(state.target, Some(HitResult::Block(hit)) if hit.block_pos == pos));
+    }
+
+    #[test]
+    fn consecutive_break_then_place_keeps_latest_prediction_until_its_ack() {
+        for confirmed in [false, true] {
+            let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+            let stone = crate::world::block::first_state_of("stone").unwrap();
+            let dirt = crate::world::block::first_state_of("dirt").unwrap();
+            let pos = BlockPos::new(2, 64, 2);
+            chunks.set_block_state(2, 63, 2, stone);
+            chunks.set_block_state(pos.x, pos.y, pos.z, stone);
+            let player_pos = dvec3(0.5, 64.0, 0.5);
+            let player = Aabb::from_center(player_pos, 0.3, 0.9);
+            let biome_climate = HashMap::new();
+            let mut effects = BreakEffects {
+                particles: &mut particles,
+                registry: &registry,
+                biome_climate: &biome_climate,
+            };
+            let mut state = InteractionState::new();
+            let mut dirty = Vec::new();
+            state.hand_height = [1.0; 2];
+            state.seq = 1;
+            state.predict_destroy(
+                pos,
+                stone,
+                player_pos,
+                &chunks,
+                &mut audio,
+                &mut effects,
+                &mut dirty,
+                &crate::movement_record::Recorder::default(),
+            );
+            assert!(is_air(chunks.get_block_state(pos.x, pos.y, pos.z)));
+            assert_eq!(dirty, vec![pos]);
+            state.target = Some(HitResult::Block(BlockHitResult {
+                block_pos: BlockPos::new(2, 63, 2),
+                face: Direction::Up,
+                hit_point: dvec3(2.5, 64.0, 2.5),
+                inside: false,
+                world_border: false,
+            }));
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let sender = PacketSender::new(tx);
+            let stack = ItemStackData::new(ItemKind::Dirt, 64);
+            assert!(state.start_use_item(
+                &sender,
+                &mut audio,
+                &chunks,
+                player_pos,
+                player,
+                player_pos + dvec3(0.0, 1.62, 0.0),
+                LookDirection::default(),
+                Some(dirt),
+                None,
+                Some(&stack),
+                20,
+                false,
+                false,
+                &entities,
+                InteractionHand::MainHand,
+                false,
+                None,
+                false,
+                false,
+                false,
+                false,
+                &mut effects,
+                &mut dirty,
+            ));
+            assert_eq!(chunks.get_block_state(pos.x, pos.y, pos.z), dirt);
+            assert_eq!(state.pending_predictions[&pos].seq, 2);
+            assert_eq!(state.pending_predictions[&pos].state, stone);
+            dirty.clear();
+            state.acknowledge(1, &chunks, player, &mut dirty);
+            assert!(dirty.is_empty());
+            assert_eq!(chunks.get_block_state(pos.x, pos.y, pos.z), dirt);
+            assert!(state.pending_predictions.contains_key(&pos));
+            if confirmed {
+                assert!(state.update_known_server_state(&pos, dirt));
+            }
+            state.acknowledge(2, &chunks, player, &mut dirty);
+            assert_eq!(
+                chunks.get_block_state(pos.x, pos.y, pos.z),
+                if confirmed { dirt } else { stone }
+            );
+            assert_eq!(dirty, if confirmed { vec![] } else { vec![pos] });
+            assert!(state.pending_predictions.is_empty());
+            state.update_placement_heights(Some(&stack), None);
+            assert_eq!(state.hand_height, [1.0; 2]);
+            assert_eq!(state.pending_placement_uses[0].is_some(), confirmed);
+            // A successful ACK before a later inventory packet must still lower
+            // the main hand; a rejected edit must not react to unrelated changes.
+            state.update_placement_heights(Some(&ItemStackData::new(ItemKind::Dirt, 63)), None);
+            assert_eq!(
+                state.hand_height,
+                if confirmed { [0.0, 1.0] } else { [1.0; 2] }
+            );
+        }
+    }
+
+    #[test]
+    fn start_use_item_multistate_reconciles_both_hands_and_ignores_old_ack() {
+        use InteractionHand::{MainHand, OffHand};
+
+        use crate::net::sender::Outbound;
+        for hand in [MainHand, OffHand] {
+            for response in [None, Some("oak_slab"), Some("dirt")] {
+                let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+                let pos = BlockPos::new(2, 65, 2);
+                let original = crate::world::block::default_state_of("stone").unwrap();
+                let predicted = registry.placeable_block_for_item("oak_slab").unwrap();
+                assert_ne!(
+                    predicted,
+                    crate::world::block::first_state_of("oak_slab").unwrap()
+                );
+                chunks.set_block_state(2, 64, 2, original);
+                chunks.set_block_state(pos.x, pos.y, pos.z, original); // occupied
+                let player_pos = dvec3(2.5, 65.0, 2.5); // overlaps the target
+                let player = Aabb::from_center(player_pos, 0.3, 0.9);
+                let mut state = InteractionState::new();
+                state.target = Some(HitResult::Block(BlockHitResult {
+                    block_pos: BlockPos::new(2, 64, 2),
+                    face: Direction::Up,
+                    hit_point: dvec3(2.5, 65.0, 2.5),
+                    inside: false,
+                    world_border: true,
+                }));
+                let stack = ItemStackData::new(ItemKind::OakSlab, 64);
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let sender = PacketSender::new(tx);
+                let biome_climate = HashMap::new();
+                let mut effects = BreakEffects {
+                    particles: &mut particles,
+                    registry: &registry,
+                    biome_climate: &biome_climate,
+                };
+                let mut dirty = Vec::new();
+                for seq in 1..=2 {
+                    assert!(state.start_use_item(
+                        &sender,
+                        &mut audio,
+                        &chunks,
+                        player_pos,
+                        player,
+                        player_pos + dvec3(0.0, 1.62, 0.0),
+                        LookDirection::default(),
+                        None,
+                        None, // unknown placement state
+                        if hand == MainHand { Some(&stack) } else { None },
+                        20,
+                        false,
+                        false,
+                        &entities,
+                        MainHand,
+                        true,
+                        if hand == OffHand { Some(&stack) } else { None },
+                        true,
+                        false,
+                        false,
+                        false,
+                        &mut effects,
+                        &mut dirty
+                    ));
+                    let latest = if hand == MainHand { seq } else { seq * 2 };
+                    assert_eq!(state.pending_predictions[&pos].seq, latest);
+                    assert_eq!(state.pending_predictions[&pos].state, original);
+                    assert_eq!(chunks.get_block_state(pos.x, pos.y, pos.z), predicted);
+                    assert_eq!(stack.count, 64);
+                }
+                let mut swings = Vec::new();
+                let mut on = Vec::new();
+                while let Ok(Outbound::Packet(packet)) = rx.try_recv() {
+                    match *packet {
+                        ServerboundGamePacket::Swing(packet) => swings.push(packet.hand),
+                        ServerboundGamePacket::UseItemOn(packet) => {
+                            assert!(packet.block_hit.world_border);
+                            on.push((packet.hand, packet.seq));
+                        }
+                        packet => panic!("unexpected {packet:?}"),
+                    }
+                }
+                assert_eq!(swings, vec![hand; 2]);
+                assert_eq!(
+                    on,
+                    if hand == MainHand {
+                        vec![(MainHand, 1), (MainHand, 2)]
+                    } else {
+                        vec![(MainHand, 1), (OffHand, 2), (MainHand, 3), (OffHand, 4)]
+                    }
+                );
+                assert_eq!(dirty, vec![pos]);
+                dirty.clear();
+                let latest = state.seq;
+                state.acknowledge(latest - 1, &chunks, player, &mut dirty);
+                assert!(dirty.is_empty());
+                assert_eq!(chunks.get_block_state(pos.x, pos.y, pos.z), predicted);
+                assert!(state.pending_predictions.contains_key(&pos));
+                let authoritative =
+                    response.map(|name| crate::world::block::default_state_of(name).unwrap());
+                if let Some(server) = authoritative {
+                    // Shared absorption path used by both single/section server updates.
+                    assert!(state.update_known_server_state(&pos, server));
+                    assert_eq!(chunks.get_block_state(pos.x, pos.y, pos.z), predicted);
+                }
+                state.acknowledge(latest, &chunks, player, &mut dirty);
+                let expected = authoritative.unwrap_or(original);
+                assert_eq!(chunks.get_block_state(pos.x, pos.y, pos.z), expected);
+                assert_eq!(
+                    dirty,
+                    if expected == predicted {
+                        vec![]
+                    } else {
+                        vec![pos]
+                    }
+                );
+                assert!(state.pending_predictions.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn placement_state_predicts_basic_orientation_and_wall_variants() {
+        crate::world::block::init("26.2");
+        for (name, face, key, expected) in [
+            ("oak_log", Direction::East, "axis", "x"),
+            ("oak_log", Direction::North, "axis", "z"),
+            ("oak_log", Direction::Up, "axis", "y"),
+            ("oak_stairs", Direction::Up, "facing", "north"),
+            ("oak_sign", Direction::Up, "rotation", "8"),
+            ("torch", Direction::East, "facing", "east"),
+            ("soul_torch", Direction::West, "facing", "west"),
+            ("redstone_torch", Direction::North, "facing", "north"),
+            ("oak_sign", Direction::South, "facing", "south"),
+        ] {
+            let state = placement_state(
+                crate::world::block::default_state_of(name).unwrap(),
+                face,
+                LookDirection::default(),
+            );
+            assert_eq!(
+                crate::world::block::block_properties(state).get(key),
+                Some(expected),
+                "{name}"
+            );
+            if name.ends_with("torch") {
+                assert!(crate::world::block::block_id(state).ends_with("wall_torch"));
+            } else if name == "oak_sign" && face == Direction::South {
+                assert_eq!(crate::world::block::block_id(state), "oak_wall_sign");
+            }
+        }
+    }
+
+    #[test]
+    fn start_use_item_unwritable_targets_succeed_without_inventing_predictions() {
+        use InteractionHand::{MainHand, OffHand};
+
+        use crate::net::sender::Outbound;
+        for hand in [MainHand, OffHand] {
+            for unloaded in [false, true] {
+                let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+                let hit = BlockHitResult {
+                    block_pos: if unloaded {
+                        BlockPos::new(15, 64, 2)
+                    } else {
+                        BlockPos::new(2, chunks.min_y() + chunks.height() as i32 - 1, 2)
+                    },
+                    face: if unloaded {
+                        Direction::East
+                    } else {
+                        Direction::Up
+                    },
+                    hit_point: dvec3(2.5, 65.0, 2.5),
+                    inside: false,
+                    world_border: false,
+                };
+                let stone = registry.placeable_block_for_item("stone").unwrap();
+                chunks.set_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z, stone);
+                let pos = hit.block_pos.offset_with_direction(hit.face);
+                let mut state = InteractionState::new();
+                state.hand_height = [1.0; 2];
+                state.target = Some(HitResult::Block(hit));
+                let stack = ItemStackData::new(ItemKind::Stone, 64);
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let sender = PacketSender::new(tx);
+                let biome_climate = HashMap::new();
+                let mut effects = BreakEffects {
+                    particles: &mut particles,
+                    registry: &registry,
+                    biome_climate: &biome_climate,
+                };
+                let player_pos = dvec3(0.5, 64.0, 0.5);
+                let mut dirty = Vec::new();
+                assert!(state.start_use_item(
+                    &sender,
+                    &mut audio,
+                    &chunks,
+                    player_pos,
+                    Aabb::from_center(player_pos, 0.3, 0.9),
+                    player_pos + dvec3(0.0, 1.62, 0.0),
+                    LookDirection::default(),
+                    Some(stone),
+                    Some(stone),
+                    if hand == MainHand { Some(&stack) } else { None },
+                    20,
+                    true,
+                    false,
+                    &entities,
+                    MainHand,
+                    false,
+                    if hand == OffHand { Some(&stack) } else { None },
+                    false,
+                    false,
+                    false,
+                    false,
+                    &mut effects,
+                    &mut dirty
+                ));
+                assert!(dirty.is_empty());
+                assert!(state.pending_predictions.is_empty());
+                assert!(state.pending_placement_uses.iter().all(Option::is_none));
+                assert!(is_air(chunks.get_block_state(pos.x, pos.y, pos.z)));
+                assert!(state.swinging);
+                assert_eq!(state.swinging_hand, hand);
+                assert_eq!(state.hand_height[hand_index(hand)], 0.0);
+                let mut swing_packets = 0;
+                while let Ok(Outbound::Packet(packet)) = rx.try_recv() {
+                    if let ServerboundGamePacket::Swing(packet) = *packet {
+                        assert_eq!(packet.hand, hand);
+                        swing_packets += 1;
+                    }
+                }
+                assert_eq!(swing_packets, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn placement_target_does_not_treat_contextual_blocks_as_replaceable() {
+        let (chunks, _) = border_test_world();
+        let hit = BlockHitResult {
+            block_pos: BlockPos::new(2, 64, 2),
+            face: Direction::Up,
+            hit_point: dvec3(2.5, 65.0, 2.5),
+            inside: false,
+            world_border: false,
+        };
+        let stone = crate::world::block::first_state_of("stone").unwrap();
+        for state in [
+            crate::world::block::find_state("oak_slab", &[("type", "bottom")]),
+            crate::world::block::find_state("snow", &[("layers", "2")]),
+        ] {
+            chunks.set_block_state(2, 64, 2, state);
+            chunks.set_block_state(2, 65, 2, stone);
+            assert_eq!(
+                placement_target(hit, "stone", &chunks),
+                Some((BlockPos::new(2, 65, 2), stone))
+            );
+        }
+        let snow = crate::world::block::find_state("snow", &[("layers", "1")]);
+        chunks.set_block_state(2, 64, 2, snow);
+        assert_eq!(
+            placement_target(hit, "stone", &chunks),
+            Some((hit.block_pos, snow))
+        );
+        assert!(!can_replace_for_item(
+            crate::world::block::first_state_of("vine").unwrap(),
+            "vine"
+        ));
+        assert!(crate::world::block::registry::block_for_item("stick").is_none());
+        assert_eq!(
+            crate::world::block::registry::block_for_item("redstone"),
+            Some("redstone_wire")
+        );
+        let registry = BlockRegistry::test_empty();
+        assert_eq!(
+            registry.placeable_block_for_item("torch"),
+            crate::world::block::default_state_of("torch")
+        );
+        assert_eq!(
+            registry.placeable_block_for_item("oak_slab"),
+            crate::world::block::default_state_of("oak_slab")
+        );
+        assert_ne!(
+            registry.placeable_block_for_item("oak_slab"),
+            crate::world::block::first_state_of("oak_slab")
+        );
     }
 
     #[test]
@@ -2635,6 +4028,7 @@ mod tests {
                         has_projectile,
                         None,
                         None,
+                        false,
                         false,
                         &mut effects,
                     );
@@ -2863,7 +4257,9 @@ mod tests {
         assert!(slab_hit.is_none());
 
         let onto_the_slab = origin + dvec3(3.0, -2.75, 0.0);
-        let (hit_point, face) = clip_shape(origin, onto_the_slab, block, &bottom_slab).unwrap();
+        let (hit_point, face, inside) =
+            clip_shape(origin, onto_the_slab, block, &bottom_slab).unwrap();
+        assert!(!inside);
         let tolerance = 1e-9;
         let is_on_slab_surface = (hit_point.y - slab_height).abs() < tolerance;
         assert!(is_on_slab_surface, "hit {hit_point:?}");
@@ -2886,8 +4282,9 @@ mod tests {
         let inside_the_slab = dvec3(0.5, 0.25, 0.5);
         let ray = dvec3(0.0, -4.0, 0.0);
 
-        let (hit_point, face) =
+        let (hit_point, face, inside) =
             clip_shape(inside_the_slab, inside_the_slab + ray, block, &bottom_slab).unwrap();
+        assert!(inside);
         assert_eq!(hit_point, inside_the_slab + ray * INSIDE_PROBE_FRACTION);
         assert_eq!(face, Direction::Up);
     }

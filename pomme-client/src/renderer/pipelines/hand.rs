@@ -13,6 +13,14 @@ const NEAR: f32 = 0.05;
 // Minecraft 26.2 GameRenderer.setupPerspective uses a 100-block hand far plane.
 const FAR: f32 = 100.0;
 
+/// Frame-local first-person inputs; array entries are main hand, offhand.
+#[derive(Clone, Copy)]
+pub struct HandAnimation {
+    pub swing_progress: [f32; 2],
+    pub inverse_height: [f32; 2],
+    pub view_follow: Mat4,
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct HandVertex {
@@ -200,34 +208,12 @@ impl HandPipeline {
         aspect: f32,
         hud_fov: f32,
         swing_progress: f32,
+        inverse_height: f32,
         bob: Mat4,
     ) {
         let proj = projection(aspect, hud_fov);
 
-        let sp = swing_progress;
-        let sqrt_sp = sp.sqrt();
-        let pi = std::f32::consts::PI;
-
-        let x_off = -0.3 * (sqrt_sp * pi).sin();
-        let y_off = 0.4 * (sqrt_sp * pi * 2.0).sin();
-        let z_off = -0.4 * (sp * pi).sin();
-
-        let swing_y = (sqrt_sp * pi).sin() * 70.0_f32.to_radians();
-        let swing_z = (sp * sp * pi).sin() * (-20.0_f32).to_radians();
-
-        let pivot = Vec3::new(-5.0 / 16.0, 2.0 / 16.0, 0.0);
-        let arm_local_rot = Mat4::from_translation(pivot) * Mat4::from_rotation_z(0.1);
-
-        let model = Mat4::from_translation(Vec3::new(x_off + 0.64, y_off - 0.6, z_off - 0.72))
-            * Mat4::from_rotation_y(45.0_f32.to_radians())
-            * Mat4::from_rotation_y(swing_y)
-            * Mat4::from_rotation_z(swing_z)
-            * Mat4::from_translation(Vec3::new(-1.0, 3.6, 3.5))
-            * Mat4::from_rotation_z(120.0_f32.to_radians())
-            * Mat4::from_rotation_x(200.0_f32.to_radians())
-            * Mat4::from_rotation_y((-135.0_f32).to_radians())
-            * Mat4::from_translation(Vec3::new(5.6, 0.0, 0.0))
-            * arm_local_rot;
+        let model = first_person_hand_matrix(swing_progress, inverse_height);
 
         let mvp = proj * bob * model;
         let uniform = HandUniform {
@@ -671,9 +657,46 @@ fn create_pipeline(
     pipeline
 }
 
+fn first_person_hand_matrix(sp: f32, inverse_height: f32) -> Mat4 {
+    let sqrt_sp = sp.sqrt();
+    let pi = std::f32::consts::PI;
+    let x_off = -0.3 * (sqrt_sp * pi).sin();
+    let y_off = 0.4 * (sqrt_sp * pi * 2.0).sin();
+    let z_off = -0.4 * (sp * pi).sin();
+    let swing_y = (sqrt_sp * pi).sin() * 70.0_f32.to_radians();
+    let swing_z = (sp * sp * pi).sin() * (-20.0_f32).to_radians();
+    let pivot = Vec3::new(-5.0 / 16.0, 2.0 / 16.0, 0.0);
+    let arm_local_rot = Mat4::from_translation(pivot) * Mat4::from_rotation_z(0.1);
+
+    Mat4::from_translation(Vec3::new(
+        x_off + 0.64,
+        y_off - 0.52 - inverse_height * 0.6,
+        z_off - 0.72,
+    )) * Mat4::from_rotation_y(45.0_f32.to_radians())
+        * Mat4::from_rotation_y(swing_y)
+        * Mat4::from_rotation_z(swing_z)
+        * Mat4::from_translation(Vec3::new(-1.0, 3.6, 3.5))
+        * Mat4::from_rotation_z(120.0_f32.to_radians())
+        * Mat4::from_rotation_x(200.0_f32.to_radians())
+        * Mat4::from_rotation_y((-135.0_f32).to_radians())
+        * Mat4::from_translation(Vec3::new(5.6, 0.0, 0.0))
+        * arm_local_rot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_hand_equip_height_lowers_the_whole_pose() {
+        for swing in [0.0, 0.5, 1.0] {
+            let raised = first_person_hand_matrix(swing, 0.0);
+            for inverse in [0.25, 1.0] {
+                let lower = Mat4::from_translation(Vec3::new(0.0, -inverse * 0.6, 0.0));
+                assert!(first_person_hand_matrix(swing, inverse).abs_diff_eq(lower * raised, 1e-6));
+            }
+        }
+    }
 
     #[test]
     fn hand_projection_matches_vanilla_near_and_far_planes() {

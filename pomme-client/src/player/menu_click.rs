@@ -22,6 +22,7 @@ pub enum ContainerKind {
     Furnace,
     Chest { rows: u8 },
     ShulkerBox,
+    Hopper,
     Anvil,
     Enchantment,
     Beacon,
@@ -36,6 +37,7 @@ impl ContainerKind {
             Self::Furnace | Self::Anvil => 39,
             Self::Chest { rows } => rows as usize * 9 + 36,
             Self::ShulkerBox => 63,
+            Self::Hopper => 41,
             Self::Enchantment => 38,
             Self::Beacon => 37,
             Self::Merchant => 39,
@@ -51,6 +53,7 @@ impl ContainerKind {
             Self::Furnace | Self::Anvil => 3,
             Self::Chest { rows } => rows as usize * 9,
             Self::ShulkerBox => 27,
+            Self::Hopper => 5,
             Self::Enchantment => 2,
             Self::Beacon => 1,
             Self::Merchant => 3,
@@ -67,6 +70,7 @@ impl ContainerKind {
             Self::Furnace
             | Self::Chest { .. }
             | Self::ShulkerBox
+            | Self::Hopper
             | Self::Enchantment
             | Self::Beacon
             | Self::Horse { .. } => None,
@@ -132,6 +136,10 @@ impl ContainerKind {
                 player: SlotList::default(),
             },
             Self::ShulkerBox => Menu::ShulkerBox {
+                contents: SlotList::default(),
+                player: SlotList::default(),
+            },
+            Self::Hopper => Menu::Hopper {
                 contents: SlotList::default(),
                 player: SlotList::default(),
             },
@@ -478,7 +486,7 @@ fn quick_move(kind: ContainerKind, menu: &mut Menu, s: usize) {
             break;
         }
         match kind {
-            ContainerKind::Chest { .. } | ContainerKind::ShulkerBox => {
+            ContainerKind::Chest { .. } | ContainerKind::ShulkerBox | ContainerKind::Hopper => {
                 let split = kind.inv_start();
                 if s < split {
                     move_item_stack_to(kind, menu, s, split..menu.len(), true);
@@ -673,6 +681,88 @@ fn with_count(mut data: ItemStackData, count: i32) -> ItemStack {
 #[cfg(test)]
 mod tests {
     use super::{effective_stack_limit, split_stack_count};
+
+    #[test]
+    fn hopper_layout_and_shift_transfer_both_directions() {
+        use azalea_inventory::operations::{ClickOperation, QuickMoveClick};
+        use azalea_inventory::{ItemStack, ItemStackData, Menu};
+        use azalea_registry::builtin::ItemKind;
+
+        use super::{ContainerKind, apply_click};
+
+        let kind = ContainerKind::Hopper;
+        assert_eq!(kind.slot_count(), 41);
+        assert_eq!(kind.inv_start(), 5);
+        assert_eq!(kind.hotbar_menu_slot(0), 32);
+        assert_eq!(kind.hotbar_menu_slot(8), 40);
+        assert_eq!(kind.offhand_menu_slot(), None);
+        assert_eq!(kind.crafting_result_slot(), None);
+        let stone = |count| ItemStack::Present(ItemStackData::new(ItemKind::Stone, count));
+        let mut slots = vec![ItemStack::Empty; kind.slot_count()];
+        let menu = kind.build_menu(&slots).unwrap();
+        assert!(matches!(&menu, Menu::Hopper { .. }));
+        assert_eq!(menu.len(), 41);
+        assert!(menu.slot(40).is_some());
+        assert!(menu.slot(41).is_none());
+        let mut cursor = ItemStack::Empty;
+
+        // Hopper -> player: merge backwards into the hotbar before empty slots.
+        slots[0] = stone(10);
+        slots[40] = stone(60);
+        let changed = apply_click(
+            kind,
+            &slots,
+            &mut cursor,
+            &ClickOperation::QuickMove(QuickMoveClick::Left { slot: 0 }),
+            false,
+        );
+        assert_eq!(
+            changed,
+            vec![(0, ItemStack::Empty), (39, stone(6)), (40, stone(64))]
+        );
+        assert!(cursor.is_empty());
+
+        // Both main inventory and hotbar -> hopper: merge forwards, then fill.
+        for source in [5, 31, 32, 40] {
+            slots.fill(ItemStack::Empty);
+            slots[0] = stone(60);
+            slots[1] = ItemStack::Present(ItemStackData::new(ItemKind::Dirt, 64));
+            slots[source] = stone(10);
+            let changed = apply_click(
+                kind,
+                &slots,
+                &mut cursor,
+                &ClickOperation::QuickMove(QuickMoveClick::Right {
+                    slot: source as u16,
+                }),
+                false,
+            );
+            assert_eq!(
+                changed,
+                vec![
+                    (0, stone(64)),
+                    (2, stone(6)),
+                    (source as u16, ItemStack::Empty)
+                ]
+            );
+            assert!(cursor.is_empty());
+        }
+
+        // A full hopper leaves the source alone; no player/hotbar fallback.
+        slots.fill(ItemStack::Empty);
+        slots[..5].fill(stone(64));
+        slots[5] = stone(10);
+        assert!(
+            apply_click(
+                kind,
+                &slots,
+                &mut cursor,
+                &ClickOperation::QuickMove(QuickMoveClick::Left { slot: 5 }),
+                false,
+            )
+            .is_empty()
+        );
+    }
 
     #[test]
     fn merchant_and_horse_use_native_slot_layouts() {

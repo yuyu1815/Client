@@ -9,7 +9,7 @@ use crate::renderer::chunk::atlas::TextureAtlas;
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 
 pub struct ChunkPipeline {
-    /// Opaque terrain: no discard, early-Z. Drawn first (front-to-back).
+    /// Opaque terrain: edit-mask discard only. Drawn first (front-to-back).
     pub pipeline_solid: vk::Pipeline,
     /// Cutout terrain: alpha-test discard. Drawn after solid.
     pub pipeline_cutout: vk::Pipeline,
@@ -24,6 +24,8 @@ pub struct ChunkPipeline {
     pub atlas_set: vk::DescriptorSet,
     camera_buffers: Vec<vk::Buffer>,
     camera_allocations: Vec<Allocation>,
+    edit_mask_buffers: Vec<vk::Buffer>,
+    edit_mask_allocations: Vec<Allocation>,
 }
 
 impl ChunkPipeline {
@@ -33,11 +35,32 @@ impl ChunkPipeline {
         allocator: &Arc<Mutex<Allocator>>,
         atlas: &TextureAtlas,
     ) -> Self {
-        let camera_layout = util::create_descriptor_set_layout(
-            device,
-            vk::DescriptorType::UniformBuffer,
-            vk::ShaderStageFlags::Vertex,
-        );
+        let camera_bindings = [
+            vk::DescriptorSetLayoutBinding {
+                binding: 0,
+                descriptor_type: vk::DescriptorType::UniformBuffer,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::Vertex,
+                ..Default::default()
+            },
+            vk::DescriptorSetLayoutBinding {
+                binding: 1,
+                descriptor_type: vk::DescriptorType::UniformBuffer,
+                descriptor_count: 1,
+                stage_flags: vk::ShaderStageFlags::Fragment,
+                ..Default::default()
+            },
+        ];
+        let camera_layout = device
+            .create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo {
+                    binding_count: camera_bindings.len() as u32,
+                    bindings: camera_bindings.as_ptr(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .expect("failed to create terrain camera/edit layout");
         // Set 1: the atlas sampler and the sprite-rectangle buffer the
         // fragment shaders wrap greedy UVs with.
         let atlas_bindings = [
@@ -91,7 +114,7 @@ impl ChunkPipeline {
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UniformBuffer,
-                descriptor_count: MAX_FRAMES_IN_FLIGHT as u32,
+                descriptor_count: 2 * MAX_FRAMES_IN_FLIGHT as u32,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::CombinedImageSampler,
@@ -165,7 +188,36 @@ impl ChunkPipeline {
             camera_allocations.push(alloc);
         }
 
+        let mask_bytes = ((crate::renderer::chunk::edit::MAX_EDIT_CELLS + 1) * 16) as u64;
+        let mut edit_mask_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let mut edit_mask_allocations = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        for &set in &camera_sets {
+            let (buffer, mut allocation) =
+                util::create_uniform_buffer(device, allocator, mask_bytes, "terrain_edit_mask");
+            allocation.mapped_slice_mut().unwrap().fill(0);
+            let info = vk::DescriptorBufferInfo {
+                buffer,
+                offset: 0,
+                range: mask_bytes,
+            };
+            device.update_descriptor_sets(
+                &[vk::WriteDescriptorSet {
+                    dst_set: set,
+                    dst_binding: 1,
+                    descriptor_type: vk::DescriptorType::UniformBuffer,
+                    descriptor_count: 1,
+                    buffer_info: &info,
+                    ..Default::default()
+                }],
+                &[],
+            );
+            edit_mask_buffers.push(buffer);
+            edit_mask_allocations.push(allocation);
+        }
+
         let pipeline = Self {
+            edit_mask_buffers,
+            edit_mask_allocations,
             pipeline_solid,
             pipeline_cutout,
             water_pipeline,
@@ -186,6 +238,18 @@ impl ChunkPipeline {
         let bytes = bytemuck::bytes_of(uniform);
         self.camera_allocations[frame].mapped_slice_mut().unwrap()[..bytes.len()]
             .copy_from_slice(bytes);
+    }
+
+    /// Current slot only, after its ordinary frame fence; no extra GPU wait.
+    pub fn update_edit_mask(&mut self, frame: usize, cells: &[[i32; 4]]) {
+        assert!(cells.len() <= crate::renderer::chunk::edit::MAX_EDIT_CELLS);
+        let dst = self.edit_mask_allocations[frame]
+            .mapped_slice_mut()
+            .unwrap();
+        let count = [cells.len() as i32, 0, 0, 0];
+        dst[..16].copy_from_slice(bytemuck::bytes_of(&count));
+        let bytes: &[u8] = bytemuck::cast_slice(cells);
+        dst[16..16 + bytes.len()].copy_from_slice(bytes);
     }
 
     pub fn rebind_atlas(&self, device: &vk::Device, atlas: &TextureAtlas) {
@@ -251,6 +315,13 @@ impl ChunkPipeline {
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
         for i in 0..MAX_FRAMES_IN_FLIGHT {
+            device.destroy_buffer(self.edit_mask_buffers[i], None);
+            alloc
+                .free(std::mem::replace(
+                    &mut self.edit_mask_allocations[i],
+                    unsafe { std::mem::zeroed() },
+                ))
+                .ok();
             device.destroy_buffer(self.camera_buffers[i], None);
             alloc
                 .free(std::mem::replace(&mut self.camera_allocations[i], unsafe {
@@ -282,8 +353,8 @@ fn shader_stage(
     }
 }
 
-/// Builds the two chunk pipelines: `solid` (chunk_solid.frag, no discard,
-/// early-Z) and `cutout` (chunk.frag, alpha-test discard). Identical state
+/// Builds solid (edit-mask discard) and cutout (edit-mask + alpha-test)
+/// terrain pipelines. Identical state
 /// otherwise; both share the vertex shader and layout.
 fn create_pipelines(
     device: &vk::Device,

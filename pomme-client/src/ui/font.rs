@@ -2141,8 +2141,22 @@ mod tests {
         );
 
         let mut packs = ResourcePackManager::new(&fixture.root.join("instance"));
-        packs.apply_server_pack(uuid::Uuid::from_u128(1), "low");
-        packs.apply_server_pack(uuid::Uuid::from_u128(2), "high");
+        packs.apply_server_pack(
+            uuid::Uuid::from_u128(1),
+            "low",
+            fixture.root.join(format!(
+                "{cache}/_invalid_hash_{}",
+                uuid::Uuid::from_u128(1)
+            )),
+        );
+        packs.apply_server_pack(
+            uuid::Uuid::from_u128(2),
+            "high",
+            fixture.root.join(format!(
+                "{cache}/_invalid_hash_{}",
+                uuid::Uuid::from_u128(2)
+            )),
+        );
         let load = |packs: &ResourcePackManager| {
             GlyphMap::load(
                 FontSources {

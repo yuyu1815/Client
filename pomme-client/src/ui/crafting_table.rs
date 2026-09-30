@@ -7,7 +7,7 @@ use azalea_inventory::ItemStack;
 
 use super::common::SLOT_STRIDE;
 use super::container::{
-    ContainerInput, ContainerResult, DragState, SlotCtx, push_cursor_stack, push_panel,
+    ContainerInput, ContainerResult, DragState, SlotCtx, push_cursor_stack, push_recipe_panel,
     resolve_gesture,
 };
 use crate::player::menu_click::ContainerKind;
@@ -33,17 +33,26 @@ pub fn build_crafting_table(
     gs: f32,
     recipe_book: &mut crate::ui::recipe_book::RecipeBookState,
     native_recipes: bool,
+    text_width_fn: &dyn Fn(&str, f32) -> f32,
+    advanced_tooltips: bool,
 ) -> ContainerResult {
-    let panel = push_panel(
+    let (panel, hidden) = push_recipe_panel(
         elements,
         screen_w,
         screen_h,
         gs,
-        166.0,
         SpriteId::CraftingTableBackground,
+        recipe_book,
+        native_recipes,
+        0,
+        cursor,
+        input,
+        (5.0, 34.0),
     );
-    panel.label(elements, 29.0, 6.0, title);
-    panel.label(elements, 8.0, 72.0, "Inventory");
+    if !hidden {
+        panel.label(elements, 29.0, 6.0, title);
+        panel.label(elements, 8.0, 72.0, "Inventory");
+    }
 
     let mut ctx = SlotCtx::new(
         elements,
@@ -55,6 +64,7 @@ pub fn build_crafting_table(
         drag,
     );
 
+    ctx.set_hidden(hidden);
     ctx.player_rows(slots, SLOT_MAIN_BASE, SLOT_HOTBAR_BASE, 84.0);
 
     for row in 0..3u16 {
@@ -89,42 +99,61 @@ pub fn build_crafting_table(
         )
         .cloned()
         .collect();
-    let recipe_id = crate::ui::container::push_recipe_entries(
+    let (recipe_id, ghost_hovered) = crate::ui::container::push_recipe_entries(
         elements,
         &panel,
         recipe_book,
         cursor,
-        input.left_pressed,
+        input,
         native_recipes,
         None,
-        input.shift,
         3,
         3,
         &recipe_items,
         grid,
-        result,
-        5.0,
-        34.0,
+        screen_w,
+        screen_h,
+        text_width_fn,
     );
     push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
 
-    let mut gesture_input = *input;
-    if recipe_id.is_some() || recipe_book.clicked_ui {
-        gesture_input.left_pressed = false;
-        gesture_input.right_pressed = false;
-        gesture_input.middle_pressed = false;
-    }
-    let (ops, clicked_outside) = resolve_gesture(
-        &gesture_input,
-        hovered,
-        &panel,
-        cursor,
-        ContainerKind::CraftingTable,
+    super::container::push_container_tooltip(
+        elements,
         slots,
+        hovered.filter(|_| !ghost_hovered),
         cursor_item,
-        drag,
-        last_click,
+        cursor,
+        screen_w,
+        screen_h,
+        panel.scale,
+        advanced_tooltips,
     );
+    let (ops, clicked_outside) = if hidden || recipe_book.clicked_ui {
+        *drag = None;
+        (Vec::new(), false)
+    } else {
+        resolve_gesture(
+            input,
+            hovered,
+            &panel,
+            if recipe_book.hovered_ui {
+                (panel.ox, panel.oy)
+            } else {
+                cursor
+            },
+            ContainerKind::CraftingTable,
+            slots,
+            cursor_item,
+            drag,
+            last_click,
+        )
+    };
+    if (!ops.is_empty() || input.left_pressed || input.right_pressed)
+        && !recipe_book.clicked_ui
+        && hovered.is_some_and(|slot| slot <= 9)
+    {
+        recipe_book.ghost_recipe = None;
+    }
 
     ContainerResult {
         clicked_outside,

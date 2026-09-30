@@ -51,6 +51,7 @@ pub enum ContainerScreen {
     Furnace(crate::ui::furnace::FurnaceVariant),
     Chest { rows: u8 },
     ShulkerBox,
+    Hopper,
     Anvil,
     Enchantment,
     Beacon,
@@ -66,6 +67,7 @@ impl ContainerScreen {
             Self::Furnace(_) => ContainerKind::Furnace,
             Self::Chest { rows } => ContainerKind::Chest { rows },
             Self::ShulkerBox => ContainerKind::ShulkerBox,
+            Self::Hopper => ContainerKind::Hopper,
             Self::Anvil => ContainerKind::Anvil,
             Self::Enchantment => ContainerKind::Enchantment,
             Self::Beacon => ContainerKind::Beacon,
@@ -109,7 +111,9 @@ impl OpenContainer {
 
 /// Vanilla sign dye RGB values; the renderer applies the 0.4 darkening for
 /// non-glowing text and keeps this full color for glowing text.
-fn sign_render_style(nbt: &simdnbt::owned::NbtCompound) -> (([f32; 3], bool), ([f32; 3], bool)) {
+pub(crate) fn sign_render_style(
+    nbt: &simdnbt::owned::NbtCompound,
+) -> (([f32; 3], bool), ([f32; 3], bool)) {
     const DYES: [(&str, [f32; 3]); 16] = [
         ("white", [249.0 / 255.0, 1.0, 254.0 / 255.0]),
         ("orange", [249.0 / 255.0, 128.0 / 255.0, 29.0 / 255.0]),
@@ -130,7 +134,7 @@ fn sign_render_style(nbt: &simdnbt::owned::NbtCompound) -> (([f32; 3], bool), ([
     ];
     let face_style = |face: &str| {
         let Some(compound) = nbt.get(face).and_then(|tag| tag.compound()) else {
-            return ([0.1, 0.1, 0.1], false);
+            return (DYES[15].1, false);
         };
         let color = compound
             .string("color")
@@ -140,7 +144,7 @@ fn sign_render_style(nbt: &simdnbt::owned::NbtCompound) -> (([f32; 3], bool), ([
                     .find(|(candidate, _)| *candidate == name.as_ref())
                     .map(|(_, rgb)| *rgb)
             })
-            .unwrap_or([0.1, 0.1, 0.1]);
+            .unwrap_or(DYES[15].1);
         (color, compound.byte("has_glowing_text").unwrap_or(0) != 0)
     };
     (face_style("front_text"), face_style("back_text"))
@@ -508,10 +512,12 @@ fn mesh_result_is_stale(
     generation: u64,
     mut replaced: std::ops::Range<i32>,
     edit: bool,
+    column_revision: u64,
 ) -> bool {
     !chunks.light_data.contains_key(&(pos.x, pos.z))
         || if edit {
-            replaced.any(|si| section_gen.get(&(pos, si)).copied() != Some(generation))
+            content_gen.get(&pos).copied().unwrap_or(0) != column_revision
+                || replaced.any(|si| section_gen.get(&(pos, si)).copied() != Some(generation))
         } else {
             content_gen.get(&pos).copied() != Some(generation)
         }
@@ -895,6 +901,34 @@ impl GameState {
         }
     }
 
+    /// Optimistic writable-page preview only; server slot packets replace it.
+    fn preview_book_pages(&mut self, slot: u32, pages: Vec<String>) {
+        use azalea_core::filterable::Filterable;
+        use azalea_inventory::ItemStack;
+        use azalea_inventory::components::WritableBookContent;
+        use azalea_registry::builtin::ItemKind;
+        let index = match slot {
+            0..=8 => crate::player::inventory::HOTBAR_START + slot as usize,
+            40 => 45,
+            _ => return,
+        };
+        let stack = self.player.inventory.slot(index);
+        if !matches!(stack, ItemStack::Present(data) if data.kind == ItemKind::WritableBook) {
+            return;
+        }
+        let preview = stack.clone().with_component(WritableBookContent {
+            pages: pages
+                .into_iter()
+                .map(|raw| Filterable {
+                    raw,
+                    filtered: None,
+                })
+                .collect(),
+        });
+        self.player.inventory.set_slot(index, preview);
+        self.sync_container_from_inventory();
+    }
+
     /// Re-mirror the inventory-backed slots into the open container after a
     /// direct player-inventory update.
     pub fn sync_container_from_inventory(&mut self) {
@@ -926,6 +960,7 @@ impl GameState {
     pub fn close_menu(&mut self) {
         self.inventory_open = false;
         self.open_container = None;
+        self.recipe_book.reset_menu();
         self.cursor_item = azalea_inventory::ItemStack::Empty;
         self.inv_drag = None;
         self.inv_last_click = None;
@@ -958,7 +993,15 @@ impl GameState {
     /// hotkeys. The anvil field is editable only while its input slot is
     /// filled, matching vanilla.
     pub fn wants_text_input(&self) -> bool {
-        if self.recipe_book.wants_text_input() {
+        if (self.inventory_open
+            || self.open_container.as_ref().is_some_and(|c| {
+                matches!(
+                    c.screen,
+                    ContainerScreen::CraftingTable | ContainerScreen::Furnace(_)
+                )
+            }))
+            && self.recipe_book.wants_text_input()
+        {
             return true;
         }
         if self
@@ -968,7 +1011,8 @@ impl GameState {
         {
             return true;
         }
-        if self.book_edit.is_some() || self.sign_edit.is_some() {
+        // Read-only books still need the ordered PageUp/PageDown key stream.
+        if self.book_edit.is_some() || self.book_view.is_some() || self.sign_edit.is_some() {
             return true;
         }
         if self.creative_inventory_open {
@@ -1317,7 +1361,7 @@ impl GameState {
     /// work: columns whose chunk-load light applied go through the
     /// content-gen path like chunk loads (the visibility rescan enqueues
     /// them tier-gated), individual lit sections remesh on the priority lane.
-    pub fn update_light(&mut self, chunk_detail: u32) {
+    pub fn update_light(&mut self, renderer: &mut Renderer, chunk_detail: u32) {
         let measuring = self.benchmark.is_some();
         let pending_before = measuring.then(|| self.light_engine.pending_light_tasks());
         let mut dirty = crate::world::light::LightDirty::default();
@@ -1353,6 +1397,7 @@ impl GameState {
             });
             for (col, range) in consecutive_section_runs(sections) {
                 self.enqueue_section_edit(
+                    renderer,
                     col,
                     range,
                     crate::app::core::chunk_lod(col, player_chunk, chunk_detail),
@@ -1381,11 +1426,13 @@ impl GameState {
     /// Every section in the span gets the same generation for stale rejection.
     pub fn enqueue_section_edit(
         &mut self,
+        renderer: &mut Renderer,
         col: ChunkPos,
         sections: std::ops::Range<i32>,
         lod: u32,
     ) {
         let g = self.bump_section_gen(col, sections.clone());
+        renderer.expect_block_edit_mesh(col, sections.clone(), g);
         self.mesh_dispatcher.enqueue(
             &self.chunk_store,
             &self.block_entity_anim,
@@ -1393,33 +1440,9 @@ impl GameState {
             lod,
             true,
             g,
+            self.content_gen.get(&col).copied().unwrap_or(0),
             sections,
         );
-    }
-
-    /// Vanilla `compileSync` under `PrioritizeChunkUpdates.PLAYER_AFFECTED`:
-    /// mesh and upload a column's player-edited sections on the spot so the
-    /// edit shows the same frame. (Vanilla defaults to NONE/async, but
-    /// pomme's async round-trip is several frames, which leaves a broken
-    /// block visibly lingering after its crack overlay completes.)
-    pub fn mesh_sections_edit_now(
-        &mut self,
-        renderer: &mut Renderer,
-        col: ChunkPos,
-        sections: std::ops::Range<i32>,
-    ) {
-        // The gen bump drops any in-flight priority result for these
-        // sections at drain time; stale bulk results are rejected by the
-        // buffer's per-section epoch gate (`ChunkMeshData::upload_epoch`).
-        let g = self.bump_section_gen(col, sections.clone());
-        let mesh = self.mesh_dispatcher.mesh_sections_now(
-            &self.chunk_store,
-            &self.block_entity_anim,
-            col,
-            sections,
-            g,
-        );
-        self.apply_mesh_upload(renderer, mesh);
     }
 
     /// One gen for the whole span: the drain stale-check compares every
@@ -1460,7 +1483,15 @@ impl GameState {
                 mesh.content_gen,
                 mesh.replaced.clone(),
                 mesh.timing.is_some(),
+                mesh.column_revision,
             );
+            if mesh.timing.is_some() {
+                renderer.record_edit_mesh_result(
+                    &mesh,
+                    stale,
+                    self.content_gen.get(&mesh.pos).copied().unwrap_or(0),
+                );
+            }
             if stale {
                 if mesh.timing.is_some() {
                     // Rebuild only sections not covered by a newer edit. A fresh
@@ -1475,7 +1506,7 @@ impl GameState {
                     );
                     let lod = self.meshed.get(&mesh.pos).map_or(0, |m| m.lod);
                     for (_, range) in runs {
-                        self.enqueue_section_edit(mesh.pos, range, lod);
+                        self.enqueue_section_edit(renderer, mesh.pos, range, lod);
                     }
                 }
                 self.mesh_dispatcher.recycle(mesh);
@@ -1579,8 +1610,7 @@ impl GameState {
         }
     }
 
-    /// Upload a finished mesh and apply its bookkeeping. The sync edit path;
-    /// the frame drain batches uploads instead.
+    /// Synchronously remesh diagnostic samples; gameplay edits are queued.
     pub fn remesh_probe_targets(
         &mut self,
         renderer: &mut Renderer,
@@ -1787,6 +1817,7 @@ impl GameState {
                         pos,
                         lod,
                         false,
+                        content_gen,
                         content_gen,
                         start..end,
                     );
@@ -2150,21 +2181,15 @@ pub(crate) fn build_server_screens(
     if game.sign_edit.is_some() {
         let cursor = core.input.cursor_pos();
         let done = core.input.left_just_pressed()
-            && crate::ui::common::hit_test(
-                cursor,
-                [
-                    (sw - 220.0 * gs) / 2.0,
-                    (sh - 150.0 * gs) / 2.0 + 120.0 * gs,
-                    220.0 * gs,
-                    30.0 * gs,
-                ],
-            );
+            && crate::ui::common::hit_test(cursor, crate::ui::sign::done_rect(sw, sh, gs));
         let close = done || core.input.escape_pressed();
         if let Some(sign) = &mut game.sign_edit {
             sign.input(text_events, &|s| {
                 gfx.renderer.menu_text_width(s, common::FONT_SIZE)
             });
-            sign.draw(elements, sw, sh, gs);
+            sign.draw(elements, sw, sh, gs, &|s| {
+                gfx.renderer.menu_text_width(s, common::FONT_SIZE)
+            });
             if close {
                 connection
                     .packet_tx
@@ -2173,10 +2198,37 @@ pub(crate) fn build_server_screens(
                 core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
             }
         }
+        core.input.consume_left_just_pressed();
+        core.input.clear_just_pressed_actions();
         return;
     }
     if game.book_view.is_some() {
         let cursor = core.input.cursor_pos();
+        // The confirmation screen owns clicks and Escape, not the book below.
+        if game.chat.has_pending_modal_prompt() {
+            if let Some(book) = &mut game.book_view {
+                book.draw(elements, sw, sh, gs, cursor, &|spans, scale| {
+                    gfx.renderer.menu_spans_width(spans, scale)
+                });
+            }
+            if let Some(action) = game.chat.build_modal_prompt(
+                elements,
+                sw,
+                sh,
+                gs,
+                cursor,
+                core.input.left_just_pressed(),
+                &|spans, scale| gfx.renderer.menu_spans_width(spans, scale),
+            ) {
+                handle_chat_ui_action(action, core, connection, game);
+            }
+            if core.input.escape_pressed() {
+                game.chat.handle_escape();
+            }
+            core.input.consume_left_just_pressed();
+            core.input.clear_just_pressed_actions();
+            return;
+        }
         let (page, pages) = game
             .book_view
             .as_ref()
@@ -2186,66 +2238,150 @@ pub(crate) fn build_server_screens(
         let action = pressed
             .then(|| crate::ui::book::view_hit_action(cursor, sw, sh, gs, page, pages))
             .flatten();
+        let mut clicked_style = None;
         if let Some(book) = &mut game.book_view {
+            for event in text_events {
+                if let crate::ui::text_edit::TextInputEvent::Key { code, .. } = event {
+                    book.key(*code);
+                }
+            }
             if let Some(index @ 0..=1) = action {
                 book.navigate(index);
             } else if pressed && !done {
-                if let Some(crate::chat_component::ClickEvent::ChangePage(target)) = book
+                clicked_style = book
                     .style_at(cursor)
-                    .and_then(|style| style.click_event.clone())
-                {
+                    .and_then(|style| style.click_event.clone());
+                if let Some(crate::chat_component::ClickEvent::ChangePage(target)) = clicked_style {
                     if target > 0 && !book.pages.is_empty() {
                         book.set_page((target as usize) - 1);
                     }
+                    clicked_style = None;
                 }
             }
             core.input.consume_left_just_pressed();
             book.draw(elements, sw, sh, gs, cursor, &|spans, scale| {
                 gfx.renderer.menu_spans_width(spans, scale)
             });
+            book.draw_hover(
+                elements,
+                cursor,
+                sw,
+                sh,
+                gs,
+                game.advanced_item_tooltips,
+                &|spans| gfx.renderer.menu_spans_width(spans, common::FONT_SIZE),
+            );
         }
-        if done || core.input.escape_pressed() {
+        if let Some(click) = clicked_style {
+            use crate::chat_component::ClickEvent;
+            let action = match click {
+                ClickEvent::OpenUrl(url) => game.chat.request_open_url(url),
+                ClickEvent::RunCommand(command) => Some(ChatUiAction::RunCommand(command)),
+                ClickEvent::CopyToClipboard(value) => {
+                    common::set_clipboard(&value);
+                    None
+                }
+                ClickEvent::ShowDialog(dialog) => Some(ChatUiAction::ShowDialog(dialog)),
+                ClickEvent::Custom { id, payload } => Some(ChatUiAction::Custom { id, payload }),
+                // A read-only book has no command-input box.
+                ClickEvent::SuggestCommand(_) | ClickEvent::ChangePage(_) => None,
+            };
+            if let Some(action) = action {
+                if matches!(action, ChatUiAction::ShowDialog(_)) {
+                    game.book_view = None;
+                }
+                handle_chat_ui_action(action, core, connection, game);
+            }
+        }
+        if game.chat.has_pending_modal_prompt() {
+            // Do not let the link's opening click accept the new prompt.
+            let clicked = false;
+            if let Some(action) = game.chat.build_modal_prompt(
+                elements,
+                sw,
+                sh,
+                gs,
+                cursor,
+                clicked,
+                &|spans, scale| gfx.renderer.menu_spans_width(spans, scale),
+            ) {
+                handle_chat_ui_action(action, core, connection, game);
+            }
+            if core.input.escape_pressed() {
+                game.chat.handle_escape();
+            }
+        } else if done || core.input.escape_pressed() {
             game.book_view = None;
             core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
         }
+        core.input.clear_just_pressed_actions();
         return;
     }
     if game.book_edit.is_some() {
-        use azalea_protocol::packets::game::ServerboundGamePacket;
-        use azalea_protocol::packets::game::s_edit_book::ServerboundEditBook;
         let cursor = core.input.cursor_pos();
-        let action = core
-            .input
-            .left_just_pressed()
+        let pressed = core.input.left_just_pressed();
+        let action = pressed
             .then(|| crate::ui::book::edit_hit_action(cursor, sw, sh, gs))
             .flatten();
-        core.input.consume_left_just_pressed();
+        let width = |s: &str| gfx.renderer.menu_text_width(s, common::FONT_SIZE);
+        let mut result = None;
+        let mut close = false;
         if let Some(book) = &mut game.book_edit {
-            if let Some(index @ 0..=1) = action {
-                book.navigate(index);
+            if book.author.is_empty() {
+                book.author = game
+                    .local_scoreboard_name
+                    .clone()
+                    .unwrap_or_else(|| core.user.username.clone());
             }
-            let enter_sign = text_events.iter().any(|event| matches!(event, crate::ui::text_edit::TextInputEvent::Key { code: winit::keyboard::KeyCode::Enter | winit::keyboard::KeyCode::NumpadEnter, mods } if mods.edit_shortcut()));
-            let result = book.input(
-                text_events,
-                action == Some(2),
-                action == Some(3) || enter_sign,
+            let was_signing = book.is_signing();
+            book.mouse(
+                cursor,
+                sw,
+                sh,
+                gs,
+                pressed,
+                core.input.left_held(),
+                core.input.shift_held(),
+                &width,
             );
-            book.draw(elements, sw, sh, gs, cursor);
-            if let Some((slot, pages, title)) = result {
-                connection
-                    .packet_tx
-                    .send(ServerboundGamePacket::EditBook(ServerboundEditBook {
-                        slot,
-                        pages,
-                        title,
-                    }));
-                game.book_edit = None;
-                core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
-            } else if core.input.escape_pressed() {
-                game.book_edit = None;
-                core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
+            if was_signing && (action == Some(2) || core.input.escape_pressed()) {
+                book.back();
+            } else {
+                if let Some(index @ 0..=1) = action {
+                    book.navigate_measured(index, &width);
+                }
+                let enter_sign = was_signing
+                    && text_events.iter().any(|event| {
+                        matches!(
+                            event,
+                            crate::ui::text_edit::TextInputEvent::Key {
+                                code: winit::keyboard::KeyCode::Enter
+                                    | winit::keyboard::KeyCode::NumpadEnter,
+                                ..
+                            }
+                        )
+                    });
+                result = book.input_measured(
+                    text_events,
+                    !was_signing && action == Some(2),
+                    action == Some(3) || enter_sign,
+                    &width,
+                );
+                close = book.should_close() || (!was_signing && core.input.escape_pressed());
+            }
+            book.draw_measured(elements, sw, sh, gs, cursor, &width);
+        }
+        if let Some((slot, pages, title)) = result {
+            if connection.packet_tx.edit_book(slot, pages.clone(), title) {
+                game.preview_book_pages(slot, pages);
             }
         }
+        if close {
+            game.book_edit = None;
+            core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
+        }
+        core.input.consume_left_just_pressed();
+        core.input.clear_just_pressed_actions();
         return;
     }
     if let Some(text) = game.code_of_conduct.clone() {
@@ -2530,6 +2666,81 @@ fn apply_render_distance(
 ) {
     core.menu.render_distance = rd;
     game.sync_client_information(connection, rd, core.menu.chat_options);
+}
+
+/// Vanilla HopperScreen: 176x133 texture, five inputs and 36 player slots.
+#[allow(clippy::too_many_arguments)]
+fn build_hopper(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    cursor: (f32, f32),
+    input: &crate::ui::container::ContainerInput,
+    slots: &[azalea_inventory::ItemStack],
+    title: &str,
+    cursor_item: &azalea_inventory::ItemStack,
+    drag: &mut Option<crate::ui::container::DragState>,
+    last_click: &mut Option<(u16, Instant)>,
+    gs: f32,
+    advanced_tooltips: bool,
+) -> crate::ui::container::ContainerResult {
+    use azalea_inventory::ItemStack;
+
+    use crate::renderer::pipelines::menu_overlay::SpriteId;
+    use crate::ui::container::{
+        ContainerResult, SlotCtx, push_cursor_stack, push_panel, resolve_gesture,
+    };
+    let panel = push_panel(
+        elements,
+        screen_w,
+        screen_h,
+        gs,
+        133.0,
+        SpriteId::HopperBackground,
+    );
+    panel.label(elements, 8.0, 6.0, title);
+    panel.label(elements, 8.0, 39.0, "Inventory");
+    let kind = ContainerKind::Hopper;
+    let mut ctx = SlotCtx::new(elements, &panel, cursor, kind, slots, cursor_item, drag);
+    for slot in 0..5u16 {
+        ctx.slot(
+            44.0 + slot as f32 * common::SLOT_STRIDE,
+            20.0,
+            slots.get(slot as usize).unwrap_or(&ItemStack::Empty),
+            None,
+            slot,
+        );
+    }
+    ctx.player_rows(slots, 5, 32, 51.0);
+    let (hovered, shown_cursor) = ctx.finish(cursor_item);
+    push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
+    if cursor_item.is_empty()
+        && let Some(item) = hovered.and_then(|slot| slots.get(slot as usize))
+        && let Some(item) = item.as_present()
+        && let Ok(value) = serde_json::to_value(item)
+    {
+        let lines = crate::ui::chat::item_tooltip_lines(&value, None, advanced_tooltips);
+        if !lines.is_empty() {
+            common::push_tooltip_lines(elements, cursor, screen_w, screen_h, panel.scale, lines);
+        }
+    }
+    let (ops, clicked_outside) = resolve_gesture(
+        input,
+        hovered,
+        &panel,
+        cursor,
+        kind,
+        slots,
+        cursor_item,
+        drag,
+        last_click,
+    );
+    ContainerResult {
+        clicked_outside,
+        ops,
+        button: None,
+        recipe_id: None,
+    }
 }
 
 /// Predict each container click locally (instant UI + drag preview), then send
@@ -2903,6 +3114,9 @@ pub fn update_game(
             // prioritized while the screen is open.
             game.xp_display_start_tick = game.tick_count as i64;
         }
+        connection.packet_tx.recorder.record("local", "fixed_tick", || {
+            Some(serde_json::json!({"player":crate::movement_record::player(game),"client_loaded":game.client_loaded,"dead":game.dead}))
+        });
         AppCore::send_client_tick_end(connection);
         core.tick_accumulator -= TICK_RATE;
     }
@@ -2914,7 +3128,7 @@ pub fn update_game(
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.
     let light_update_start = game.benchmark.is_some().then(std::time::Instant::now);
-    game.update_light(core.menu.chunk_detail);
+    game.update_light(&mut gfx.renderer, core.menu.chunk_detail);
     game.last_update_phases.light_update_ms = light_update_start
         .map(|start| start.elapsed().as_secs_f32() * 1000.0)
         .unwrap_or_default();
@@ -2985,9 +3199,6 @@ pub fn update_game(
     } else {
         Vec::new()
     };
-    if game.text_owner() == input::TextOwner::Other {
-        game.recipe_book.handle_text_events(&text_events);
-    }
     let text_sw = gfx.renderer.screen_width() as f32;
     let text_gs = hud::gui_scale(
         text_sw,
@@ -2995,6 +3206,11 @@ pub fn update_game(
         core.menu.gui_scale_setting,
     );
     let text_fs = common::FONT_SIZE * text_gs;
+    if game.text_owner() == input::TextOwner::Other && game.wants_text_input() {
+        game.recipe_book.handle_text_events(&text_events, &|t| {
+            gfx.renderer.menu_text_width(t, common::FONT_SIZE)
+        });
+    }
     let chat_was_open = game.chat.is_open();
     if game.text_owner() != input::TextOwner::Chat {
         // The top screen replaces ChatScreen; server screens consume their
@@ -3514,16 +3730,15 @@ pub fn update_game(
         };
         let direction = frame
             .item_frame_direction
-            .unwrap_or(azalea_core::direction::Direction::North);
-        let frame_rotation = item_frame_base_rotation(direction);
-        let map_center =
-            item_frame_base_position(*frame.position, direction) - gfx.renderer.camera_anchor();
+            .unwrap_or(azalea_core::direction::Direction::South);
+        let base_matrix =
+            item_frame_base_matrix(*frame.position, direction, gfx.renderer.camera_anchor());
         map_quads.push(MapQuadDraw {
             map_id,
             map_data: map.clone(),
-            position: map_center.as_vec3(),
+            position: base_matrix.w_axis.truncate(),
             rotation: crate::renderer::pipelines::map_quad::frame_map_rotation(
-                glam::Quat::from_mat4(&frame_rotation),
+                glam::Quat::from_mat4(&base_matrix),
                 frame.item_frame_rotation,
             ),
         });
@@ -3981,7 +4196,14 @@ pub fn update_game(
             game.pause_screen,
             game.server_render_distance,
             game.singleplayer,
+            connection.packet_tx.recorder.active(),
         );
+        if game.pause_screen == PauseScreen::Benchmark {
+            core.menu
+                .build_movement_recording_status(&mut elements, sw, sh, &|t, s| {
+                    gfx.renderer.menu_text_width(t, s)
+                });
+        }
         core.input.clear_just_pressed_actions();
     }
 
@@ -4089,6 +4311,8 @@ pub fn update_game(
                     gs,
                     &mut game.recipe_book,
                     native_recipes,
+                    &|t, s| gfx.renderer.menu_text_width(t, s),
+                    game.advanced_item_tooltips,
                 ),
                 ContainerScreen::Furnace(variant) => crate::ui::furnace::build_furnace(
                     &mut elements,
@@ -4107,6 +4331,7 @@ pub fn update_game(
                     &|t, s| gfx.renderer.menu_text_width(t, s),
                     &mut game.recipe_book,
                     native_recipes,
+                    game.advanced_item_tooltips,
                 ),
                 ContainerScreen::Chest { rows } => crate::ui::chest::build_chest(
                     &mut elements,
@@ -4115,6 +4340,20 @@ pub fn update_game(
                     core.input.cursor_pos(),
                     &input,
                     rows,
+                    &container.slots,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                    game.advanced_item_tooltips,
+                ),
+                ContainerScreen::Hopper => build_hopper(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
                     &container.slots,
                     &container.title,
                     &game.cursor_item,
@@ -4233,11 +4472,12 @@ pub fn update_game(
                 &mut game.recipe_book,
                 native_recipes,
                 game.advanced_item_tooltips,
+                &|t, s| gfx.renderer.menu_text_width(t, s),
             );
             place_recipe = result
                 .recipe_id
                 .map(|(display_id, use_max_items)| (0, display_id, use_max_items));
-            player_preview = Some(result.player_preview);
+            player_preview = result.player_preview;
             (result.clicked_outside, result.ops)
         };
         close_inventory = clicked_outside;
@@ -4462,7 +4702,9 @@ pub fn update_game(
         core.input.clear_just_pressed_actions();
     }
 
-    let swing_progress = game.interaction.get_swing_progress(partial_tick);
+    let hand_animation = game
+        .interaction
+        .hand_animation(partial_tick, gfx.renderer.camera_look_dir());
     let use_anim = game.interaction.use_animation(partial_tick);
     let destroy_info = game.interaction.destroy_stage().map(|(pos, stage)| {
         let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
@@ -4760,8 +5002,9 @@ pub fn update_game(
                 // This existing loose box needs only the BE kind/text, not the
                 // block state. Unknown kinds and written signs are never culled.
                 if let Some(planes) = &be_frustum {
-                    let has_sign_text = be.kind == BlockEntityKind::Sign
-                        && sign_has_text(be.sign_front.as_ref(), be.sign_back.as_ref());
+                    let has_sign_text = crate::world::block_entity::is_sign_kind(be.kind)
+                        && (sign_has_text(be.sign_front.as_ref(), be.sign_back.as_ref())
+                            || game.sign_edit.as_ref().is_some_and(|edit| edit.pos == *pos));
                     if !block_entity_in_frustum(be.kind, pos, has_sign_text, be_eye, planes) {
                         return None;
                     }
@@ -4818,11 +5061,17 @@ pub fn update_game(
                     let partner = BlockPos::new(pos.x + dx, pos.y, pos.z + dz);
                     lid_open = lid_open.max(openness_at(&partner));
                 }
-                let copy_sign_text =
-                    be.kind == BlockEntityKind::Sign && sign_text_in_range(pos, sign_text_eye);
-                let sign_front = copy_sign_text.then(|| be.sign_front.clone().unwrap_or_default());
-                let sign_back = copy_sign_text.then(|| be.sign_back.clone().unwrap_or_default());
-                let is_sign = be.kind == BlockEntityKind::Sign;
+                let is_sign = crate::world::block_entity::is_sign_kind(be.kind);
+                let copy_sign_text = is_sign && sign_text_in_range(pos, sign_text_eye);
+                // Client-only live preview; never mutate server NBT or its cached faces.
+                let face_lines = |front, stored: Option<&[String; 4]>| {
+                    game.sign_edit.as_ref().map_or_else(
+                        || stored.cloned().unwrap_or_default(),
+                        |edit| edit.preview_lines(*pos, front, stored),
+                    )
+                };
+                let sign_front = copy_sign_text.then(|| face_lines(true, be.sign_front.as_ref()));
+                let sign_back = copy_sign_text.then(|| face_lines(false, be.sign_back.as_ref()));
                 let ((sign_front_color, sign_front_glowing), (sign_back_color, sign_back_glowing)) =
                     if is_sign {
                         sign_render_style(&be.nbt)
@@ -4894,7 +5143,14 @@ pub fn update_game(
                             let rgb = color.rgb;
                             [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
                         });
-                    (name, light, raw_dye_rgb)
+                    (
+                        name,
+                        light,
+                        raw_dye_rgb,
+                        crate::world::block_entity::player_head_profile_source_from_item(
+                            held_stack,
+                        ),
+                    )
                 })
             }
             _ => None,
@@ -4941,8 +5197,34 @@ pub fn update_game(
             .probe
             .as_ref()
             .is_none_or(|probe| probe.held_item_draw_enabled());
-    gfx.renderer
-        .update_placed_head_skins(&block_entity_renders, &core.tokio_rt);
+    let activation_profile = game
+        .item_activation
+        .as_ref()
+        .and_then(|activation| activation.draw(partial_tick))
+        .and_then(|draw| {
+            crate::world::block_entity::player_head_profile_source_from_item(draw.stack)
+        });
+    gfx.renderer.update_head_skins(
+        block_entity_renders
+            .iter()
+            .filter_map(|head| head.player_head_profile_source.as_ref())
+            .chain(
+                item_renders
+                    .iter()
+                    .filter_map(|item| item.player_head_profile_source.as_ref()),
+            )
+            .chain(elements.iter().filter_map(|element| match element {
+                crate::renderer::pipelines::menu_overlay::MenuElement::ItemIcon {
+                    player_head_profile_source,
+                    ..
+                } => player_head_profile_source.as_ref(),
+                _ => None,
+            }))
+            .chain(held_item.0.as_ref().and_then(|item| item.3.as_ref()))
+            .chain(held_item.1.as_ref().and_then(|item| item.3.as_ref()))
+            .chain(activation_profile.as_ref()),
+        &core.tokio_rt,
+    );
     game.last_update_phases.cpu_update_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
     let render_start = std::time::Instant::now();
     if let Err(e) = gfx.renderer.render_world(
@@ -4950,7 +5232,7 @@ pub fn update_game(
         hide_cursor,
         show_hand,
         elements,
-        swing_progress,
+        hand_animation,
         use_anim,
         held_item,
         destroy_info,
@@ -4999,6 +5281,7 @@ pub fn update_game(
     if let Some(prev) = game.container_was_open
         && open_menu != Some(prev)
     {
+        game.recipe_book.reset_menu();
         use azalea_protocol::packets::game::s_container_close::ServerboundContainerClose;
         connection
             .packet_tx
@@ -5049,6 +5332,18 @@ pub fn update_game(
                 PauseScreen::ChunkLoader => PauseScreen::Benchmark,
                 _ => PauseScreen::Main,
             };
+        }
+        PauseAction::StartMovementRecording => {
+            connection
+                .packet_tx
+                .recorder
+                .start(&core.tokio_rt, &core.data_dirs.game_dir);
+            core.menu.movement_recording = Some(connection.packet_tx.recorder.clone());
+            game.paused = false;
+            core.apply_cursor_grab(&gfx.window, Some(game));
+        }
+        PauseAction::StopMovementRecording => {
+            connection.packet_tx.recorder.stop("user_stop");
         }
         PauseAction::StartFpsBenchmark => {
             game.benchmark = Some(Benchmark::new(
@@ -5262,7 +5557,74 @@ fn transform_item_bounds(
 
 #[cfg(test)]
 mod dropped_item_tests {
-    use super::{item_frame_base_rotation, item_stack_seed, transform_item_bounds};
+    use super::{
+        item_frame_base_matrix, item_frame_item_matrix, item_stack_seed, transform_item_bounds,
+    };
+
+    #[test]
+    fn dropped_item_copies_preserve_player_head_profile() {
+        use azalea_inventory::components::{PartialOrFullProfile, PartialProfile, Profile};
+        use azalea_inventory::{ItemStack, ItemStackData};
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+
+        use crate::world::block_entity::{
+            PlayerHeadProfileSource, PlayerHeadSkinPatch, player_head_profile_source_from_item,
+        };
+
+        let profile = Profile {
+            unpack: Box::new(PartialOrFullProfile::Partial(PartialProfile {
+                name: Some("Alex".into()),
+                id: None,
+                properties: Default::default(),
+            })),
+            skin_patch: Box::default(),
+        };
+        let mut data = ItemStackData::new(ItemKind::PlayerHead, 64);
+        // SAFETY: Profile is inserted under its matching component kind.
+        unsafe {
+            data.component_patch
+                .unchecked_insert_component(DataComponentKind::Profile, Some(profile.into()));
+        }
+        let source = player_head_profile_source_from_item(&ItemStack::Present(data));
+        let expected = Some(PlayerHeadProfileSource::DynamicName {
+            name: "Alex".into(),
+            patch: PlayerHeadSkinPatch::default(),
+        });
+        assert_eq!(source, expected);
+        let mut infos = Vec::new();
+        super::emit_item_copies(
+            &mut infos,
+            "player_head",
+            None,
+            source,
+            1,
+            0,
+            64,
+            glam::Vec3::ZERO,
+            0.0,
+            0.0,
+            0.0,
+            false,
+            false,
+            glam::Mat4::IDENTITY,
+            0.0,
+            1.0,
+            1.0,
+            false,
+            None,
+            false,
+            None,
+            0.0,
+            glam::DVec3::ZERO,
+            64,
+        );
+        assert_eq!(infos.len(), super::stack_render_count(64) as usize);
+        assert!(
+            infos
+                .iter()
+                .all(|info| info.player_head_profile_source == expected)
+        );
+    }
 
     #[test]
     fn dropped_item_scatter_seed_includes_damage() {
@@ -5272,15 +5634,68 @@ mod dropped_item_tests {
     }
 
     #[test]
-    fn item_frame_diamond_rotation_keeps_fixed_item_center_on_face_normal() {
-        use glam::{Mat4, Vec3};
-        for rotation in [0.0_f32, 90.0] {
-            let frame = item_frame_base_rotation(azalea_core::direction::Direction::North);
-            let center = (frame
-                * Mat4::from_rotation_z(rotation.to_radians())
-                * Mat4::from_translation(Vec3::new(0.0, 0.0, 0.4375)))
-            .transform_point3(Vec3::ZERO);
-            assert!(center.abs_diff_eq(Vec3::new(0.0, 0.0, 0.4375), 1e-6));
+    fn item_frame_item_matrix_halves_fixed_scale_and_translation_but_not_body_or_map() {
+        use azalea_core::direction::Direction as D;
+        use glam::{DVec3, Mat4, Quat, Vec3};
+
+        let attachment = DVec3::new(-16.5, 64.5, 31.5);
+        let anchor = DVec3::new(-16.0, 64.0, 32.0);
+        let translation = Vec3::new(2.0, -4.0, 6.0) / 16.0;
+        let scale = Vec3::new(0.5, 0.75, 0.25);
+        let fixed = Mat4::from_translation(translation)
+            * Mat4::from_rotation_y(90_f32.to_radians())
+            * Mat4::from_scale(scale);
+        for (direction, normal) in [
+            (D::Down, DVec3::NEG_Y),
+            (D::Up, DVec3::Y),
+            (D::North, DVec3::NEG_Z),
+            (D::South, DVec3::Z),
+            (D::West, DVec3::NEG_X),
+            (D::East, DVec3::X),
+        ] {
+            let position = attachment - normal * 0.46875;
+            // This is the production base matrix shared by body and map draws.
+            let base = item_frame_base_matrix(position, direction, anchor);
+            assert!(
+                base.transform_point3(Vec3::ZERO)
+                    .abs_diff_eq((attachment - anchor).as_vec3(), 1e-6)
+            );
+            assert!(
+                base.transform_vector3(Vec3::Z)
+                    .abs_diff_eq(-normal.as_vec3(), 1e-6)
+            );
+            for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                assert!((base.transform_vector3(axis).length() - 1.0).abs() < 1e-6);
+            }
+            for rotation in 0..8 {
+                let item = item_frame_item_matrix(base, rotation, fixed);
+                let (sin, cos) = (rotation as f32 * 45.0).to_radians().sin_cos();
+                let local_center = Vec3::new(
+                    (translation.x * cos - translation.y * sin) * 0.5,
+                    (translation.x * sin + translation.y * cos) * 0.5,
+                    0.4375 + translation.z * 0.5,
+                );
+                assert!(
+                    item.transform_point3(Vec3::ZERO)
+                        .abs_diff_eq(base.transform_point3(local_center), 1e-6)
+                );
+                for (axis, length) in [(Vec3::X, scale.x), (Vec3::Y, scale.y), (Vec3::Z, scale.z)] {
+                    assert!((item.transform_vector3(axis).length() - length * 0.5).abs() < 1e-6);
+                }
+                let plain = item_frame_item_matrix(base, rotation, Mat4::IDENTITY);
+                assert!(
+                    plain
+                        .transform_point3(Vec3::ZERO)
+                        .abs_diff_eq(base.transform_point3(Vec3::Z * 0.4375), 1e-6)
+                );
+                assert!((plain.transform_vector3(Vec3::X).length() - 0.5).abs() < 1e-6);
+                let map_rotation = crate::renderer::pipelines::map_quad::frame_map_rotation(
+                    Quat::from_mat4(&base),
+                    rotation,
+                );
+                assert!(((map_rotation * Vec3::X).length() - 1.0).abs() < 1e-6);
+                assert!(((map_rotation * Vec3::Y).length() - 1.0).abs() < 1e-6);
+            }
         }
     }
 
@@ -5335,6 +5750,7 @@ fn emit_item_copies(
     infos: &mut Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo>,
     item_name: &str,
     raw_dye_rgb: Option<[u8; 3]>,
+    player_head_profile_source: Option<crate::world::block_entity::PlayerHeadProfileSource>,
     item_id: u32,
     damage: i32,
     count: i32,
@@ -5371,6 +5787,7 @@ fn emit_item_copies(
         infos.push(ItemRenderInfo {
             item_name: item_name.to_string(),
             raw_dye_rgb,
+            player_head_profile_source: player_head_profile_source.clone(),
             model_matrix: base * copy_offset * ground_transform,
             light,
             nether_lighting,
@@ -5447,6 +5864,24 @@ fn item_frame_base_position(
     position + normal * 0.46875
 }
 
+fn item_frame_base_matrix(
+    position: glam::DVec3,
+    direction: azalea_core::direction::Direction,
+    anchor: glam::DVec3,
+) -> glam::Mat4 {
+    glam::Mat4::from_translation((item_frame_base_position(position, direction) - anchor).as_vec3())
+        * item_frame_base_rotation(direction)
+}
+
+fn item_frame_item_matrix(base: glam::Mat4, rotation: i32, fixed: glam::Mat4) -> glam::Mat4 {
+    base * glam::Mat4::from_rotation_z((rotation as f32 * 45.0).to_radians())
+        * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.4375))
+        // Vanilla's outer half-scale also scales the FIXED display translation.
+        // Meshes are already centered; do not add another T(-0.5).
+        * glam::Mat4::from_scale(glam::Vec3::splat(0.5))
+        * fixed
+}
+
 const SNOWBALL_ITEM_NAME: &str = "snowball";
 
 /// 26.2 ThrownItemRenderer: one camera-facing GROUND item at the
@@ -5500,6 +5935,7 @@ fn snowball_render_infos(
             Some(ItemRenderInfo {
                 item_name: SNOWBALL_ITEM_NAME.to_owned(),
                 raw_dye_rgb: None,
+                player_head_profile_source: None,
                 model_matrix: glam::Mat4::from_translation((pos - anchor).as_vec3())
                     * billboard
                     * ground_transform,
@@ -5591,6 +6027,11 @@ fn build_item_render_infos(
                     let rgb = color.rgb;
                     [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
                 }),
+            item.stack.as_ref().and_then(|stack| {
+                crate::world::block_entity::player_head_profile_source_from_item(
+                    &azalea_inventory::ItemStack::Present(stack.clone()),
+                )
+            }),
             item.item_id,
             item.damage,
             item.count,
@@ -5623,7 +6064,19 @@ fn build_item_render_infos(
         emit_item_copies(
             &mut infos,
             &pickup.item_name,
-            None,
+            pickup
+                .stack
+                .as_ref()
+                .and_then(|stack| stack.get_component::<azalea_inventory::components::DyedColor>())
+                .map(|color| {
+                    let rgb = color.rgb;
+                    [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
+                }),
+            pickup.stack.as_ref().and_then(|stack| {
+                crate::world::block_entity::player_head_profile_source_from_item(
+                    &azalea_inventory::ItemStack::Present(stack.clone()),
+                )
+            }),
             pickup.item_id,
             pickup.damage,
             pickup.count,
@@ -5705,15 +6158,13 @@ fn build_item_render_infos(
         // represent floor/ceiling mounting and is not used to infer facing.
         let direction = frame
             .item_frame_direction
-            .unwrap_or(azalea_core::direction::Direction::North);
-        let base_rotation = item_frame_base_rotation(direction);
-        let base_matrix = glam::Mat4::from_translation(
-            (item_frame_base_position(position, direction) - anchor).as_vec3(),
-        ) * base_rotation;
+            .unwrap_or(azalea_core::direction::Direction::South);
+        let base_matrix = item_frame_base_matrix(position, direction, anchor);
         // build_item_mesh already centers baked model vertices by subtracting 0.5.
         infos.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
             item_name: item_name.to_owned(),
             raw_dye_rgb: None,
+            player_head_profile_source: None,
             model_matrix: base_matrix,
             light: get_entity_light(
                 chunk_store,
@@ -5742,15 +6193,14 @@ fn build_item_render_infos(
                 .is_none()
         {
             let name = crate::player::inventory::item_resource_name(stack.kind);
-            let frame_item_transform = base_matrix
-                * glam::Mat4::from_rotation_z(
-                    (frame.item_frame_rotation as f32 * 45.0).to_radians(),
-                )
-                * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.4375))
-                * renderer
+            let frame_item_transform = item_frame_item_matrix(
+                base_matrix,
+                frame.item_frame_rotation,
+                renderer
                     .registry()
                     .get_item_fixed_transform(&name)
-                    .unwrap_or(glam::Mat4::IDENTITY);
+                    .unwrap_or(glam::Mat4::IDENTITY),
+            );
             let raw_dye_rgb = stack
                 .get_component::<azalea_inventory::components::DyedColor>()
                 .map(|color| {
@@ -5760,6 +6210,10 @@ fn build_item_render_infos(
             infos.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
                 item_name: name,
                 raw_dye_rgb,
+                player_head_profile_source:
+                    crate::world::block_entity::player_head_profile_source_from_item(
+                        &frame.item_frame_item,
+                    ),
                 model_matrix: frame_item_transform,
                 light: get_entity_light(
                     chunk_store,
@@ -6293,6 +6747,90 @@ mod tests {
         show_death_screen_param, sign_has_text, sign_text_in_range,
     };
     use crate::renderer::SkyState;
+
+    #[test]
+    fn hopper_ui_targets_all_41_native_slots() {
+        use azalea_inventory::ItemStack;
+        use azalea_inventory::operations::{ClickOperation, QuickMoveClick};
+
+        use crate::ui::container::ContainerInput;
+        let input = ContainerInput {
+            left_pressed: true,
+            right_pressed: false,
+            middle_pressed: false,
+            left_held: false,
+            right_held: false,
+            shift: true,
+            hotbar_swap: None,
+            swap_offhand: false,
+            throw: false,
+            throw_all: false,
+        };
+        let slots = vec![ItemStack::Empty; 41];
+        for scale in [1.0, 2.0, 3.0] {
+            for slot in 0..41u16 {
+                let (x, y) = match slot {
+                    0..=4 => (44.0 + slot as f32 * 18.0, 20.0),
+                    5..=31 => (
+                        8.0 + ((slot - 5) % 9) as f32 * 18.0,
+                        51.0 + ((slot - 5) / 9) as f32 * 18.0,
+                    ),
+                    _ => (8.0 + (slot - 32) as f32 * 18.0, 109.0),
+                };
+                let mut elements = Vec::new();
+                let result = super::build_hopper(
+                    &mut elements,
+                    176.0 * scale,
+                    133.0 * scale,
+                    ((x + 8.0) * scale, (y + 8.0) * scale),
+                    &input,
+                    &slots,
+                    "Hopper",
+                    &ItemStack::Empty,
+                    &mut None,
+                    &mut None,
+                    scale,
+                    false,
+                );
+                use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
+                assert!(elements.iter().any(|element| matches!(element,MenuElement::Image {x,y,w,h,sprite:SpriteId::HopperBackground,..}
+                if *x==0.0 && *y==0.0 && *w==176.0*scale && *h==133.0*scale)));
+                assert!(elements.iter().any(
+                    |element| matches!(element,MenuElement::TextFlat {x,y,text,..}
+                if *x==8.0*scale && *y==39.0*scale && text=="Inventory")
+                ));
+                assert!(!elements.iter().any(|element| matches!(
+                    element,
+                    MenuElement::Image {
+                        sprite: SpriteId::Generic54Bottom,
+                        ..
+                    }
+                )));
+                assert!(!result.clicked_outside);
+                assert!(matches!(
+                    result.ops.as_slice(),
+                    [ClickOperation::QuickMove(QuickMoveClick::Left { slot: actual })]
+                        if *actual == slot
+                ));
+            }
+        }
+        // Empty space beside the five hopper slots is not a phantom sixth slot.
+        let result = super::build_hopper(
+            &mut Vec::new(),
+            176.0,
+            133.0,
+            (8.0, 28.0),
+            &input,
+            &slots,
+            "Hopper",
+            &ItemStack::Empty,
+            &mut None,
+            &mut None,
+            1.0,
+            false,
+        );
+        assert!(result.ops.is_empty());
+    }
 
     #[test]
     fn client_information_diff_includes_locale_without_repeat_sends() {
@@ -7155,7 +7693,8 @@ mod tests {
             col,
             first,
             0..3,
-            true
+            true,
+            0
         ));
         let second = bump_section_generations(&mut generations, &mut next, col, 1..2);
         assert!(second > first);
@@ -7166,7 +7705,8 @@ mod tests {
             col,
             first,
             0..3,
-            true
+            true,
+            0
         ));
         assert!(!mesh_result_is_stale(
             &chunks,
@@ -7175,7 +7715,8 @@ mod tests {
             col,
             first,
             0..1,
-            true
+            true,
+            0
         ));
         assert!(!mesh_result_is_stale(
             &chunks,
@@ -7184,7 +7725,8 @@ mod tests {
             col,
             second,
             1..2,
-            true
+            true,
+            0
         ));
     }
 
@@ -7220,7 +7762,8 @@ mod tests {
             col,
             old,
             0..2,
-            true
+            true,
+            0
         )); // The old group cannot upload section 1.
         let runs = current_edit_section_runs(&chunks, &generations, col, old, 0..2);
         assert_eq!(runs, vec![(col, 0..1)]);
@@ -7234,7 +7777,8 @@ mod tests {
                 col,
                 fresh,
                 range,
-                true
+                true,
+                0
             )); // Section 0 can now upload.
         }
         assert_eq!(generations[&(col, 1)], new); // No old geometry or requeue for 1.
@@ -7245,7 +7789,8 @@ mod tests {
             col,
             new,
             1..2,
-            true
+            true,
+            0
         )); // The newer section 1 job remains valid.
         assert!(current_edit_section_runs(&chunks, &generations, col, old, 0..2).is_empty());
 
@@ -7295,6 +7840,7 @@ mod tests {
             stale_mesh_gen,
             0..1,
             false,
+            stale_mesh_gen,
         ));
     }
 
@@ -7328,6 +7874,55 @@ mod tests {
         let snapshot = chunks.get_chunk(&pos).unwrap();
         let mut generations = HashMap::from([(pos, 1)]);
         let sections = HashMap::new();
+        let edit_sections = HashMap::from([((pos, 0), 7)]);
+        assert!(!mesh_result_is_stale(
+            &chunks,
+            &generations,
+            &edit_sections,
+            pos,
+            7,
+            0..1,
+            true,
+            1
+        ));
+        // ChunkLoaded replaces the contents through the SAME Arc, not a new identity.
+        chunks.load_decoded_chunk(pos, azalea_world::Chunk::default());
+        assert!(Arc::ptr_eq(&snapshot, &chunks.get_chunk(&pos).unwrap()));
+        let mut next = 1;
+        bump_loaded_content_generations(
+            &mut generations,
+            &mut next,
+            [pos],
+            &std::collections::HashSet::from([pos]),
+        );
+        assert!(mesh_result_is_stale(
+            &chunks,
+            &generations,
+            &edit_sections,
+            pos,
+            7,
+            0..1,
+            true,
+            1
+        ));
+        assert_eq!(
+            current_edit_section_runs(&chunks, &edit_sections, pos, 7, 0..1),
+            vec![(pos, 0..1)]
+        );
+        let mut edit_sections = edit_sections;
+        let mut ticket = 7;
+        let fresh = bump_section_generations(&mut edit_sections, &mut ticket, pos, 0..1);
+        assert!(!mesh_result_is_stale(
+            &chunks,
+            &generations,
+            &edit_sections,
+            pos,
+            fresh,
+            0..1,
+            true,
+            next
+        ));
+        generations.insert(pos, 1); // Continue the bulk/unload assertions below.
         assert!(!mesh_result_is_stale(
             &chunks,
             &generations,
@@ -7335,7 +7930,8 @@ mod tests {
             pos,
             1,
             0..1,
-            false
+            false,
+            1
         ));
         chunks.unload_chunk(&pos);
         generations.remove(&pos);
@@ -7350,7 +7946,8 @@ mod tests {
             pos,
             1,
             0..1,
-            false
+            false,
+            1
         ));
         drop(snapshot);
     }

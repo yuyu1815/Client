@@ -24,12 +24,18 @@ layout(location = 3) flat out float v_visibility;
 layout(location = 4) out vec3 v_fog_color;
 layout(location = 5) out float v_fog;
 layout(location = 6) flat out uint v_sprite;
+layout(location = 7) out vec3 v_edit_local;
+layout(location = 8) flat out ivec3 v_edit_origin;
+layout(location = 9) out vec3 v_edit_rel;
 
 void main() {
     vec3 local = vec3(in_pos_xy, in_pos_z) * POS_RANGE - POS_BIAS;
     vec3 world = origin_fade.xyz + local;
     vec3 rel = world - camera_pos.xyz;
     gl_Position = view_proj * vec4(rel, 1.0);
+    v_edit_local = local;
+    v_edit_origin = camera_block.xyz + ivec3(round(origin_fade.xyz));
+    v_edit_rel = rel;
     v_sprite_uv = vec2(in_sprite_uv) / TERRAIN_UV_FIXED_SCALE;
     v_light = in_light_tint.r;
     v_tint = in_light_tint.gba;

@@ -1,3 +1,31 @@
+// Mask is shared by every terrain color/depth-writing layer. No terrain
+// shadow-map pass exists here; entity contact shadows sample latest CPU blocks.
+layout(set = 0, binding = 1, std140) uniform TerrainEdits {
+    ivec4 edit_count;
+    ivec4 edit_cells[64];
+};
+layout(location = 7) in vec3 v_edit_local;
+layout(location = 8) flat in ivec3 v_edit_origin;
+layout(location = 9) in vec3 v_edit_rel;
+
+bool terrain_edit_masked(float visibility) {
+    // Derivatives before divergent control flow, including delta/bulk draws.
+    vec3 n = cross(dFdx(v_edit_local), dFdy(v_edit_local));
+    // Winding and viewport Y conventions cannot change source ownership.
+    if (dot(n, v_edit_rel) > 0.0) n = -n;
+    vec3 a = abs(n);
+    vec3 axis = a.x >= a.y && a.x >= a.z ? vec3(sign(n.x), 0, 0)
+              : a.y >= a.z ? vec3(0, sign(n.y), 0) : vec3(0, 0, sign(n.z));
+    ivec3 source = v_edit_origin + ivec3(floor(v_edit_local - axis * 0.001));
+    if (visibility < 0.0 || edit_count.x == 0) return false;
+    // ponytail: O(n) fragment mask, capped at 64 cells; sorted SSBO binary
+    // search or section-local bitsets if profiling shows this scan matters.
+    for (int i = 0; i < edit_count.x; ++i) {
+        if (all(equal(source, edit_cells[i].xyz))) return true;
+    }
+    return false;
+}
+
 // Level-0 sprite rectangles `(x, y, width, height)` in atlas texels, indexed by
 // the vertex's sprite id; index 0 is the missing tile.
 layout(set = 1, binding = 1) readonly buffer SpriteRects {

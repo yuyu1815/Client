@@ -336,6 +336,9 @@ pub enum NetworkEvent {
     },
     RecipeBookAdd(azalea_protocol::packets::game::c_recipe_book_add::ClientboundRecipeBookAdd),
     RecipeBookRemove(Vec<u32>),
+    PlaceGhostRecipe(
+        azalea_protocol::packets::game::c_place_ghost_recipe::ClientboundPlaceGhostRecipe,
+    ),
     RecipeBookSettings(azalea_protocol::packets::game::c_recipe_book_settings::RecipeBookSettings),
     UpdateRecipes(azalea_protocol::packets::game::c_update_recipes::ClientboundUpdateRecipes),
     RecipeItemTags(azalea_protocol::common::tags::TagMap),
@@ -510,6 +513,8 @@ pub enum NetworkEvent {
         uuid: uuid::Uuid,
         entity_type: EntityKind,
         position: Position,
+        /// Spawn facing travels atomically with the item frame's center.
+        item_frame_direction: Option<azalea_core::direction::Direction>,
         velocity: DVec3,
         y_rot_deg: f32,
         x_rot_deg: f32,

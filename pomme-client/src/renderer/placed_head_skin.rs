@@ -1,12 +1,15 @@
 //! CPU-only, full-sheet skins for placed player heads. No UI faces or GPU
 //! objects.
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
-use super::{SkinData, fetch_skin_texture_from_profile_property, process_legacy_skin};
-use crate::assets::{AssetIndex, load_image, resolve_asset_path};
+use super::{
+    SkinData, fetch_skin_texture, fetch_skin_texture_by_name,
+    fetch_skin_texture_from_profile_property, process_legacy_skin,
+};
+use crate::assets::{AssetId, AssetIndex, resolve_asset_path_with_pack_dirs};
 use crate::world::block_entity::PlayerHeadProfileSource;
 
 const MAX_PENDING: usize = 32;
@@ -15,7 +18,7 @@ const MAX_PENDING: usize = 32;
 pub(super) const MAX_ENTRIES: usize = 128;
 const UNUSED_RETENTION: Duration = Duration::from_secs(60);
 const DEFAULT_SOURCE: PlayerHeadProfileSource = PlayerHeadProfileSource::Default;
-type Completion = (PlayerHeadProfileSource, Result<SkinData, String>);
+type Completion = (u64, PlayerHeadProfileSource, Result<SkinData, String>);
 
 enum State {
     Pending,
@@ -34,26 +37,35 @@ pub(super) struct PlacedHeadSkinCache {
     tx: SyncSender<Completion>,
     rx: Receiver<Completion>,
     fallback: SkinData,
+    generation: u64,
+    revision: u64,
 }
 
 impl PlacedHeadSkinCache {
-    /// Load the same built-in slim Steve used by the skull pipeline, once at
-    /// renderer startup, not during frame rendering or per-source admission.
-    pub(super) fn load(jar: &Path, index: &Option<AssetIndex>) -> Result<Self, String> {
-        let path = resolve_asset_path(
+    /// Load slim Steve through the same pack-aware loader as patched heads,
+    /// only at startup or asset reload, never during frame rendering.
+    pub(super) fn load(
+        jar: &Path,
+        index: &Option<AssetIndex>,
+        packs: &[PathBuf],
+    ) -> Result<Self, String> {
+        Ok(Self::new(Self::resource_skin(
+            "minecraft:entity/player/slim/steve",
             jar,
             index,
-            "minecraft/textures/entity/player/slim/steve.png",
-        );
-        let rgba = load_image(&path).map_err(|e| e.to_string())?.into_rgba8();
-        let (width, height) = rgba.dimensions();
-        let (pixels, width, height) = process_legacy_skin(rgba.into_raw(), width, height)?;
-        Ok(Self::new(SkinData {
-            pixels,
-            width,
-            height,
-            slim: true,
-        }))
+            packs,
+        )?))
+    }
+
+    pub(super) fn reload(
+        &mut self,
+        jar: &Path,
+        index: &Option<AssetIndex>,
+        packs: &[PathBuf],
+    ) -> Result<(), String> {
+        self.invalidate();
+        self.fallback = Self::load(jar, index, packs)?.fallback;
+        Ok(())
     }
 
     fn new(fallback: SkinData) -> Self {
@@ -64,16 +76,42 @@ impl PlacedHeadSkinCache {
             tx,
             rx,
             fallback,
+            generation: 0,
+            revision: 0,
         }
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Changes when sheets become ready or are retired; GUI bakes use this
+    /// stamp.
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Drop all resource-dependent sheets and give the next generation its own
+    /// bounded channel. Old jobs cannot occupy new reservations or publish
+    /// skins.
+    pub(super) fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.revision = self.revision.wrapping_add(1);
+        self.entries.clear();
+        self.pending = 0;
+        (self.tx, self.rx) = mpsc::sync_channel(MAX_PENDING);
     }
 
     /// Called once before world drawing. No disk IO, HTTP, decode, waits, or
     /// worker creation on cache hits; even 1000 distinct heads admit at most
-    /// 32 outstanding jobs (completed-but-undrained results still count).
+    /// 32 outstanding jobs per generation (undrained results still count).
     pub(super) fn update<'a>(
         &mut self,
         sources: impl Iterator<Item = &'a PlayerHeadProfileSource> + Clone,
         rt: &tokio::runtime::Runtime,
+        jar: &Path,
+        index: &Option<AssetIndex>,
+        pack_dirs: &[PathBuf],
     ) {
         self.drain();
         let now = Instant::now();
@@ -84,33 +122,167 @@ impl PlacedHeadSkinCache {
                 }
             }
         }
+        let previous_len = self.entries.len();
         self.entries.retain(|_, entry| {
             matches!(entry.state, State::Pending)
                 || now.duration_since(entry.last_seen) < UNUSED_RETENTION
         });
+        if self.entries.len() != previous_len {
+            self.revision = self.revision.wrapping_add(1);
+        }
         for source in sources {
             if !self.reserve(source, now) {
                 continue;
             }
             let source = source.clone();
             let tx = self.tx.clone();
+            let generation = self.generation;
+            let assets = (jar.to_owned(), index.clone(), pack_dirs.to_vec());
+            let fallback = SkinData {
+                pixels: self.fallback.pixels.clone(),
+                width: self.fallback.width,
+                height: self.fallback.height,
+                slim: self.fallback.slim,
+            };
             rt.spawn(async move {
-                let PlayerHeadProfileSource::EmbeddedTexturesProperty(value) = &source else {
-                    unreachable!("only embedded properties are admitted");
-                };
-                let result = fetch_skin_texture_from_profile_property(value).await;
-                // One result per reservation; channel capacity equals MAX_PENDING.
-                // try_send never blocks a runtime worker (including on teardown).
-                let _ = tx.try_send((source, result));
+                let result = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    Self::resolve(&source, assets, fallback),
+                )
+                .await
+                .unwrap_or_else(|_| Err("head skin resolution timed out".into()));
+                // One result per reservation; never block a runtime worker.
+                let _ = tx.try_send((generation, source, result));
             });
         }
     }
 
     fn supported(source: &PlayerHeadProfileSource) -> bool {
-        // Reject oversized input before hashing/cloning/decoding or spawning.
-        // ResourceTexture and Profile deliberately remain fallback in this phase.
-        matches!(source, PlayerHeadProfileSource::EmbeddedTexturesProperty(value)
-            if value.len() <= super::MAX_TEXTURE_PROPERTY_BYTES)
+        use crate::world::block_entity::valid_player_head_resource_texture;
+        let Some(patch) = source.patch() else {
+            return false;
+        };
+        if [&patch.texture, &patch.cape, &patch.elytra]
+            .iter()
+            .any(|v| {
+                v.as_ref()
+                    .is_some_and(|v| !valid_player_head_resource_texture(v))
+            })
+            || patch
+                .model
+                .as_ref()
+                .is_some_and(|v| !matches!(v.as_str(), "slim" | "wide"))
+        {
+            return false;
+        }
+        match source {
+            PlayerHeadProfileSource::Static {
+                name, properties, ..
+            } => {
+                name.as_ref().is_none_or(|v| v.len() <= 16)
+                    && properties.len() <= 16
+                    && properties.iter().all(|p| {
+                        p.name.len() <= 192
+                            && p.value.len() <= super::MAX_TEXTURE_PROPERTY_BYTES
+                            && p.signature.as_ref().is_none_or(|v| v.len() <= 3072)
+                    })
+            }
+            PlayerHeadProfileSource::DynamicName { name, .. } => {
+                crate::player::valid_player_name(name)
+            }
+            PlayerHeadProfileSource::DynamicId { .. } => true,
+            PlayerHeadProfileSource::Default => false,
+        }
+    }
+
+    async fn resolve(
+        source: &PlayerHeadProfileSource,
+        assets: (PathBuf, Option<AssetIndex>, Vec<PathBuf>),
+        fallback: SkinData,
+    ) -> Result<SkinData, String> {
+        let patch = source.patch().ok_or("default profile")?;
+        // A body patch replaces the resolved body, not the profile identity.
+        // Avoid a needless HTTP lookup when the final body is already local.
+        let mut skin = if let Some(texture) = &patch.texture {
+            let texture = texture.clone();
+            tokio::task::spawn_blocking(move || {
+                Self::resource_skin(&texture, &assets.0, &assets.1, &assets.2)
+            })
+            .await
+            .map_err(|e| e.to_string())??
+        } else {
+            let result = match source {
+                PlayerHeadProfileSource::Static { properties, .. } => {
+                    if let Some(property) = properties.iter().find(|p| p.name == "textures") {
+                        fetch_skin_texture_from_profile_property(&property.value).await
+                    } else {
+                        // Official Static.resolveProfile is completedFuture(partialProfile).
+                        // NEVER replace missing static properties with a name/id lookup.
+                        Ok(fallback)
+                    }
+                }
+                PlayerHeadProfileSource::DynamicName { name, .. } => {
+                    fetch_skin_texture_by_name(name).await
+                }
+                PlayerHeadProfileSource::DynamicId { id, .. } => {
+                    fetch_skin_texture(&id.simple().to_string()).await
+                }
+                PlayerHeadProfileSource::Default => unreachable!(),
+            };
+            result?
+        };
+        if let Some(model) = &patch.model {
+            skin.slim = model == "slim";
+        }
+        Ok(skin)
+    }
+
+    fn resource_skin(
+        texture: &str,
+        jar: &Path,
+        index: &Option<AssetIndex>,
+        packs: &[PathBuf],
+    ) -> Result<SkinData, String> {
+        if !crate::world::block_entity::valid_player_head_resource_texture(texture) {
+            return Err("invalid head texture asset".into());
+        }
+        let key = AssetId::parse(texture).asset_key("textures", ".png");
+        let path = resolve_asset_path_with_pack_dirs(jar, index, &key, packs);
+        // Bound both encoded input and decoder allocation, including pack files.
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(|e| e.to_string())?
+            .take(2 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() > 2 * 1024 * 1024 {
+            return Err("head texture exceeds 2 MiB".into());
+        }
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(64);
+        limits.max_image_height = Some(64);
+        limits.max_alloc = Some(64 * 64 * 16);
+        reader.limits(limits);
+        let rgba = reader.decode().map_err(|e| e.to_string())?.into_rgba8();
+        let (width, height) = rgba.dimensions();
+        if width != 64 || !matches!(height, 32 | 64) {
+            return Err("invalid head texture dimensions".into());
+        }
+        let (pixels, width, height) = if height == 32 {
+            process_legacy_skin(rgba.into_raw(), width, height)?
+        } else {
+            (rgba.into_raw(), width, height)
+        };
+        Ok(SkinData {
+            pixels,
+            width,
+            height,
+            slim: true,
+        })
     }
 
     fn reserve(&mut self, source: &PlayerHeadProfileSource, now: Instant) -> bool {
@@ -133,7 +305,10 @@ impl PlacedHeadSkinCache {
     }
 
     fn drain(&mut self) {
-        while let Ok((source, result)) = self.rx.try_recv() {
+        while let Ok((generation, source, result)) = self.rx.try_recv() {
+            if generation != self.generation {
+                continue;
+            }
             // A completion only updates its complete source key, never a block
             // position or the source now replacing it. Pending keys are not evicted.
             let Some(entry) = self.entries.get_mut(&source) else {
@@ -149,6 +324,7 @@ impl PlacedHeadSkinCache {
                         && skin.height == 64
                         && skin.pixels.len() == 64 * 64 * 4 =>
                 {
+                    self.revision = self.revision.wrapping_add(1);
                     State::Ready(skin)
                 }
                 _ => State::Failed,
@@ -156,8 +332,7 @@ impl PlacedHeadSkinCache {
         }
     }
 
-    /// Only validated, decoded sheets can reach GPU upload. Unsupported sources
-    /// (ResourceTexture and name/UUID Profile) never appear here.
+    /// Only validated, decoded sheets can reach GPU upload.
     pub(super) fn ready(&self) -> impl Iterator<Item = (&PlayerHeadProfileSource, &SkinData)> {
         self.entries
             .iter()
@@ -229,7 +404,16 @@ mod tests {
     }
 
     fn source(value: &str) -> PlayerHeadProfileSource {
-        PlayerHeadProfileSource::EmbeddedTexturesProperty(value.into())
+        PlayerHeadProfileSource::Static {
+            name: None,
+            id: None,
+            properties: vec![crate::world::block_entity::PlayerHeadProfileProperty {
+                name: "textures".into(),
+                value: value.into(),
+                signature: None,
+            }],
+            patch: Default::default(),
+        }
     }
 
     fn finish(
@@ -237,7 +421,12 @@ mod tests {
         source: PlayerHeadProfileSource,
         result: Result<SkinData, String>,
     ) {
-        assert!(cache.tx.try_send((source, result)).is_ok());
+        assert!(
+            cache
+                .tx
+                .try_send((cache.generation, source, result))
+                .is_ok()
+        );
         cache.drain();
     }
 
@@ -286,9 +475,14 @@ mod tests {
             ready_without_gpu,
             source("unknown"),
             PlayerHeadProfileSource::Default,
-            PlayerHeadProfileSource::ResourceTexture("minecraft:custom.png".into()),
-            PlayerHeadProfileSource::Profile("Steve".into()),
-            PlayerHeadProfileSource::Profile("00000000-0000-0000-0000-000000000000".into()),
+            PlayerHeadProfileSource::DynamicName {
+                name: "Steve".into(),
+                patch: Default::default(),
+            },
+            PlayerHeadProfileSource::DynamicId {
+                id: uuid::Uuid::nil(),
+                patch: Default::default(),
+            },
         ] {
             assert_eq!(*cache.texture(Some(&key), &slots, &steve), steve);
         }
@@ -323,7 +517,7 @@ mod tests {
         let steve = 0;
         assert_eq!(*cache.texture(Some(&key), &slots, &steve), 101);
         // The GPU invalidation path drains all slots after device idle. The
-        // validated CPU sheet survives reload, but its old GPU set does not.
+        // validated CPU sheet survives a GPU-only rebuild, but its old set does not.
         let retired: Vec<_> = slots.drain().collect();
         assert_eq!(retired.len(), 1);
         assert_eq!(*cache.texture(Some(&key), &slots, &steve), steve);
@@ -424,8 +618,19 @@ mod tests {
         for source in [
             source(&"A".repeat(super::super::MAX_TEXTURE_PROPERTY_BYTES + 1)),
             PlayerHeadProfileSource::Default,
-            PlayerHeadProfileSource::Profile("Steve".into()),
-            PlayerHeadProfileSource::ResourceTexture("minecraft:textures/test.png".into()),
+            PlayerHeadProfileSource::DynamicName {
+                name: "unsafe name".into(),
+                patch: Default::default(),
+            },
+            PlayerHeadProfileSource::Static {
+                name: None,
+                id: None,
+                properties: Vec::new(),
+                patch: crate::world::block_entity::PlayerHeadSkinPatch {
+                    texture: Some("minecraft:../unsafe".into()),
+                    ..Default::default()
+                },
+            },
         ] {
             assert!(!cache.reserve(&source, Instant::now()));
             let (key, fallback) = cache.skin(&source);
@@ -447,17 +652,282 @@ mod tests {
             .unwrap();
         let mut cache = PlacedHeadSkinCache::new(sheet(0));
         let bad = source("not base64!");
-        cache.update(std::iter::once(&bad), &rt);
+        cache.update(std::iter::once(&bad), &rt, Path::new("."), &None, &[]);
         // Finite wait in a test only; the frame path exclusively uses try_recv.
         let completion = cache.rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(completion.0, bad);
-        assert!(completion.1.is_err());
+        assert_eq!(completion.1, bad);
+        assert!(completion.2.is_err());
         assert!(cache.tx.try_send(completion).is_ok());
-        cache.update(std::iter::once(&bad), &rt);
+        cache.update(std::iter::once(&bad), &rt, Path::new("."), &None, &[]);
         assert_eq!(cache.pending, 0);
         assert!(matches!(cache.entries[&bad].state, State::Failed));
         assert_eq!(cache.skin(&bad).0, &DEFAULT_SOURCE);
         assert!(cache.rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn nbt_stored_profiles_admit_list_map_static_dynamic_and_patch() {
+        use azalea_registry::builtin::BlockEntityKind;
+        use simdnbt::owned::{NbtCompound, NbtList};
+
+        use crate::world::block_entity::{PlayerHeadSkinPatch, StoredBlockEntity};
+        let mut property = NbtCompound::new();
+        property.insert("name", "textures");
+        property.insert("value", "embedded");
+        let mut list_profile = NbtCompound::new();
+        list_profile.insert("properties", NbtList::Compound(vec![property]));
+        let mut map = NbtCompound::new();
+        map.insert("textures", NbtList::String(vec!["embedded".into()]));
+        let mut map_profile = NbtCompound::new();
+        map_profile.insert("properties", map);
+        let stored = |profile: NbtCompound| {
+            let mut nbt = NbtCompound::new();
+            nbt.insert("profile", profile);
+            StoredBlockEntity::new(BlockEntityKind::Skull, nbt)
+                .player_head_profile_source
+                .unwrap()
+        };
+        let list = stored(list_profile.clone());
+        assert_eq!(list, stored(map_profile));
+        assert_eq!(list, source("embedded"));
+        // Preserve all profile fields and signatures, not only the selected value.
+        list_profile.insert("name", "Alex");
+        list_profile.insert("id", simdnbt::owned::NbtTag::IntArray(vec![0, 0, 0, 1]));
+        list_profile.insert("texture", "custom:entity/skin");
+        list_profile.insert("cape", "custom:cape");
+        list_profile.insert("elytra", "custom:elytra");
+        list_profile.insert("model", "wide");
+        let full = stored(list_profile);
+        assert!(
+            matches!(&full, PlayerHeadProfileSource::Static { name: Some(name), id: Some(id), properties, patch }
+            if name == "Alex" && *id == uuid::Uuid::from_u128(1) && properties[0].value == "embedded"
+                && patch.cape.as_deref() == Some("custom:cape") && patch.elytra.as_deref() == Some("custom:elytra"))
+        );
+        let mut name = NbtCompound::new();
+        name.insert("name", "Alex");
+        let dynamic_name = stored(name.clone());
+        assert!(
+            matches!(&dynamic_name, PlayerHeadProfileSource::DynamicName { name, .. } if name == "Alex")
+        );
+        let mut id = NbtCompound::new();
+        id.insert("id", simdnbt::owned::NbtTag::IntArray(vec![0, 0, 0, 1]));
+        let dynamic_id = stored(id);
+        assert!(
+            matches!(&dynamic_id, PlayerHeadProfileSource::DynamicId { id, .. } if *id == uuid::Uuid::from_u128(1))
+        );
+        name.insert("id", simdnbt::owned::NbtTag::IntArray(vec![0, 0, 0, 1]));
+        let static_empty = stored(name);
+        assert!(
+            matches!(&static_empty, PlayerHeadProfileSource::Static { properties, .. } if properties.is_empty())
+        );
+        let mut patch = NbtCompound::new();
+        patch.insert("texture", "custom:skin");
+        let patch_only = stored(patch);
+        let mut cache = PlacedHeadSkinCache::new(sheet(0));
+        for key in [
+            &list,
+            &full,
+            &dynamic_name,
+            &dynamic_id,
+            &static_empty,
+            &patch_only,
+        ] {
+            assert!(cache.reserve(key, Instant::now()));
+        }
+        assert_eq!(cache.pending, 6);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // No live HTTP: a static identity with no properties returns the default,
+        // whereas an accidental dynamic substitution would await a real lookup.
+        let skin = rt.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                PlacedHeadSkinCache::resolve(
+                    &static_empty,
+                    (PathBuf::new(), None, vec![]),
+                    sheet(42),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        });
+        assert_eq!(skin.pixels[0], 42);
+        let mut invalid = NbtCompound::new();
+        invalid.insert("texture", "minecraft:../secret");
+        assert_eq!(stored(invalid), PlayerHeadProfileSource::Default);
+        let unsafe_patch = PlayerHeadProfileSource::DynamicId {
+            id: uuid::Uuid::nil(),
+            patch: PlayerHeadSkinPatch {
+                texture: Some("file:/secret".into()),
+                ..Default::default()
+            },
+        };
+        assert!(!cache.reserve(&unsafe_patch, Instant::now()));
+    }
+
+    #[test]
+    fn pack_patch_resolution_preserves_alpha_and_reload_rejects_old_jobs() {
+        use crate::world::block_entity::PlayerHeadSkinPatch;
+        let root = std::env::temp_dir().join(format!("pomme-head-{}", uuid::Uuid::new_v4()));
+        let jar = root.join("jar");
+        let pack = root.join("pack");
+        let relative = "custom/textures/head.png";
+        for (dir, byte) in [(&jar, 11), (&pack.join("assets"), 23)] {
+            let path = dir.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            image::RgbaImage::from_pixel(64, 64, image::Rgba([byte, byte, byte, 0]))
+                .save(path)
+                .unwrap();
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let source = PlayerHeadProfileSource::Static {
+            name: Some("Alex".into()),
+            id: Some(uuid::Uuid::nil()),
+            properties: vec![],
+            patch: PlayerHeadSkinPatch {
+                texture: Some("custom:head".into()),
+                model: Some("wide".into()),
+                ..Default::default()
+            },
+        };
+        let skin = rt
+            .block_on(PlacedHeadSkinCache::resolve(
+                &source,
+                (jar.clone(), None, vec![pack.clone()]),
+                sheet(0),
+            ))
+            .unwrap();
+        assert_eq!(&skin.pixels[..4], &[23, 23, 23, 0]);
+        assert!(!skin.slim);
+        assert!(PlacedHeadSkinCache::resource_skin("custom:../head", &jar, &None, &[]).is_err());
+        let mut cache = PlacedHeadSkinCache::new(sheet(0));
+        assert!(cache.reserve(&source, Instant::now()));
+        let old_generation = cache.generation();
+        let old_tx = cache.tx.clone();
+        cache.invalidate();
+        assert_eq!(cache.revision(), 1);
+        assert_eq!(cache.pending, 0);
+        assert!(
+            old_tx
+                .try_send((old_generation, source.clone(), Ok(sheet(99))))
+                .is_err()
+        );
+        assert!(cache.reserve(&source, Instant::now()));
+        // Even if an old generation is delivered on the new channel, ignore it.
+        cache
+            .tx
+            .try_send((old_generation, source.clone(), Ok(sheet(99))))
+            .ok()
+            .unwrap();
+        cache.drain();
+        assert_eq!(cache.pending, 1);
+        assert_eq!(cache.skin(&source).0, &DEFAULT_SOURCE);
+        finish(&mut cache, source.clone(), Ok(skin));
+        assert_eq!(cache.revision(), 2);
+        assert_eq!(cache.skin(&source).1.pixels[0], 23);
+        cache.invalidate();
+        assert_eq!(cache.skin(&source).0, &DEFAULT_SOURCE);
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([31, 31, 31, 0]))
+            .save(pack.join("assets").join(relative))
+            .unwrap();
+        let reloaded = rt
+            .block_on(PlacedHeadSkinCache::resolve(
+                &source,
+                (jar, None, vec![pack]),
+                sheet(0),
+            ))
+            .unwrap();
+        assert!(cache.reserve(&source, Instant::now()));
+        finish(&mut cache, source.clone(), Ok(reloaded));
+        assert_eq!(cache.skin(&source).1.pixels[0], 31);
+        assert_eq!(cache.revision(), 4);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn head_fallback_reload_tracks_pack_changes_and_keeps_valid_sheet_on_error() {
+        let root = std::env::temp_dir().join(format!("pomme-head-{}", uuid::Uuid::new_v4()));
+        let jar = root.join("jar");
+        let pack = root.join("pack");
+        let relative = "minecraft/textures/entity/player/slim/steve.png";
+        for (dir, byte) in [(&jar, 11), (&pack.join("assets"), 23)] {
+            let path = dir.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            image::RgbaImage::from_pixel(64, 64, image::Rgba([byte, byte, byte, 0]))
+                .save(path)
+                .unwrap();
+        }
+        let mut cache = PlacedHeadSkinCache::load(&jar, &None, &[]).unwrap();
+        assert_eq!(cache.skin(&DEFAULT_SOURCE).1.pixels[0], 11);
+        let pending = source("pending before reload");
+        assert!(cache.reserve(&pending, Instant::now()));
+        let old_tx = cache.tx.clone();
+        cache.reload(&jar, &None, &[pack.clone()]).unwrap();
+        assert_eq!(cache.generation(), 1);
+        assert_eq!(cache.revision(), 1);
+        assert_eq!(cache.pending, 0);
+        assert!(cache.entries.is_empty());
+        assert!(
+            old_tx
+                .try_send((0, pending.clone(), Ok(sheet(99))))
+                .is_err()
+        );
+        let fallback = cache.skin(&pending).1;
+        assert_eq!(&fallback.pixels[..4], &[23, 23, 23, 0]);
+        let slots = HashMap::from([(DEFAULT_SOURCE, fallback.pixels[0])]);
+        assert_eq!(
+            *cache.texture(Some(&pending), &slots, &slots[&DEFAULT_SOURCE]),
+            23
+        );
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([31, 31, 31, 0]))
+            .save(pack.join("assets").join(relative))
+            .unwrap();
+        cache.reload(&jar, &None, &[pack.clone()]).unwrap();
+        assert_eq!(cache.skin(&DEFAULT_SOURCE).1.pixels[0], 31);
+        cache.reload(&jar, &None, &[]).unwrap();
+        assert_eq!(cache.skin(&DEFAULT_SOURCE).1.pixels[0], 11);
+        std::fs::write(pack.join("assets").join(relative), b"invalid PNG").unwrap();
+        assert!(cache.reload(&jar, &None, &[pack.clone()]).is_err());
+        assert_eq!(cache.skin(&DEFAULT_SOURCE).1.pixels[0], 11);
+        assert_eq!(cache.generation(), 4);
+        assert_eq!(cache.revision(), 4);
+        let startup = PlacedHeadSkinCache::load(&jar, &None, &[pack]);
+        assert!(startup.is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn encoded_untrusted_urls_fail_without_http() {
+        use base64::Engine;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for url in [
+            "file:///secret",
+            "http://127.0.0.1/skin",
+            "https://textures.minecraft.net:444/skin",
+            "https://evil.example/skin",
+        ] {
+            let json = serde_json::json!({"textures": {"SKIN": {"url": url}}});
+            let value = base64::engine::general_purpose::STANDARD.encode(json.to_string());
+            let key = source(&value);
+            assert!(PlacedHeadSkinCache::supported(&key));
+            assert!(
+                rt.block_on(PlacedHeadSkinCache::resolve(
+                    &key,
+                    (PathBuf::new(), None, vec![]),
+                    sheet(0)
+                ))
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -475,7 +945,7 @@ mod tests {
         }
         finish(&mut cache, absent.clone(), Err("failed".into()));
         finish(&mut cache, visible.clone(), Ok(sheet(7)));
-        cache.update(std::iter::once(&visible), &rt);
+        cache.update(std::iter::once(&visible), &rt, Path::new("."), &None, &[]);
         assert!(cache.entries.contains_key(&pending));
         assert!(cache.entries.contains_key(&visible));
         assert!(!cache.entries.contains_key(&absent));

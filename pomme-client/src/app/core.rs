@@ -49,6 +49,7 @@ pub type PackDownloadResult = Result<std::path::PathBuf, crate::resource_pack::P
 
 fn take_finished_pack_downloads(
     pending: &mut Vec<PendingPackDownload>,
+    generations: &HashMap<uuid::Uuid, u64>,
 ) -> Vec<(
     uuid::Uuid,
     bool,
@@ -56,6 +57,8 @@ fn take_finished_pack_downloads(
     std::thread::Result<PackDownloadResult>,
     u64,
 )> {
+    // Detaching an invalid worker must not make later live pushes wait for it.
+    pending.retain(|pack| generations.get(&pack.id) == Some(&pack.generation));
     let mut finished = Vec::new();
     while pending
         .first()
@@ -179,6 +182,41 @@ enum InlineObjectContent {
 /// Vanilla `PlayerSkinRenderCache.CACHE_DURATION`.
 const GLYPH_CACHE_DURATION: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
+/// Notify before async enqueue; support checks use the first pre-write state,
+/// while the renderer reads the final ChunkStore state for repeated edits.
+fn show_block_edits(
+    game: &mut GameState,
+    renderer: &mut Renderer,
+    edits: Vec<(azalea_core::position::BlockPos, azalea_block::BlockState)>,
+) {
+    if edits.is_empty() {
+        return;
+    }
+    let mut previous_states = HashMap::new();
+    for (pos, previous) in edits {
+        previous_states.entry(pos).or_insert(previous);
+    }
+    for (pos, previous) in previous_states {
+        renderer.show_block_edit(
+            &game.mesh_dispatcher,
+            &game.chunk_store,
+            &game.block_entity_anim,
+            pos,
+            previous,
+        );
+    }
+    // The clicked face is already sent; repick for next input/this outline.
+    // Physics keeps its existing movement-before-interaction tick ordering.
+    game.interaction.update_target(
+        game.player.eye_pos(),
+        game.player.look_dir,
+        &game.chunk_store,
+        &game.entity_store,
+        crate::player::is_creative(game.player.game_mode),
+        &game.world_border,
+    );
+}
+
 /// Applies a server-driven block change: block-entity sync, prediction
 /// absorption, the block + light write, and the remesh cascade. The block
 /// entity syncs even when a pending prediction absorbs the update (the state
@@ -186,6 +224,7 @@ const GLYPH_CACHE_DURATION: std::time::Duration = std::time::Duration::from_secs
 /// was just predicted still gets its entry.
 fn apply_server_block(
     game: &mut GameState,
+    renderer: &mut Renderer,
     priority_remesh: &mut Vec<(azalea_core::position::ChunkPos, i32)>,
     pos: azalea_core::position::BlockPos,
     state: azalea_block::BlockState,
@@ -199,6 +238,7 @@ fn apply_server_block(
     if game.interaction.update_known_server_state(&pos, state) {
         return;
     }
+    let previous = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
     crate::world::light::set_block_and_light(
         &game.chunk_store,
         &mut game.light_engine,
@@ -207,6 +247,9 @@ fn apply_server_block(
         pos.z,
         state,
     );
+    if previous != game.chunk_store.get_block_state(pos.x, pos.y, pos.z) {
+        show_block_edits(game, renderer, vec![(pos, previous)]);
+    }
     game.bump_loaded_mesh_neighborhoods([azalea_core::position::ChunkPos::new(
         pos.x.div_euclid(16),
         pos.z.div_euclid(16),
@@ -526,6 +569,16 @@ fn player_input_state(input: &InputState, analog_move: glam::Vec2) -> PlayerInpu
         shift: input.performing_action(Action::Sneak),
         sprint: input.performing_action(Action::Sprint),
     }
+}
+
+pub fn movement_input(input: &InputState) -> serde_json::Value {
+    let p = player_input_state(
+        input,
+        input
+            .get_gamepad_movement_axes()
+            .unwrap_or(glam::Vec2::ZERO),
+    );
+    serde_json::json!({"forward":p.forward,"backward":p.backward,"left":p.left,"right":p.right,"jump":p.jump,"shift":p.shift,"sprint":p.sprint,"attack":input.performing_action(Action::Destroy),"use":input.performing_action(Action::Use)})
 }
 
 fn send_changed_player_input(
@@ -865,6 +918,19 @@ fn register_nonliving_spawn(
 ) {
     store.set_vehicle_spawn_transform(id, position, velocity, LookDirection::new(y_rot, x_rot));
     store.set_vehicle_kind(id, kind);
+}
+
+fn arrow_pickup_position(store: &crate::entity::EntityStore, id: i32) -> Option<Position> {
+    use azalea_registry::builtin::EntityKind;
+    let vehicle = store.vehicles.get(&id)?;
+    if !matches!(
+        vehicle.kind,
+        Some(EntityKind::Arrow | EntityKind::SpectralArrow)
+    ) {
+        return None;
+    }
+    // Use the current visual position, not the last packet's movement baseline.
+    Some(vehicle.projectile.as_ref()?.position(1.0))
 }
 
 fn entity_look_direction(store: &crate::entity::EntityStore, id: i32) -> Option<LookDirection> {
@@ -1437,7 +1503,11 @@ impl AppCore {
                         self.player_faces.insert(skin.uuid, (base, hat));
                         self.player_faces_dirty = true;
                     }
-                    renderer.update_player_entity_skin(&skin.uuid, &data);
+                    if skin.uuid == self.user.uuid {
+                        renderer.update_local_player_skin(&skin.uuid, &data);
+                    } else {
+                        renderer.update_player_entity_skin(&skin.uuid, &data);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load entity player skin for {}: {e}", skin.uuid)
@@ -1779,6 +1849,7 @@ impl AppCore {
 
     pub fn clear_server_resource_packs(&mut self, renderer: &mut Renderer) {
         self.server_pack_generations.clear();
+        self.pending_pack_download.clear();
         if self.resource_packs.clear_server_packs() {
             self.reload_pack_assets(renderer);
         }
@@ -1809,6 +1880,7 @@ impl AppCore {
         game: &mut GameState,
     ) -> Option<String> {
         let rx = &connection.event_rx;
+        renderer.set_edit_recorder(&connection.packet_tx.recorder);
 
         // Phase timers for the chunk-load benchmark's worst-frame breakdown.
         let t_net = std::time::Instant::now();
@@ -1822,6 +1894,14 @@ impl AppCore {
 
         for event in rx.try_iter().take(4096) {
             processed += 1;
+            let observation = if connection.packet_tx.recorder.active() {
+                crate::movement_record::event(&event, game)
+            } else {
+                None
+            };
+            if let Some(data) = &observation {
+                connection.packet_tx.recorder.record("local", "before_apply", || Some(serde_json::json!({"event":data,"player":crate::movement_record::player(game)})));
+            }
             match event {
                 NetworkEvent::Connected { profile_name } => {
                     if let Some(state) = connect_phase.as_deref_mut() {
@@ -1894,7 +1974,7 @@ impl AppCore {
                     game.pending_load_rescan = false;
                     game.mesh_dispatcher = renderer.create_mesh_dispatcher(
                         Arc::clone(&game.biome_climate),
-                        None,
+                        Some(&self.resource_packs),
                         cardinal_light,
                     );
                 }
@@ -2384,20 +2464,17 @@ impl AppCore {
                 }
                 NetworkEvent::OpenBook { hand } => {
                     use azalea_inventory::ItemStack;
-                    use azalea_inventory::components::WrittenBookContent;
+                    use azalea_inventory::components::{WritableBookContent, WrittenBookContent};
                     use azalea_protocol::packets::game::s_interact::InteractionHand;
                     use azalea_registry::builtin::ItemKind;
 
                     use crate::player::inventory::HOTBAR_START;
-                    let (stack, edit_slot) = match hand {
+                    let stack = match hand {
                         InteractionHand::MainHand => {
                             let selected = self.input.selected_slot().min(8);
-                            (
-                                game.player.inventory.slot(HOTBAR_START + selected as usize),
-                                selected as u32,
-                            )
+                            game.player.inventory.slot(HOTBAR_START + selected as usize)
                         }
-                        InteractionHand::OffHand => (game.player.inventory.slot(45), 40),
+                        InteractionHand::OffHand => game.player.inventory.slot(45),
                     };
                     if let ItemStack::Present(data) = stack {
                         match data.kind {
@@ -2426,10 +2503,20 @@ impl AppCore {
                                 }
                             }
                             ItemKind::WritableBook => {
-                                game.paused = false;
-                                game.book_view = None;
-                                game.book_edit = writable_book_editor(data, edit_slot);
-                                if game.book_edit.is_some() {
+                                // OpenBook is read-only; only local UseItem opens the editor.
+                                let content = data.component_patch.get::<WritableBookContent>()
+                                    .cloned()
+                                    .or_else(|| azalea_inventory::default_components::get_default_component::<WritableBookContent>(data.kind));
+                                if let Some(content) = content {
+                                    let pages = content
+                                        .pages
+                                        .into_iter()
+                                        .map(|page| azalea_chat::FormattedText::from(page.raw))
+                                        .collect();
+                                    game.paused = false;
+                                    game.book_edit = None;
+                                    game.book_view =
+                                        Some(crate::ui::book::BookViewState::new(pages));
                                     self.apply_cursor_grab(window, Some(game));
                                 }
                             }
@@ -2443,33 +2530,11 @@ impl AppCore {
                     title,
                 } => {
                     use azalea_inventory::ItemStack;
-                    use azalea_registry::builtin::MenuKind;
 
                     use crate::app::phases::in_game::ContainerScreen;
-                    use crate::ui::furnace::FurnaceVariant;
-                    let screen = match menu_type {
-                        MenuKind::Merchant => Some(ContainerScreen::Merchant),
-                        MenuKind::Crafting => Some(ContainerScreen::CraftingTable),
-                        MenuKind::Furnace => {
-                            Some(ContainerScreen::Furnace(FurnaceVariant::Furnace))
-                        }
-                        MenuKind::BlastFurnace => {
-                            Some(ContainerScreen::Furnace(FurnaceVariant::BlastFurnace))
-                        }
-                        MenuKind::Smoker => Some(ContainerScreen::Furnace(FurnaceVariant::Smoker)),
-                        MenuKind::Generic9x1 => Some(ContainerScreen::Chest { rows: 1 }),
-                        MenuKind::Generic9x2 => Some(ContainerScreen::Chest { rows: 2 }),
-                        MenuKind::Generic9x3 => Some(ContainerScreen::Chest { rows: 3 }),
-                        MenuKind::Generic9x4 => Some(ContainerScreen::Chest { rows: 4 }),
-                        MenuKind::Generic9x5 => Some(ContainerScreen::Chest { rows: 5 }),
-                        MenuKind::Generic9x6 => Some(ContainerScreen::Chest { rows: 6 }),
-                        MenuKind::ShulkerBox => Some(ContainerScreen::ShulkerBox),
-                        MenuKind::Anvil => Some(ContainerScreen::Anvil),
-                        MenuKind::Enchantment => Some(ContainerScreen::Enchantment),
-                        MenuKind::Beacon => Some(ContainerScreen::Beacon),
-                        _ => None,
-                    };
+                    let screen = container_screen_for_menu(menu_type);
                     if let Some(screen) = screen {
+                        game.recipe_book.reset_menu();
                         // Vanilla setScreen replaces whatever screen is up,
                         // including the pause menu.
                         game.paused = false;
@@ -2622,6 +2687,24 @@ impl AppCore {
                 NetworkEvent::RecipeToastAdd { entries } => {
                     game.toasts.add_recipes(entries);
                 }
+                NetworkEvent::PlaceGhostRecipe(packet) => {
+                    use crate::app::phases::in_game::ContainerScreen;
+                    let active = game
+                        .open_container
+                        .as_ref()
+                        .filter(|c| {
+                            matches!(
+                                c.screen,
+                                ContainerScreen::CraftingTable | ContainerScreen::Furnace(_)
+                            )
+                        })
+                        .map(|c| c.id)
+                        .or_else(|| game.inventory_open.then_some(0));
+                    if let Some(active) = active {
+                        game.recipe_book
+                            .receive_ghost(packet.container_id, active, packet.recipe);
+                    }
+                }
                 NetworkEvent::RecipeBookAdd(packet) => game.recipe_book.add(packet),
                 NetworkEvent::RecipeBookRemove(ids) => game.recipe_book.remove(&ids),
                 NetworkEvent::RecipeBookSettings(settings) => {
@@ -2738,25 +2821,42 @@ impl AppCore {
                     );
                 }
                 NetworkEvent::BlockUpdate { pos, state } => {
-                    apply_server_block(game, &mut priority_remesh, pos, state);
+                    apply_server_block(game, renderer, &mut priority_remesh, pos, state);
                 }
                 NetworkEvent::SectionBlocksUpdate { updates } => {
                     for (pos, state) in updates {
-                        apply_server_block(game, &mut priority_remesh, pos, state);
+                        apply_server_block(game, renderer, &mut priority_remesh, pos, state);
                     }
                 }
                 NetworkEvent::OpenSignEditor { pos, is_front_text } => {
                     if let Some(entity) = game.chunk_store.block_entities.get(&pos)
-                        && entity.kind == azalea_registry::builtin::BlockEntityKind::Sign
+                        && crate::world::block_entity::is_sign_kind(entity.kind)
                     {
+                        let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+                        let id = crate::world::block::block_id(state);
+                        let props = crate::world::block::block_properties(state);
+                        let style = crate::app::phases::in_game::sign_render_style(&entity.nbt);
                         let lines =
                             crate::world::block_entity::sign_lines(&entity.nbt, is_front_text);
-                        game.paused = false;
-                        game.sign_edit = Some(crate::ui::sign::SignEditState::new(
+                        let edit = crate::ui::sign::SignEditState::new(
                             pos,
                             is_front_text,
                             lines,
-                        ));
+                            entity.kind == azalea_registry::builtin::BlockEntityKind::HangingSign,
+                            crate::renderer::pipelines::block_entity::variant_for_block(
+                                entity.kind,
+                                id,
+                                props,
+                            ) as u8,
+                            props.get("facing").is_some(),
+                            if is_front_text { style.0 } else { style.1 },
+                            &|s| renderer.menu_text_width(s, crate::ui::common::FONT_SIZE),
+                        );
+                        game.paused = false;
+                        game.sign_edit = Some(edit);
+                        game.interaction
+                            .stop_destroying_for_screen(&connection.packet_tx);
+                        self.apply_cursor_grab(window, Some(game));
                     }
                 }
                 NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => {
@@ -2960,9 +3060,18 @@ impl AppCore {
                         game.player.position = snap.into();
                         game.player.prev_position = game.player.position;
                     }
+                    let edits = game.interaction.take_visual_edits();
+                    for (pos, before) in &edits {
+                        connection.packet_tx.recorder.record("local", "ack_restore", || Some(serde_json::json!({
+                            "pos":[pos.x,pos.y,pos.z],"before":before.id(),
+                            "restored":game.chunk_store.get_block_state(pos.x,pos.y,pos.z).id(),"action_sequence":seq
+                        })));
+                    }
+                    show_block_edits(game, renderer, edits);
                     let min_y = game.chunk_store.min_y();
                     let n = game.chunk_store.section_count();
                     for b in ack_dirty {
+                        connection.packet_tx.recorder.record("local", "ack_restored_block", || Some(serde_json::json!({"tick":game.tick_count,"sequence":seq,"block":[b.x,b.y,b.z],"state":game.chunk_store.get_block_state(b.x,b.y,b.z).id()})));
                         // Mesh eligibility is narrower than BE animation.
                         retain_restored_be_animation(
                             &game.chunk_store,
@@ -3069,6 +3178,7 @@ impl AppCore {
                     uuid,
                     entity_type,
                     position,
+                    item_frame_direction,
                     velocity,
                     y_rot_deg,
                     x_rot_deg,
@@ -3141,6 +3251,9 @@ impl AppCore {
                             x_rot_deg,
                             entity_type,
                         );
+                        if let Some(direction) = item_frame_direction {
+                            game.entity_store.set_item_frame_direction(id, direction);
+                        }
                     }
                     if entity_type == azalea_registry::builtin::EntityKind::Item {
                         game.item_entity_store
@@ -3508,6 +3621,18 @@ impl AppCore {
                 }
                 NetworkEvent::ItemFrameDirection { id, direction } => {
                     game.entity_store.set_item_frame_direction(id, direction);
+                    if let Some(frame) = game.entity_store.vehicles.get(&id)
+                        && matches!(
+                            frame.kind,
+                            Some(
+                                azalea_registry::builtin::EntityKind::ItemFrame
+                                    | azalea_registry::builtin::EntityKind::GlowItemFrame
+                            )
+                        )
+                    {
+                        game.entity_positions.insert(id, frame.position);
+                        self.audio.update_entity_sound_position(id, frame.position);
+                    }
                 }
                 NetworkEvent::ItemFrameItem { id, item } => {
                     if let azalea_inventory::ItemStack::Present(data) = &item
@@ -3693,8 +3818,10 @@ impl AppCore {
                                 game.player.position.z,
                             )
                         });
-                    if let Some(item_pos) =
-                        game.item_entity_store.pickup(item_id, target_pos, amount)
+                    if let Some(item_pos) = game
+                        .item_entity_store
+                        .pickup(item_id, target_pos, amount)
+                        .or_else(|| arrow_pickup_position(&game.entity_store, item_id))
                     {
                         // Vanilla plays this client-side in handleTakeItemEntity.
                         self.audio.play_world_sound(
@@ -3805,6 +3932,7 @@ impl AppCore {
                         self.next_server_pack_generation.wrapping_add(1);
                     let generation = self.next_server_pack_generation;
                     self.server_pack_generations.insert(id, generation);
+                    self.pending_pack_download.retain(|pack| pack.id != id);
                     let cache_dir = self.resource_packs.server_cache_dir().to_path_buf();
                     self.pending_pack_download.push(PendingPackDownload {
                         id,
@@ -3821,10 +3949,12 @@ impl AppCore {
                     let removed = match id {
                         Some(id) => {
                             self.server_pack_generations.remove(&id);
+                            self.pending_pack_download.retain(|pack| pack.id != id);
                             self.resource_packs.remove_server_pack(&id)
                         }
                         None => {
                             self.server_pack_generations.clear();
+                            self.pending_pack_download.clear();
                             self.resource_packs.clear_server_packs()
                         }
                     };
@@ -3852,7 +3982,11 @@ impl AppCore {
                 NetworkEvent::Disconnected { reason } => {
                     tracing::warn!("Disconnected: {reason}");
                     set_first_disconnect_reason(&mut disconnect_reason, reason);
+                    self.server_pack_generations.clear();
+                    self.pending_pack_download.clear();
+                    game.pending_server_transfer = None;
                     self.clear_server_ui(game, renderer);
+                    break;
                 }
                 NetworkEvent::CodeOfConduct { text } => {
                     if game.code_of_conduct.replace(text).is_some() {
@@ -3889,11 +4023,20 @@ impl AppCore {
                     game.tab_list.set_header_footer(header, footer);
                 }
             }
+            if let Some(data) = observation {
+                connection
+                    .packet_tx
+                    .recorder
+                    .record("local", "applied", || {
+                        Some(crate::movement_record::applied(data, game))
+                    });
+            }
         }
 
-        for (id, required, hash, result, generation) in
-            take_finished_pack_downloads(&mut self.pending_pack_download)
-        {
+        for (id, required, hash, result, generation) in take_finished_pack_downloads(
+            &mut self.pending_pack_download,
+            &self.server_pack_generations,
+        ) {
             if self.server_pack_generations.get(&id) != Some(&generation) {
                 continue;
             }
@@ -3903,6 +4046,7 @@ impl AppCore {
                 Err(_) => {
                     tracing::error!("Resource pack {} thread panicked", id);
                     if required {
+                        game.pending_server_transfer = None;
                         disconnect_reason = Some(
                             "Required resource pack failed: thread panicked (internal error)"
                                 .into(),
@@ -3912,11 +4056,12 @@ impl AppCore {
                 Ok(Err(e)) => {
                     tracing::error!("Resource pack {} failed: {e}", id);
                     if required {
+                        game.pending_server_transfer = None;
                         disconnect_reason = Some(format!("Required resource pack failed: {e}"));
                     }
                 }
-                Ok(Ok(_path)) => {
-                    self.resource_packs.apply_server_pack(id, &hash);
+                Ok(Ok(path)) => {
+                    self.resource_packs.apply_server_pack(id, &hash, path);
                     // Vanilla acknowledges SuccessfullyLoaded only after the
                     // resources have been applied. Rebuild the live renderer
                     // (including shared-atlas chunk geometry) before replying.
@@ -3938,6 +4083,7 @@ impl AppCore {
         // ungated by visibility.
         for &(col, si) in &priority_remesh {
             game.enqueue_section_edit(
+                renderer,
                 col,
                 si..si + 1,
                 chunk_lod(col, player_chunk, self.menu.chunk_detail),
@@ -4159,6 +4305,7 @@ impl AppCore {
             self.send_sprint_command(connection, game);
             self.send_position_packet(connection, game);
 
+            connection.packet_tx.recorder.record("local", "movement_tick", || Some(serde_json::json!({"player":crate::movement_record::player(game),"input":movement_input(&neutral)})));
             // Q/F presses queued while dead must not fire on respawn.
             self.input.clear_click_counts();
             return;
@@ -4333,6 +4480,9 @@ impl AppCore {
         let held_stack = game.player.inventory.held_stack(input.selected_slot());
         let hand_on_cooldown =
             held_stack_item.is_some_and(|stack| game.item_cooldowns.is_on_cooldown(stack));
+        let offhand_on_cooldown = game
+            .item_cooldowns
+            .is_on_cooldown(game.player.inventory.offhand());
         let offhand_stack = match game.player.inventory.offhand() {
             azalea_inventory::ItemStack::Present(stack) if stack.count > 0 => Some(stack),
             _ => None,
@@ -4387,6 +4537,7 @@ impl AppCore {
             has_projectile,
             place_block,
             offhand_place_block,
+            offhand_on_cooldown,
             hands_empty,
             &mut crate::player::interaction::BreakEffects {
                 particles: &mut game.particle_store,
@@ -4394,6 +4545,7 @@ impl AppCore {
                 biome_climate: &game.biome_climate,
             },
         );
+        connection.packet_tx.recorder.record("local", "movement_tick", || Some(serde_json::json!({"player":crate::movement_record::player(game),"input":movement_input(input)})));
         if let Some(hand) = game.interaction.take_writable_book_open() {
             use azalea_inventory::ItemStack;
             use azalea_protocol::packets::game::s_interact::InteractionHand;
@@ -4417,10 +4569,16 @@ impl AppCore {
             }
         }
         if !dirty.is_empty() {
+            let edits = game.interaction.take_visual_edits();
+            show_block_edits(game, renderer, edits);
             let min_y = game.chunk_store.min_y();
             let n = game.chunk_store.section_count();
             let mut sections: Vec<(azalea_core::position::ChunkPos, i32)> = Vec::new();
+            game.bump_loaded_mesh_neighborhoods(dirty.iter().map(|b| {
+                azalea_core::position::ChunkPos::new(b.x.div_euclid(16), b.z.div_euclid(16))
+            }));
             for b in dirty {
+                connection.packet_tx.recorder.record("local", "prediction_block", || Some(serde_json::json!({"tick":game.tick_count,"block":[b.x,b.y,b.z],"predicted_state":game.chunk_store.get_block_state(b.x,b.y,b.z).id()})));
                 // Light lands in this frame's update_light, matching vanilla's
                 // prediction timing (setBlockState queues; the per-frame
                 // ClientLevel.update drains).
@@ -4440,8 +4598,15 @@ impl AppCore {
                     None => spans.push((col, si, si)),
                 }
             }
+            let player_chunk = game.player_chunk();
+            // Delta is ready; priority jobs replace it asynchronously.
             for (col, lo, hi) in spans {
-                game.mesh_sections_edit_now(renderer, col, lo..hi + 1);
+                game.enqueue_section_edit(
+                    renderer,
+                    col,
+                    lo..hi + 1,
+                    chunk_lod(col, player_chunk, self.menu.chunk_detail),
+                );
             }
         }
 
@@ -4579,6 +4744,35 @@ impl AppCore {
     }
 }
 
+/// Screen dispatch shared by OpenScreen and its headless regression checks.
+fn container_screen_for_menu(
+    menu_type: azalea_registry::builtin::MenuKind,
+) -> Option<crate::app::phases::in_game::ContainerScreen> {
+    use azalea_registry::builtin::MenuKind;
+
+    use crate::app::phases::in_game::ContainerScreen;
+    use crate::ui::furnace::FurnaceVariant;
+    match menu_type {
+        MenuKind::Merchant => Some(ContainerScreen::Merchant),
+        MenuKind::Crafting => Some(ContainerScreen::CraftingTable),
+        MenuKind::Furnace => Some(ContainerScreen::Furnace(FurnaceVariant::Furnace)),
+        MenuKind::BlastFurnace => Some(ContainerScreen::Furnace(FurnaceVariant::BlastFurnace)),
+        MenuKind::Smoker => Some(ContainerScreen::Furnace(FurnaceVariant::Smoker)),
+        MenuKind::Generic9x1 => Some(ContainerScreen::Chest { rows: 1 }),
+        MenuKind::Generic9x2 => Some(ContainerScreen::Chest { rows: 2 }),
+        MenuKind::Generic9x3 => Some(ContainerScreen::Chest { rows: 3 }),
+        MenuKind::Generic9x4 => Some(ContainerScreen::Chest { rows: 4 }),
+        MenuKind::Generic9x5 => Some(ContainerScreen::Chest { rows: 5 }),
+        MenuKind::Generic9x6 => Some(ContainerScreen::Chest { rows: 6 }),
+        MenuKind::ShulkerBox => Some(ContainerScreen::ShulkerBox),
+        MenuKind::Hopper => Some(ContainerScreen::Hopper),
+        MenuKind::Anvil => Some(ContainerScreen::Anvil),
+        MenuKind::Enchantment => Some(ContainerScreen::Enchantment),
+        MenuKind::Beacon => Some(ContainerScreen::Beacon),
+        _ => None,
+    }
+}
+
 /// DimensionInfo follows Login/Respawn, not ordinary same-world chunk updates.
 /// The living store remains intact; only projectile vehicles and their packet
 /// position baselines belong to the discarded projectile world.
@@ -4682,6 +4876,8 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use azalea_protocol::packets::game::ServerboundGamePacket;
 
     use super::{
@@ -4704,6 +4900,349 @@ mod tests {
     use crate::ui::chat::ChatMessageTag;
 
     #[test]
+    fn immediate_edit_same_frame_routes_and_generation_registration() {
+        // CPU wiring guard, not a Vulkan visual test. Runtime world/mesh
+        // behavior is checked by the interaction and mesher immediate_edit tests.
+        fn before(source: &str, first: &str, second: &str) {
+            assert!(source.find(first).unwrap() < source.find(second).unwrap());
+        }
+        let source = include_str!("core.rs");
+        let tick = source
+            .split_once("    pub fn tick_physics(")
+            .unwrap()
+            .1
+            .split_once("    fn send_abilities_packet(")
+            .unwrap()
+            .0;
+        before(
+            tick,
+            "game.interaction.tick(",
+            "game.interaction.take_visual_edits()",
+        );
+        before(
+            tick,
+            "show_block_edits(game, renderer, edits)",
+            "game.enqueue_section_edit(",
+        );
+        let notify = source
+            .split_once("fn show_block_edits(")
+            .unwrap()
+            .1
+            .split_once("fn apply_server_block(")
+            .unwrap()
+            .0;
+        assert!(notify.contains("previous_states.entry(pos).or_insert(previous)"));
+        before(
+            notify,
+            "renderer.show_block_edit(",
+            "game.interaction.update_target(",
+        );
+        let server = source
+            .split_once("fn apply_server_block(")
+            .unwrap()
+            .1
+            .split_once("fn sync_server_be_animation(")
+            .unwrap()
+            .0;
+        before(server, "update_known_server_state", "set_block_and_light(");
+        before(server, "set_block_and_light(", "show_block_edits(");
+        before(server, "show_block_edits(", "dirty_sections_for_block(");
+        let ack = source
+            .split_once("NetworkEvent::BlockChangedAck { seq } => {")
+            .unwrap()
+            .1
+            .split_once("NetworkEvent::TickingState {")
+            .unwrap()
+            .0;
+        before(
+            ack,
+            "game.interaction.acknowledge(",
+            "game.interaction.take_visual_edits()",
+        );
+        before(
+            ack,
+            "show_block_edits(game, renderer, edits)",
+            "for b in ack_dirty",
+        );
+        assert!(!ack.contains("uploaded("));
+        let frame = include_str!("phases/in_game.rs");
+        let enqueue = frame
+            .split_once("    pub fn enqueue_section_edit(")
+            .unwrap()
+            .1
+            .split_once("    fn bump_section_gen(")
+            .unwrap()
+            .0;
+        before(
+            enqueue,
+            "self.bump_section_gen(",
+            "renderer.expect_block_edit_mesh(",
+        );
+        before(
+            enqueue,
+            "renderer.expect_block_edit_mesh(",
+            "self.mesh_dispatcher.enqueue(",
+        );
+        assert!(frame.contains("self.enqueue_section_edit(renderer, mesh.pos, range, lod)"));
+        let update = frame
+            .split_once("    game.drain_and_upload_meshes(&mut gfx.renderer);")
+            .unwrap()
+            .1;
+        before(
+            update,
+            "core.tick_physics(",
+            "game.update_light(&mut gfx.renderer",
+        );
+        before(
+            update,
+            "game.update_light(&mut gfx.renderer",
+            "gfx.renderer.render_world(",
+        );
+        let render = include_str!("../renderer/mod.rs")
+            .split_once("    fn render_frame(")
+            .unwrap()
+            .1;
+        before(
+            render,
+            "wait_for_fences(&[fence]",
+            "self.chunk_buffers.prepare_edits(frame)",
+        );
+        before(
+            render,
+            "self.chunk_buffers.prepare_edits(frame)",
+            "self.chunk_buffers.draw_edits(",
+        );
+    }
+
+    #[test]
+    fn local_edits_enqueue_without_synchronous_mesh_or_upload() {
+        let source = include_str!("core.rs");
+        let tick = source
+            .split_once("    pub fn tick_physics(")
+            .unwrap()
+            .1
+            .split_once("    fn send_abilities_packet(")
+            .unwrap()
+            .0;
+        assert!(tick.contains("game.enqueue_section_edit("));
+        assert!(!tick.contains("mesh_sections_edit_now("));
+        assert!(!tick.contains("mesh_sections_now("));
+        assert!(!tick.contains("apply_mesh_upload("));
+        assert!(!tick.contains("upload_chunk_mesh"));
+    }
+
+    #[test]
+    fn hopper_open_screen_dispatch_uses_native_layout() {
+        use azalea_registry::builtin::MenuKind;
+
+        use crate::app::phases::in_game::ContainerScreen;
+        let screen = super::container_screen_for_menu(MenuKind::Hopper).unwrap();
+        assert!(screen == ContainerScreen::Hopper);
+        let kind = screen.click_kind();
+        assert!(kind == crate::player::menu_click::ContainerKind::Hopper);
+        assert_eq!(kind.slot_count(), 41);
+        assert_eq!(kind.inv_start(), 5);
+        assert_eq!(kind.hotbar_menu_slot(0), 32);
+        assert_eq!(kind.hotbar_menu_slot(8), 40);
+        assert!(
+            super::container_screen_for_menu(MenuKind::Generic9x3)
+                == Some(ContainerScreen::Chest { rows: 3 })
+        );
+        assert!(super::container_screen_for_menu(MenuKind::BrewingStand).is_none());
+    }
+
+    #[test]
+    fn pickup_sound_positions_preserve_items_and_use_only_tracked_arrows() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::DVec3;
+
+        use crate::entity::components::Position;
+        use crate::entity::{EntityStore, ItemEntityStore};
+
+        let mut entities = EntityStore::new();
+        let mut items = ItemEntityStore::new();
+        let start = Position::new(-2.0, 64.0, 3.0);
+        let target = Position::new(0.0, 65.0, 0.0);
+        let sound_position = |items: &mut ItemEntityStore, entities: &EntityStore, id, amount| {
+            items
+                .pickup(id, target, amount)
+                .or_else(|| super::arrow_pickup_position(entities, id))
+        };
+        // Item vehicles outlive the emptied stack until RemoveEntities arrives.
+        register_nonliving_spawn(
+            &mut entities,
+            1,
+            target,
+            DVec3::ZERO,
+            0.0,
+            0.0,
+            EntityKind::Item,
+        );
+        items.spawn_item(1, uuid::Uuid::nil(), start, DVec3::ZERO);
+        items.set_item_data(1, "minecraft:stone".into(), 1, 0, 3, None);
+        assert_eq!(sound_position(&mut items, &entities, 1, 1), Some(start));
+        assert_eq!(items.visible_items(*start, 8.0)[0].count, 2);
+        assert_eq!(items.active_pickups(0.0).len(), 1);
+        assert_eq!(items.active_pickups(0.0)[0].count, 3);
+        assert_eq!(sound_position(&mut items, &entities, 1, 2), Some(start));
+        assert_eq!(items.active_pickups(0.0).len(), 2);
+        assert_eq!(sound_position(&mut items, &entities, 1, 1), None);
+
+        for kind in [
+            EntityKind::Arrow,
+            EntityKind::SpectralArrow,
+            EntityKind::Snowball,
+        ] {
+            register_nonliving_spawn(&mut entities, 2, start, DVec3::ZERO, 0.0, 0.0, kind);
+            let display = entities
+                .vehicles
+                .get_mut(&2)
+                .unwrap()
+                .projectile
+                .as_mut()
+                .unwrap();
+            display.prev = start;
+            display.current = target;
+            let expected = (kind != EntityKind::Snowball).then_some(target);
+            assert_eq!(sound_position(&mut items, &entities, 2, 1), expected);
+            assert_eq!(items.active_pickups(0.0).len(), 2);
+            entities.remove_entity(2);
+            assert_eq!(sound_position(&mut items, &entities, 2, 1), None);
+        }
+        entities.set_passengers(3, &[]);
+        assert_eq!(sound_position(&mut items, &entities, 3, 1), None);
+    }
+
+    #[tokio::test]
+    async fn item_frame_spawn_and_metadata_keep_attachment_in_all_six_directions() {
+        use azalea_core::direction::Direction as D;
+        use azalea_core::entity_id::MinecraftEntityId;
+        use azalea_entity::{EntityDataItem, EntityDataValue, EntityMetadataItems};
+        use azalea_protocol::packets::game::ClientboundGamePacket;
+        use azalea_protocol::packets::game::c_add_entity::ClientboundAddEntity;
+        use azalea_protocol::packets::game::c_set_entity_data::ClientboundSetEntityData;
+        use azalea_registry::builtin::EntityKind;
+        use glam::DVec3;
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::Position;
+        use crate::net::NetworkEvent;
+        use crate::net::sender::PacketSender;
+
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(out_tx);
+        // One remaining queue slot must carry both spawn center and direction.
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let registries = azalea_core::registry_holder::RegistryHolder::default();
+        let tree = std::sync::Arc::new(parking_lot::Mutex::new(None));
+        let dispatch = async |packet: &ClientboundGamePacket| {
+            crate::net::handler::handle_game_packet(
+                packet,
+                &sender,
+                &tx,
+                &registries,
+                &tree,
+                &mut crate::net::chunk_batch::ChunkBatchSizeCalculator::default(),
+                &mut (384, -64),
+                &mut std::collections::HashMap::new(),
+            )
+            .await
+            .unwrap();
+        };
+        let block = DVec3::new(-17.0, 64.0, 31.0);
+        let attachment = block + DVec3::splat(0.5);
+        let faces = [
+            (D::Down, DVec3::NEG_Y),
+            (D::Up, DVec3::Y),
+            (D::North, DVec3::NEG_Z),
+            (D::South, DVec3::Z),
+            (D::West, DVec3::NEG_X),
+            (D::East, DVec3::X),
+        ];
+        for kind in [
+            EntityKind::ItemFrame,
+            EntityKind::GlowItemFrame,
+            EntityKind::Snowball,
+        ] {
+            for (data, (direction, normal)) in faces.into_iter().enumerate() {
+                dispatch(&ClientboundGamePacket::AddEntity(ClientboundAddEntity {
+                    id: MinecraftEntityId(42),
+                    uuid: uuid::Uuid::nil(),
+                    entity_type: kind,
+                    position: Position::from(block).into(),
+                    movement: Default::default(),
+                    x_rot: 32,
+                    y_rot: 64,
+                    y_head_rot: 0,
+                    data: data as i32,
+                }))
+                .await;
+                let NetworkEvent::EntitySpawned {
+                    id,
+                    entity_type,
+                    position,
+                    velocity,
+                    y_rot_deg,
+                    x_rot_deg,
+                    item_frame_direction,
+                    ..
+                } = rx.try_recv().unwrap()
+                else {
+                    panic!("expected atomic spawn");
+                };
+                assert!(rx.is_empty());
+                let mut store = EntityStore::new();
+                store.set_passengers(id, &[77]); // placeholder must be initialized first
+                register_nonliving_spawn(
+                    &mut store,
+                    id,
+                    position,
+                    velocity,
+                    y_rot_deg,
+                    x_rot_deg,
+                    entity_type,
+                );
+                if let Some(direction) = item_frame_direction {
+                    store.set_item_frame_direction(id, direction);
+                }
+                let frame = &store.vehicles[&id];
+                assert_eq!(frame.passengers, [77]);
+                if kind == EntityKind::Snowball {
+                    assert_eq!(*frame.position, block);
+                    assert_eq!(frame.item_frame_direction, None);
+                    continue;
+                }
+                // No metadata packet is sent here, including for default South.
+                assert_eq!(*frame.position, attachment - normal * 0.46875);
+                assert_eq!(frame.item_frame_direction, Some(direction));
+                for (next, next_normal) in faces.into_iter().chain([(direction, normal)]) {
+                    dispatch(&ClientboundGamePacket::SetEntityData(
+                        ClientboundSetEntityData {
+                            id: MinecraftEntityId(id),
+                            packed_items: EntityMetadataItems(vec![EntityDataItem {
+                                index: 8,
+                                value: EntityDataValue::Direction(next),
+                            }]),
+                        },
+                    ))
+                    .await;
+                    let NetworkEvent::ItemFrameDirection { id, direction } = rx.try_recv().unwrap()
+                    else {
+                        panic!("expected direction metadata");
+                    };
+                    store.set_item_frame_direction(id, direction);
+                    assert_eq!(store.vehicles[&id].item_frame_direction, Some(next));
+                    assert_eq!(
+                        *store.vehicles[&id].position,
+                        attachment - next_normal * 0.46875
+                    );
+                    assert!(rx.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn unchanged_dynamic_atlas_stats_are_zeroed() {
         let stats = DynamicAtlasSyncStats::default();
         assert_eq!(stats.added_keys, 0);
@@ -4716,6 +5255,21 @@ mod tests {
         assert_eq!(stats.retire_wait_ms, 0.0);
         assert_eq!(stats.upload_submit_wait_ms, 0.0);
         assert_eq!(stats.descriptor_ms, 0.0);
+    }
+
+    #[test]
+    fn open_book_packet_cannot_enter_the_local_editor() {
+        let source = include_str!("core.rs");
+        let branch = source
+            .split_once("                NetworkEvent::OpenBook { hand } => {")
+            .unwrap()
+            .1
+            .split_once("                NetworkEvent::OpenScreen {")
+            .unwrap()
+            .0;
+        assert!(!branch.contains("writable_book_editor("));
+        assert!(branch.contains("BookViewState::new(pages)"));
+        assert!(branch.contains("game.book_edit = None;"));
     }
 
     #[test]
@@ -5089,6 +5643,7 @@ mod tests {
 
         let first_id = uuid::Uuid::from_u128(1);
         let second_id = uuid::Uuid::from_u128(2);
+        let generations = HashMap::from([(first_id, 1), (second_id, 2)]);
         let (first_tx, first_rx) = mpsc::channel();
         let (second_tx, second_rx) = mpsc::channel();
         let mut pending = vec![
@@ -5121,7 +5676,7 @@ mod tests {
         while !pending[1].handle.is_finished() && Instant::now() < deadline {
             std::thread::yield_now();
         }
-        assert!(take_finished_pack_downloads(&mut pending).is_empty());
+        assert!(take_finished_pack_downloads(&mut pending, &generations).is_empty());
         assert_eq!(pending.len(), 2);
 
         first_tx.send(()).unwrap();
@@ -5129,7 +5684,7 @@ mod tests {
         while !pending[0].handle.is_finished() && Instant::now() < deadline {
             std::thread::yield_now();
         }
-        let finished = take_finished_pack_downloads(&mut pending);
+        let finished = take_finished_pack_downloads(&mut pending, &generations);
         assert_eq!(finished.len(), 2);
         assert_eq!(finished[0].0, first_id);
         assert!(matches!(
@@ -5150,6 +5705,65 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_or_replaced_pack_head_does_not_block_a_live_push() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        for replaced in [false, true] {
+            let old_id = uuid::Uuid::from_u128(1);
+            let live_id = if replaced {
+                old_id
+            } else {
+                uuid::Uuid::from_u128(2)
+            };
+            let (slow_tx, slow_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let mut pending = vec![
+                PendingPackDownload {
+                    id: old_id,
+                    generation: 1,
+                    required: true,
+                    hash: String::new(),
+                    handle: std::thread::spawn(move || {
+                        slow_rx.recv().unwrap();
+                        done_tx.send(()).unwrap();
+                        Err(crate::resource_pack::PackError::Download(
+                            "stale failure".into(),
+                        ))
+                    }),
+                },
+                PendingPackDownload {
+                    id: live_id,
+                    generation: 2,
+                    required: false,
+                    hash: String::new(),
+                    handle: std::thread::spawn(|| Ok("B".into())),
+                },
+            ];
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !pending[1].handle.is_finished() && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            // Pop removes the old generation; replacement changes it, exactly
+            // as disconnect followed by a fresh push does.
+            let generations = HashMap::from([(live_id, 2)]);
+            let finished = take_finished_pack_downloads(&mut pending, &generations);
+            assert_eq!(finished.len(), 1, "a cancelled head must not delay B");
+            assert_eq!(finished[0].0, live_id);
+            assert!(
+                matches!(&finished[0].3, Ok(Ok(path)) if path == &std::path::PathBuf::from("B"))
+            );
+            assert!(pending.is_empty());
+            slow_tx.send(()).unwrap();
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(
+                take_finished_pack_downloads(&mut pending, &generations).is_empty(),
+                "stale failure sends no status and cannot apply"
+            );
+        }
+    }
+
+    #[test]
     fn reverse_download_completion_keeps_push_order_asset_precedence() {
         use std::sync::mpsc;
         use std::time::{Duration, Instant};
@@ -5164,6 +5778,13 @@ mod tests {
         ));
         let mut packs = ResourcePackManager::new(&root);
         let ids = [uuid::Uuid::from_u128(11), uuid::Uuid::from_u128(22)];
+        let generations = HashMap::from([(ids[0], 1), (ids[1], 2)]);
+        let first_dir = packs
+            .server_cache_dir()
+            .join(format!("_empty_hash_{}", ids[0]));
+        let second_dir = packs
+            .server_cache_dir()
+            .join(format!("_empty_hash_{}", ids[1]));
         for (id, contents) in ids
             .into_iter()
             .zip([b"first".as_slice(), b"second".as_slice()])
@@ -5186,7 +5807,7 @@ mod tests {
                 hash: String::new(),
                 handle: std::thread::spawn(move || {
                     first_rx.recv().unwrap();
-                    Ok("first".into())
+                    Ok(first_dir)
                 }),
             },
             PendingPackDownload {
@@ -5196,7 +5817,7 @@ mod tests {
                 hash: String::new(),
                 handle: std::thread::spawn(move || {
                     second_rx.recv().unwrap();
-                    Ok("second".into())
+                    Ok(second_dir)
                 }),
             },
         ];
@@ -5206,7 +5827,7 @@ mod tests {
         while !pending[1].handle.is_finished() && Instant::now() < deadline {
             std::thread::yield_now();
         }
-        let finished = take_finished_pack_downloads(&mut pending);
+        let finished = take_finished_pack_downloads(&mut pending, &generations);
         assert!(
             finished.is_empty(),
             "later pack must wait for the earlier push"
@@ -5217,9 +5838,8 @@ mod tests {
         while !pending[0].handle.is_finished() && Instant::now() < deadline {
             std::thread::yield_now();
         }
-        for (id, _, hash, result, _) in take_finished_pack_downloads(&mut pending) {
-            assert!(matches!(result, Ok(Ok(_))));
-            packs.apply_server_pack(id, &hash);
+        for (id, _, hash, result, _) in take_finished_pack_downloads(&mut pending, &generations) {
+            packs.apply_server_pack(id, &hash, result.unwrap().unwrap());
         }
 
         let resolved = packs.resolve_asset("test/shared.txt").unwrap();

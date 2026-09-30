@@ -3,9 +3,9 @@ use std::time::Instant;
 use azalea_inventory::ItemStack;
 use azalea_inventory::operations::ClickOperation;
 
-use super::common::{SLOT_STRIDE, push_tooltip_lines};
+use super::common::SLOT_STRIDE;
 use super::container::{
-    ContainerInput, DragState, SlotCtx, push_cursor_stack, push_panel, resolve_gesture,
+    ContainerInput, DragState, SlotCtx, push_cursor_stack, push_recipe_panel, resolve_gesture,
 };
 use crate::player::inventory::{self, Inventory};
 use crate::player::menu_click::ContainerKind;
@@ -32,7 +32,7 @@ pub struct InventoryResult {
     /// Container-click operations to send this frame (usually 0-1; a drag
     /// release emits a start/add.../end sequence).
     pub ops: Vec<ClickOperation>,
-    pub player_preview: PlayerPreview,
+    pub player_preview: Option<PlayerPreview>,
     pub recipe_id: Option<(u32, bool)>,
 }
 
@@ -51,16 +51,24 @@ pub fn build_inventory(
     recipe_book: &mut crate::ui::recipe_book::RecipeBookState,
     native_recipes: bool,
     advanced_tooltips: bool,
+    text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) -> InventoryResult {
-    let panel = push_panel(
+    let (panel, hidden) = push_recipe_panel(
         elements,
         screen_w,
         screen_h,
         gs,
-        166.0,
         SpriteId::InventoryBackground,
+        recipe_book,
+        native_recipes,
+        0,
+        cursor,
+        input,
+        (104.0, 61.0),
     );
-    panel.label(elements, 97.0, 6.0, "Crafting");
+    if !hidden {
+        panel.label(elements, 97.0, 6.0, "Crafting");
+    }
 
     let slots = inventory.slots();
     let mut ctx = SlotCtx::new(
@@ -73,6 +81,7 @@ pub fn build_inventory(
         drag,
     );
 
+    ctx.set_hidden(hidden);
     ctx.player_rows(slots, SLOT_MAIN_BASE, SLOT_HOTBAR_BASE, 84.0);
 
     let armor_ys = [8.0, 26.0, 44.0, 62.0];
@@ -127,56 +136,66 @@ pub fn build_inventory(
         .chain(grid.iter())
         .cloned()
         .collect();
-    let recipe_id = crate::ui::container::push_recipe_entries(
+    let (recipe_id, ghost_hovered) = crate::ui::container::push_recipe_entries(
         elements,
         &panel,
         recipe_book,
         cursor,
-        input.left_pressed,
+        input,
         native_recipes,
         None,
-        input.shift,
         2,
         2,
         &recipe_items,
         grid,
-        inventory.craft_output(),
-        104.0,
-        61.0,
+        screen_w,
+        screen_h,
+        text_width_fn,
     );
     push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
-    if !cursor_item.is_present()
-        && let Some(item) = hovered.and_then(|slot| inventory.slot(slot as usize).as_present())
-        && let Ok(value) = serde_json::to_value(item)
-    {
-        let lines = super::chat::item_tooltip_lines(&value, None, advanced_tooltips);
-        if !lines.is_empty() {
-            push_tooltip_lines(elements, cursor, screen_w, screen_h, panel.scale, lines);
-        }
-    }
-
-    let mut gesture_input = *input;
-    if recipe_id.is_some() || recipe_book.clicked_ui {
-        gesture_input.left_pressed = false;
-        gesture_input.right_pressed = false;
-        gesture_input.middle_pressed = false;
-    }
-    let (ops, clicked_outside) = resolve_gesture(
-        &gesture_input,
-        hovered,
-        &panel,
-        cursor,
-        ContainerKind::Player,
+    super::container::push_container_tooltip(
+        elements,
         slots,
+        hovered.filter(|_| !ghost_hovered),
         cursor_item,
-        drag,
-        last_click,
+        cursor,
+        screen_w,
+        screen_h,
+        panel.scale,
+        advanced_tooltips,
     );
+
+    let (ops, clicked_outside) = if hidden || recipe_book.clicked_ui {
+        *drag = None;
+        (Vec::new(), false)
+    } else {
+        resolve_gesture(
+            input,
+            hovered,
+            &panel,
+            if recipe_book.hovered_ui {
+                (panel.ox, panel.oy)
+            } else {
+                cursor
+            },
+            ContainerKind::Player,
+            slots,
+            cursor_item,
+            drag,
+            last_click,
+        )
+    };
+    if (!ops.is_empty() || input.left_pressed || input.right_pressed)
+        && !recipe_book.clicked_ui
+        && hovered.is_some_and(|slot| slot <= 4)
+    {
+        recipe_book.ghost_recipe = None;
+    }
 
     InventoryResult {
         clicked_outside,
         ops,
-        player_preview: PlayerPreview {
+        player_preview: (!hidden).then_some(PlayerPreview {
             rect: [
                 panel.ox + 26.0 * panel.scale,
                 panel.oy + 8.0 * panel.scale,
@@ -185,7 +204,7 @@ pub fn build_inventory(
             ],
             gui_scale: panel.scale,
             cursor,
-        },
+        }),
         recipe_id,
     }
 }

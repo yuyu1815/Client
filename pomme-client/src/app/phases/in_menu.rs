@@ -16,6 +16,7 @@ pub enum MenuUpdateResult {
 fn connect_args(core: &AppCore, transport: Transport, username: String) -> ConnectArgs {
     ConnectArgs {
         transport,
+        is_transfer: false,
         username,
         uuid: core.user.uuid,
         access_token: core.user.access_token.clone(),

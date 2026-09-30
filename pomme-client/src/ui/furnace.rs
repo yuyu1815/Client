@@ -10,7 +10,7 @@ use azalea_inventory::ItemStack;
 use super::common::FONT_SIZE;
 use super::container::{
     ContainerInput, ContainerResult, DragState, Panel, SlotCtx, push_clipped_sprite,
-    push_cursor_stack, push_panel, resolve_gesture,
+    push_cursor_stack, push_recipe_panel, resolve_gesture,
 };
 use crate::player::menu_click::ContainerKind;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
@@ -76,13 +76,33 @@ pub fn build_furnace(
     text_width_fn: &dyn Fn(&str, f32) -> f32,
     recipe_book: &mut crate::ui::recipe_book::RecipeBookState,
     native_recipes: bool,
+    advanced_tooltips: bool,
 ) -> ContainerResult {
     let (background, lit_sprite, burn_sprite) = variant.sprites();
-    let panel = push_panel(elements, screen_w, screen_h, gs, 166.0, background);
+    let book_type = match variant {
+        FurnaceVariant::Furnace => 1,
+        FurnaceVariant::BlastFurnace => 2,
+        FurnaceVariant::Smoker => 3,
+    };
+    let (panel, hidden) = push_recipe_panel(
+        elements,
+        screen_w,
+        screen_h,
+        gs,
+        background,
+        recipe_book,
+        native_recipes,
+        book_type,
+        cursor,
+        input,
+        (20.0, 34.0),
+    );
     // Vanilla centers the furnace title: (imageWidth - font.width(title)) / 2.
     let title_x = ((176.0 - text_width_fn(title, FONT_SIZE)) / 2.0).floor();
-    panel.label(elements, title_x, 6.0, title);
-    panel.label(elements, 8.0, 72.0, "Inventory");
+    if !hidden {
+        panel.label(elements, title_x, 6.0, title);
+        panel.label(elements, 8.0, 72.0, "Inventory");
+    }
 
     push_progress_overlays(elements, &panel, lit_sprite, burn_sprite, data);
 
@@ -96,6 +116,7 @@ pub fn build_furnace(
         drag,
     );
 
+    ctx.set_hidden(hidden);
     ctx.player_rows(slots, SLOT_MAIN_BASE, SLOT_HOTBAR_BASE, 84.0);
 
     let item = |num: u16| slots.get(num as usize).unwrap_or(&ItemStack::Empty);
@@ -112,44 +133,63 @@ pub fn build_furnace(
         .chain(std::iter::once(item(SLOT_INGREDIENT)))
         .cloned()
         .collect();
-    let recipe_id = crate::ui::container::push_recipe_entries(
+    let (recipe_id, ghost_hovered) = crate::ui::container::push_recipe_entries(
         elements,
         &panel,
         recipe_book,
         cursor,
-        input.left_pressed,
+        input,
         native_recipes,
         Some(variant),
-        input.shift,
         1,
         1,
         &recipe_items,
         slots
-            .get(SLOT_INGREDIENT as usize..SLOT_INGREDIENT as usize + 1)
+            .get(SLOT_INGREDIENT as usize..SLOT_INGREDIENT as usize + 2)
             .unwrap_or(&[]),
-        item(SLOT_RESULT),
-        20.0,
-        34.0,
+        screen_w,
+        screen_h,
+        text_width_fn,
     );
     push_cursor_stack(elements, cursor, panel.scale, &shown_cursor);
 
-    let mut gesture_input = *input;
-    if recipe_id.is_some() || recipe_book.clicked_ui {
-        gesture_input.left_pressed = false;
-        gesture_input.right_pressed = false;
-        gesture_input.middle_pressed = false;
-    }
-    let (ops, clicked_outside) = resolve_gesture(
-        &gesture_input,
-        hovered,
-        &panel,
-        cursor,
-        ContainerKind::Furnace,
+    super::container::push_container_tooltip(
+        elements,
         slots,
+        hovered.filter(|_| !ghost_hovered),
         cursor_item,
-        drag,
-        last_click,
+        cursor,
+        screen_w,
+        screen_h,
+        panel.scale,
+        advanced_tooltips,
     );
+    let (ops, clicked_outside) = if hidden || recipe_book.clicked_ui {
+        *drag = None;
+        (Vec::new(), false)
+    } else {
+        resolve_gesture(
+            input,
+            hovered,
+            &panel,
+            if recipe_book.hovered_ui {
+                (panel.ox, panel.oy)
+            } else {
+                cursor
+            },
+            ContainerKind::Furnace,
+            slots,
+            cursor_item,
+            drag,
+            last_click,
+        )
+    };
+    if (!ops.is_empty() || input.left_pressed || input.right_pressed)
+        && !recipe_book.clicked_ui
+        && hovered.is_some_and(|slot| slot <= 2)
+    {
+        recipe_book.ghost_recipe = None;
+    }
 
     ContainerResult {
         clicked_outside,

@@ -542,6 +542,9 @@ fn atlas_dirty(count: usize, last: &mut usize, since: &mut Option<Instant>) -> b
 }
 
 pub struct MainMenu {
+    /// Retain the latest opt-in recorder after its connection drops; poll only,
+    /// never wait for its writer on the UI thread.
+    pub movement_recording: Option<Arc<crate::movement_record::Recorder>>,
     username: String,
     version: String,
     screen: Screen,
@@ -698,6 +701,7 @@ impl MainMenu {
         // now and is ready for the first screen (and initial connection).
         crate::lang::set_locale(supported_locale(&settings.locale));
         Self {
+            movement_recording: None,
             username,
             version,
             screen: Screen::Main,
@@ -1130,9 +1134,9 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: impl Fn(&str, f32) -> f32,
     ) -> MainMenuResult {
-        match self.screen {
+        let mut result = match self.screen {
             Screen::Main => {
-                let mut result = self.build_main(screen_w, screen_h, input, text_width_fn);
+                let mut result = self.build_main(screen_w, screen_h, input, &text_width_fn);
                 if let Some(action) =
                     self.drive_theme_transition(&mut result.elements, screen_w, screen_h)
                 {
@@ -1211,6 +1215,62 @@ impl MainMenu {
             Screen::CreditsRoll => {
                 self.build_credits_roll(screen_w, screen_h, input, &text_width_fn)
             }
+        };
+        if matches!(self.screen, Screen::Main | Screen::Disconnected(_)) {
+            self.build_movement_recording_status(
+                &mut result.elements,
+                screen_w,
+                screen_h,
+                &text_width_fn,
+            );
+        }
+        result
+    }
+
+    pub(crate) fn build_movement_recording_status(
+        &self,
+        elements: &mut Vec<MenuElement>,
+        sw: f32,
+        sh: f32,
+        text_width: &dyn Fn(&str, f32) -> f32,
+    ) {
+        let Some(recorder) = &self.movement_recording else {
+            return;
+        };
+        let status = recorder.status();
+        if status.is_empty() {
+            return;
+        }
+        let gs = crate::ui::hud::gui_scale(sw, sh, self.gui_scale_setting);
+        let scale = 7.0 * gs;
+        let color = if status.starts_with("Recording FAILED") {
+            [1.0, 0.4, 0.4, 1.0]
+        } else {
+            [1.0, 1.0, 1.0, 1.0]
+        };
+        let lines = crate::ui::chat::wrap_spans(
+            &[crate::ui::text::TextSpan::new(status, color)],
+            (sw - 16.0 * gs).max(1.0),
+            &|spans| spans.iter().map(|s| text_width(&s.text, scale)).sum(),
+        );
+        let y = sh - (24.0 + lines.len() as f32 * 10.0) * gs;
+        elements.push(MenuElement::Rect {
+            x: 4.0 * gs,
+            y: y - 3.0 * gs,
+            w: (sw - 8.0 * gs).max(1.0),
+            h: (lines.len() as f32 * 10.0 + 6.0) * gs,
+            corner_radius: 0.0,
+            color: [0.0, 0.0, 0.0, 0.85],
+        });
+        for (i, line) in lines.into_iter().enumerate() {
+            elements.push(MenuElement::Text {
+                x: sw / 2.0,
+                y: y + i as f32 * 10.0 * gs,
+                text: line.into_iter().map(|s| s.text).collect(),
+                scale,
+                color,
+                centered: true,
+            });
         }
     }
 

@@ -12,6 +12,34 @@ fn sign_text_in_range(center: glam::DVec3, eye: glam::DVec3) -> bool {
     center.distance_squared(eye) <= f64::from(SIGN_TEXT_RENDER_DISTANCE).powi(2)
 }
 
+/// Official 26.2 StandingSignRenderer / HangingSignRenderer transformations.
+fn sign_text_matrix(
+    base: glam::Vec3,
+    yaw: f32,
+    wall: bool,
+    hanging: bool,
+    front: bool,
+) -> glam::Mat4 {
+    let scale = if hanging { 0.0140625 } else { 1.0 / 96.0 };
+    glam::Mat4::from_translation(
+        base + glam::Vec3::new(0.5, if hanging { 0.9375 } else { 0.5 }, 0.5),
+    ) * glam::Mat4::from_rotation_y((-yaw).to_radians())
+        * glam::Mat4::from_translation(if hanging {
+            glam::Vec3::new(0.0, -0.3125, 0.0)
+        } else if wall {
+            glam::Vec3::new(0.0, -0.3125, -0.4375)
+        } else {
+            glam::Vec3::ZERO
+        })
+        * glam::Mat4::from_rotation_y(if front { 0.0 } else { std::f32::consts::PI })
+        * glam::Mat4::from_translation(if hanging {
+            glam::Vec3::new(0.0, -0.32, 0.073)
+        } else {
+            glam::Vec3::new(0.0, 1.0 / 3.0, 0.046666667)
+        })
+        * glam::Mat4::from_scale(glam::Vec3::new(scale, -scale, scale))
+}
+
 fn reset_sign_vertices(vertices: &mut Vec<SignVertex>) {
     vertices.clear();
 }
@@ -95,7 +123,10 @@ pub(super) fn draw_sign_text(
     vertices: &mut Vec<SignVertex>,
 ) -> u32 {
     reset_sign_vertices(vertices);
-    for info in items.iter().filter(|i| i.kind == BlockEntityKind::Sign) {
+    for info in items
+        .iter()
+        .filter(|i| crate::world::block_entity::is_sign_kind(i.kind))
+    {
         let center = glam::DVec3::new(
             info.pos.x as f64 + 0.5,
             info.pos.y as f64 + 0.5,
@@ -124,39 +155,22 @@ pub(super) fn draw_sign_text(
             let base = (glam::DVec3::new(info.pos.x as f64, info.pos.y as f64, info.pos.z as f64)
                 - anchor)
                 .as_vec3();
-            // StandingSignRenderer.textTransformation, including wall offset,
-            // back-face rotation and the inverted Y of Font coordinates.
-            let matrix = glam::Mat4::from_translation(base + glam::Vec3::splat(0.5))
-                * glam::Mat4::from_rotation_y((-info.yaw).to_radians())
-                * glam::Mat4::from_translation(if info.sign_wall {
-                    glam::Vec3::new(0.0, -0.3125, -0.4375)
-                } else {
-                    glam::Vec3::ZERO
-                })
-                * glam::Mat4::from_rotation_y(if front { 0.0 } else { std::f32::consts::PI })
-                * glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.0 / 3.0, 0.046666667))
-                * glam::Mat4::from_scale(glam::Vec3::new(1.0 / 96.0, -1.0 / 96.0, 1.0 / 96.0));
+            let hanging = info.kind == BlockEntityKind::HangingSign;
+            let (line_width, line_height) = crate::world::block_entity::sign_text_size(hanging);
+            let matrix = sign_text_matrix(base, info.yaw, info.sign_wall, hanging, front);
             let black = dye == [29.0 / 255.0, 29.0 / 255.0, 33.0 / 255.0];
-            let dark = if black && glowing {
-                [0.941, 0.922, 0.922]
-            } else {
-                dye.map(|c| c * 0.4)
-            };
-            let color = if glowing {
-                dye
-            } else {
-                dark.map(|c| c * info.sign_light)
-            };
+            let (color, dark) =
+                crate::world::block_entity::sign_text_colors(dye, glowing, info.sign_light);
             let near = center.distance_squared(eye) < 256.0;
             let outline = glowing && (black || near);
             for (row, line) in lines.iter().enumerate() {
-                // Vanilla SignBlockEntity: 90 px line width, 10 px height.
+                // Limits and row spacing also match the editor's input layout.
                 let chars: Vec<_> = line
                     .chars()
                     .take(256)
                     .scan(0.0f32, |width, ch| {
                         let gi = glyphs.glyph(ch, None);
-                        if *width + gi.advance > 90.0 {
+                        if *width + gi.advance > line_width {
                             return None;
                         }
                         let x = *width;
@@ -165,7 +179,8 @@ pub(super) fn draw_sign_text(
                     })
                     .collect();
                 let width: f32 = chars.last().map_or(0.0, |(x, gi)| x + gi.advance);
-                let y = row as f32 * 10.0 - 20.0;
+                let left = crate::ui::sign::centered_line_x(0.0, width);
+                let y = (row as f32 - 2.0) * line_height;
                 if outline {
                     for (x, gi) in &chars {
                         for dy in -1..=1 {
@@ -175,7 +190,7 @@ pub(super) fn draw_sign_text(
                                         vertices,
                                         matrix,
                                         gi,
-                                        *x - width / 2.0 + dx as f32 * 0.5,
+                                        *x + left + dx as f32 * 0.5,
                                         y + dy as f32 * 0.5,
                                         dark,
                                     );
@@ -185,7 +200,7 @@ pub(super) fn draw_sign_text(
                     }
                 }
                 for (x, gi) in &chars {
-                    push_sign_glyph(vertices, matrix, gi, *x - width / 2.0, y, color);
+                    push_sign_glyph(vertices, matrix, gi, *x + left, y, color);
                 }
             }
         }
@@ -218,6 +233,21 @@ pub(super) fn draw_sign_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hanging_sign_transform_matches_official_both_faces_and_mounts() {
+        for wall in [false, true] {
+            for front in [false, true] {
+                let matrix = sign_text_matrix(glam::Vec3::ZERO, 0.0, wall, true, front);
+                let origin = matrix.transform_point3(glam::Vec3::ZERO);
+                assert!((origin.y - 0.305).abs() < 1e-6);
+                assert!((origin.z - (0.5 + if front { 0.073 } else { -0.073 })).abs() < 1e-6);
+                assert!(
+                    (matrix.transform_vector3(glam::Vec3::X).length() - 0.0140625).abs() < 1e-6
+                );
+            }
+        }
+    }
 
     #[test]
     fn sign_text_range_uses_player_eye_with_third_person_camera_offset() {

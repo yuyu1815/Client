@@ -15,6 +15,7 @@ use crate::renderer::pipelines::item_entity::{
 
 pub struct HeldItemInfo {
     pub name: String,
+    pub player_head_profile_source: Option<crate::world::block_entity::PlayerHeadProfileSource>,
     pub light: f32,
     pub has_3d_model: bool,
     pub nether_lighting: bool,
@@ -106,6 +107,7 @@ impl HeldItemPipeline {
         aspect: f32,
         hud_fov: f32,
         swing_progress: f32,
+        inverse_height: f32,
         use_anim: Option<UseAnim>,
         left_hand: bool,
         item: &HeldItemInfo,
@@ -139,15 +141,17 @@ impl HeldItemPipeline {
                 .resolve(&item.name, default_first_person(item.has_3d_model, false))
         };
         let arm = match use_anim.filter(|anim| anim.left_hand == left_hand) {
-            Some(anim) if anim.bow => bow_item_matrix(anim),
-            Some(anim) => eat_item_matrix(anim),
-            None => first_person_item_matrix(swing_progress, left_hand),
+            Some(anim) if anim.bow => bow_item_matrix(anim, inverse_height),
+            Some(anim) => eat_item_matrix(anim, inverse_height),
+            None => first_person_item_matrix(swing_progress, left_hand, inverse_height),
         };
         // build_item_mesh stores vertices centered at the origin; ItemTransform's
         // final -0.5 translation applies to vanilla's uncentered [0, 1] vertices.
         let model = arm * display.to_matrix();
 
-        self.shared.bind(cmd, frame, self.pipeline);
+        if !self.bind_item_texture(cmd, frame, item, meshes) {
+            return;
+        }
         cmd.bind_vertex_buffers(0, &[buffer], &[0]);
         push_model_light(cmd, self.shared.pipeline_layout, &model, item.light);
         // Held items use the same transformed-normal path as dropped items.
@@ -212,7 +216,9 @@ impl HeldItemPipeline {
             },
         );
         let model = animation_transform * fixed.to_matrix();
-        self.shared.bind(cmd, frame, self.pipeline);
+        if !self.bind_item_texture(cmd, frame, item, meshes) {
+            return;
+        }
         cmd.bind_vertex_buffers(0, &[buffer], &[0]);
         push_model_light(cmd, self.shared.pipeline_layout, &model, item.light);
         push_world_lighting(
@@ -229,6 +235,25 @@ impl HeldItemPipeline {
             "viewProjectionMatrixColumnMajor": view_projection.to_cols_array(),
             "provenance": "CPU submitted matrices/pipeline draw; not GPU readback"
         }));
+    }
+
+    fn bind_item_texture(
+        &self,
+        cmd: vk::CommandBuffer,
+        frame: usize,
+        item: &HeldItemInfo,
+        meshes: &ItemEntityPipeline,
+    ) -> bool {
+        if item.name == "player_head" {
+            let Some(set) = meshes.head_texture_set(item.player_head_profile_source.as_ref())
+            else {
+                return false;
+            };
+            self.shared.bind_texture(cmd, frame, self.pipeline, set);
+        } else {
+            self.shared.bind(cmd, frame, self.pipeline);
+        }
+        true
     }
 
     pub fn probe_draw_trace(&self) -> Option<serde_json::Value> {
@@ -283,32 +308,34 @@ fn bow_model_name(anim: &UseAnim) -> &'static str {
 }
 
 // Vanilla ItemInHandRenderer: applyItemArmTransform + swingArm.
-fn first_person_item_matrix(swing_progress: f32, left_hand: bool) -> Mat4 {
+fn first_person_item_matrix(swing_progress: f32, left_hand: bool, inverse_height: f32) -> Mat4 {
     let a = swing_progress;
     let sq = a.sqrt();
     let pi = std::f32::consts::PI;
 
     let hand_sign = if left_hand { -1.0 } else { 1.0 };
-    Mat4::from_translation(Vec3::new(hand_sign * 0.56, -0.52, -0.72))
-        * Mat4::from_translation(Vec3::new(
-            hand_sign * -0.4 * (sq * pi).sin(),
-            0.2 * (sq * pi * 2.0).sin(),
-            -0.2 * (a * pi).sin(),
-        ))
-        * Mat4::from_rotation_y((45.0 + (a * a * pi).sin() * -20.0).to_radians())
-        * Mat4::from_rotation_z(((sq * pi).sin() * -20.0).to_radians())
+    Mat4::from_translation(Vec3::new(
+        hand_sign * 0.56,
+        -0.52 - inverse_height * 0.6,
+        -0.72,
+    )) * Mat4::from_translation(Vec3::new(
+        hand_sign * -0.4 * (sq * pi).sin(),
+        0.2 * (sq * pi * 2.0).sin(),
+        -0.2 * (a * pi).sin(),
+    )) * Mat4::from_rotation_y((hand_sign * (45.0 + (a * a * pi).sin() * -20.0)).to_radians())
+        * Mat4::from_rotation_z((hand_sign * (sq * pi).sin() * -20.0).to_radians())
         * Mat4::from_rotation_x(((sq * pi).sin() * -80.0).to_radians())
-        * Mat4::from_rotation_y((-45.0_f32).to_radians())
+        * Mat4::from_rotation_y((hand_sign * -45.0_f32).to_radians())
 }
 
 // Vanilla ItemInHandRenderer BOW branch (26.2): fixed bow pose plus the
 // 20-tick quadratic draw power, applied after the ordinary arm transform.
-fn bow_item_matrix(anim: UseAnim) -> Mat4 {
+fn bow_item_matrix(anim: UseAnim, inverse_height: f32) -> Mat4 {
     let time_held = anim.duration - anim.curr_usage_time;
     let mut power = time_held / 20.0;
     power = ((power * power + power * 2.0) / 3.0).min(1.0);
     let invert = if anim.left_hand { -1.0 } else { 1.0 };
-    first_person_item_matrix(0.0, anim.left_hand)
+    first_person_item_matrix(0.0, anim.left_hand, inverse_height)
         * Mat4::from_translation(Vec3::new(invert * -0.2785682, 0.18344387, 0.15731531))
         * Mat4::from_rotation_x((-13.935_f32).to_radians())
         * Mat4::from_rotation_y((invert * 35.3_f32).to_radians())
@@ -319,8 +346,8 @@ fn bow_item_matrix(anim: UseAnim) -> Mat4 {
 }
 
 // Vanilla ItemInHandRenderer: applyEatTransform then applyItemArmTransform
-// (EAT/DRINK skip the usual pre-transform; right hand, inverseArmHeight = 0).
-fn eat_item_matrix(anim: UseAnim) -> Mat4 {
+// (EAT/DRINK skip the usual swing pre-transform).
+fn eat_item_matrix(anim: UseAnim, inverse_height: f32) -> Mat4 {
     let scaled = anim.curr_usage_time / anim.duration;
     let invert = if anim.left_hand { -1.0 } else { 1.0 };
     // The chew bob runs after the first 20% of the eat, oscillating every 4
@@ -336,7 +363,11 @@ fn eat_item_matrix(anim: UseAnim) -> Mat4 {
         * Mat4::from_rotation_y((invert * jiggle * 90.0).to_radians())
         * Mat4::from_rotation_x((jiggle * 10.0).to_radians())
         * Mat4::from_rotation_z((invert * jiggle * 30.0).to_radians())
-        * Mat4::from_translation(Vec3::new(invert * 0.56, -0.52, -0.72))
+        * Mat4::from_translation(Vec3::new(
+            invert * 0.56,
+            -0.52 - inverse_height * 0.6,
+            -0.72,
+        ))
 }
 
 fn default_first_person(has_3d_model: bool, left_hand: bool) -> DisplayTransform {
@@ -386,13 +417,13 @@ mod tests {
 
     #[test]
     fn held_item_matrix_places_each_hand_on_its_side_during_idle_and_swing() {
-        let idle_right = first_person_item_matrix(0.0, false).w_axis.x;
-        let idle_left = first_person_item_matrix(0.0, true).w_axis.x;
+        let idle_right = first_person_item_matrix(0.0, false, 0.0).w_axis.x;
+        let idle_left = first_person_item_matrix(0.0, true, 0.0).w_axis.x;
         assert!((idle_right - 0.56).abs() < 1e-6);
         assert!((idle_left + 0.56).abs() < 1e-6);
 
-        let swing_right = first_person_item_matrix(0.5, false).w_axis.x;
-        let swing_left = first_person_item_matrix(0.5, true).w_axis.x;
+        let swing_right = first_person_item_matrix(0.5, false, 0.0).w_axis.x;
+        let swing_left = first_person_item_matrix(0.5, true, 0.0).w_axis.x;
         assert!(swing_right > 0.0 && swing_left < 0.0);
         assert!((swing_right + swing_left).abs() < 1e-6);
     }
@@ -405,11 +436,11 @@ mod tests {
             left_hand,
             bow: true,
         };
-        let idle = bow_item_matrix(anim(0.0, false));
-        let early = bow_item_matrix(anim(10.0, false));
-        let full = bow_item_matrix(anim(20.0, false));
-        let left = bow_item_matrix(anim(20.0, true));
-        let base_right = first_person_item_matrix(0.0, false);
+        let idle = bow_item_matrix(anim(0.0, false), 0.0);
+        let early = bow_item_matrix(anim(10.0, false), 0.0);
+        let full = bow_item_matrix(anim(20.0, false), 0.0);
+        let left = bow_item_matrix(anim(20.0, true), 0.0);
+        let base_right = first_person_item_matrix(0.0, false, 0.0);
 
         assert!(idle.abs_diff_eq(
             base_right
@@ -433,8 +464,59 @@ mod tests {
     }
 
     #[test]
+    fn whack_mirrors_y_z_rotations_and_preserves_official_right_hand() {
+        let mirror = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
+        let pi = std::f32::consts::PI;
+        for a in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            let sq = a.sqrt();
+            let official_right = Mat4::from_translation(Vec3::new(0.56, -0.52, -0.72))
+                * Mat4::from_translation(Vec3::new(
+                    -0.4 * (sq * pi).sin(),
+                    0.2 * (sq * pi * 2.0).sin(),
+                    -0.2 * (a * pi).sin(),
+                ))
+                * Mat4::from_rotation_y((45.0 + (a * a * pi).sin() * -20.0).to_radians())
+                * Mat4::from_rotation_z(((sq * pi).sin() * -20.0).to_radians())
+                * Mat4::from_rotation_x(((sq * pi).sin() * -80.0).to_radians())
+                * Mat4::from_rotation_y((-45.0_f32).to_radians());
+            assert!(first_person_item_matrix(a, false, 0.0).abs_diff_eq(official_right, 1e-6));
+            for inverse in [0.0, 0.3, 1.0] {
+                let right = first_person_item_matrix(a, false, inverse);
+                let left = first_person_item_matrix(a, true, inverse);
+                assert!(left.abs_diff_eq(mirror * right * mirror, 1e-6));
+            }
+        }
+    }
+
+    #[test]
+    fn equip_height_applies_to_idle_whack_eat_and_bow_poses() {
+        for left_hand in [false, true] {
+            for inverse in [0.0, 0.25, 1.0] {
+                let idle = first_person_item_matrix(0.0, left_hand, inverse);
+                assert!((idle.w_axis.y - (-0.52 - inverse * 0.6)).abs() < 1e-6);
+                let anim = UseAnim {
+                    curr_usage_time: 32.0,
+                    duration: 32.0,
+                    left_hand,
+                    bow: false,
+                };
+                assert!(eat_item_matrix(anim, inverse).abs_diff_eq(idle, 1e-6));
+                let lower = Mat4::from_translation(Vec3::new(0.0, -inverse * 0.6, 0.0));
+                assert!(
+                    bow_item_matrix(anim, inverse)
+                        .abs_diff_eq(lower * bow_item_matrix(anim, 0.0), 1e-6)
+                );
+                assert!(
+                    first_person_item_matrix(0.5, left_hand, inverse)
+                        .abs_diff_eq(lower * first_person_item_matrix(0.5, left_hand, 0.0), 1e-6)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn held_display_transform_pivots_around_model_center() {
-        let arm = first_person_item_matrix(0.0, false);
+        let arm = first_person_item_matrix(0.0, false, 0.0);
         let model = arm * default_first_person(true, false).to_matrix();
         let center = model.transform_point3(Vec3::ZERO);
         let arm_origin = arm.transform_point3(Vec3::ZERO);

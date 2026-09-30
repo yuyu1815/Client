@@ -8,8 +8,10 @@ use pyronyx::vk;
 
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap, SpriteAlphaMask, TextureAtlas};
+use crate::renderer::placed_head_skin::{MAX_ENTRIES, PlacedHeadSkinCache};
 use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util, world_shadow};
 use crate::world::block::model::{BakedModel, Direction, ItemTint, direction_from_positions};
+use crate::world::block_entity::PlayerHeadProfileSource;
 
 /// Item-only vertex format. Vanilla's ENTITY item format keeps UV0 as floats
 /// and carries a baked face normal; both matter here because generated sprite
@@ -79,6 +81,7 @@ fn pack_normal(normal: glam::Vec3) -> [i8; 4] {
 pub struct ItemRenderInfo {
     pub item_name: String,
     pub raw_dye_rgb: Option<[u8; 3]>,
+    pub player_head_profile_source: Option<PlayerHeadProfileSource>,
     pub model_matrix: Mat4,
     pub light: f32,
     pub nether_lighting: bool,
@@ -204,11 +207,11 @@ impl ItemPipelineShared {
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::CombinedImageSampler,
-                descriptor_count: 2,
+                descriptor_count: 2 + (MAX_ENTRIES + 1) as u32,
             },
         ];
         let pool_info = vk::DescriptorPoolCreateInfo {
-            max_sets: MAX_FRAMES_IN_FLIGHT as u32 + 2,
+            max_sets: MAX_FRAMES_IN_FLIGHT as u32 + 2 + (MAX_ENTRIES + 1) as u32,
             pool_size_count: pool_sizes.len() as u32,
             pool_sizes: pool_sizes.as_ptr(),
             ..Default::default()
@@ -637,6 +640,13 @@ fn append_shadow_quad(
     }
 }
 
+struct HeadTexture {
+    image: vk::Image,
+    view: vk::ImageView,
+    allocation: Allocation,
+    set: vk::DescriptorSet,
+}
+
 pub struct ItemEntityPipeline {
     shadow: Option<ShadowPipeline>,
     /// Vanilla `ITEM_CUTOUT`: alpha-tested, no blending.
@@ -645,6 +655,9 @@ pub struct ItemEntityPipeline {
     translucent: vk::Pipeline,
     shared: ItemPipelineShared,
     meshes: HashMap<String, MeshEntry>,
+    head_textures: HashMap<PlayerHeadProfileSource, HeadTexture>,
+    free_head_sets: Vec<vk::DescriptorSet>,
+    head_generation: Option<u64>,
     last_draw_trace: Option<serde_json::Value>,
 }
 
@@ -681,8 +694,130 @@ impl ItemEntityPipeline {
             translucent,
             shared,
             meshes: HashMap::new(),
+            head_textures: HashMap::new(),
+            free_head_sets: Vec::new(),
+            head_generation: None,
             last_draw_trace: None,
         }
+    }
+
+    /// Synchronize before recording any head draw/bake commands. Texture sets
+    /// have the same set=1 layout as held and GUI item pipelines.
+    pub(in crate::renderer) fn sync_head_textures(
+        &mut self,
+        device: &vk::Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        allocator: &Arc<Mutex<Allocator>>,
+        cache: &PlacedHeadSkinCache,
+    ) {
+        let mut desired: HashMap<_, _> = cache.ready().collect();
+        let (fallback_key, fallback) = cache.skin(&PlayerHeadProfileSource::Default);
+        desired.insert(fallback_key, fallback);
+        debug_assert!(desired.len() <= MAX_ENTRIES + 1);
+        let new_generation = self.head_generation != Some(cache.generation());
+        let changed = new_generation
+            || desired.len() != self.head_textures.len()
+            || desired
+                .keys()
+                .any(|key| !self.head_textures.contains_key(*key));
+        if !changed {
+            return;
+        }
+        // ponytail: bounded 129-sheet pool; idle on publication/retirement.
+        // Use fence-based deferred retirement only if skin churn measures badly.
+        device
+            .wait_idle()
+            .expect("failed to idle before item head texture sync");
+        if new_generation {
+            self.clear_head_textures(device, allocator);
+        }
+        let retired: Vec<_> = self
+            .head_textures
+            .keys()
+            .filter(|key| !desired.contains_key(key))
+            .cloned()
+            .collect();
+        for key in retired {
+            let texture = self.head_textures.remove(&key).unwrap();
+            self.retire_head_texture(device, allocator, texture);
+        }
+        for (key, skin) in desired {
+            if self.head_textures.contains_key(key) {
+                continue;
+            }
+            let (image, view, allocation) = util::create_gpu_image_with_format(
+                device,
+                allocator,
+                skin.width,
+                skin.height,
+                vk::Format::R8G8B8A8Srgb,
+                "item_head_skin",
+            );
+            let (staging, staging_alloc) = util::create_staging_buffer(
+                device,
+                allocator,
+                &skin.pixels,
+                "item_head_skin_staging",
+            );
+            util::upload_image(
+                device,
+                queue,
+                command_pool,
+                staging,
+                image,
+                skin.width,
+                skin.height,
+            );
+            device.destroy_buffer(staging, None);
+            allocator.lock().unwrap().free(staging_alloc).ok();
+            let set = if let Some(set) = self.free_head_sets.pop() {
+                write_texture_descriptor(device, set, view, self.shared.atlas_sampler);
+                set
+            } else {
+                self.shared
+                    .allocate_texture_set(device, view, self.shared.atlas_sampler)
+            };
+            self.head_textures.insert(
+                key.clone(),
+                HeadTexture {
+                    image,
+                    view,
+                    allocation,
+                    set,
+                },
+            );
+        }
+        self.head_generation = Some(cache.generation());
+    }
+
+    fn retire_head_texture(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        texture: HeadTexture,
+    ) {
+        device.destroy_image_view(texture.view, None);
+        device.destroy_image(texture.image, None);
+        allocator.lock().unwrap().free(texture.allocation).ok();
+        self.free_head_sets.push(texture.set);
+    }
+
+    /// Caller must idle the device and discard any recorded head commands
+    /// first.
+    pub fn clear_head_textures(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        let textures = std::mem::take(&mut self.head_textures);
+        for texture in textures.into_values() {
+            self.retire_head_texture(device, allocator, texture);
+        }
+        self.head_generation = None;
+    }
+
+    pub(super) fn head_texture_set(
+        &self,
+        source: Option<&PlayerHeadProfileSource>,
+    ) -> Option<vk::DescriptorSet> {
+        select_head_texture(&self.head_textures, source).map(|texture| texture.set)
     }
 
     pub fn update_camera(&mut self, frame: usize, uniform: &CameraUniform) {
@@ -873,11 +1008,13 @@ impl ItemEntityPipeline {
         if self.meshes.contains_key(name) {
             return;
         }
-        let translucent = model
-            .quads
-            .iter()
-            .any(|quad| uv_map.get_region(&quad.texture).translucent);
-        let vertices = build_item_mesh(model, uv_map, false);
+        let standalone_skin = name == "player_head";
+        let translucent = !standalone_skin
+            && model
+                .quads
+                .iter()
+                .any(|quad| uv_map.get_region(&quad.texture).translucent);
+        let vertices = build_item_mesh_texture(model, uv_map, false, standalone_skin);
         if !vertices.is_empty() {
             let gui_vertices = translucent.then(|| build_item_mesh(model, uv_map, true));
             self.insert_mesh(
@@ -946,7 +1083,14 @@ impl ItemEntityPipeline {
                 if mesh.translucent != translucent {
                     continue;
                 }
-                if !bound {
+                if item.item_name == "player_head" {
+                    let Some(set) = self.head_texture_set(item.player_head_profile_source.as_ref())
+                    else {
+                        continue;
+                    };
+                    self.shared.bind_texture(cmd, frame, pipeline, set);
+                    bound = false;
+                } else if !bound {
                     self.shared.bind(cmd, frame, pipeline);
                     bound = true;
                 }
@@ -1043,6 +1187,7 @@ impl ItemEntityPipeline {
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        self.clear_head_textures(device, allocator);
         self.clear_meshes(device, allocator);
         self.destroy_pipelines(device);
         if let Some(shadow) = self.shadow.as_mut() {
@@ -1050,6 +1195,16 @@ impl ItemEntityPipeline {
         }
         self.shared.destroy(device, allocator);
     }
+}
+
+/// Full profile identity selects the sheet; it never changes the mesh key.
+fn select_head_texture<'a, T>(
+    slots: &'a HashMap<PlayerHeadProfileSource, T>,
+    source: Option<&PlayerHeadProfileSource>,
+) -> Option<&'a T> {
+    source
+        .and_then(|key| slots.get(key))
+        .or_else(|| slots.get(&PlayerHeadProfileSource::Default))
 }
 
 /// Local-space bounds of a baked item mesh before its display transform.
@@ -1108,6 +1263,15 @@ fn build_item_mesh(
     uv_map: &AtlasUVMap,
     vanilla_gui_order: bool,
 ) -> Vec<ItemVertex> {
+    build_item_mesh_texture(model, uv_map, vanilla_gui_order, false)
+}
+
+fn build_item_mesh_texture(
+    model: &BakedModel,
+    uv_map: &AtlasUVMap,
+    vanilla_gui_order: bool,
+    standalone_skin: bool,
+) -> Vec<ItemVertex> {
     let mut quads: Vec<_> = model.quads.iter().collect();
     if vanilla_gui_order {
         quads.sort_by_key(|quad| gui_item_quad_order_key(quad));
@@ -1129,10 +1293,14 @@ fn build_item_mesh(
             let p = quad.positions[i];
             vertices.push(ItemVertex {
                 position: [p[0] - 0.5, p[1] - 0.5, p[2] - 0.5],
-                tex_coords: [
-                    region.u_min + quad.uvs[i][0] * u_span,
-                    region.v_min + quad.uvs[i][1] * v_span,
-                ],
+                tex_coords: if standalone_skin {
+                    quad.uvs[i]
+                } else {
+                    [
+                        region.u_min + quad.uvs[i][0] * u_span,
+                        region.v_min + quad.uvs[i][1] * v_span,
+                    ]
+                },
                 // GUI consumes the baked ITEMS_3D shade byte. Held and
                 // dropped-item world shaders ignore light_tint.r and compute
                 // context lighting from this packed cardinal normal instead.
@@ -1954,11 +2122,58 @@ mod tests {
     }
 
     #[test]
+    fn player_head_same_kind_profiles_select_independent_textures() {
+        use crate::world::block_entity::{PlayerHeadProfileProperty, PlayerHeadSkinPatch};
+        let profile = |signature: &str, cape: Option<&str>| PlayerHeadProfileSource::Static {
+            name: Some("same-player".into()),
+            id: None,
+            properties: vec![PlayerHeadProfileProperty {
+                name: "textures".into(),
+                value: "same-texture".into(),
+                signature: Some(signature.into()),
+            }],
+            patch: PlayerHeadSkinPatch {
+                cape: cape.map(str::to_owned),
+                ..Default::default()
+            },
+        };
+        let a = profile("A", None);
+        let b = profile("B", None);
+        let patched = profile("A", Some("minecraft:cape"));
+        let mut slots = HashMap::from([
+            (PlayerHeadProfileSource::Default, 0),
+            (a.clone(), 1),
+            (b.clone(), 2),
+            (patched.clone(), 3),
+        ]);
+        // Same mesh/item kind, A -> B -> A, including cloned full identity.
+        for (source, expected) in [(&a, 1), (&b, 2), (&a.clone(), 1), (&patched, 3)] {
+            assert_eq!(select_head_texture(&slots, Some(source)), Some(&expected));
+        }
+        assert_eq!(select_head_texture(&slots, None), Some(&0));
+        slots.remove(&a);
+        assert_eq!(select_head_texture(&slots, Some(&a)), Some(&0));
+        assert_eq!(select_head_texture(&slots, Some(&b)), Some(&2));
+        slots.clear();
+        assert_eq!(select_head_texture(&slots, Some(&b)), None);
+    }
+
+    #[test]
     fn player_head_quads_feed_all_item_contexts_with_72_vertices() {
         let transform = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
             * glam::Mat4::from_quat(glam::Quat::from_xyzw(1.0, 0.0, 0.0, 0.0));
         let model = crate::world::block::model::bake_player_head_item_model(transform);
-        let atlas = AtlasUVMap::test_empty();
+        let mut atlas = AtlasUVMap::test_empty();
+        atlas.test_insert_region(
+            &model.quads[0].texture,
+            AtlasRegion {
+                u_min: 0.25,
+                v_min: 0.5,
+                u_max: 0.375,
+                v_max: 0.625,
+                ..unit_region()
+            },
+        );
         let directions = [
             glam::Vec3::Z,
             glam::Vec3::NEG_Z,
@@ -1970,8 +2185,11 @@ mod tests {
         // These are the actual shared CPU conversions consumed by GUI
         // bake_to_slot, either hand, dropped items and FIXED item frames.
         // No context re-applies the special model's T Rx or a placed-BE yaw.
+        // A non-unit atlas region must not contaminate standalone sheet UVs.
         for gui_order in [false, true] {
-            let vertices = build_item_mesh(&model, &atlas, gui_order);
+            let vertices = build_item_mesh_texture(&model, &atlas, gui_order, true);
+            let atlas_vertices = build_item_mesh(&model, &atlas, gui_order);
+            assert_ne!(vertices[0].tex_coords, atlas_vertices[0].tex_coords);
             assert_eq!(vertices.len(), 72);
             assert_eq!(
                 mesh_bounds(&vertices[..36]),

@@ -166,148 +166,168 @@ pub fn push_clipped_sprite(
     elements.push(MenuElement::ScissorPop);
 }
 
-/// Draws supported recipe outputs and returns the server-issued display ID
-/// clicked this frame. Unsupported/tag/composite outputs are intentionally
-/// hidden.
+/// Vanilla recipe-book sprites, collections, input and server-driven ghosts.
+/// Returns the selected recipe and whether a drawn ghost slot is hovered.
+#[allow(clippy::too_many_arguments)]
 pub fn push_recipe_entries(
     elements: &mut Vec<MenuElement>,
     panel: &Panel,
     book: &mut crate::ui::recipe_book::RecipeBookState,
     cursor: (f32, f32),
-    clicked: bool,
+    input: &ContainerInput,
     native: bool,
     furnace_variant: Option<crate::ui::furnace::FurnaceVariant>,
-    use_max_items: bool,
     columns: usize,
     rows: usize,
     available: &[ItemStack],
     grid: &[ItemStack],
-    result_slot: &ItemStack,
-    x: f32,
-    y: f32,
-) -> Option<(u32, bool)> {
-    book.clicked_ui = false;
+    screen_w: f32,
+    screen_h: f32,
+    text_width_fn: &dyn Fn(&str, f32) -> f32,
+) -> (Option<(u32, bool)>, bool) {
     if !native {
-        panel.label(elements, x, y, "Recipe book unavailable");
-        return None;
+        return (None, false);
     }
-    let book_type = match furnace_variant {
-        None => 0,
-        Some(crate::ui::furnace::FurnaceVariant::Furnace) => 1,
-        Some(crate::ui::furnace::FurnaceVariant::BlastFurnace) => 2,
-        Some(crate::ui::furnace::FurnaceVariant::Smoker) => 3,
-    };
-    book.load_settings(book_type);
-    let button_rect = [
-        panel.ox + x * panel.scale,
-        panel.oy + y * panel.scale,
-        18.0 * panel.scale,
-        18.0 * panel.scale,
-    ];
-    let button_hover = crate::ui::common::hit_test(cursor, button_rect);
-    panel.image(
-        elements,
-        if book.open {
-            SpriteId::RecipeBookButtonHighlighted
-        } else {
-            SpriteId::RecipeBookButton
-        },
-        x,
-        y,
-        18.0,
-        18.0,
-    );
-    if button_hover && clicked {
-        book.clicked_ui = true;
-        book.open = !book.open;
-        book.search_focused = false;
-        book.settings_dirty = true;
-    }
+    let cycle = book.cycle_index();
+    let s = panel.scale;
+    let narrow = screen_w / s < 379.0;
+    let ghost_hovered = (!narrow || !book.open)
+        && push_recipe_ghost(
+            elements,
+            panel,
+            book,
+            cursor,
+            screen_w,
+            screen_h,
+            columns,
+            rows,
+            furnace_variant.is_some(),
+            grid,
+            cycle,
+        );
     if !book.open {
-        return None;
+        return (None, ghost_hovered);
     }
-    let bx = x - 86.0;
-    let by = y - 16.0;
+    let recipe_panel = recipe_book_panel(screen_w, screen_h, s);
     let r = [
-        panel.ox + bx * panel.scale,
-        panel.oy + by * panel.scale,
-        147.0 * panel.scale,
-        166.0 * panel.scale,
+        recipe_panel.ox,
+        recipe_panel.oy,
+        recipe_panel.w,
+        recipe_panel.h,
     ];
-    if clicked && crate::ui::common::hit_test(cursor, r) {
-        book.clicked_ui = true;
-    }
-    elements.push(MenuElement::Rect {
-        x: r[0],
-        y: r[1],
-        w: r[2],
-        h: r[3],
-        corner_radius: 0.0,
-        color: [0.12, 0.12, 0.12, 0.96],
-    });
-    let search = [
-        r[0] + 25.0 * panel.scale,
-        r[1] + 13.0 * panel.scale,
-        81.0 * panel.scale,
-        14.0 * panel.scale,
-    ];
-    elements.push(MenuElement::Rect {
-        x: search[0],
-        y: search[1],
-        w: search[2],
-        h: search[3],
-        corner_radius: 0.0,
-        color: [0.04, 0.04, 0.04, 1.0],
-    });
-    let search_hover = crate::ui::common::hit_test(cursor, search);
-    if clicked {
+    let rect = |x: f32, y: f32, w: f32, h: f32| [r[0] + x * s, r[1] + y * s, w * s, h * s];
+    let clicked = input.left_pressed;
+    let popup_was_open = book.popup.is_some();
+    let press = input.left_pressed || input.right_pressed || input.middle_pressed;
+    book.hovered_ui = hit_test(cursor, r);
+    book.clicked_ui |= press && (narrow || book.hovered_ui || popup_was_open);
+    recipe_panel.image(
+        elements,
+        SpriteId::RecipeBookBackground,
+        0.0,
+        0.0,
+        147.0,
+        166.0,
+    );
+    let search_hover = hit_test(cursor, rect(8.0, 13.0, 98.0, 14.0));
+    let wf = |text: &str| text_width_fn(text, FONT_SIZE);
+    if clicked && !popup_was_open {
+        book.toggle_focused = false;
+        if search_hover && !book.search_focused {
+            book.search_field().set_focused(true);
+        }
         book.search_focused = search_hover;
-        book.clicked_ui |= search_hover;
+        book.search_dragging = search_hover;
+        if search_hover {
+            let pos = book
+                .search_field()
+                .pos_from_click((cursor.0 - r[0]) / s - 29.0, 73.0, &wf);
+            book.search_field().on_click(pos, input.shift, 73.0, &wf);
+        }
     }
-    panel.label(
+    if book.search_dragging && input.left_held {
+        let pos = book
+            .search_field()
+            .pos_from_click((cursor.0 - r[0]) / s - 29.0, 73.0, &wf);
+        book.search_field().on_drag(pos, 73.0, &wf);
+    } else if !input.left_held {
+        book.search_dragging = false;
+    }
+    let focused = book.search_focused;
+    recipe_panel.image(
         elements,
-        bx + 27.0,
-        by + 14.0,
-        if book.search.is_empty() {
-            "Search..."
+        if focused {
+            SpriteId::RecipeSearchFieldHighlighted
         } else {
-            &book.search
+            SpriteId::RecipeSearchField
         },
+        25.0,
+        13.0,
+        81.0,
+        14.0,
     );
-    let filter = [
-        r[0] + 110.0 * panel.scale,
-        r[1] + 12.0 * panel.scale,
-        26.0 * panel.scale,
-        16.0 * panel.scale,
-    ];
-    elements.push(MenuElement::Rect {
-        x: filter[0],
-        y: filter[1],
-        w: filter[2],
-        h: filter[3],
-        corner_radius: 0.0,
-        color: if book.craftable_only {
-            [0.2, 0.65, 0.2, 1.0]
-        } else {
-            [0.3, 0.3, 0.3, 1.0]
-        },
+    let field = book.search_field();
+    let info = field.render_info(73.0, focused, &wf);
+    let shown = &field.value()[info.display_start..info.display_end];
+    elements.push(MenuElement::ScissorPush {
+        x: r[0] + 29.0 * s,
+        y: r[1] + 13.0 * s,
+        w: 73.0 * s,
+        h: 14.0 * s,
     });
-    panel.label(
+    // 26.2 EditBox is bordered: text x+4, y+(height-8)/2.
+    super::common::push_field_text(
         elements,
-        bx + 119.0,
-        by + 15.0,
-        if book.craftable_only { "✓" } else { "·" },
+        &info,
+        shown,
+        None,
+        r[0] + 29.0 * s,
+        r[1] + 16.0 * s,
+        FONT_SIZE * s,
+        s,
+        s,
+        WHITE,
+        None,
+        &|t| wf(t) * s,
     );
-    if crate::ui::common::hit_test(cursor, filter) && clicked {
-        book.clicked_ui = true;
+    if field.value().is_empty() && !focused {
+        elements.push(MenuElement::TextFlat {
+            x: r[0] + 29.0 * s,
+            y: r[1] + 16.0 * s,
+            text: crate::lang::translate("gui.recipebook.search_hint")
+                .unwrap_or("Search...")
+                .into(),
+            scale: FONT_SIZE * s,
+            color: super::common::rgb(0x808080),
+        });
+    }
+    elements.push(MenuElement::ScissorPop);
+    let filter_hover = hit_test(cursor, rect(110.0, 12.0, 26.0, 16.0));
+    let filter_sprite = match (furnace_variant.is_some(), book.craftable_only, filter_hover) {
+        (false, true, false) => SpriteId::RecipeFilterEnabled,
+        (false, true, true) => SpriteId::RecipeFilterEnabledHighlighted,
+        (false, false, false) => SpriteId::RecipeFilterDisabled,
+        (false, false, true) => SpriteId::RecipeFilterDisabledHighlighted,
+        (true, true, false) => SpriteId::FurnaceRecipeFilterEnabled,
+        (true, true, true) => SpriteId::FurnaceRecipeFilterEnabledHighlighted,
+        (true, false, false) => SpriteId::FurnaceRecipeFilterDisabled,
+        (true, false, true) => SpriteId::FurnaceRecipeFilterDisabledHighlighted,
+    };
+    recipe_panel.image(elements, filter_sprite, 110.0, 12.0, 26.0, 16.0);
+    if filter_hover && clicked && !popup_was_open {
         book.craftable_only = !book.craftable_only;
         book.settings_dirty = true;
         book.page = 0;
     }
     let mut categories: Vec<_> = book
         .categories
-        .values()
-        .copied()
+        .iter()
+        .filter(|(id, _)| {
+            book.displays.get(*id).is_some_and(|d| {
+                crate::ui::recipe_book::display_fits(d, columns, rows, furnace_variant.is_some())
+            })
+        })
+        .map(|(_, c)| *c)
         .filter(|c| match furnace_variant {
             Some(v) => furnace_category_matches(v, c),
             None => matches!(
@@ -336,332 +356,481 @@ pub fn push_recipe_entries(
     if book.category.is_some_and(|c| !categories.contains(&c)) {
         book.category = None;
     }
-    // Vanilla has a search/all tab in addition to the craft category tabs.
-    // Without it a click on a category cannot be undone without closing UI.
     for (i, category) in std::iter::once(None)
         .chain(categories.iter().copied().map(Some))
         .take(5)
         .enumerate()
     {
-        let tab = [
-            r[0] - 30.0 * panel.scale,
-            r[1] + (3.0 + 27.0 * i as f32) * panel.scale,
-            35.0 * panel.scale,
-            27.0 * panel.scale,
-        ];
-        elements.push(MenuElement::Rect {
-            x: tab[0],
-            y: tab[1],
-            w: tab[2],
-            h: tab[3],
-            corner_radius: 0.0,
-            color: if book.category == category {
-                [0.56, 0.42, 0.22, 1.0]
+        let selected = book.category == category;
+        let tx = -30.0 + if selected { -2.0 } else { 0.0 };
+        let ty = 3.0 + 27.0 * i as f32;
+        recipe_panel.image(
+            elements,
+            if selected {
+                SpriteId::RecipeBookTabSelected
             } else {
-                [0.2, 0.2, 0.2, 1.0]
+                SpriteId::RecipeBookTab
             },
-        });
-        let label = match category {
-            None => "All",
-            Some(azalea_registry::builtin::RecipeBookCategory::CraftingEquipment) => "Gear",
-            Some(azalea_registry::builtin::RecipeBookCategory::CraftingBuildingBlocks) => "Build",
-            Some(azalea_registry::builtin::RecipeBookCategory::CraftingMisc) => "Misc",
-            Some(azalea_registry::builtin::RecipeBookCategory::CraftingRedstone) => "Red",
-            Some(azalea_registry::builtin::RecipeBookCategory::FurnaceFood)
-            | Some(azalea_registry::builtin::RecipeBookCategory::BlastFurnaceBlocks)
-            | Some(azalea_registry::builtin::RecipeBookCategory::SmokerFood) => "Food",
-            Some(azalea_registry::builtin::RecipeBookCategory::FurnaceBlocks)
-            | Some(azalea_registry::builtin::RecipeBookCategory::BlastFurnaceMisc) => "Blocks",
-            _ => "Misc",
-        };
-        panel.label(elements, bx - 28.0, by + 11.0 + 27.0 * i as f32, label);
-        if crate::ui::common::hit_test(cursor, tab) && clicked {
-            book.clicked_ui = true;
+            tx,
+            ty,
+            35.0,
+            27.0,
+        );
+        let icons = recipe_tab_icons(category);
+        for (i, icon) in icons.iter().enumerate() {
+            push_recipe_icon(
+                elements,
+                &recipe_panel,
+                tx + if icons.len() == 1 {
+                    9.0
+                } else {
+                    3.0 + 11.0 * i as f32
+                },
+                ty + 5.0,
+                16.0,
+                &ItemStack::from(*icon),
+            );
+        }
+        let tab_hover = hit_test(cursor, rect(-30.0, ty, 35.0, 27.0));
+        book.hovered_ui |= tab_hover;
+        book.clicked_ui |= tab_hover && press;
+        if tab_hover && clicked && !popup_was_open {
             book.category = category;
             book.page = 0;
         }
     }
-    let mut recipes = Vec::new();
-    for (id, display) in &book.displays {
-        let Some(category) = book.categories.get(id) else {
-            continue;
-        };
-        if !categories.contains(category) || book.category.is_some_and(|c| c != *category) {
-            continue;
-        }
-        let result = match (furnace_variant, display) {
-            (Some(_), azalea_protocol::common::recipe::RecipeDisplayData::Furnace(d)) => &d.result,
-            (None, azalea_protocol::common::recipe::RecipeDisplayData::Shapeless(d)) => &d.result,
-            (None, azalea_protocol::common::recipe::RecipeDisplayData::Shaped(d)) => &d.result,
-            _ => continue,
-        };
-        let Some((name, count)) = recipe_output_icon(result) else {
-            continue;
-        };
-        let haystack = name.to_ascii_lowercase().replace('_', " ");
-        if !book.search.is_empty() && !haystack.contains(&book.search.to_ascii_lowercase()) {
-            continue;
-        }
-        let craftable = book.can_craft(*id, available) == Some(true);
-        // Only server-provided crafting requirements and synced item tags
-        // may produce a positive local craftability result.
-        if !book.craftable_only || craftable {
-            recipes.push((*id, name, count, craftable));
-        }
-    }
+    let selected_categories = book.category.map(|c| vec![c]).unwrap_or(categories);
+    let recipes = book.collections(
+        &selected_categories,
+        columns,
+        rows,
+        furnace_variant.is_some(),
+        available,
+    );
     let pages = recipes.len().div_ceil(20).max(1);
     book.page = book.page.min(pages - 1);
-    let previous = [
-        r[0] + 38.0 * panel.scale,
-        r[1] + 137.0 * panel.scale,
-        12.0 * panel.scale,
-        17.0 * panel.scale,
-    ];
-    let next = [
-        r[0] + 93.0 * panel.scale,
-        r[1] + 137.0 * panel.scale,
-        12.0 * panel.scale,
-        17.0 * panel.scale,
-    ];
-    if book.page > 0 {
-        elements.push(MenuElement::Rect {
-            x: previous[0],
-            y: previous[1],
-            w: previous[2],
-            h: previous[3],
-            corner_radius: 0.0,
-            color: [0.55, 0.55, 0.55, 1.0],
-        });
-    }
-    if book.page + 1 < pages {
-        elements.push(MenuElement::Rect {
-            x: next[0],
-            y: next[1],
-            w: next[2],
-            h: next[3],
-            corner_radius: 0.0,
-            color: [0.55, 0.55, 0.55, 1.0],
-        });
-    }
-    if clicked && crate::ui::common::hit_test(cursor, previous) && book.page > 0 {
-        book.clicked_ui = true;
-        book.page -= 1;
-    }
-    if clicked && crate::ui::common::hit_test(cursor, next) && book.page + 1 < pages {
-        book.clicked_ui = true;
-        book.page += 1;
+    for (forward, visible, px) in [
+        (false, book.page > 0, 38.0),
+        (true, book.page + 1 < pages, 93.0),
+    ] {
+        if !visible {
+            continue;
+        }
+        let hovered = hit_test(cursor, rect(px, 137.0, 12.0, 17.0));
+        let sprite = match (forward, hovered) {
+            (false, false) => SpriteId::RecipePageBackward,
+            (false, true) => SpriteId::RecipePageBackwardHighlighted,
+            (true, false) => SpriteId::RecipePageForward,
+            (true, true) => SpriteId::RecipePageForwardHighlighted,
+        };
+        recipe_panel.image(elements, sprite, px, 137.0, 12.0, 17.0);
+        if hovered && clicked && !popup_was_open {
+            if forward {
+                book.page += 1;
+            } else {
+                book.page -= 1;
+            }
+        }
     }
     if pages > 1 {
-        panel.label(
-            elements,
-            bx + 68.0,
-            by + 142.0,
-            &format!("{} / {pages}", book.page + 1),
-        );
+        let text = format!("{} / {pages}", book.page + 1);
+        elements.push(MenuElement::Text {
+            x: r[0] + 73.0 * s,
+            y: r[1] + 141.0 * s,
+            text,
+            scale: FONT_SIZE * s,
+            color: WHITE,
+            centered: true,
+        });
     }
     let mut selected = None;
-    for (index, (id, name, count, craftable)) in
-        recipes.iter().skip(book.page * 20).take(20).enumerate()
-    {
-        let gx = bx + 11.0 + (index % 5) as f32 * 25.0;
-        let gy = by + 31.0 + (index / 5) as f32 * 25.0;
-        let px = panel.ox + gx * panel.scale;
-        let py = panel.oy + gy * panel.scale;
-        let size = 18.0 * panel.scale;
-        let rect = [px, py, size, size];
-        let hovered = crate::ui::common::hit_test(cursor, rect);
-        if book.flags.get(id).is_some_and(|flags| flags & 2 != 0) {
-            elements.push(MenuElement::Rect {
-                x: px,
-                y: py,
-                w: size,
-                h: size,
-                corner_radius: 0.0,
-                color: [0.85, 0.65, 0.12, 0.8],
-            });
+    for (index, ids) in recipes.iter().skip(book.page * 20).take(20).enumerate() {
+        let gx = 11.0 + (index % 5) as f32 * 25.0;
+        let gy = 31.0 + (index / 5) as f32 * 25.0;
+        let craftable = ids
+            .iter()
+            .any(|id| book.can_craft(*id, available) == Some(true));
+        let sprite = match (ids.len() > 1, craftable) {
+            (false, true) => SpriteId::RecipeSlotCraftable,
+            (false, false) => SpriteId::RecipeSlotUncraftable,
+            (true, true) => SpriteId::RecipeSlotManyCraftable,
+            (true, false) => SpriteId::RecipeSlotManyUncraftable,
+        };
+        recipe_panel.image(elements, sprite, gx, gy, 25.0, 25.0);
+        let id = ids[cycle % ids.len()];
+        let items = crate::ui::recipe_book::display_result(&book.displays[&id])
+            .map(|d| book.resolve(d))
+            .unwrap_or_default();
+        let item = items.get((cycle / ids.len()) % items.len().max(1));
+        if let Some(item) = item {
+            let same_result = ids.len() > 1
+                && item.as_present().is_some_and(|first| {
+                    ids.iter()
+                        .filter_map(|id| crate::ui::recipe_book::display_result(&book.displays[id]))
+                        .flat_map(|display| book.resolve(display))
+                        .all(|stack| {
+                            stack
+                                .as_present()
+                                .is_some_and(|stack| first.is_same_item_and_components(stack))
+                        })
+                });
+            if same_result {
+                push_recipe_icon(elements, &recipe_panel, gx + 5.0, gy + 5.0, 16.0, item);
+            }
+            let offset = if same_result { 3.0 } else { 4.0 };
+            push_recipe_icon(
+                elements,
+                &recipe_panel,
+                gx + offset,
+                gy + offset,
+                16.0,
+                item,
+            );
         }
-        if hovered {
-            elements.push(MenuElement::Rect {
-                x: px,
-                y: py,
-                w: size,
-                h: size,
-                corner_radius: 0.0,
-                color: [0.45, 0.45, 0.45, 0.9],
-            });
+        for id in ids {
+            if let Some(flags) = book.flags.get_mut(id) {
+                *flags &= !2;
+            }
+        }
+        if hit_test(cursor, rect(gx, gy, 25.0, 25.0)) && !popup_was_open {
+            if let Some(item) = item {
+                push_recipe_tooltip(elements, item, cursor, screen_w, screen_h, s, ids.len() > 1);
+            }
             if clicked {
-                book.clicked_ui = true;
-                // Always send the server-issued display ID, even when local
-                // requirements are unknown or unavailable.
-                selected = Some((*id, use_max_items));
-                book.ghost_recipe = if *craftable || furnace_variant.is_some() {
-                    None
-                } else {
-                    Some(*id)
-                };
-                if let Some(flags) = book.flags.get_mut(id) {
-                    *flags &= !2;
+                selected = Some((id, input.shift));
+            }
+            if input.right_pressed && ids.len() > 1 {
+                let mut ids = ids.clone();
+                ids.sort_by_key(|id| book.can_craft(*id, available) != Some(true));
+                let cols = if ids.len() <= 16 { 4 } else { 5 };
+                let px = gx
+                    - (((gx + ids.len().min(cols) as f32 * 25.0 - 123.0) / 25.0)
+                        .max(0.0)
+                        .floor()
+                        * 25.0);
+                let py = gy
+                    - (((gy + ids.len().div_ceil(cols) as f32 * 25.0 - 146.0) / 25.0)
+                        .max(0.0)
+                        .ceil()
+                        * 25.0);
+                book.popup = Some((ids, px, py.max(-4.0)));
+            }
+        }
+    }
+    if let Some((ids, px, py)) = &book.popup {
+        let cols = if ids.len() <= 16 { 4 } else { 5 };
+        recipe_panel.image(
+            elements,
+            SpriteId::RecipeOverlay,
+            *px,
+            *py,
+            ids.len().min(cols) as f32 * 25.0 + 8.0,
+            ids.len().div_ceil(cols) as f32 * 25.0 + 8.0,
+        );
+        for (i, id) in ids.iter().enumerate() {
+            let gx = *px + 4.0 + (i % cols) as f32 * 25.0;
+            let gy = *py + 5.0 + (i / cols) as f32 * 25.0;
+            let hovered = hit_test(cursor, rect(gx, gy, 24.0, 24.0));
+            let craftable = book.can_craft(*id, available) == Some(true);
+            let sprite = match (furnace_variant.is_some(), craftable, hovered) {
+                (false, true, false) => SpriteId::RecipeCraftingOverlay,
+                (false, true, true) => SpriteId::RecipeCraftingOverlayHighlighted,
+                (false, false, false) => SpriteId::RecipeCraftingOverlayDisabled,
+                (false, false, true) => SpriteId::RecipeCraftingOverlayDisabledHighlighted,
+                (true, true, false) => SpriteId::RecipeFurnaceOverlay,
+                (true, true, true) => SpriteId::RecipeFurnaceOverlayHighlighted,
+                (true, false, false) => SpriteId::RecipeFurnaceOverlayDisabled,
+                (true, false, true) => SpriteId::RecipeFurnaceOverlayDisabledHighlighted,
+            };
+            recipe_panel.image(elements, sprite, gx, gy, 24.0, 24.0);
+            for (index, d) in crate::ui::recipe_book::ingredient_positions(&book.displays[id], 3, 3)
+            {
+                let items = book.resolve(d);
+                if let Some(item) = items.get(cycle % items.len().max(1)) {
+                    push_recipe_icon(
+                        elements,
+                        &recipe_panel,
+                        gx + 2.0 + (index % 3) as f32 * 7.0,
+                        gy + 2.0 + (index / 3) as f32 * 7.0,
+                        6.0,
+                        item,
+                    );
                 }
             }
+            if hovered && clicked && popup_was_open {
+                selected = Some((*id, input.shift));
+            }
         }
-        elements.push(MenuElement::ItemIcon {
+    }
+    if popup_was_open && press {
+        book.popup = None;
+    }
+    if selected.is_some() {
+        book.ghost_recipe = None;
+        book.popup = None;
+        if narrow {
+            book.open = false;
+            book.settings_dirty = true;
+            book.search_focused = false;
+        }
+    }
+    (selected, ghost_hovered)
+}
+
+/// All book geometry uses GUI units at the container's existing scale.
+pub fn recipe_book_panel(screen_w: f32, screen_h: f32, scale: f32) -> Panel {
+    let width = screen_w / scale;
+    Panel {
+        scale,
+        ox: (((width - 147.0) / 2.0).floor() - if width < 379.0 { 0.0 } else { 86.0 }) * scale,
+        oy: ((screen_h / scale - 166.0) / 2.0).floor() * scale,
+        w: 147.0 * scale,
+        h: 166.0 * scale,
+    }
+}
+
+fn recipe_container_x(screen_w: f32, scale: f32, open: bool) -> f32 {
+    let width = screen_w / scale;
+    if open && width >= 379.0 {
+        (177.0 + ((width - 176.0 - 200.0) / 2.0).floor()) * scale
+    } else {
+        ((width - 176.0) / 2.0).floor() * scale
+    }
+}
+
+/// Process the toggle before drawing/hit-testing so every caller moves
+/// together.
+#[allow(clippy::too_many_arguments)]
+pub fn push_recipe_panel(
+    elements: &mut Vec<MenuElement>,
+    screen_w: f32,
+    screen_h: f32,
+    gs: f32,
+    background: SpriteId,
+    book: &mut crate::ui::recipe_book::RecipeBookState,
+    native: bool,
+    book_type: u32,
+    cursor: (f32, f32),
+    input: &ContainerInput,
+    button: (f32, f32),
+) -> (Panel, bool) {
+    let mut panel = push_backdrop(elements, screen_w, screen_h, gs, 176.0, 166.0);
+    panel.oy = ((screen_h / panel.scale - 166.0) / 2.0).floor() * panel.scale;
+    book.clicked_ui = false;
+    book.hovered_ui = false;
+    if native {
+        book.load_settings(book_type);
+        panel.ox = recipe_container_x(screen_w, panel.scale, book.open);
+        let hidden = book.open && screen_w / panel.scale < 379.0;
+        let hovered = hit_test(
+            cursor,
+            [
+                panel.ox + button.0 * panel.scale,
+                panel.oy + button.1 * panel.scale,
+                20.0 * panel.scale,
+                18.0 * panel.scale,
+            ],
+        );
+        if !hidden && hovered && input.left_pressed {
+            book.open = !book.open;
+            book.search_focused = false;
+            book.toggle_focused = false;
+            book.search_dragging = false;
+            book.popup = None;
+            book.settings_dirty = true;
+            book.clicked_ui = true;
+            panel.ox = recipe_container_x(screen_w, panel.scale, book.open);
+        }
+    }
+    panel.image(elements, background, 0.0, 0.0, 176.0, 166.0);
+    let hidden = native && book.open && screen_w / panel.scale < 379.0;
+    if native && !hidden {
+        let hover = hit_test(
+            cursor,
+            [
+                panel.ox + button.0 * panel.scale,
+                panel.oy + button.1 * panel.scale,
+                20.0 * panel.scale,
+                18.0 * panel.scale,
+            ],
+        );
+        panel.image(
+            elements,
+            if hover || book.toggle_focused {
+                SpriteId::RecipeBookButtonHighlighted
+            } else {
+                SpriteId::RecipeBookButton
+            },
+            button.0,
+            button.1,
+            20.0,
+            18.0,
+        );
+    }
+    (panel, hidden)
+}
+
+fn recipe_tab_icons(
+    category: Option<azalea_registry::builtin::RecipeBookCategory>,
+) -> Vec<azalea_registry::builtin::ItemKind> {
+    use azalea_registry::builtin::{ItemKind as I, RecipeBookCategory as C};
+    match category {
+        None => vec![I::Compass],
+        Some(C::CraftingEquipment) => vec![I::IronAxe, I::GoldenSword],
+        Some(C::CraftingBuildingBlocks) => vec![I::Bricks],
+        Some(C::CraftingMisc) => vec![I::LavaBucket, I::Apple],
+        Some(C::CraftingRedstone) => vec![I::Redstone],
+        Some(C::FurnaceFood | C::SmokerFood) => vec![I::Porkchop],
+        Some(C::FurnaceBlocks) => vec![I::Stone],
+        Some(C::FurnaceMisc) => vec![I::LavaBucket, I::Emerald],
+        Some(C::BlastFurnaceBlocks) => vec![I::RedstoneOre],
+        Some(C::BlastFurnaceMisc) => vec![I::IronShovel, I::GoldenLeggings],
+        _ => Vec::new(),
+    }
+}
+
+fn push_recipe_icon(
+    elements: &mut Vec<MenuElement>,
+    panel: &Panel,
+    x: f32,
+    y: f32,
+    size: f32,
+    item: &ItemStack,
+) {
+    if let Some(item) = item.as_present() {
+        let mut icon = item.clone();
+        icon.count = 1; // fakeItem: no list or ingredient count decorations.
+        push_item_icon(
+            elements,
+            panel.ox + x * panel.scale,
+            panel.oy + y * panel.scale,
+            size * panel.scale,
+            panel.scale,
+            &icon,
+        );
+    }
+}
+
+fn push_recipe_tooltip(
+    elements: &mut Vec<MenuElement>,
+    item: &ItemStack,
+    cursor: (f32, f32),
+    screen_w: f32,
+    screen_h: f32,
+    scale: f32,
+    many: bool,
+) {
+    if let Some(item) = item.as_present()
+        && let Ok(value) = serde_json::to_value(item)
+    {
+        let mut lines = super::chat::item_tooltip_lines(&value, None, false);
+        if many {
+            lines.push(crate::renderer::pipelines::menu_overlay::TooltipLine::new(
+                crate::lang::translate("gui.recipebook.moreRecipes")
+                    .unwrap_or("Right click for more")
+                    .into(),
+                WHITE,
+            ));
+        }
+        if !lines.is_empty() {
+            super::common::push_tooltip_lines(elements, cursor, screen_w, screen_h, scale, lines);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_recipe_ghost(
+    elements: &mut Vec<MenuElement>,
+    panel: &Panel,
+    book: &crate::ui::recipe_book::RecipeBookState,
+    cursor: (f32, f32),
+    screen_w: f32,
+    screen_h: f32,
+    columns: usize,
+    rows: usize,
+    furnace: bool,
+    grid: &[ItemStack],
+    cycle: usize,
+) -> bool {
+    use crate::ui::recipe_book::{display_fits, display_result, ingredient_positions};
+    let Some(display) = &book.ghost_recipe else {
+        return false;
+    };
+    if !display_fits(display, columns, rows, furnace) {
+        return false;
+    }
+    let mut positions = Vec::new();
+    if furnace {
+        if let azalea_protocol::common::recipe::RecipeDisplayData::Furnace(d) = display {
+            positions.push((56.0, 17.0, &d.ingredient, false));
+            if !grid.get(1).is_some_and(ItemStack::is_present) {
+                positions.push((56.0, 53.0, &d.fuel, false));
+            }
+        }
+    } else {
+        for (slot, d) in ingredient_positions(display, columns, rows) {
+            let (x, y) = if columns == 2 {
+                (98.0, 18.0)
+            } else {
+                (30.0, 17.0)
+            };
+            positions.push((
+                x + (slot % columns) as f32 * 18.0,
+                y + (slot / columns) as f32 * 18.0,
+                d,
+                false,
+            ));
+        }
+    }
+    if let Some(result) = display_result(display) {
+        let (x, y) = if furnace {
+            (116.0, 35.0)
+        } else if columns == 2 {
+            (154.0, 28.0)
+        } else {
+            (124.0, 35.0)
+        };
+        positions.push((x, y, result, true));
+    }
+    let mut hovered = false;
+    for (x, y, d, result) in positions {
+        let items = book.resolve(d);
+        let Some(item) = items.get(cycle % items.len().max(1)) else {
+            continue;
+        };
+        let s = panel.scale;
+        let px = panel.ox + x * s;
+        let py = panel.oy + y * s;
+        let big = result && columns != 2;
+        elements.push(MenuElement::Rect {
+            x: px - if big { 4.0 * s } else { 0.0 },
+            y: py - if big { 4.0 * s } else { 0.0 },
+            w: if big { 24.0 * s } else { 16.0 * s },
+            h: if big { 24.0 * s } else { 16.0 * s },
+            corner_radius: 0.0,
+            color: [1.0, 0.0, 0.0, 48.0 / 255.0],
+        });
+        push_recipe_icon(elements, panel, x, y, 16.0, item);
+        elements.push(MenuElement::Rect {
             x: px,
             y: py,
-            w: size,
-            h: size,
-            item_name: name.clone(),
-            tint: if *craftable {
-                [1.0; 4]
-            } else {
-                [0.6, 0.6, 0.6, 1.0]
-            },
-            stack_dye_rgb: None,
+            w: 16.0 * s,
+            h: 16.0 * s,
+            corner_radius: 0.0,
+            color: [1.0, 1.0, 1.0, 48.0 / 255.0],
         });
-        if *count > 1 {
-            elements.push(MenuElement::TextFlat {
-                x: px + size * 0.52,
-                y: py + size * 0.58,
-                text: count.to_string(),
-                scale: crate::ui::common::FONT_SIZE * panel.scale * 0.7,
-                color: [1.0; 4],
-            });
-        }
-    }
-    // Only crafting layouts have known ghost-slot coordinates. Never overlay
-    // a real input/result stack or infer slots for furnace/smithing displays.
-    if let Some(display) = book.ghost_recipe.and_then(|id| book.displays.get(&id)) {
-        use azalea_protocol::common::recipe::RecipeDisplayData as R;
-        let (ingredients, width, start_x, start_y, output): (
-            Vec<_>,
-            usize,
-            usize,
-            usize,
-            Option<_>,
-        ) = match display {
-            R::Shaped(d)
-                if d.width > 0
-                    && d.height > 0
-                    && d.width as usize <= columns
-                    && d.height as usize <= rows
-                    && d.ingredients.len() <= (d.width as usize) * (d.height as usize) =>
-            {
-                let w = d.width as usize;
-                let h = d.height as usize;
-                // PlaceRecipeHelper centers recipes smaller than the grid.
-                (
-                    d.ingredients.iter().collect(),
-                    w,
-                    (columns - w) / 2,
-                    (rows - h) / 2,
-                    Some(&d.result),
-                )
-            }
-            R::Shapeless(d) if d.ingredients.len() <= columns * rows => (
-                d.ingredients.iter().collect(),
-                columns,
-                0,
-                0,
-                Some(&d.result),
-            ),
-            _ => (Vec::new(), 1, 0, 0, None),
-        };
-        for (i, ingredient) in ingredients.into_iter().enumerate() {
-            let slot = (start_y + i / width) * columns + start_x + i % width;
-            if grid.get(slot).is_some_and(ItemStack::is_present) {
-                continue;
-            }
-            if let Some((name, _)) = recipe_ghost_icon(ingredient, book) {
-                let (gx, gy) = if columns == 2 {
-                    (
-                        98.0 + (slot % 2) as f32 * 18.0,
-                        18.0 + (slot / 2) as f32 * 18.0,
-                    )
-                } else {
-                    (
-                        30.0 + (slot % 3) as f32 * 18.0,
-                        17.0 + (slot / 3) as f32 * 18.0,
-                    )
-                };
-                elements.push(MenuElement::ItemIcon {
-                    x: panel.ox + gx * panel.scale,
-                    y: panel.oy + gy * panel.scale,
-                    w: 16.0 * panel.scale,
-                    h: 16.0 * panel.scale,
-                    item_name: name,
-                    tint: [1.0, 1.0, 1.0, 0.5],
-                    stack_dye_rgb: None,
-                });
-            }
-        }
-        // Vanilla GhostSlots includes the result slot as well as inputs.
-        if let Some((name, _)) = output
-            .filter(|_| !result_slot.is_present())
-            .and_then(recipe_output_icon)
+        if result
+            && let Some(stack) = item.as_present()
+            && stack.count > 1
         {
-            let (gx, gy) = if columns == 2 {
-                (154.0, 28.0)
-            } else {
-                (124.0, 35.0)
-            };
-            elements.push(MenuElement::ItemIcon {
-                x: panel.ox + gx * panel.scale,
-                y: panel.oy + gy * panel.scale,
-                w: 16.0 * panel.scale,
-                h: 16.0 * panel.scale,
-                item_name: name,
-                tint: [1.0, 1.0, 1.0, 0.5],
-                stack_dye_rgb: None,
-            });
+            super::common::push_item_count(elements, px, py, 16.0 * s, s, stack.count);
+        }
+        if hit_test(cursor, [px, py, 16.0 * s, 16.0 * s]) {
+            hovered = true;
+            push_recipe_tooltip(elements, item, cursor, screen_w, screen_h, s, false);
         }
     }
-    selected
-}
-
-/// Resolve the representative item vanilla exposes for wrapped slot displays.
-/// Component-specific variants keep their underlying item icon; the GUI item
-/// atlas does not yet render arbitrary item components.
-fn recipe_output_icon(
-    display: &azalea_protocol::common::recipe::SlotDisplayData,
-) -> Option<(String, u8)> {
-    use azalea_protocol::common::recipe::SlotDisplayData as D;
-
-    match display {
-        D::Empty | D::AnyFuel | D::Tag(_) => None,
-        D::Item(item) => Some((crate::player::inventory::item_resource_name(item.item), 1)),
-        D::ItemStack(item) => match &item.stack {
-            azalea_inventory::ItemStack::Present(stack) => Some((
-                crate::player::inventory::item_resource_name(stack.kind),
-                u8::try_from(stack.count).ok()?,
-            )),
-            azalea_inventory::ItemStack::Empty => None,
-        },
-        D::WithAnyPotion(item) => recipe_output_icon(&item.contents),
-        D::OnlyWithComponent(item) => recipe_output_icon(&item.contents),
-        D::Dyed(item) => recipe_output_icon(&item.target),
-        D::SmithingTrim(item) => recipe_output_icon(&item.base),
-        D::WithRemainder(item) => recipe_output_icon(&item.input),
-        D::Composite(item) => item.contents.iter().find_map(recipe_output_icon),
-    }
-}
-
-fn recipe_ghost_icon(
-    display: &azalea_protocol::common::recipe::SlotDisplayData,
-    book: &crate::ui::recipe_book::RecipeBookState,
-) -> Option<(String, u8)> {
-    use azalea_protocol::common::recipe::SlotDisplayData as D;
-    match display {
-        D::Tag(d) => book
-            .item_tags
-            .get(&d.tag.to_string())?
-            .first()
-            .map(|item| (crate::player::inventory::item_resource_name(*item), 1)),
-        D::Composite(d) => d
-            .contents
-            .iter()
-            .find_map(|part| recipe_ghost_icon(part, book)),
-        D::WithRemainder(d) => recipe_ghost_icon(&d.input, book),
-        _ => recipe_output_icon(display),
-    }
+    hovered
 }
 
 fn furnace_category_matches(
@@ -691,6 +860,7 @@ pub struct SlotCtx<'e> {
     /// cursor. Read-only; the real change happens on release.
     preview: Option<(HashMap<u16, ItemStack>, ItemStack)>,
     hovered: Option<u16>,
+    hidden: bool,
 }
 
 impl<'e> SlotCtx<'e> {
@@ -716,12 +886,23 @@ impl<'e> SlotCtx<'e> {
             cursor,
             preview,
             hovered: None,
+            hidden: false,
+        }
+    }
+
+    pub fn set_hidden(&mut self, hidden: bool) {
+        self.hidden = hidden;
+        if hidden {
+            self.preview = None;
         }
     }
 
     /// Draws a slot at GUI-unit position (x, y), recording it as hovered when
     /// the cursor is over it.
     pub fn slot(&mut self, x: f32, y: f32, item: &ItemStack, empty: Option<SpriteId>, num: u16) {
+        if self.hidden {
+            return;
+        }
         let shown = self
             .preview
             .as_ref()
@@ -790,6 +971,31 @@ impl<'e> SlotCtx<'e> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn push_container_tooltip(
+    elements: &mut Vec<MenuElement>,
+    slots: &[ItemStack],
+    hovered: Option<u16>,
+    cursor_item: &ItemStack,
+    cursor: (f32, f32),
+    screen_w: f32,
+    screen_h: f32,
+    scale: f32,
+    advanced: bool,
+) {
+    if cursor_item.is_empty()
+        && let Some(item) = hovered
+            .and_then(|slot| slots.get(slot as usize))
+            .and_then(ItemStack::as_present)
+        && let Ok(value) = serde_json::to_value(item)
+    {
+        let lines = super::chat::item_tooltip_lines(&value, None, advanced);
+        if !lines.is_empty() {
+            super::common::push_tooltip_lines(elements, cursor, screen_w, screen_h, scale, lines);
+        }
+    }
+}
+
 /// The carried stack rides the cursor, on top of everything.
 pub fn push_cursor_stack(
     elements: &mut Vec<MenuElement>,
@@ -854,6 +1060,624 @@ fn resolve_key_ops(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn idle_input() -> ContainerInput {
+        ContainerInput {
+            left_pressed: false,
+            right_pressed: false,
+            middle_pressed: false,
+            left_held: false,
+            right_held: false,
+            shift: false,
+            hotbar_swap: None,
+            swap_offhand: false,
+            throw: false,
+            throw_all: false,
+        }
+    }
+
+    fn open_book() -> crate::ui::recipe_book::RecipeBookState {
+        let mut book = crate::ui::recipe_book::RecipeBookState::default();
+        book.open = true;
+        book.settings_type = Some(0);
+        book.settings_loaded = true;
+        book
+    }
+
+    #[test]
+    fn recipe_layout_uses_vanilla_sprites_and_slot_hit_mapping_at_wide_narrow_and_scaled_sizes() {
+        use crate::player::inventory::Inventory;
+        for s in [1.0f32, 2.0, 3.0] {
+            for width in [378.0f32, 379.0, 640.0] {
+                let sw = width * s;
+                let sh = 360.0 * s;
+                let mut book = open_book();
+                let mut elements = Vec::new();
+                let mut input = idle_input();
+                input.left_pressed = true;
+                input.shift = true;
+                let x = if width < 379.0 {
+                    ((width - 176.0) / 2.0).floor()
+                } else {
+                    177.0 + ((width - 376.0) / 2.0).floor()
+                };
+                let y = 97.0;
+                let result = crate::ui::inventory::build_inventory(
+                    &mut elements,
+                    sw,
+                    sh,
+                    ((x + 16.0) * s, (y + 92.0) * s),
+                    &input,
+                    &Inventory::new(),
+                    &ItemStack::Empty,
+                    &mut None,
+                    &mut None,
+                    s,
+                    &mut book,
+                    true,
+                    false,
+                    &|t, size| t.len() as f32 * size * 0.75,
+                );
+                let bp = recipe_book_panel(sw, sh, s);
+                assert!(elements.iter().any(|e|matches!(e,MenuElement::Image {x,y,w,h,sprite:SpriteId::RecipeBookBackground,..}
+                    if *x==bp.ox && *y==bp.oy && *w==147.0*s && *h==166.0*s)));
+                assert!(elements.iter().any(|e|matches!(e,MenuElement::Image {x,y,w,h,sprite:SpriteId::RecipeBookTabSelected,..}
+                    if *x==bp.ox-32.0*s && *y==bp.oy+3.0*s && *w==35.0*s && *h==27.0*s)));
+                assert!(elements.iter().any(
+                    |e| matches!(e,MenuElement::Image {x,y,sprite:SpriteId::RecipeSearchField,..}
+                    if *x==bp.ox+25.0*s && *y==bp.oy+13.0*s)
+                ));
+                if width < 379.0 {
+                    assert!(result.ops.is_empty());
+                    assert!(result.player_preview.is_none());
+                    assert!(!elements.iter().any(|e| matches!(
+                        e,
+                        MenuElement::Image {
+                            sprite: SpriteId::RecipeBookButton
+                                | SpriteId::RecipeBookButtonHighlighted
+                                | SpriteId::SlotHighlightFront,
+                            ..
+                        }
+                    )));
+                } else {
+                    assert!(matches!(
+                        result.ops.as_slice(),
+                        [ClickOperation::QuickMove(QuickMoveClick::Left { slot: 9 })]
+                    ));
+                    assert_eq!(result.player_preview.unwrap().rect[0], (x + 26.0) * s);
+                    assert!(elements.iter().any(|e|matches!(e,MenuElement::Image {w,h,sprite:SpriteId::RecipeBookButton,..} if *w==20.0*s && *h==18.0*s)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn toggle_hover_focus_and_20px_hit_box_do_not_depend_on_open_state() {
+        let mut book = open_book();
+        book.open = false;
+        let mut elements = Vec::new();
+        let mut input = idle_input();
+        // Closed container x=232; click the final two pixels of the 20-wide button.
+        let cursor = (232.0 + 104.0 + 19.0, 97.0 + 61.0 + 9.0);
+        push_recipe_panel(
+            &mut elements,
+            640.0,
+            360.0,
+            1.0,
+            SpriteId::InventoryBackground,
+            &mut book,
+            true,
+            0,
+            cursor,
+            &input,
+            (104.0, 61.0),
+        );
+        assert!(elements.iter().any(|e| matches!(
+            e,
+            MenuElement::Image {
+                sprite: SpriteId::RecipeBookButtonHighlighted,
+                ..
+            }
+        )));
+        input.left_pressed = true;
+        push_recipe_panel(
+            &mut Vec::new(),
+            640.0,
+            360.0,
+            1.0,
+            SpriteId::InventoryBackground,
+            &mut book,
+            true,
+            0,
+            cursor,
+            &input,
+            (104.0, 61.0),
+        );
+        assert!(book.open && book.clicked_ui);
+        input.left_pressed = false;
+        book.toggle_focused = true;
+        elements.clear();
+        push_recipe_panel(
+            &mut elements,
+            640.0,
+            360.0,
+            1.0,
+            SpriteId::InventoryBackground,
+            &mut book,
+            true,
+            0,
+            (-1.0, -1.0),
+            &input,
+            (104.0, 61.0),
+        );
+        assert!(elements.iter().any(|e| matches!(
+            e,
+            MenuElement::Image {
+                sprite: SpriteId::RecipeBookButtonHighlighted,
+                ..
+            }
+        )));
+        book.toggle_focused = false;
+        elements.clear();
+        push_recipe_panel(
+            &mut elements,
+            640.0,
+            360.0,
+            1.0,
+            SpriteId::InventoryBackground,
+            &mut book,
+            true,
+            0,
+            (-1.0, -1.0),
+            &input,
+            (104.0, 61.0),
+        );
+        assert!(elements.iter().any(|e| matches!(
+            e,
+            MenuElement::Image {
+                sprite: SpriteId::RecipeBookButton,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn recipe_container_slots_move_and_drag_release_over_book_never_drops_carried_items() {
+        use azalea_registry::builtin::ItemKind;
+        let mut input = idle_input();
+        input.left_pressed = true;
+        input.shift = true;
+        for width in [378.0, 640.0] {
+            let x = if width < 379.0 { 101.0 } else { 309.0 };
+            let mut book = open_book();
+            let crafting = crate::ui::crafting_table::build_crafting_table(
+                &mut Vec::new(),
+                width,
+                360.0,
+                (x + 38.0, 97.0 + 25.0),
+                &input,
+                &vec![ItemStack::Empty; 46],
+                "Crafting",
+                &ItemStack::Empty,
+                &mut None,
+                &mut None,
+                1.0,
+                &mut book,
+                true,
+                &|t, size| t.len() as f32 * size,
+                false,
+            );
+            let mut book = open_book();
+            book.settings_type = Some(1);
+            let furnace = crate::ui::furnace::build_furnace(
+                &mut Vec::new(),
+                width,
+                360.0,
+                (x + 64.0, 97.0 + 25.0),
+                &input,
+                crate::ui::furnace::FurnaceVariant::Furnace,
+                &vec![ItemStack::Empty; 39],
+                &[0; 4],
+                "Furnace",
+                &ItemStack::Empty,
+                &mut None,
+                &mut None,
+                1.0,
+                &|t, size| t.len() as f32 * size,
+                &mut book,
+                true,
+                false,
+            );
+            if width < 379.0 {
+                assert!(crafting.ops.is_empty() && furnace.ops.is_empty());
+            } else {
+                assert!(matches!(
+                    crafting.ops.as_slice(),
+                    [ClickOperation::QuickMove(QuickMoveClick::Left { slot: 1 })]
+                ));
+                assert!(matches!(
+                    furnace.ops.as_slice(),
+                    [ClickOperation::QuickMove(QuickMoveClick::Left { slot: 0 })]
+                ));
+            }
+        }
+        let mut book = open_book();
+        let mut drag = Some((QuickCraftKind::Left, vec![]));
+        let result = crate::ui::inventory::build_inventory(
+            &mut Vec::new(),
+            640.0,
+            360.0,
+            (170.0, 120.0),
+            &idle_input(),
+            &crate::player::inventory::Inventory::new(),
+            &ItemStack::from(ItemKind::Stone),
+            &mut drag,
+            &mut None,
+            1.0,
+            &mut book,
+            true,
+            false,
+            &|t, size| t.len() as f32 * size,
+        );
+        assert!(result.ops.is_empty());
+        assert!(drag.is_none());
+    }
+
+    #[test]
+    fn recipe_collection_slots_are_25px_with_normal_16px_icons_and_popup_selects_server_ids() {
+        use azalea_protocol::common::recipe::*;
+        use azalea_registry::builtin::{ItemKind, RecipeBookCategory};
+        let mut book = open_book();
+        for id in [10, 11] {
+            book.displays.insert(
+                id,
+                RecipeDisplayData::Shapeless(ShapelessCraftingRecipeDisplay {
+                    ingredients: vec![SlotDisplayData::Item(ItemSlotDisplay {
+                        item: ItemKind::Stone,
+                    })],
+                    result: SlotDisplayData::ItemStack(ItemStackSlotDisplay {
+                        stack: ItemStack::new(ItemKind::Stone, 4),
+                    }),
+                    crafting_station: SlotDisplayData::Empty,
+                }),
+            );
+            book.groups.insert(id, 1);
+            book.categories.insert(id, RecipeBookCategory::CraftingMisc);
+        }
+        if let Some(RecipeDisplayData::Shapeless(d)) = book.displays.get_mut(&11) {
+            d.result = SlotDisplayData::ItemStack(ItemStackSlotDisplay {
+                stack: ItemStack::new(ItemKind::Cobblestone, 4),
+            });
+        }
+        let panel = Panel {
+            scale: 2.0,
+            ox: 618.0,
+            oy: 194.0,
+            w: 352.0,
+            h: 332.0,
+        };
+        let bp = recipe_book_panel(1280.0, 720.0, 2.0);
+        let mut elements = Vec::new();
+        let mut input = idle_input();
+        input.right_pressed = true;
+        // Hit the slot's right edge, outside its item icon.
+        let click = (bp.ox + 35.0 * 2.0, bp.oy + 55.0 * 2.0);
+        assert!(
+            push_recipe_entries(
+                &mut elements,
+                &panel,
+                &mut book,
+                click,
+                &input,
+                true,
+                None,
+                2,
+                2,
+                &[],
+                &[],
+                1280.0,
+                720.0,
+                &|t, size| t.len() as f32 * size
+            )
+            .0
+            .is_none()
+        );
+        assert!(book.popup.is_some());
+        assert!(book.clicked_ui);
+        assert!(elements.iter().any(|e|matches!(e,MenuElement::Image {x,y,w,h,sprite:SpriteId::RecipeSlotManyUncraftable,..}
+            if *x==bp.ox+22.0 && *y==bp.oy+62.0 && *w==50.0 && *h==50.0)));
+        assert!(elements.iter().any(|e|matches!(e,MenuElement::ItemIcon {x,y,w,h,item_name,tint,..}
+            if item_name=="stone" && *x==bp.ox+30.0 && *y==bp.oy+70.0 && *w==32.0 && *h==32.0 && *tint==WHITE)));
+        assert!(!elements.iter().any(
+            |e| matches!(e,MenuElement::TextFlat {text,..}|MenuElement::Text {text,..} if text=="4")
+        ));
+        let (_, px, py) = book.popup.as_ref().unwrap();
+        let click = (
+            bp.ox + (*px + 4.0 + 25.0 + 12.0) * 2.0,
+            bp.oy + (*py + 5.0 + 12.0) * 2.0,
+        );
+        input.right_pressed = false;
+        input.left_pressed = true;
+        assert_eq!(
+            push_recipe_entries(
+                &mut Vec::new(),
+                &panel,
+                &mut book,
+                click,
+                &input,
+                true,
+                None,
+                2,
+                2,
+                &[],
+                &[],
+                1280.0,
+                720.0,
+                &|t, size| t.len() as f32 * size
+            ),
+            (Some((11, false)), false)
+        );
+        assert!(book.ghost_recipe.is_none());
+        if let Some(RecipeDisplayData::Shapeless(d)) = book.displays.get_mut(&11) {
+            d.result = SlotDisplayData::ItemStack(ItemStackSlotDisplay {
+                stack: ItemStack::new(ItemKind::Stone, 4),
+            });
+        }
+        input.left_pressed = false;
+        elements.clear();
+        push_recipe_entries(
+            &mut elements,
+            &panel,
+            &mut book,
+            (-1.0, -1.0),
+            &input,
+            true,
+            None,
+            2,
+            2,
+            &[],
+            &[],
+            1280.0,
+            720.0,
+            &|t, size| t.len() as f32 * size,
+        );
+        for offset in [3.0, 5.0] {
+            assert!(elements.iter().any(|e|matches!(e,MenuElement::ItemIcon {x,y,w,h,item_name,..}
+                if item_name=="stone" && *x==bp.ox+(11.0+offset)*2.0 && *y==bp.oy+(31.0+offset)*2.0 && *w==32.0 && *h==32.0)));
+        }
+    }
+
+    #[test]
+    fn furnace_server_ghost_cycles_candidates_draws_opaque_icons_overlays_and_result_count() {
+        use azalea_protocol::common::recipe::*;
+        use azalea_registry::builtin::ItemKind;
+        let mut book = crate::ui::recipe_book::RecipeBookState::default();
+        let item = |kind| SlotDisplayData::Item(ItemSlotDisplay { item: kind });
+        book.receive_ghost(
+            8,
+            8,
+            RecipeDisplayData::Furnace(FurnaceRecipeDisplay {
+                ingredient: SlotDisplayData::Composite(CompositeSlotDisplay {
+                    contents: vec![item(ItemKind::IronOre), item(ItemKind::RawIron)],
+                }),
+                fuel: SlotDisplayData::AnyFuel,
+                result: SlotDisplayData::ItemStack(ItemStackSlotDisplay {
+                    stack: ItemStack::new(ItemKind::IronIngot, 4),
+                }),
+                crafting_station: SlotDisplayData::Empty,
+                duration: 200,
+                experience: 0.7,
+            }),
+        );
+        let panel = Panel {
+            scale: 2.0,
+            ox: 0.0,
+            oy: 0.0,
+            w: 352.0,
+            h: 332.0,
+        };
+        let mut elements = Vec::new();
+        push_recipe_ghost(
+            &mut elements,
+            &panel,
+            &book,
+            (-1.0, -1.0),
+            640.0,
+            360.0,
+            1,
+            1,
+            true,
+            &[ItemStack::Empty, ItemStack::Empty],
+            1,
+        );
+        assert!(elements.iter().any(|e|matches!(e,MenuElement::ItemIcon {x,y,item_name,tint,..} if *x==112.0 && *y==34.0 && item_name=="raw_iron" && *tint==WHITE)));
+        assert!(
+            elements
+                .iter()
+                .any(|e| matches!(e,MenuElement::ItemIcon {x,y,..} if *x==112.0 && *y==106.0))
+        );
+        assert!(elements.iter().any(|e|matches!(e,MenuElement::Rect {x,y,w,h,color,..} if *x==224.0 && *y==62.0 && *w==48.0 && *h==48.0 && *color==[1.0,0.0,0.0,48.0/255.0])));
+        assert!(elements.iter().any(|e|matches!(e,MenuElement::Rect {x,y,color,..} if *x==232.0 && *y==70.0 && *color==[1.0,1.0,1.0,48.0/255.0])));
+        assert!(
+            elements
+                .iter()
+                .any(|e| matches!(e,MenuElement::Text {text,..} if text=="4"))
+        );
+        elements.clear();
+        push_recipe_ghost(
+            &mut elements,
+            &panel,
+            &book,
+            (-1.0, -1.0),
+            640.0,
+            360.0,
+            1,
+            1,
+            true,
+            &[ItemStack::Empty, ItemStack::from(ItemKind::Coal)],
+            1,
+        );
+        assert!(
+            !elements
+                .iter()
+                .any(|e| matches!(e,MenuElement::ItemIcon {x,y,..} if *x==112.0 && *y==106.0))
+        );
+    }
+
+    #[test]
+    fn ghost_tooltip_only_overrides_drawn_slots_in_all_recipe_screens() {
+        use azalea_protocol::common::recipe::*;
+        use azalea_registry::builtin::ItemKind;
+
+        use crate::player::inventory::Inventory;
+        use crate::ui::{crafting_table, furnace, inventory};
+
+        let item = |kind| SlotDisplayData::Item(ItemSlotDisplay { item: kind });
+        let slots = vec![ItemStack::from(ItemKind::Coal); 46];
+        let mut inventory = Inventory::new();
+        inventory.set_contents(slots.clone());
+        let width = |t: &str, size| t.len() as f32 * size;
+        for scale in [1.0, 2.0] {
+            for screen in 0..3 {
+                let (display, ingredient, uncovered, result) = match screen {
+                    0 => (
+                        RecipeDisplayData::Furnace(FurnaceRecipeDisplay {
+                            ingredient: item(ItemKind::Stone),
+                            fuel: SlotDisplayData::AnyFuel,
+                            result: item(ItemKind::IronIngot),
+                            crafting_station: SlotDisplayData::Empty,
+                            duration: 200,
+                            experience: 0.7,
+                        }),
+                        (56.0, 17.0),
+                        (56.0, 53.0), // Occupied fuel is not a ghost slot.
+                        (116.0, 35.0),
+                    ),
+                    _ => (
+                        RecipeDisplayData::Shaped(ShapedCraftingRecipeDisplay {
+                            width: 1,
+                            height: 1,
+                            ingredients: vec![item(ItemKind::Stone)],
+                            result: item(ItemKind::IronIngot),
+                            crafting_station: SlotDisplayData::Empty,
+                        }),
+                        if screen == 1 {
+                            (98.0, 18.0)
+                        } else {
+                            (48.0, 35.0)
+                        },
+                        if screen == 1 {
+                            (116.0, 18.0)
+                        } else {
+                            (30.0, 17.0)
+                        },
+                        if screen == 1 {
+                            (154.0, 28.0)
+                        } else {
+                            (124.0, 35.0)
+                        },
+                    ),
+                };
+                for native in [true, false] {
+                    for (position, expected) in [
+                        (ingredient, ItemKind::Stone),
+                        (uncovered, ItemKind::Coal),
+                        (result, ItemKind::IronIngot),
+                    ] {
+                        let mut book = crate::ui::recipe_book::RecipeBookState::default();
+                        book.receive_ghost(0, 0, display.clone());
+                        let cursor = (
+                            (232.0 + position.0 + 8.0) * scale,
+                            (97.0 + position.1 + 8.0) * scale,
+                        );
+                        let mut elements = Vec::new();
+                        match screen {
+                            0 => {
+                                furnace::build_furnace(
+                                    &mut elements,
+                                    640.0 * scale,
+                                    360.0 * scale,
+                                    cursor,
+                                    &idle_input(),
+                                    furnace::FurnaceVariant::Furnace,
+                                    &slots,
+                                    &[0; 4],
+                                    "Furnace",
+                                    &ItemStack::Empty,
+                                    &mut None,
+                                    &mut None,
+                                    scale,
+                                    &width,
+                                    &mut book,
+                                    native,
+                                    false,
+                                );
+                            }
+                            1 => {
+                                inventory::build_inventory(
+                                    &mut elements,
+                                    640.0 * scale,
+                                    360.0 * scale,
+                                    cursor,
+                                    &idle_input(),
+                                    &inventory,
+                                    &ItemStack::Empty,
+                                    &mut None,
+                                    &mut None,
+                                    scale,
+                                    &mut book,
+                                    native,
+                                    false,
+                                    &width,
+                                );
+                            }
+                            _ => {
+                                crafting_table::build_crafting_table(
+                                    &mut elements,
+                                    640.0 * scale,
+                                    360.0 * scale,
+                                    cursor,
+                                    &idle_input(),
+                                    &slots,
+                                    "Crafting",
+                                    &ItemStack::Empty,
+                                    &mut None,
+                                    &mut None,
+                                    scale,
+                                    &mut book,
+                                    native,
+                                    &width,
+                                    false,
+                                );
+                            }
+                        }
+                        let tooltips: Vec<_> = elements
+                            .iter()
+                            .filter_map(|e| match e {
+                                MenuElement::TooltipLines { lines, .. } => Some(lines),
+                                _ => None,
+                            })
+                            .collect();
+                        assert_eq!(
+                            tooltips.len(),
+                            1,
+                            "screen={screen}, native={native}, position={position:?}"
+                        );
+                        let expected =
+                            ItemStack::from(if native { expected } else { ItemKind::Coal });
+                        assert_eq!(
+                            tooltips[0][0]
+                                .spans
+                                .iter()
+                                .map(|span| span.text.as_str())
+                                .collect::<String>(),
+                            super::super::common::item_display_name(expected.as_present().unwrap()),
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn furnace_recipe_categories_match_the_screen_variant() {

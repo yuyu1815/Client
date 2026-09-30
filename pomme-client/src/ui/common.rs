@@ -418,6 +418,10 @@ pub fn push_item_icon(
         w: size,
         h: size,
         item_name: item_resource_name(data.kind),
+        player_head_profile_source:
+            crate::world::block_entity::player_head_profile_source_from_item(&ItemStack::Present(
+                data.clone(),
+            )),
         tint: WHITE,
         stack_dye_rgb: data
             .get_component::<azalea_inventory::components::DyedColor>()
@@ -666,4 +670,94 @@ pub struct SliderResult {
     pub hovered: bool,
     pub dragging: bool,
     pub new_value: Option<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn player_head_profile_survives_slot_and_cursor_extraction() {
+        use azalea_auth::game_profile::{GameProfileProperties, ProfilePropertyValue};
+        use azalea_inventory::components::{PartialOrFullProfile, PartialProfile, Profile};
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+
+        use crate::world::block_entity::{
+            PlayerHeadProfileProperty, PlayerHeadProfileSource, PlayerHeadSkinPatch,
+        };
+
+        let mut properties = GameProfileProperties::default();
+        properties.map.insert(
+            "textures".into(),
+            ProfilePropertyValue {
+                value: "encoded".into(),
+                signature: Some("signed".into()),
+            },
+        );
+        let profile = Profile {
+            unpack: Box::new(PartialOrFullProfile::Partial(PartialProfile {
+                name: Some("Alex".into()),
+                id: None,
+                properties,
+            })),
+            skin_patch: Box::default(),
+        };
+        let mut data = ItemStackData::new(ItemKind::PlayerHead, 2);
+        // SAFETY: Profile is inserted under its matching component kind.
+        unsafe {
+            data.component_patch
+                .unchecked_insert_component(DataComponentKind::Profile, Some(profile.into()));
+        }
+        let item = ItemStack::Present(data);
+        let expected = Some(PlayerHeadProfileSource::Static {
+            name: Some("Alex".into()),
+            id: None,
+            properties: vec![PlayerHeadProfileProperty {
+                name: "textures".into(),
+                value: "encoded".into(),
+                signature: Some("signed".into()),
+            }],
+            patch: PlayerHeadSkinPatch::default(),
+        });
+        let mut elements = Vec::new();
+        push_slot(
+            &mut elements,
+            0.0,
+            0.0,
+            16.0,
+            1.0,
+            (-1.0, -1.0),
+            &item,
+            None,
+        );
+        crate::ui::container::push_cursor_stack(&mut elements, (32.0, 32.0), 1.0, &item);
+        let profiles: Vec<_> = elements
+            .iter()
+            .filter_map(|element| match element {
+                MenuElement::ItemIcon {
+                    player_head_profile_source,
+                    ..
+                } => Some(player_head_profile_source),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(profiles, vec![&expected, &expected]);
+
+        elements.clear();
+        push_item_icon(
+            &mut elements,
+            0.0,
+            0.0,
+            16.0,
+            1.0,
+            &ItemStackData::new(ItemKind::PlayerHead, 1),
+        );
+        assert!(matches!(
+            &elements[0],
+            MenuElement::ItemIcon {
+                player_head_profile_source: None,
+                ..
+            }
+        ));
+    }
 }

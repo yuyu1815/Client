@@ -448,7 +448,16 @@ fn resident_chest_open<'a>(
     matches.next().is_none().then_some(open)
 }
 
+struct EditFrame {
+    vertices: (vk::Buffer, Allocation),
+    indices: (vk::Buffer, Allocation),
+    meta: (vk::Buffer, Allocation),
+    draws: Vec<(u32, u32, u32, i32, u32)>,
+}
+
 pub struct ChunkBufferStore {
+    pub(crate) edits: super::edit::EditOverlay,
+    edit_frames: Vec<EditFrame>,
     /// Capacity (in draws) of the per-frame meta/indirect buffers. Grown on
     /// demand because per-section packing yields many more draws than buckets.
     max_meta: usize,
@@ -856,7 +865,38 @@ impl ChunkBufferStore {
             device.update_descriptor_sets(&writes, &[]);
         }
 
+        // Fixed per-frame mapped buffers: edit upload never allocates, submits
+        // a transfer, waits a GPU fence, or overwrites another in-flight slot.
+        let edit_frames = (0..MAX_FRAMES_IN_FLIGHT)
+            .map(|_| EditFrame {
+                vertices: util::create_host_buffer(
+                    device,
+                    allocator,
+                    (super::edit::MAX_EDIT_VERTICES * size_of::<PackedVertex>()) as u64,
+                    vk::BufferUsageFlags::VertexBuffer,
+                    "edit_vertices",
+                ),
+                indices: util::create_host_buffer(
+                    device,
+                    allocator,
+                    (super::edit::MAX_EDIT_INDICES * size_of::<u32>()) as u64,
+                    vk::BufferUsageFlags::IndexBuffer,
+                    "edit_indices",
+                ),
+                meta: util::create_host_buffer(
+                    device,
+                    allocator,
+                    (super::edit::MAX_EDIT_CELLS * size_of::<ChunkMeta>()) as u64,
+                    vk::BufferUsageFlags::VertexBuffer,
+                    "edit_meta",
+                ),
+                draws: Vec::with_capacity(super::edit::MAX_EDIT_CELLS),
+            })
+            .collect();
+
         Self {
+            edits: Default::default(),
+            edit_frames,
             max_meta,
             vertex_buffer,
             vertex_alloc,
@@ -1139,6 +1179,15 @@ impl ChunkBufferStore {
             );
             self.retire_slices(freed);
             self.meta_dirty = true;
+            if mesh.timing.is_some() {
+                self.edits.uploaded(
+                    mesh.pos,
+                    &accepted,
+                    mesh.content_gen,
+                    mesh.column_revision,
+                    mesh.upload_epoch,
+                );
+            }
             if plans.is_empty() {
                 continue;
             }
@@ -1493,6 +1542,9 @@ impl ChunkBufferStore {
     }
 
     pub fn remove(&mut self, pos: &ChunkPos) {
+        self.edits
+            .cells
+            .retain(|p, _| p.x.div_euclid(16) != pos.x || p.z.div_euclid(16) != pos.z);
         if let Some(alloc) = forget_column(&mut self.chunks, &mut self.empty_epochs, pos) {
             self.retire_slices(alloc.sections.iter().map(|sec| {
                 (
@@ -1507,6 +1559,7 @@ impl ChunkBufferStore {
     }
 
     pub fn clear(&mut self) {
+        self.edits.cells.clear();
         clear_columns(&mut self.chunks, &mut self.empty_epochs);
         self.vtx_free.reset();
         self.idx_free.reset();
@@ -1800,8 +1853,87 @@ impl ChunkBufferStore {
         }
     }
 
+    /// Call only after the existing frame-slot fence. Includes air cells in
+    /// the mask, but never issues empty geometry draws.
+    pub(crate) fn prepare_edits(&mut self, frame: usize) -> Vec<[i32; 4]> {
+        let gpu = &mut self.edit_frames[frame];
+        gpu.draws.clear();
+        let mut mask = Vec::with_capacity(self.edits.cells.len());
+        let mut vo = 0usize;
+        let mut io = 0usize;
+        for cell in self.edits.cells.values() {
+            let geometry = &cell.geometry;
+            let p = geometry.pos;
+            mask.push([p.x, p.y, p.z, 0]);
+            let mesh = &geometry.mesh;
+            if mesh.indices.is_empty() {
+                continue;
+            }
+            write_verts(
+                gpu.vertices.1.mapped_slice_mut().unwrap(),
+                vo * VERTEX_SIZE as usize,
+                &mesh.vertices,
+            );
+            let bytes: &[u8] = bytemuck::cast_slice(&mesh.indices);
+            let off = io * INDEX_SIZE as usize;
+            gpu.indices.1.mapped_slice_mut().unwrap()[off..off + bytes.len()]
+                .copy_from_slice(bytes);
+            let meta = ChunkMeta {
+                aabb_min: mesh.aabb.min,
+                aabb_max: mesh.aabb.max,
+                index_count: mesh.indices.len() as u32,
+                first_index: io as u32,
+                vertex_offset: vo as i32,
+                visibility: (-1.0f32).to_bits(),
+                origin: geometry.origin,
+                solid_index_count: mesh.solid_index_count,
+            };
+            let instance = gpu.draws.len() as u32;
+            let bytes = bytemuck::bytes_of(&meta);
+            let off = instance as usize * size_of::<ChunkMeta>();
+            gpu.meta.1.mapped_slice_mut().unwrap()[off..off + bytes.len()].copy_from_slice(bytes);
+            gpu.draws.push((
+                io as u32,
+                mesh.indices.len() as u32,
+                mesh.solid_index_count,
+                vo as i32,
+                instance,
+            ));
+            vo += mesh.vertices.len();
+            io += mesh.indices.len();
+        }
+        mask
+    }
+
+    /// Reuses terrain pipelines/packing/meta. No cave-cull dependency: edits
+    /// must show even before the section visibility graph has been refreshed.
+    pub(crate) fn draw_edits(&self, cmd: vk::CommandBuffer, frame: usize, cutout: bool) {
+        let gpu = &self.edit_frames[frame];
+        if gpu.draws.is_empty() {
+            return;
+        }
+        cmd.bind_vertex_buffers(0, &[gpu.vertices.0, gpu.meta.0], &[0, 0]);
+        cmd.bind_index_buffer(gpu.indices.0, 0, vk::IndexType::Uint32);
+        for &(first, total, solid, vertex, instance) in &gpu.draws {
+            let (first, count) = if cutout {
+                (first + solid, total - solid)
+            } else {
+                (first, solid)
+            };
+            if count > 0 {
+                cmd.draw_indexed(count, 1, first, vertex, instance);
+            }
+        }
+    }
+
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
         let mut alloc = allocator.lock().unwrap();
+        for gpu in self.edit_frames.drain(..) {
+            for (buffer, allocation) in [gpu.vertices, gpu.indices, gpu.meta] {
+                device.destroy_buffer(buffer, None);
+                alloc.free(allocation).ok();
+            }
+        }
 
         device.destroy_buffer(self.vertex_buffer, None);
         device.destroy_buffer(self.index_buffer, None);

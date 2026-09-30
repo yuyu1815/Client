@@ -12,7 +12,8 @@ use super::occlusion_graph::{VisibilitySet, compute_visibility};
 use crate::renderer::chunk::atlas::{AtlasRegion, AtlasUVMap};
 use crate::world::block::is_air;
 use crate::world::block::model::{
-    BakedModel, CardinalLighting, Direction, face_positions, face_uvs,
+    BakedModel, BakedQuad, CardinalLighting, Direction, direction_from_positions, face_positions,
+    face_uvs,
 };
 use crate::world::block::registry::{BlockRegistry, FaceTextures, Tint};
 use crate::world::block_entity_anim::BlockEntityAnimStore;
@@ -396,6 +397,8 @@ pub struct ChunkMeshData {
     /// `GameState::content_gen`). Lets the drain drop a stale result whose
     /// column has since been edited.
     pub content_gen: u64,
+    /// Column/dependency revision captured at enqueue, also for section edits.
+    pub column_revision: u64,
     /// Globally monotonic stamp assigned at enqueue. The buffer keeps the
     /// highest epoch uploaded per section and rejects any older upload, so an
     /// in-flight bulk mesh can never clobber a section a newer edit already
@@ -945,8 +948,7 @@ impl MeshDispatcher {
         )
     }
 
-    // Async worker path, vanilla's default `prioritizeChunkUpdates = NONE`.
-    // Player edits use `mesh_section_now` instead.
+    // Async worker path; player edits use its priority lane.
     pub fn enqueue(
         &self,
         chunk_store: &ChunkStore,
@@ -955,6 +957,7 @@ impl MeshDispatcher {
         lod: u32,
         priority: bool,
         content_gen: u64,
+        column_revision: u64,
         sections: std::ops::Range<i32>,
     ) {
         let tx = if priority {
@@ -969,6 +972,7 @@ impl MeshDispatcher {
             pos,
             lod,
             content_gen,
+            column_revision,
             upload_epoch,
             sections,
             // An edit re-meshes an already-shown chunk (vanilla's "recompile").
@@ -983,10 +987,8 @@ impl MeshDispatcher {
         });
     }
 
-    /// Vanilla `compileSync` (`PrioritizeChunkUpdates.PLAYER_AFFECTED`): mesh
-    /// a column's edited sections on the calling thread so a player edit is
-    /// renderable the same frame, skipping the worker round-trip. One
-    /// snapshot serves the whole span.
+    /// Synchronous compilation for diagnostic probes that need geometry in
+    /// the same frame. Gameplay edits use the priority async lane instead.
     pub fn mesh_sections_now(
         &self,
         chunk_store: &ChunkStore,
@@ -1021,6 +1023,16 @@ impl MeshDispatcher {
         animations: &BlockEntityAnimStore,
         pos: ChunkPos,
     ) -> ChunkStoreSnapshot {
+        self.build_snapshot_inner(chunk_store, animations, pos, true)
+    }
+
+    fn build_snapshot_inner(
+        &self,
+        chunk_store: &ChunkStore,
+        animations: &BlockEntityAnimStore,
+        pos: ChunkPos,
+        entities: bool,
+    ) -> ChunkStoreSnapshot {
         let chunks_needed = chunk::mesh_neighborhood(pos);
         ChunkStoreSnapshot {
             chunks: chunks_needed
@@ -1048,13 +1060,67 @@ impl MeshDispatcher {
             moving_blocks: chunk_store
                 .block_entities
                 .iter()
+                .take(if entities { usize::MAX } else { 0 })
                 .filter(|(block_pos, _)| {
                     block_pos.x.div_euclid(16) == pos.x && block_pos.z.div_euclid(16) == pos.z
                 })
                 .map(|(block_pos, entity)| (*block_pos, entity.nbt.clone()))
                 .collect(),
-            chests: snapshot_chests(chunk_store, animations, pos),
+            chests: if entities {
+                snapshot_chests(chunk_store, animations, pos)
+            } else {
+                Vec::new()
+            },
         }
+    }
+
+    /// Fail closed: source-voxel inference is only proven for unit-cube faces.
+    /// Never substitute a cube for a fluid, partial model or block entity.
+    pub fn supports_immediate_edit(&self, state: BlockState, pos: BlockPos) -> bool {
+        edit_state_supported(&self.registry, state, pos)
+    }
+
+    /// Mesh ONLY the supplied cells, with the normal world emitters and atlas.
+    /// No type-map, greedy pass, visibility flood fill or section scan.
+    pub fn mesh_edit_cells(
+        &self,
+        store: &ChunkStore,
+        animations: &BlockEntityAnimStore,
+        cells: &[BlockPos],
+    ) -> Option<Vec<super::edit::EditCellMesh>> {
+        if cells.len() > super::edit::MAX_EDIT_CELLS {
+            return None;
+        }
+        let mut snapshots = HashMap::new();
+        let mut result = Vec::with_capacity(cells.len());
+        let mut vertices = 0;
+        let mut indices = 0;
+        for &pos in cells {
+            let state = store.get_block_state(pos.x, pos.y, pos.z);
+            if !self.supports_immediate_edit(state, pos) {
+                return None;
+            }
+            let col = ChunkPos::new(pos.x.div_euclid(16), pos.z.div_euclid(16));
+            // An unloaded neighbour must not acquire a mask/residency claim.
+            if store.get_chunk(&col).is_none()
+                || pos.y < store.min_y()
+                || pos.y >= store.min_y() + store.height() as i32
+            {
+                continue;
+            }
+            let snapshot = snapshots
+                .entry(col)
+                .or_insert_with(|| self.build_snapshot_inner(store, animations, col, false));
+            let cell = mesh_edit_cell(snapshot, &self.registry, &self.uv_map, pos, state);
+            vertices += cell.mesh.vertices.len();
+            indices += cell.mesh.indices.len();
+            if vertices > super::edit::MAX_EDIT_VERTICES || indices > super::edit::MAX_EDIT_INDICES
+            {
+                return None;
+            }
+            result.push(cell);
+        }
+        Some(result)
     }
 
     /// Latest camera position, used to mesh the nearest pending chunk first.
@@ -1092,6 +1158,7 @@ struct PendingJob {
     pos: ChunkPos,
     lod: u32,
     content_gen: u64,
+    column_revision: u64,
     upload_epoch: u64,
     sections: std::ops::Range<i32>,
     is_recompile: bool,
@@ -1123,6 +1190,7 @@ impl PendingJob {
         );
         let meshed_at = std::time::Instant::now();
         mesh.content_gen = self.content_gen;
+        mesh.column_revision = self.column_revision;
         mesh.upload_epoch = self.upload_epoch;
         mesh.queue_ms = (started_at - self.enqueued_at).as_secs_f32() * 1000.0;
         mesh.mesh_ms = (meshed_at - started_at).as_secs_f32() * 1000.0;
@@ -2286,11 +2354,126 @@ fn mesh_chunk_snapshot(
         sections,
         replaced: range,
         content_gen: 0,
+        column_revision: 0,
         upload_epoch: 0,
         visibility,
         timing: None,
         queue_ms: 0.0,
         mesh_ms: 0.0,
+    }
+}
+
+fn edit_state_supported(registry: &BlockRegistry, state: BlockState, pos: BlockPos) -> bool {
+    if is_air(state) {
+        return true;
+    }
+    if crate::world::block::fluid(state).kind != crate::world::block::FluidKind::Empty
+        || crate::world::block_entity::is_block_entity_block(crate::world::block::block_id(state))
+    {
+        return false;
+    }
+    // ponytail: full-cube boundary quads only; add explicit per-vertex source
+    // ownership before supporting partial/out-of-cell models and fluids.
+    let valid = |quads: &[BakedQuad]| {
+        !quads.is_empty() && quads.iter().all(|quad| unit_cube_face(&quad.positions))
+    };
+    if let Some(model) = registry.get_baked_model_at(state, pos.x, pos.y, pos.z) {
+        valid(&model.quads)
+    } else if let Some(quads) = registry.get_multipart_quads_at(state, pos.x, pos.y, pos.z) {
+        valid(&quads)
+    } else {
+        registry.is_opaque_full_cube(state) && registry.get_textures(state).is_some()
+    }
+}
+
+fn unit_cube_face(positions: &[[f32; 3]; 4]) -> bool {
+    CUBE_FACE_DIRS.iter().any(|dir| {
+        let expected = face_positions(*dir, [0.0; 3], [1.0; 3]);
+        positions.iter().all(|p| {
+            expected
+                .iter()
+                .any(|q| p.iter().zip(q).all(|(a, b)| (a - b).abs() < 0.00001))
+        }) && expected.iter().all(|q| {
+            positions
+                .iter()
+                .any(|p| p.iter().zip(q).all(|(a, b)| (a - b).abs() < 0.00001))
+        })
+    })
+}
+
+fn mesh_edit_cell(
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    atlas: &AtlasUVMap,
+    pos: BlockPos,
+    state: BlockState,
+) -> super::edit::EditCellMesh {
+    let section_index = (pos.y - snapshot.min_y).div_euclid(16);
+    let origin = [
+        pos.x.div_euclid(16) * 16,
+        snapshot.min_y + section_index * 16,
+        pos.z.div_euclid(16) * 16,
+    ];
+    let local = [
+        (pos.x - origin[0]) as f32,
+        (pos.y - origin[1]) as f32,
+        (pos.z - origin[2]) as f32,
+    ];
+    let mut sink = MeshSink::default();
+    if !is_air(state) {
+        if let Some(model) = registry.get_baked_model_at(state, pos.x, pos.y, pos.z) {
+            emit_baked_model(
+                &mut sink,
+                local,
+                state,
+                &model,
+                snapshot,
+                registry,
+                atlas,
+                pos.x,
+                pos.y,
+                pos.z,
+                None,
+                &mut Vec::new(),
+            );
+        } else if let Some(quads) = registry.get_multipart_quads_at(state, pos.x, pos.y, pos.z) {
+            emit_multipart(
+                &mut sink,
+                local,
+                state,
+                &quads,
+                snapshot,
+                registry,
+                atlas,
+                pos.x,
+                pos.y,
+                pos.z,
+                None,
+                &mut Vec::new(),
+            );
+        } else if let Some(textures) = registry.get_textures(state) {
+            emit_cube_faces(
+                &mut sink, local, state, textures, snapshot, registry, atlas, pos.x, pos.y, pos.z,
+            );
+        }
+    }
+    let aabb = section_aabb(&sink.vertices);
+    let solid_index_count = sink.solid.len() as u32;
+    sink.solid.extend(sink.cutout);
+    super::edit::EditCellMesh {
+        pos,
+        state,
+        origin,
+        mesh: SectionMesh {
+            section_index,
+            vertices: sink.vertices.iter().map(pack_vertex).collect(),
+            aabb,
+            indices: sink.solid,
+            solid_index_count,
+            water_indices: Vec::new(),
+            emitted_chests: Vec::new(),
+            trace: Vec::new(),
+        },
     }
 }
 
@@ -2411,20 +2594,13 @@ fn emit_baked_model(
         let vertex_start = sink.vertices.len();
         let solid_start = sink.solid.len();
         let cutout_start = sink.cutout.len();
-        let lights = quad.shade_face.map_or_else(
-            || [snapshot.get_light(bx, by, bz); 4],
-            |dir| {
-                compute_face_ao(
-                    snapshot,
-                    registry,
-                    bx,
-                    by,
-                    bz,
-                    dir,
-                    Some(dir),
-                    model.ambient_occlusion,
-                )
-            },
+        let lights = model_quad_lights(
+            snapshot,
+            registry,
+            state,
+            quad,
+            model.ambient_occlusion,
+            [bx, by, bz],
         );
         emit_face(
             sink,
@@ -3113,20 +3289,13 @@ fn emit_multipart(
             block_pos,
             &quad.positions,
             &quad.uvs,
-            quad.shade_face.map_or_else(
-                || [snapshot.get_light(bx, by, bz); 4],
-                |dir| {
-                    compute_face_ao(
-                        snapshot,
-                        registry,
-                        bx,
-                        by,
-                        bz,
-                        dir,
-                        Some(dir),
-                        quad.ambient_occlusion,
-                    )
-                },
+            model_quad_lights(
+                snapshot,
+                registry,
+                state,
+                quad,
+                quad.ambient_occlusion,
+                [bx, by, bz],
             ),
             region,
             tint,
@@ -3439,9 +3608,60 @@ fn compute_face_ao(
     })
 }
 
-#[cfg(test)]
-fn flat_quad_light(world_light: f32, shade: f32) -> f32 {
-    world_light * shade
+fn model_quad_lights(
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    state: BlockState,
+    quad: &BakedQuad,
+    ambient_occlusion: bool,
+    [bx, by, bz]: [i32; 3],
+) -> [f32; 4] {
+    if ambient_occlusion {
+        // Keep the existing smooth-lighting path unchanged.
+        return quad.shade_face.map_or_else(
+            || [snapshot.get_light(bx, by, bz); 4],
+            |dir| compute_face_ao(snapshot, registry, bx, by, bz, dir, Some(dir), true),
+        );
+    }
+    // ModelBlockRenderer.tesselateFlat supplies the cull-face neighbour's
+    // light. Unculled quads use BlockModelLighter.prepareQuadShape's faceCubic:
+    // planar on their normal axis AND (on the block edge OR full collision).
+    let sample_face = quad.cullface.or_else(|| {
+        let dir = quad
+            .shade_face
+            .or_else(|| direction_from_positions(&quad.positions))?;
+        let (axis, positive) = match dir {
+            Direction::Down => (1, false),
+            Direction::Up => (1, true),
+            Direction::North => (2, false),
+            Direction::South => (2, true),
+            Direction::West => (0, false),
+            Direction::East => (0, true),
+        };
+        let min = quad
+            .positions
+            .iter()
+            .map(|p| p[axis])
+            .fold(f32::INFINITY, f32::min);
+        let max = quad
+            .positions
+            .iter()
+            .map(|p| p[axis])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let on_edge = if positive { max > 0.9999 } else { min < 0.0001 };
+        // ponytail: unsupported collision shapes still inherit the existing
+        // full-cube fallback; bake isCollisionShapeFullBlock into state data
+        // when extending exact flat lighting to those blocks (e.g. cauldrons).
+        (min == max && (on_edge || crate::physics::block_shape::partial_shape(state).is_none()))
+            .then_some(dir)
+    });
+    let [dx, dy, dz] = sample_face.map_or([0; 3], |dir| dir.offset());
+    // LightCoordsUtil.getLightCoords uses the rendered state's emission even
+    // when sampling the neighbouring position (torches/repeaters included).
+    let light = snapshot
+        .get_light(bx + dx, by + dy, bz + dz)
+        .max(LIGHT_TABLE[crate::world::block::light_props(state).emission as usize]);
+    [light * snapshot.shade(quad.shade_face); 4]
 }
 
 fn avg4(a: f32, b: f32, c: f32, d: f32) -> f32 {
@@ -3941,13 +4161,7 @@ mod chest_quad_tests {
 mod terrain_uv_tests {
     use serde_json::json;
 
-    use super::{
-        MeshTraceConfig, MeshTraceState, TraceTarget, add_weighted_fluid_height,
-        backward_up_face_visible, classify_block_entity_geometry, emit_reverse_quad_winding,
-        flat_quad_light, fluid_flow_neighbor_height, fluid_height_with_above, fluid_top_uv_values,
-        moving_state_with_properties, pack_sprite_uv, piston_head_is_short,
-        retracting_source_head_is_short, unpack_sprite_uv,
-    };
+    use super::*;
 
     #[test]
     fn block_entity_geometry_only_suppresses_replacement_meshes() {
@@ -4031,9 +4245,491 @@ mod terrain_uv_tests {
     }
 
     #[test]
-    fn non_cullface_quad_light_uses_world_light_and_face_shade() {
-        assert!((flat_quad_light(0.4, 0.8) - 0.32).abs() < f32::EPSILON);
-        assert_eq!(flat_quad_light(1.0, 1.0), 1.0);
+    fn hopper_and_other_non_ao_quads_use_one_flat_sample_and_keep_all_32_quads() {
+        crate::world::block::init("26.2");
+        let registry = BlockRegistry::test_empty();
+        let atlas = AtlasUVMap::test_empty();
+        let mut data = Box::new([0x22; 2048]);
+        let mut set_light = |[x, y, z]: [usize; 3], level: u8| {
+            let index = y * 256 + z * 16 + x;
+            let shift = (index % 2) * 4;
+            data[index / 2] = (data[index / 2] & !(15 << shift)) | (level << shift);
+        };
+        set_light([8, 8, 8], 3);
+        for (i, dir) in CUBE_FACE_DIRS.iter().enumerate() {
+            set_light(dir.offset().map(|v| (8 + v) as usize), (i + 4) as u8);
+        }
+        set_light([7, 9, 7], 15); // Deliberately nonuniform corner lighting.
+        let mut snapshot = ChunkStoreSnapshot {
+            chunks: Vec::new(),
+            light: HashMap::from([(
+                (0, 0),
+                Arc::new(chunk::ChunkLightData {
+                    sky_sections: vec![None; 3],
+                    block_sections: vec![None, Some(data), None],
+                    min_y: 0,
+                    has_sky: false,
+                    sky_top_section: None,
+                }),
+            )]),
+            grass_colormap: Arc::new(Colormap::test_empty()),
+            foliage_colormap: Arc::new(Colormap::test_empty()),
+            dry_foliage_colormap: Arc::new(Colormap::test_empty()),
+            biome_climate: Arc::new(HashMap::new()),
+            cardinal_lighting: CardinalLighting::DEFAULT,
+            min_y: 0,
+            height: 16,
+            debug_world: None,
+            trace: None,
+            moving_blocks: Vec::new(),
+            chests: Vec::new(),
+        };
+        let hopper = crate::world::block::find_state("hopper", &[]);
+        let stone = crate::world::block::find_state("stone", &[]);
+        let mut model = BakedModel {
+            quads: Vec::new(),
+            ambient_occlusion: false,
+            is_full_cube: false,
+            occludes: false,
+        };
+        use Direction::{Down, Up};
+        // Official 26.2 hopper.json's seven elements and face/cullface pairs.
+        // In particular the inside rim faces cull UP, not their own normal.
+        for (from, to, faces) in [
+            (
+                [0, 10, 0],
+                [16, 11, 16],
+                vec![
+                    (Direction::Down, None),
+                    (Direction::Up, Some(Direction::Up)),
+                    (Direction::North, Some(Direction::North)),
+                    (Direction::South, Some(Direction::South)),
+                    (Direction::West, Some(Direction::West)),
+                    (Direction::East, Some(Direction::East)),
+                ],
+            ),
+            (
+                [0, 11, 0],
+                [2, 16, 16],
+                vec![
+                    (Direction::Up, Some(Direction::Up)),
+                    (Direction::North, Some(Direction::North)),
+                    (Direction::South, Some(Direction::South)),
+                    (Direction::West, Some(Direction::West)),
+                    (Direction::East, Some(Direction::Up)),
+                ],
+            ),
+            (
+                [14, 11, 0],
+                [16, 16, 16],
+                vec![
+                    (Direction::Up, Some(Direction::Up)),
+                    (Direction::North, Some(Direction::North)),
+                    (Direction::South, Some(Direction::South)),
+                    (Direction::West, Some(Direction::Up)),
+                    (Direction::East, Some(Direction::East)),
+                ],
+            ),
+            (
+                [2, 11, 0],
+                [14, 16, 2],
+                vec![
+                    (Direction::Up, Some(Direction::Up)),
+                    (Direction::North, Some(Direction::North)),
+                    (Direction::South, Some(Direction::Up)),
+                ],
+            ),
+            (
+                [2, 11, 14],
+                [14, 16, 16],
+                vec![
+                    (Direction::Up, Some(Direction::Up)),
+                    (Direction::North, Some(Direction::Up)),
+                    (Direction::South, Some(Direction::South)),
+                ],
+            ),
+            (
+                [4, 4, 4],
+                [12, 10, 12],
+                vec![
+                    (Direction::Down, None),
+                    (Direction::North, None),
+                    (Direction::South, None),
+                    (Direction::West, None),
+                    (Direction::East, None),
+                ],
+            ),
+            (
+                [6, 0, 6],
+                [10, 4, 10],
+                vec![
+                    (Direction::Down, Some(Direction::Down)),
+                    (Direction::North, None),
+                    (Direction::South, None),
+                    (Direction::West, None),
+                    (Direction::East, None),
+                ],
+            ),
+        ] {
+            for (dir, cullface) in faces {
+                model.quads.push(BakedQuad {
+                    positions: face_positions(
+                        dir,
+                        from.map(|v| v as f32 / 16.0),
+                        to.map(|v| v as f32 / 16.0),
+                    ),
+                    ambient_occlusion: false,
+                    uvs: [[0.0; 2]; 4],
+                    texture: "hopper_outside".into(),
+                    cullface,
+                    tint_index: None,
+                    tint: Tint::None,
+                    item_tint: crate::world::block::model::ItemTint::Untinted,
+                    shade_light: 1.0,
+                    shade_face: Some(dir),
+                });
+            }
+        }
+        assert_eq!(model.quads.len(), 32);
+        for multipart in [false, true] {
+            let mut sink = MeshSink::default();
+            if multipart {
+                emit_multipart(
+                    &mut sink,
+                    [0.0; 3],
+                    hopper,
+                    &model.quads,
+                    &snapshot,
+                    &registry,
+                    &atlas,
+                    8,
+                    8,
+                    8,
+                    None,
+                    &mut Vec::new(),
+                );
+            } else {
+                emit_baked_model(
+                    &mut sink,
+                    [0.0; 3],
+                    hopper,
+                    &model,
+                    &snapshot,
+                    &registry,
+                    &atlas,
+                    8,
+                    8,
+                    8,
+                    None,
+                    &mut Vec::new(),
+                );
+            }
+            assert_eq!(sink.vertices.len(), 32 * 4);
+            assert_eq!(sink.solid.len() + sink.cutout.len(), 32 * 6);
+            for (quad, vertices) in model.quads.iter().zip(sink.vertices.chunks_exact(4)) {
+                let [dx, dy, dz] = quad.cullface.map_or([0; 3], |dir| dir.offset());
+                let expected = pack_light_tint(
+                    snapshot.get_light(8 + dx, 8 + dy, 8 + dz) * snapshot.shade(quad.shade_face),
+                    PACKED_WHITE_SHIFTED,
+                );
+                assert!(vertices.iter().all(|v| v.light_tint == expected));
+            }
+        }
+        let mut quad = model.quads[0].clone();
+        for dir in CUBE_FACE_DIRS {
+            quad.cullface = None;
+            quad.shade_face = Some(dir);
+            quad.positions = face_positions(dir, [0.0; 3], [1.0; 3]);
+            let [dx, dy, dz] = dir.offset();
+            let neighbor = snapshot.get_light(8 + dx, 8 + dy, 8 + dz) * snapshot.shade(Some(dir));
+            assert_eq!(
+                model_quad_lights(&snapshot, &registry, hopper, &quad, false, [8; 3]),
+                [neighbor; 4]
+            );
+            quad.positions = face_positions(dir, [0.25; 3], [0.75; 3]);
+            assert_eq!(
+                model_quad_lights(&snapshot, &registry, hopper, &quad, false, [8; 3]),
+                [LIGHT_TABLE[3] * snapshot.shade(Some(dir)); 4]
+            );
+            assert_eq!(
+                model_quad_lights(&snapshot, &registry, stone, &quad, false, [8; 3]),
+                [neighbor; 4]
+            );
+            quad.positions[0] = [0.5; 3]; // Not planar: even full collision samples self.
+            assert_eq!(
+                model_quad_lights(&snapshot, &registry, stone, &quad, false, [8; 3]),
+                [LIGHT_TABLE[3] * snapshot.shade(Some(dir)); 4]
+            );
+        }
+        quad.positions = face_positions(Direction::Up, [0.0; 3], [1.0; 3]);
+        quad.shade_face = Some(Direction::Up);
+        let smooth = model_quad_lights(&snapshot, &registry, hopper, &quad, true, [8; 3]);
+        assert_eq!(
+            smooth,
+            compute_face_ao(
+                &snapshot,
+                &registry,
+                8,
+                8,
+                8,
+                Direction::Up,
+                Some(Direction::Up),
+                true
+            )
+        );
+        assert!(smooth.iter().any(|light| *light != smooth[0]));
+        for (dir, boundary, toward_edge) in [(Down, 0.0001_f32, -1_i32), (Up, 0.9999_f32, 1_i32)] {
+            quad.shade_face = Some(dir);
+            quad.positions = face_positions(dir, [0.0; 3], [1.0; 3]);
+            for vertex in &mut quad.positions {
+                vertex[1] = boundary;
+            }
+            assert_eq!(
+                model_quad_lights(&snapshot, &registry, hopper, &quad, false, [8; 3]),
+                [LIGHT_TABLE[3] * snapshot.shade(Some(dir)); 4]
+            );
+            for vertex in &mut quad.positions {
+                vertex[1] = f32::from_bits((boundary.to_bits() as i32 + toward_edge) as u32);
+            }
+            let [dx, dy, dz] = dir.offset();
+            assert_eq!(
+                model_quad_lights(&snapshot, &registry, hopper, &quad, false, [8; 3]),
+                [snapshot.get_light(8 + dx, 8 + dy, 8 + dz) * snapshot.shade(Some(dir)); 4]
+            );
+        }
+        let torch = crate::world::block::find_state("torch", &[]);
+        quad.cullface = Some(Up);
+        quad.shade_face = None;
+        assert_eq!(
+            model_quad_lights(&snapshot, &registry, torch, &quad, false, [8; 3]),
+            [LIGHT_TABLE[14]; 4]
+        );
+        quad.cullface = None;
+        snapshot.cardinal_lighting = CardinalLighting::NETHER;
+        quad.positions = face_positions(Up, [0.0; 3], [1.0; 3]);
+        quad.shade_face = None;
+        assert_eq!(
+            model_quad_lights(&snapshot, &registry, hopper, &quad, false, [8; 3]),
+            [snapshot.get_light(8, 9, 8) * CardinalLighting::NETHER.up; 4]
+        );
+    }
+
+    #[test]
+    fn immediate_edit_small_mesh_exposure_culling_and_latest_state() {
+        use std::collections::HashSet;
+
+        crate::world::block::init("26.2");
+        let root = std::env::temp_dir().join(format!(
+            "pomme-edit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let blocks = root.join("minecraft/blockstates");
+        let models = root.join("minecraft/models/block");
+        std::fs::create_dir_all(&blocks).unwrap();
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(
+            blocks.join("stone.json"),
+            r#"{"variants":{"":{"model":"minecraft:block/stone"}}}"#,
+        )
+        .unwrap();
+        let faces: serde_json::Map<String, Value> =
+            ["up", "down", "north", "south", "east", "west"]
+                .into_iter()
+                .map(|dir| (dir.to_owned(), json!({"texture":"#all", "cullface":dir})))
+                .collect();
+        std::fs::write(
+            models.join("stone.json"),
+            json!({
+                "textures":{"all":"minecraft:block/stone"},
+                "elements":[{"from":[0,0,0],"to":[16,16,16],"faces":faces}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let registry = BlockRegistry::load(&root, &None, &root, None);
+        let stone = crate::world::block::first_state_of("stone").unwrap();
+        let p = BlockPos::new(-1, -49, -1);
+        assert!(edit_state_supported(&registry, stone, p));
+        assert!(!unit_cube_face(&face_positions(
+            Direction::Up,
+            [0.0; 3],
+            [0.5; 3]
+        )));
+        let dispatcher = MeshDispatcher::new(
+            registry,
+            AtlasUVMap::test_empty(),
+            Colormap::test_empty(),
+            Colormap::test_empty(),
+            Colormap::test_empty(),
+            Arc::new(HashMap::new()),
+            CardinalLighting::DEFAULT,
+            MeshTraceState::new(),
+            false,
+        );
+        let mut store = ChunkStore::new(2);
+        for col in [ChunkPos::new(-1, -1), ChunkPos::new(0, -1)] {
+            let mut column = azalea_world::Chunk::default();
+            column.sections = vec![Default::default(); store.section_count() as usize].into();
+            store.load_decoded_chunk(col, column);
+        }
+        let animations = BlockEntityAnimStore::default();
+        let neighbor = BlockPos::new(0, -49, -1);
+        store.set_block_state(p.x, p.y, p.z, stone);
+        store.set_block_state(neighbor.x, neighbor.y, neighbor.z, stone);
+        let cells = [p, neighbor];
+        let meshes = dispatcher
+            .mesh_edit_cells(&store, &animations, &cells)
+            .unwrap();
+        assert_eq!(meshes.len(), 2);
+        assert_eq!(meshes[0].mesh.vertices.len(), 20);
+        assert_eq!(meshes[0].mesh.indices.len(), 30); // shared face culled
+        assert_eq!(meshes[0].origin, [-16, -64, -16]);
+        assert_eq!(meshes[1].origin, [0, -64, -16]);
+        store.set_block_state(p.x, p.y, p.z, BlockState::AIR);
+        let meshes = dispatcher
+            .mesh_edit_cells(&store, &animations, &cells)
+            .unwrap();
+        assert!(meshes[0].mesh.indices.is_empty()); // air still carries a mask
+        assert_eq!(meshes[1].mesh.vertices.len(), 24); // newly exposed neighbour
+        assert_eq!(meshes[1].mesh.indices.len(), 36);
+        store.set_block_state(p.x, p.y, p.z, stone); // destroy -> place same cell
+        let meshes = dispatcher
+            .mesh_edit_cells(&store, &animations, &cells)
+            .unwrap();
+        assert_eq!(meshes[0].state, stone);
+        assert_eq!(meshes[1].mesh.indices.len(), 30);
+        // Retirement uses real mesher section indices, including the -49/-48
+        // boundary and the -1/0 column boundary, not hand-written fixture IDs.
+        let cells = super::super::edit::edit_neighborhood(p);
+        let mut overlay = super::super::edit::EditOverlay::default();
+        overlay.replace(
+            dispatcher
+                .mesh_edit_cells(&store, &animations, &cells)
+                .unwrap(),
+        );
+        for col in [ChunkPos::new(-1, -1), ChunkPos::new(0, -1)] {
+            overlay.expect(col, 0..2, 10);
+        }
+        store.set_block_state(p.x, p.y, p.z, BlockState::AIR);
+        overlay.replace(
+            dispatcher
+                .mesh_edit_cells(&store, &animations, &cells)
+                .unwrap(),
+        );
+        assert_eq!(overlay.cells[&p].geometry.state, BlockState::AIR);
+        for col in [ChunkPos::new(-1, -1), ChunkPos::new(0, -1)] {
+            overlay.expect(col, 0..2, 11);
+            overlay.uploaded(col, &HashSet::from([0, 1]), 10, 0, 10);
+        }
+        assert!(overlay.cells.contains_key(&p)); // stale generation cannot retire
+        overlay.uploaded(ChunkPos::new(-1, -1), &HashSet::from([0]), 11, 0, 11);
+        assert!(!overlay.cells.contains_key(&p));
+        let upper = BlockPos::new(-1, -48, -1);
+        assert!(overlay.cells.contains_key(&upper)); // different section stays masked
+        assert!(overlay.cells.contains_key(&neighbor)); // different column stays masked
+        overlay.uploaded(ChunkPos::new(-1, -1), &HashSet::from([1]), 11, 0, 11);
+        assert!(!overlay.cells.contains_key(&upper));
+        overlay.uploaded(ChunkPos::new(0, -1), &HashSet::from([0, 1]), 11, 0, 11);
+        assert!(overlay.cells.is_empty());
+        assert!(
+            dispatcher
+                .mesh_edit_cells(
+                    &store,
+                    &animations,
+                    &vec![p; super::super::edit::MAX_EDIT_CELLS + 1]
+                )
+                .is_none()
+        );
+        // Exercise the same transactional manager used by Renderer, CPU-only.
+        let a = BlockPos::new(-12, -49, -12);
+        let b = BlockPos::new(10, -49, -8);
+        store.set_block_state(a.x, a.y, a.z, stone);
+        overlay
+            .admit(&dispatcher, &store, &animations, a, BlockState::AIR)
+            .unwrap();
+        let a_vertices = overlay.cells[&a].geometry.mesh.vertices.len();
+        assert_eq!(a_vertices, 24);
+        overlay.expect(ChunkPos::new(-1, -1), 0..2, 20);
+        let unsupported = crate::world::block::first_state_of("oak_slab").unwrap();
+        store.set_block_state(b.x + 1, b.y, b.z, unsupported);
+        assert_eq!(
+            overlay.admit(&dispatcher, &store, &animations, b, BlockState::AIR),
+            Err("unsupported_current_or_neighbor")
+        );
+        assert_eq!(overlay.cells[&a].geometry.mesh.vertices.len(), a_vertices);
+        assert_eq!(overlay.cells[&a].expected_generation, Some(20));
+        store.set_block_state(b.x + 1, b.y, b.z, BlockState::AIR);
+        for (x, z) in [
+            (-8, -12),
+            (-4, -12),
+            (4, -12),
+            (8, -12),
+            (12, -12),
+            (-12, -8),
+            (-8, -8),
+            (-4, -8),
+        ] {
+            overlay
+                .admit(
+                    &dispatcher,
+                    &store,
+                    &animations,
+                    BlockPos::new(x, -49, z),
+                    BlockState::AIR,
+                )
+                .unwrap();
+        }
+        assert_eq!(overlay.cells.len(), 63);
+        assert_eq!(
+            overlay.admit(&dispatcher, &store, &animations, b, BlockState::AIR),
+            Err("cell_cap")
+        );
+        assert_eq!(overlay.cells.len(), 63);
+        assert_eq!(overlay.cells[&a].geometry.state, stone);
+        // At capacity, replacing an existing cell succeeds without extra slots.
+        store.set_block_state(a.x, a.y, a.z, BlockState::AIR);
+        overlay
+            .admit(&dispatcher, &store, &animations, a, stone)
+            .unwrap();
+        assert!(overlay.cells[&a].geometry.mesh.indices.is_empty());
+        store.set_block_state(a.x, a.y, a.z, stone);
+        overlay
+            .admit(&dispatcher, &store, &animations, a, BlockState::AIR)
+            .unwrap();
+        assert_eq!(overlay.cells[&a].geometry.state, stone);
+        // Unsupported ACK correction removes only its influence set, not B/others.
+        store.set_block_state(a.x, a.y, a.z, unsupported);
+        assert!(
+            overlay
+                .admit(&dispatcher, &store, &animations, a, stone)
+                .is_err()
+        );
+        assert!(!overlay.cells.contains_key(&a));
+        assert_eq!(overlay.cells.len(), 56);
+        assert!(overlay.cells.contains_key(&BlockPos::new(-8, -49, -12)));
+        // A vertex-cap rejection after a same-position write cannot leave old delta.
+        let c = BlockPos::new(-8, -49, -12);
+        let unrelated = BlockPos::new(4, -49, -12);
+        overlay
+            .cells
+            .get_mut(&unrelated)
+            .unwrap()
+            .geometry
+            .mesh
+            .vertices = vec![bytemuck::Zeroable::zeroed(); super::super::edit::MAX_EDIT_VERTICES];
+        store.set_block_state(c.x, c.y, c.z, stone);
+        assert_eq!(
+            overlay.admit(&dispatcher, &store, &animations, c, BlockState::AIR),
+            Err("vertex_cap")
+        );
+        assert!(!overlay.cells.contains_key(&c));
+        assert!(overlay.cells.contains_key(&unrelated));
+        drop(dispatcher);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -19,12 +19,15 @@ use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim}
 use crate::renderer::pipelines::entity_renderer::{
     BlendMode, ModelInput, WHITE_TINT, create_pipeline, fallback_texture,
 };
-use crate::renderer::placed_head_skin::{MAX_ENTRIES as MAX_HEAD_TEXTURES, PlacedHeadSkinCache};
+use crate::renderer::placed_head_skin::{MAX_ENTRIES, PlacedHeadSkinCache};
 use crate::renderer::{
     BlockEntityModelDrawCounts, MAX_FRAMES_IN_FLIGHT, block_entity_model, shader, util,
 };
 use crate::ui::font::GlyphMap;
 use crate::world::block_entity::PlayerHeadProfileSource;
+
+// One extra slot for the pack-reloadable default sheet.
+const MAX_HEAD_TEXTURES: usize = MAX_ENTRIES + 1;
 
 pub struct BlockEntityRenderInfo {
     pub pos: BlockPos,
@@ -97,7 +100,7 @@ const DYE_COLOR_NAMES: [&str; 16] = [
 ];
 
 /// Sign wood order used by the block-entity variant mapping.
-const SIGN_WOOD_NAMES: [&str; 12] = [
+pub(crate) const SIGN_WOOD_NAMES: [&str; 12] = [
     "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak",
     "bamboo", "crimson", "warped",
 ];
@@ -215,8 +218,10 @@ pub fn variant_for_block(
             .and_then(|s| name_index(&DYE_COLOR_NAMES, s))
             .unwrap_or(16),
         BlockEntityKind::Skull => u32::from(name == "player_wall_head"),
-        BlockEntityKind::Sign => name
-            .strip_suffix("_wall_sign")
+        BlockEntityKind::Sign | BlockEntityKind::HangingSign => name
+            .strip_suffix("_wall_hanging_sign")
+            .or_else(|| name.strip_suffix("_hanging_sign"))
+            .or_else(|| name.strip_suffix("_wall_sign"))
             .or_else(|| name.strip_suffix("_sign"))
             .and_then(|s| name_index(&SIGN_WOOD_NAMES, s))
             .unwrap_or(0),
@@ -271,7 +276,7 @@ pub fn yaw_for_block(kind: BlockEntityKind, props: &crate::world::block::PropMap
                 _ => None,
             })
             .unwrap_or(0.0),
-        BlockEntityKind::Sign => props
+        BlockEntityKind::Sign | BlockEntityKind::HangingSign => props
             .get("rotation")
             .and_then(|s| s.parse::<f32>().ok())
             .map(|r| r * 22.5)
@@ -898,7 +903,9 @@ impl BlockEntityPipeline {
 
         let mut uploads = Vec::new();
         let mut staging = Vec::new();
-        for (source, skin) in skins.ready() {
+        for (source, skin) in skins.ready().chain(std::iter::once(
+            skins.skin(&PlayerHeadProfileSource::Default),
+        )) {
             if self.player_head_textures.contains_key(source) {
                 continue;
             }
@@ -1094,6 +1101,10 @@ impl BlockEntityPipeline {
             let is_player_head =
                 info.kind == BlockEntityKind::Skull && info.player_head_profile_source.is_some();
             let slot = if is_player_head {
+                let fallback = self
+                    .player_head_textures
+                    .get(&PlayerHeadProfileSource::Default)
+                    .unwrap_or(fallback);
                 head_skins.texture(
                     info.player_head_profile_source.as_ref(),
                     &self.player_head_textures,

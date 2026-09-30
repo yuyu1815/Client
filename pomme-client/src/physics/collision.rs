@@ -5,7 +5,6 @@ use glam::{DVec3, dvec3};
 use super::aabb::Aabb;
 use super::block_shape;
 use crate::entity::components::Velocity;
-use crate::world::block::has_collision;
 use crate::world::chunk::ChunkStore;
 
 const COLLISION_EPSILON: f64 = 1.0e-7;
@@ -38,7 +37,8 @@ fn collect_block_aabbs_with(
 ) -> Vec<Aabb> {
     let mut aabbs = Vec::new();
     let min_x = region.min.x.floor() as i32;
-    let min_y = region.min.y.floor() as i32;
+    // Fences, walls and closed gates extend 0.5 blocks above their cell.
+    let min_y = region.min.y.floor() as i32 - 1;
     let min_z = region.min.z.floor() as i32;
     let max_x = region.max.x.ceil() as i32;
     let max_y = region.max.y.ceil() as i32;
@@ -49,9 +49,7 @@ fn collect_block_aabbs_with(
             for bx in min_x..max_x {
                 let (state, piston) = cell(bx, by, bz);
                 if crate::world::block::block_id(state) == "moving_piston" {
-                    if let Some((moved, progress_offset)) = piston
-                        && has_collision(moved)
-                    {
+                    if let Some((moved, progress_offset)) = piston {
                         let origin = dvec3(bx as f64, by as f64, bz as f64) + progress_offset;
                         match block_shape::partial_shape(moved) {
                             Some(boxes) => {
@@ -105,9 +103,6 @@ fn collect_block_aabbs_with(
                             }
                         }
                     }
-                    continue;
-                }
-                if !has_collision(state) {
                     continue;
                 }
                 match block_shape::partial_shape(state) {
@@ -383,6 +378,175 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_wall_hanging_crossbar_collides_even_when_has_collision_is_false() {
+        crate::world::block::init("26.2");
+        let air = crate::world::block::find_state("air", &[]);
+        let piston = crate::world::block::find_state("moving_piston", &[]);
+        for facing in ["north", "south", "east", "west"] {
+            let sign =
+                crate::world::block::find_state("oak_wall_hanging_sign", &[("facing", facing)]);
+            assert!(!crate::world::block::has_collision(sign));
+            let bar = if matches!(facing, "north" | "south") {
+                [0.0, 0.875, 0.375, 1.0, 1.0, 0.625]
+            } else {
+                [0.375, 0.875, 0.0, 0.625, 1.0, 1.0]
+            };
+            for moving in [false, true] {
+                let offset = if moving {
+                    dvec3(0.25, 0.0, 0.0)
+                } else {
+                    DVec3::ZERO
+                };
+                let boxes = collect_block_aabbs_with(&Aabb::block(0, 0, 0), None, |x, y, z| {
+                    if (x, y, z) == (0, 0, 0) {
+                        if moving {
+                            (piston, Some((sign, offset)))
+                        } else {
+                            (sign, None)
+                        }
+                    } else {
+                        (air, None)
+                    }
+                });
+                assert_eq!(boxes.len(), 1, "{facing} moving={moving}");
+                let expected = Aabb::from_local(bar, offset);
+                assert_eq!(boxes[0].min, expected.min);
+                assert_eq!(boxes[0].max, expected.max);
+                let board = Aabb::from_local([0.45, 0.1, 0.45, 0.55, 0.6, 0.55], offset);
+                assert!(!boxes[0].intersects(&board), "board must not collide");
+                let falling = Aabb::from_local([0.45, 1.25, 0.45, 0.55, 1.5, 0.55], offset);
+                let (resolved, grounded) =
+                    collide_along_axes(&boxes, falling, Velocity::new(0.0, -0.5, 0.0));
+                assert_eq!(resolved.y, -0.25);
+                assert!(grounded);
+            }
+        }
+    }
+
+    #[test]
+    fn collector_keeps_undefined_noncollidable_blocks_empty_including_moving_pistons() {
+        crate::world::block::init("26.2");
+        let air = crate::world::block::find_state("air", &[]);
+        let piston = crate::world::block::find_state("moving_piston", &[]);
+        for id in [
+            "air",
+            "torch",
+            "oak_sign",
+            "oak_wall_sign",
+            "oak_hanging_sign",
+            "stone",
+            "iron_chain",
+        ] {
+            let state = crate::world::block::find_state(id, &[]);
+            for moving in [false, true] {
+                let offset = if moving {
+                    dvec3(0.25, 0.0, 0.0)
+                } else {
+                    DVec3::ZERO
+                };
+                let boxes = collect_block_aabbs_with(&Aabb::block(0, 0, 0), None, |x, y, z| {
+                    if (x, y, z) == (0, 0, 0) {
+                        if moving {
+                            (piston, Some((state, offset)))
+                        } else {
+                            (state, None)
+                        }
+                    } else {
+                        (air, None)
+                    }
+                });
+                if matches!(id, "stone" | "iron_chain") {
+                    assert_eq!(boxes.len(), 1, "{id} moving={moving}");
+                    let local = block_shape::partial_shape(state)
+                        .map(|b| b[0])
+                        .unwrap_or([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+                    let expected = Aabb::from_local(local, offset);
+                    assert_eq!(boxes[0].min, expected.min);
+                    assert_eq!(boxes[0].max, expected.max);
+                } else {
+                    assert!(boxes.is_empty(), "{id} moving={moving}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tall_shapes_in_cell_below_region_collide_at_positive_and_negative_heights() {
+        crate::world::block::init("26.2");
+        let air = crate::world::block::find_state("air", &[]);
+        for (id, props, min_x) in [
+            (
+                "oak_fence",
+                &[
+                    ("north", "true"),
+                    ("east", "false"),
+                    ("south", "false"),
+                    ("west", "false"),
+                ][..],
+                0.375,
+            ),
+            (
+                "cobblestone_wall",
+                &[
+                    ("up", "false"),
+                    ("north", "low"),
+                    ("east", "none"),
+                    ("south", "none"),
+                    ("west", "none"),
+                ][..],
+                0.3125,
+            ),
+            (
+                "oak_fence_gate",
+                &[("facing", "east"), ("open", "false")][..],
+                0.375,
+            ),
+        ] {
+            let state = crate::world::block::find_state(id, props);
+            for by in [0, -1, -2] {
+                let origin = dvec3(-2.0, by as f64, -3.0);
+                let collect = |region: &Aabb| {
+                    collect_block_aabbs_with(region, None, |x, y, z| {
+                        (
+                            if (x, y, z) == (-2, by, -3) {
+                                state
+                            } else {
+                                air
+                            },
+                            None,
+                        )
+                    })
+                };
+                // North connection only: this region does not touch the central post.
+                let overlap = Aabb::from_local([0.4, 1.25, 0.05, 0.6, 1.4, 0.2], origin);
+                assert!(
+                    collect(&overlap).iter().any(|b| b.intersects(&overlap)),
+                    "{id} y={by}"
+                );
+
+                let player = overlap.offset(dvec3(-0.8, 0.0, 0.0));
+                let velocity = Velocity::new(1.0, 0.0, 0.0);
+                let (resolved, _) =
+                    collide_along_axes(&collect(&player.expand(*velocity)), player, velocity);
+                assert!((resolved.x - (min_x + 0.2)).abs() < 1.0e-9, "{id} y={by}");
+
+                let falling = overlap.offset(dvec3(0.0, 0.5, 0.0));
+                let velocity = Velocity::new(0.0, -0.5, 0.0);
+                let (resolved, grounded) =
+                    collide_along_axes(&collect(&falling.expand(*velocity)), falling, velocity);
+                assert_eq!(resolved.y, -0.25, "{id} y={by}");
+                assert!(grounded, "{id} y={by}");
+
+                let above = overlap.offset(dvec3(0.0, 0.25, 0.0));
+                assert!(
+                    collect(&above).iter().all(|b| !b.intersects(&above)),
+                    "{id} y={by}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn collision_distance_below_vanilla_epsilon_is_zeroed() {
         let player = Aabb::from_center(dvec3(0.5, 0.0, 0.5), 0.3, 0.9);
         let block = Aabb::block(1, 0, 0);
@@ -392,6 +556,7 @@ mod tests {
 
     #[test]
     fn entity_aabb_stops_player_motion() {
+        crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let player = Aabb::from_center(dvec3(0.5, 0.0, 0.5), 0.3, 0.9);
         let entity = Aabb::new(dvec3(1.0, 0.0, 0.0), dvec3(1.6, 1.8, 1.0));
@@ -409,6 +574,7 @@ mod tests {
 
     #[test]
     fn world_border_stops_player_at_boundary() {
+        crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let player = Aabb::from_center(dvec3(4.5, 0.0, 0.0), 0.3, 0.9);
         let (resolved, _) = resolve_collision_with_context(
@@ -425,6 +591,7 @@ mod tests {
 
     #[test]
     fn border_does_not_trap_entity_already_outside() {
+        crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let outside = Aabb::from_center(dvec3(5.5, 0.0, 0.0), 0.3, 0.9);
         let (resolved, _) = resolve_collision_with_context(

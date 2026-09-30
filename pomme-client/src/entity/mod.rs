@@ -880,6 +880,7 @@ pub struct ItemEntity {
 
 struct PickupAnimation {
     item_name: String,
+    stack: Option<azalea_inventory::ItemStackData>,
     item_id: u32,
     damage: i32,
     count: i32,
@@ -892,6 +893,7 @@ struct PickupAnimation {
 
 pub struct PickupRenderInfo {
     pub item_name: String,
+    pub stack: Option<azalea_inventory::ItemStackData>,
     pub item_id: u32,
     pub damage: i32,
     pub count: i32,
@@ -1022,6 +1024,7 @@ impl ItemEntityStore {
         let start_pos = entity.position;
         let anim = PickupAnimation {
             item_name: entity.item_name.clone(),
+            stack: entity.stack.clone(),
             item_id: entity.item_id,
             damage: entity.damage,
             count: entity.count,
@@ -1082,6 +1085,7 @@ impl ItemEntityStore {
                 let pos = p.start_pos.lerp(p.target_pos, t as f64);
                 PickupRenderInfo {
                     item_name: p.item_name.clone(),
+                    stack: p.stack.clone(),
                     item_id: p.item_id,
                     damage: p.damage,
                     count: p.count,
@@ -1237,7 +1241,7 @@ pub struct VehicleState {
     /// None until a real spawn transform arrives; SetPassengers may create
     /// placeholders.
     pub look_dir: Option<LookDirection>,
-    /// ItemFrame metadata index 8; independent from spawn/entity yaw.
+    /// ItemFrame spawn data / metadata index 8; independent from entity yaw.
     pub item_frame_direction: Option<azalea_core::direction::Direction>,
     /// Full metadata index 9 stack, retained for component-backed item render.
     pub item_frame_item: azalea_inventory::ItemStack,
@@ -1661,6 +1665,13 @@ impl EntityStore {
                 Some(EntityKind::ItemFrame | EntityKind::GlowItemFrame)
             )
         {
+            // The first direction initializes an already-centered spawn. Later
+            // updates recover the attachment center from the old face normal.
+            if let Some(old) = vehicle.item_frame_direction {
+                vehicle.position += (Position::from(old.normal_vec3())
+                    - Position::from(direction.normal_vec3()))
+                    * 0.46875;
+            }
             vehicle.item_frame_direction = Some(direction);
         }
     }

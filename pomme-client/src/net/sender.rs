@@ -33,6 +33,7 @@ pub enum ChatMark {
 
 pub struct PacketSender {
     tx: mpsc::UnboundedSender<Outbound>,
+    pub recorder: std::sync::Arc<crate::movement_record::Recorder>,
 }
 
 fn encode_sign_update(
@@ -90,7 +91,14 @@ fn encode_place_recipe(
 
 impl PacketSender {
     pub fn new(tx: mpsc::UnboundedSender<Outbound>) -> Self {
-        Self { tx }
+        Self::with_recorder(tx, Default::default())
+    }
+
+    pub fn with_recorder(
+        tx: mpsc::UnboundedSender<Outbound>,
+        recorder: std::sync::Arc<crate::movement_record::Recorder>,
+    ) -> Self {
+        Self { tx, recorder }
     }
 
     pub fn send(&self, packet: ServerboundGamePacket) {
@@ -114,6 +122,24 @@ impl PacketSender {
                 secondary,
             },
         ));
+    }
+
+    /// EditBook has the same bounded layout in native 26.2 and Azalea.
+    pub fn edit_book(&self, slot: u32, pages: Vec<String>, title: Option<String>) -> bool {
+        if !matches!(slot, 0..=8 | 40)
+            || pages.len() > 100
+            || pages.iter().any(|page| page.encode_utf16().count() > 1024)
+            || title
+                .as_ref()
+                .is_some_and(|title| title.encode_utf16().count() > 32)
+        {
+            tracing::warn!("Rejected outbound book exceeding protocol limits");
+            return false;
+        }
+        self.send(ServerboundGamePacket::EditBook(
+            azalea_protocol::packets::game::s_edit_book::ServerboundEditBook { slot, pages, title },
+        ));
+        true
     }
 
     /// Sends the native recipe-book type and its open/filter settings.
@@ -207,8 +233,25 @@ impl PacketSender {
     }
 
     fn queue(&self, out: Outbound) {
-        if let Err(e) = self.tx.send(out) {
-            tracing::error!("Failed to queue outbound packet: {e}");
+        let observation = if self.recorder.active() {
+            match &out {
+                Outbound::Packet(p) => crate::movement_record::outbound(p),
+                Outbound::Raw(frame) => crate::movement_record::outbound_frame(frame),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        self.recorder
+            .record("outbound", "queue_attempt", || observation.clone());
+        match self.tx.send(out) {
+            // Sampled after admission; another thread may already have dequeued it.
+            Ok(()) => self.recorder.record("outbound", "queued", || observation),
+            Err(e) => {
+                self.recorder
+                    .record("outbound", "queue_failed", || observation);
+                tracing::error!("Failed to queue outbound packet: {e}");
+            }
         }
     }
 }
@@ -219,6 +262,52 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{Outbound, PacketSender};
+
+    #[test]
+    fn edit_book_validates_before_queueing_and_keeps_typed_wire_layout() {
+        use std::io::Cursor;
+
+        use azalea_buf::AzBuf;
+        use azalea_protocol::packets::game::s_edit_book::ServerboundEditBook;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        for (slot, pages, title) in [
+            (9, vec![], None),
+            (41, vec![], None),
+            (0, vec![String::new(); 101], None),
+            (0, vec!["😀".repeat(513)], None),
+            (40, vec![], Some("😀".repeat(17))),
+        ] {
+            assert!(!sender.edit_book(slot, pages, title));
+            assert!(rx.try_recv().is_err());
+        }
+        for slot in [0, 8, 40] {
+            assert!(sender.edit_book(slot, vec!["page".into()], Some("Title".into())));
+            let Outbound::Packet(packet) = rx.try_recv().unwrap() else {
+                panic!("typed book packet");
+            };
+            let ServerboundGamePacket::EditBook(packet) = *packet else {
+                panic!("EditBook");
+            };
+            let mut body = Vec::new();
+            packet.azalea_write(&mut body).unwrap();
+            assert_eq!(
+                body,
+                [
+                    vec![slot as u8, 1, 4],
+                    b"page".to_vec(),
+                    vec![1, 5],
+                    b"Title".to_vec()
+                ]
+                .concat()
+            );
+            let decoded =
+                ServerboundEditBook::azalea_read(&mut Cursor::new(body.as_slice())).unwrap();
+            assert_eq!(decoded.slot, slot);
+            assert_eq!(decoded.pages, ["page"]);
+            assert_eq!(decoded.title.as_deref(), Some("Title"));
+        }
+    }
 
     #[test]
     fn sign_update_encodes_position_face_and_four_strings_in_native_order() {

@@ -738,6 +738,7 @@ fn draw_tabs(
             item_name: meta.icon.into(),
             tint: WHITE,
             stack_dye_rgb: None,
+            player_head_profile_source: None,
         });
     }
 }

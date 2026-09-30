@@ -19,6 +19,7 @@ mod item_activation;
 mod lang;
 mod logging;
 mod mob_effect;
+mod movement_record;
 mod net;
 mod particle;
 mod physics;

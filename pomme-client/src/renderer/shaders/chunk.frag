@@ -16,9 +16,10 @@ layout(location = 6) flat in uint v_sprite;
 layout(location = 0) out vec4 out_color;
 
 void main() {
+    if (terrain_edit_masked(v_visibility)) discard;
     vec4 color = sample_atlas_sprite_rgss(atlas_texture, v_sprite_uv, v_sprite);
     if (color.a < 0.5) discard;
     vec3 shaded =
-        shade_chunk_surface(color.rgb, v_tint, v_light, v_visibility, v_fog_color, v_fog);
+        shade_chunk_surface(color.rgb, v_tint, v_light, abs(v_visibility), v_fog_color, v_fog);
     out_color = vec4(shaded, color.a);
 }

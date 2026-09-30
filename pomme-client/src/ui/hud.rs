@@ -704,6 +704,8 @@ pub fn build_hud(
                     w: item_size,
                     h: item_size,
                     item_name: item_resource_name(data.kind),
+                    player_head_profile_source:
+                        crate::world::block_entity::player_head_profile_source_from_item(item),
                     tint: WHITE,
                     stack_dye_rgb: None,
                 });

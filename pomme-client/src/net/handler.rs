@@ -433,7 +433,7 @@ pub async fn handle_game_packet(
             });
         }
         ClientboundGamePacket::OpenBook(p) => {
-            let _ = event_tx.try_send(NetworkEvent::OpenBook { hand: p.hand });
+            event_tx.try_send(NetworkEvent::OpenBook { hand: p.hand })?;
         }
         ClientboundGamePacket::ContainerClose(_) => {
             let _ = event_tx.try_send(NetworkEvent::ContainerClosed);
@@ -676,6 +676,9 @@ pub async fn handle_game_packet(
                 let _ = event_tx.try_send(NetworkEvent::RecipeToastAdd { entries });
             }
             let _ = event_tx.try_send(NetworkEvent::RecipeBookAdd(p.clone()));
+        }
+        ClientboundGamePacket::PlaceGhostRecipe(p) => {
+            let _ = event_tx.try_send(NetworkEvent::PlaceGhostRecipe(p.clone()));
         }
         ClientboundGamePacket::RecipeBookRemove(p) => {
             let _ = event_tx.try_send(NetworkEvent::RecipeBookRemove(p.recipes.clone()));
@@ -922,11 +925,36 @@ pub async fn handle_game_packet(
             let y_rot_deg = (p.y_rot as f32) * 360.0 / 256.0;
             let x_rot_deg = (p.x_rot as f32) * 360.0 / 256.0;
             let head_y_rot_deg = (p.y_head_rot as f32) * 360.0 / 256.0;
+            let item_frame_direction = matches!(
+                p.entity_type,
+                EntityKind::ItemFrame | EntityKind::GlowItemFrame
+            )
+            .then(|| {
+                use azalea_core::direction::Direction as D;
+                match p.data {
+                    0 => D::Down,
+                    1 => D::Up,
+                    2 => D::North,
+                    3 => D::South,
+                    4 => D::West,
+                    5 => D::East,
+                    _ => D::South,
+                }
+            });
+            let mut position: Position = p.position.into();
+            if let Some(direction) = item_frame_direction {
+                // ItemFrame AddEntity sends the attachment BlockPos, not its center.
+                position += glam::DVec3::splat(0.5)
+                    - glam::DVec3::from(Position::from(direction.normal_vec3())) * 0.46875;
+            }
+            // Keep the center and facing in one event, including when metadata
+            // omits the default South direction.
             let _ = event_tx.try_send(NetworkEvent::EntitySpawned {
                 id: p.id.0,
                 uuid: p.uuid,
                 entity_type: p.entity_type,
-                position: p.position.into(),
+                position,
+                item_frame_direction,
                 velocity: lp_to_dvec3(&p.movement),
                 y_rot_deg,
                 x_rot_deg,

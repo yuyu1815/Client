@@ -15,6 +15,15 @@ const TARGET_SLOT_CAPACITY: u32 = 256;
 const MIN_ATLAS_PX: u32 = 512;
 const MAX_ATLAS_PX: u32 = 4096;
 
+/// Keep the complete identity (not a lossy hash) in the existing string-keyed
+/// allocator. Revision rebakes a pending fallback when its sheet arrives.
+pub(crate) fn player_head_slot_key(
+    source: Option<&crate::world::block_entity::PlayerHeadProfileSource>,
+    revision: u64,
+) -> String {
+    format!("player_head#{revision}:{source:?}")
+}
+
 pub fn is_animated_item(item_name: &str) -> bool {
     matches!(item_name, "compass" | "recovery_compass" | "clock")
 }
