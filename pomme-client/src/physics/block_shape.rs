@@ -3,7 +3,7 @@
 //! `StairBlock`, etc.). Boxes are block-local (0..1); the caller offsets them
 //! to the block position.
 //!
-//! TODO: chests and many smaller shapes still fall back to a full cube.
+//! TODO: many smaller shapes still fall back to a full cube.
 //! Fence gates are represented from their block state; neighbor-derived
 //! connections and entity-context shapes still need runtime context.
 //!
@@ -74,6 +74,11 @@ pub(crate) fn compute_shape(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> 
     }
 
     match id {
+        "chest" | "trapped_chest" | "copper_chest" => Some(chest_shape(props)),
+        _ if id.ends_with("_copper_chest") => Some(chest_shape(props)),
+        "ender_chest" => Some(vec![[0.0625, 0.0, 0.0625, 0.9375, 0.875, 0.9375]]),
+        "soul_sand" => Some(vec![[0.0, 0.0, 0.0, 1.0, 0.875, 1.0]]),
+        "honey_block" => Some(vec![[0.0625, 0.0, 0.0625, 0.9375, 0.9375, 0.9375]]),
         _ if id.ends_with("_wall_hanging_sign") => Some(wall_hanging_sign_shape(props)),
         _ if id.ends_with("_sign") => Some(Vec::new()),
         "hopper" => Some(hopper_shape(props.get("facing").unwrap_or("down"))),
@@ -127,6 +132,8 @@ pub(crate) fn compute_shape(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> 
 /// the two agree, so `compute_shape`'s result doubles as the outline.
 pub(crate) fn compute_outline(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> {
     match id {
+        // These override collision only, inheriting BlockBehaviour.getShape.
+        "soul_sand" | "honey_block" => Some(FULL_CUBE_SHAPE.to_vec()),
         // Most specific suffix first: all four families also end in _sign.
         _ if id.ends_with("_wall_hanging_sign") => {
             let facing = props.get("facing").unwrap_or("north");
@@ -154,6 +161,20 @@ pub(crate) fn compute_outline(id: &str, props: &PropMap) -> Option<Vec<LocalBox>
         "water" | "lava" | "bubble_column" => Some(Vec::new()),
         _ => None,
     }
+}
+
+fn chest_shape(props: &PropMap) -> Vec<LocalBox> {
+    // ChestBlock.getShape/getConnectedDirection; trapped and copper inherit it.
+    let facing = props.get("facing").unwrap_or("north");
+    let connected = match props.get("type") {
+        Some("left") => cw(facing),
+        Some("right") => ccw(facing),
+        _ => return vec![[0.0625, 0.0, 0.0625, 0.9375, 0.875, 0.9375]],
+    };
+    vec![rotate_horizontal_box(
+        [0.0625, 0.0, 0.0, 0.9375, 0.875, 0.9375],
+        connected,
+    )]
 }
 
 fn hopper_shape(facing: &str) -> Vec<LocalBox> {
@@ -474,6 +495,260 @@ mod tests {
         "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "bamboo",
         "crimson", "warped", "pale_oak",
     ];
+
+    #[test]
+    fn four_collision_families_match_registry_oracle_for_every_state() {
+        crate::world::block::init("26.2");
+        let oracle: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../third_party/SteelMC/steel-registry/build_assets/blocks.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        // Registry state order: facing north/south/west/east, type
+        // single/left/right, waterlogged true/false (last varies fastest).
+        for id in [
+            "chest",
+            "trapped_chest",
+            "copper_chest",
+            "exposed_copper_chest",
+            "weathered_copper_chest",
+            "oxidized_copper_chest",
+            "waxed_copper_chest",
+            "waxed_exposed_copper_chest",
+            "waxed_weathered_copper_chest",
+            "waxed_oxidized_copper_chest",
+            "ender_chest",
+            "soul_sand",
+            "honey_block",
+        ] {
+            let block = oracle["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|b| b["name"] == id)
+                .unwrap();
+            let expected = |kind: &str, offset: usize| -> Vec<LocalBox> {
+                let shape = &block[kind];
+                assert_eq!(shape["usesOffset"], false);
+                let indices = shape["overwrites"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["offset"] == offset)
+                    .map_or(&shape["default"], |entry| &entry["shapes"]);
+                indices
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|index| {
+                        let b = &oracle["shapes"][index.as_u64().unwrap() as usize];
+                        std::array::from_fn(|axis| {
+                            b[if axis < 3 { "min" } else { "max" }][axis % 3]
+                                .as_f64()
+                                .unwrap()
+                        })
+                    })
+                    .collect()
+            };
+            let directions: &[&str] = if matches!(id, "soul_sand" | "honey_block") {
+                &["north"]
+            } else {
+                &["north", "south", "west", "east"]
+            };
+            let types: &[&str] = if matches!(id, "ender_chest" | "soul_sand" | "honey_block") {
+                &["single"]
+            } else {
+                &["single", "left", "right"]
+            };
+            let water: &[&str] = if matches!(id, "soul_sand" | "honey_block") {
+                &["false"]
+            } else {
+                &["true", "false"]
+            };
+            for (direction, &facing) in directions.iter().enumerate() {
+                for (type_index, &chest_type) in types.iter().enumerate() {
+                    for (water_index, &waterlogged) in water.iter().enumerate() {
+                        let mut props = Vec::new();
+                        if directions.len() > 1 {
+                            props.extend([("facing", facing), ("waterlogged", waterlogged)]);
+                        }
+                        if types.len() > 1 {
+                            props.push(("type", chest_type));
+                        }
+                        let offset =
+                            (direction * types.len() + type_index) * water.len() + water_index;
+                        let state = crate::world::block::find_state(id, &props);
+                        assert!(crate::world::block::has_collision(state), "{id}");
+                        assert_eq!(
+                            partial_shape(state).unwrap(),
+                            expected("collision_shapes", offset),
+                            "{id} {props:?} collision offset={offset}"
+                        );
+                        assert_eq!(
+                            outline_shape(state),
+                            expected("outline_shapes", offset),
+                            "{id} {props:?} outline offset={offset}"
+                        );
+                        if matches!(id, "soul_sand" | "honey_block") {
+                            assert_eq!(
+                                super::compute_outline(
+                                    id,
+                                    crate::world::block::block_properties(state)
+                                ),
+                                Some(super::FULL_CUBE_SHAPE.to_vec())
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn double_chest_halves_meet_at_connected_face_without_gap() {
+        use glam::{DVec3, dvec3};
+
+        use crate::physics::aabb::Aabb;
+
+        crate::world::block::init("26.2");
+        // ChestType.LEFT connects clockwise; RIGHT connects counterclockwise.
+        for (facing, offset, axis) in [
+            ("north", dvec3(1.0, 0.0, 0.0), 0),
+            ("east", dvec3(0.0, 0.0, 1.0), 2),
+            ("south", dvec3(-1.0, 0.0, 0.0), 0),
+            ("west", dvec3(0.0, 0.0, -1.0), 2),
+        ] {
+            let shape = |chest_type| {
+                partial_shape(crate::world::block::find_state(
+                    "chest",
+                    &[
+                        ("facing", facing),
+                        ("type", chest_type),
+                        ("waterlogged", "false"),
+                    ],
+                ))
+                .unwrap()[0]
+            };
+            let left = Aabb::from_local(shape("left"), DVec3::ZERO);
+            let right = Aabb::from_local(shape("right"), offset);
+            if offset[axis] > 0.0 {
+                assert_eq!(left.max[axis], right.min[axis], "{facing}");
+                assert_eq!(left.max[axis], 1.0);
+            } else {
+                assert_eq!(left.min[axis], right.max[axis], "{facing}");
+                assert_eq!(left.min[axis], 0.0);
+            }
+            assert_eq!(left.max.y, 0.875);
+            assert_eq!(right.max.y, 0.875);
+        }
+    }
+
+    #[test]
+    fn partial_block_tops_stop_descending_feet_and_keep_exact_outlines() {
+        use azalea_core::position::ChunkPos;
+        use glam::{DVec3, dvec3};
+
+        use crate::physics::aabb::{Aabb, clip_boxes};
+        use crate::world::chunk::ChunkStore;
+
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        chunks.partial_storage.set(
+            &ChunkPos::new(0, 0),
+            Some(azalea_world::chunk::Chunk::default()),
+            &mut chunks.chunk_storage,
+        );
+        for (id, top, outline_top) in [
+            ("chest", 0.875, 0.875),
+            ("ender_chest", 0.875, 0.875),
+            ("soul_sand", 0.875, 1.0),
+            ("honey_block", 0.9375, 1.0),
+        ] {
+            let state = crate::world::block::default_state_of(id).unwrap();
+            chunks.set_block_state(2, 64, 2, state);
+            let origin = dvec3(2.0, 64.0, 2.0);
+            let collision = partial_shape(state).unwrap();
+            let boxes =
+                crate::physics::collision::collect_block_aabbs(&chunks, &Aabb::block(2, 64, 2));
+            assert_eq!(boxes.len(), 1, "{id}");
+            assert_eq!(boxes[0].min, Aabb::from_local(collision[0], origin).min);
+            assert_eq!(boxes[0].max.y, 64.0 + top);
+            let falling = Aabb::from_center(origin + dvec3(0.5, 1.25, 0.5), 0.3, 0.9);
+            // Shift-descending must not turn these static shapes into scaffolding.
+            let (movement, grounded) = crate::physics::collision::resolve_collision_for_player(
+                &chunks,
+                falling,
+                dvec3(0.0, -0.5, 0.0).into(),
+                0.0,
+                false,
+                &[],
+                None,
+                Some((true, false, 0.0)),
+            );
+            assert_eq!(movement, dvec3(0.0, top - 1.25, 0.0), "{id}");
+            assert!(grounded, "{id}");
+            let standing = falling.offset(movement);
+            assert_eq!(standing.min.y, 64.0 + top);
+            assert_eq!(boxes[0].clip_y_collide(&standing, -0.08), 0.0, "{id}");
+            let slightly_inside = standing.offset(dvec3(0.0, -5.0e-8, 0.0));
+            assert_eq!(
+                boxes[0].clip_y_collide(&slightly_inside, -0.08),
+                boxes[0].max.y - slightly_inside.min.y,
+                "{id} microscopic foot penetration"
+            );
+            let approaching = Aabb::from_center(origin + dvec3(-0.5, 0.0, 0.5), 0.3, 0.9);
+            assert_eq!(
+                boxes[0].clip_x_collide(&approaching, 1.0),
+                boxes[0].min.x - approaching.max.x,
+                "{id} side cannot pass through"
+            );
+            let from = dvec3(0.5, 2.0, 0.5);
+            let to = dvec3(0.5, -1.0, 0.5);
+            for (shape, height) in [(collision, top), (outline_shape(state), outline_top)] {
+                let (t, _) = clip_boxes(shape, DVec3::ZERO, from, to).unwrap();
+                assert!(
+                    ((from + (to - from) * t).y - height).abs() < 1.0e-12,
+                    "{id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shape_defaults_and_noncollidable_fallbacks_are_preserved() {
+        crate::world::block::init("26.2");
+        for id in ["chest", "ender_chest"] {
+            let state = crate::world::block::default_state_of(id).unwrap();
+            assert_eq!(
+                crate::world::block::block_properties(state).get("facing"),
+                Some("north")
+            );
+            assert_eq!(
+                crate::world::block::block_properties(state).get("waterlogged"),
+                Some("false")
+            );
+            assert_eq!(
+                partial_shape(state),
+                Some(&[[0.0625, 0.0, 0.0625, 0.9375, 0.875, 0.9375]][..])
+            );
+        }
+        for id in ["air", "torch", "oak_sign"] {
+            let state = crate::world::block::default_state_of(id).unwrap();
+            assert!(!crate::world::block::has_collision(state));
+            assert_eq!(partial_shape(state), Some(&[][..]), "{id}");
+        }
+        let stone = crate::world::block::default_state_of("stone").unwrap();
+        assert_eq!(partial_shape(stone), None);
+        assert_eq!(outline_shape(stone), super::FULL_CUBE_SHAPE);
+        // Missing properties keep the north/single defaults, not a double half.
+        assert_eq!(
+            super::compute_shape("chest", crate::world::block::block_properties(stone)),
+            Some(vec![[0.0625, 0.0, 0.0625, 0.9375, 0.875, 0.9375]])
+        );
+    }
 
     #[test]
     fn sign_shapes_match_vanilla_for_all_directions_and_rotations() {

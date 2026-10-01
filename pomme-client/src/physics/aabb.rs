@@ -6,6 +6,9 @@ use super::block_shape::LocalBox;
 /// This is intentionally not `Mth.EPSILON`, which is the float `1.0E-5f`.
 const EPSILON: f64 = 1.0e-7;
 
+/// `VoxelShape.collideX` tolerance; kept separate from ray clipping.
+const COLLISION_EPSILON: f64 = 1.0e-7;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Aabb {
     pub min: DVec3,
@@ -113,28 +116,35 @@ impl Aabb {
     }
 
     fn clip_axis(&self, other: &Aabb, mut delta: f64, axis: Axis) -> f64 {
+        if delta.abs() < COLLISION_EPSILON {
+            return 0.0;
+        }
         let (c1, c2) = axis.cross_axes();
-
-        if component(other.max, c1) <= component(self.min, c1)
-            || component(other.min, c1) >= component(self.max, c1)
-        {
-            return delta;
-        }
-        if component(other.max, c2) <= component(self.min, c2)
-            || component(other.min, c2) >= component(self.max, c2)
-        {
-            return delta;
-        }
-
-        if delta > 0.0 && component(other.max, axis) <= component(self.min, axis) {
-            let clip = component(self.min, axis) - component(other.max, axis);
-            if clip < delta {
-                delta = clip;
+        for cross in [c1, c2] {
+            // Vanilla findIndex uses half-open cells: max - epsilon exactly
+            // on the obstacle's min still includes that cell, but min +
+            // epsilon exactly on its max excludes it. Do not symmetrize.
+            if component(other.max, cross) - COLLISION_EPSILON < component(self.min, cross)
+                || component(other.min, cross) + COLLISION_EPSILON >= component(self.max, cross)
+            {
+                return delta;
             }
-        } else if delta < 0.0 && component(other.min, axis) >= component(self.max, axis) {
+        }
+
+        // collideX scans from aMax + 1 / aMin - 1, then checks the signed
+        // distance. Both checks matter at exact epsilon and large coordinates.
+        if delta > 0.0 && component(other.max, axis) - COLLISION_EPSILON < component(self.min, axis)
+        {
+            let clip = component(self.min, axis) - component(other.max, axis);
+            if clip >= -COLLISION_EPSILON {
+                delta = delta.min(clip);
+            }
+        } else if delta < 0.0
+            && component(other.min, axis) + COLLISION_EPSILON >= component(self.max, axis)
+        {
             let clip = component(self.max, axis) - component(other.min, axis);
-            if clip > delta {
-                delta = clip;
+            if clip <= COLLISION_EPSILON {
+                delta = delta.max(clip);
             }
         }
 
@@ -243,6 +253,199 @@ mod tests {
     use super::*;
 
     const BOTTOM_SLAB: LocalBox = [0.0, 0.0, 0.0, 1.0, 0.5, 1.0];
+
+    fn collide(block: &Aabb, moving: &Aabb, distance: f64, axis: Axis) -> f64 {
+        match axis {
+            Axis::X => block.clip_x_collide(moving, distance),
+            Axis::Y => block.clip_y_collide(moving, distance),
+            Axis::Z => block.clip_z_collide(moving, distance),
+        }
+    }
+
+    // Literal single-cell VoxelShape.collideX oracle, including findIndex's
+    // half-open boundaries. Independent of clip_axis's distance predicates.
+    fn voxel_collide(block: &Aabb, moving: &Aabb, distance: f64, axis: Axis) -> f64 {
+        if distance.abs() < COLLISION_EPSILON {
+            return 0.0;
+        }
+        let index = |axis, coord| {
+            [component(block.min, axis), component(block.max, axis)]
+                .into_iter()
+                .take_while(|&bound| bound <= coord)
+                .count() as i32
+                - 1
+        };
+        let (b, c) = axis.cross_axes();
+        for cross in [b, c] {
+            let min = index(cross, component(moving.min, cross) + COLLISION_EPSILON).max(0);
+            let max = (index(cross, component(moving.max, cross) - COLLISION_EPSILON) + 1).min(1);
+            if min >= max {
+                return distance;
+            }
+        }
+        if distance > 0.0 {
+            let start = index(axis, component(moving.max, axis) - COLLISION_EPSILON) + 1;
+            for cell in start..1 {
+                if cell == 0 {
+                    let gap = component(block.min, axis) - component(moving.max, axis);
+                    return if gap >= -COLLISION_EPSILON {
+                        distance.min(gap)
+                    } else {
+                        distance
+                    };
+                }
+            }
+        } else if distance < 0.0 {
+            let start = index(axis, component(moving.min, axis) + COLLISION_EPSILON) - 1;
+            for cell in (0..=start).rev() {
+                if cell == 0 {
+                    let gap = component(block.max, axis) - component(moving.min, axis);
+                    return if gap <= COLLISION_EPSILON {
+                        distance.max(gap)
+                    } else {
+                        distance
+                    };
+                }
+            }
+        }
+        distance
+    }
+
+    #[test]
+    fn collision_matches_voxel_oracle_for_both_signs_all_axes_and_large_coordinates() {
+        for axis in [Axis::X, Axis::Y, Axis::Z] {
+            for origin in [0.0, 1.0, -2.0, -30_000_000.0, 30_000_000.0] {
+                let offset = DVec3::splat(origin);
+                let block = Aabb::block(0, 0, 0).offset(offset);
+                for penetration in [
+                    -0.25,
+                    -COLLISION_EPSILON,
+                    0.0,
+                    5.0e-8,
+                    COLLISION_EPSILON,
+                    2.0e-7,
+                    0.25,
+                ] {
+                    for sign in [-1.0, 1.0] {
+                        let mut moving = block;
+                        let i = match axis {
+                            Axis::X => 0,
+                            Axis::Y => 1,
+                            Axis::Z => 2,
+                        };
+                        if sign > 0.0 {
+                            moving.max[i] = origin + penetration;
+                            moving.min[i] = moving.max[i] - 0.6;
+                        } else {
+                            moving.min[i] = origin + 1.0 - penetration;
+                            moving.max[i] = moving.min[i] + 0.6;
+                        }
+                        let actual = collide(&block, &moving, sign * 0.5, axis);
+                        assert_eq!(
+                            actual,
+                            voxel_collide(&block, &moving, sign * 0.5, axis),
+                            "{axis:?} origin={origin} penetration={penetration} sign={sign}"
+                        );
+                        if penetration == 0.25 {
+                            assert_eq!(
+                                actual,
+                                sign * 0.5,
+                                "do not teleport out of real penetration"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let wall = Aabb::block(1, 0, 0);
+        let moving = Aabb::new(DVec3::ZERO, dvec3(1.0 + 5.0e-8, 1.0, 1.0));
+        assert_eq!(wall.clip_x_collide(&moving, 0.1), 1.0 - moving.max.x);
+        assert!(wall.clip_x_collide(&moving, 0.1) < 0.0);
+    }
+
+    #[test]
+    fn collision_exact_epsilon_boundaries_follow_half_open_voxel_indices() {
+        for axis in [Axis::X, Axis::Y, Axis::Z] {
+            let i = match axis {
+                Axis::X => 0,
+                Axis::Y => 1,
+                Axis::Z => 2,
+            };
+            let block = Aabb::new(DVec3::splat(-1.0), DVec3::ZERO);
+            let mut moving = block;
+            moving.min[i] = -COLLISION_EPSILON;
+            moving.max[i] = 0.5;
+            assert_eq!(collide(&block, &moving, -0.1, axis), COLLISION_EPSILON);
+            let block = Aabb::block(0, 0, 0);
+            moving = block;
+            moving.min[i] = -0.5;
+            moving.max[i] = COLLISION_EPSILON;
+            assert_eq!(collide(&block, &moving, 0.1, axis), 0.1);
+            moving.max[i] = COLLISION_EPSILON.next_down();
+            assert_eq!(collide(&block, &moving, 0.1, axis), -moving.max[i]);
+            for cross in [axis.cross_axes().0, axis.cross_axes().1] {
+                let j = match cross {
+                    Axis::X => 0,
+                    Axis::Y => 1,
+                    Axis::Z => 2,
+                };
+                for overlap in [
+                    0.0,
+                    5.0e-8,
+                    COLLISION_EPSILON,
+                    COLLISION_EPSILON.next_up(),
+                    2.0e-7,
+                ] {
+                    for near_min in [true, false] {
+                        moving = block;
+                        moving.min[i] = -1.0;
+                        moving.max[i] = 0.0;
+                        if near_min {
+                            moving.min[j] = -1.0;
+                            moving.max[j] = overlap;
+                        } else {
+                            moving.min[j] = 1.0 - overlap;
+                            moving.max[j] = 2.0;
+                        }
+                        let actual = collide(&block, &moving, 0.1, axis);
+                        assert_eq!(
+                            actual,
+                            voxel_collide(&block, &moving, 0.1, axis),
+                            "{axis:?} cross={cross:?} overlap={overlap} near_min={near_min}"
+                        );
+                        if overlap < COLLISION_EPSILON {
+                            assert_eq!(actual, 0.1, "ignore microscopic cross-axis overlap");
+                        }
+                        if near_min && overlap == COLLISION_EPSILON {
+                            assert_eq!(actual, 0.0, "max-epsilon on min includes the cell");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn collision_zeroes_only_sub_epsilon_motion_and_preserves_full_floor() {
+        let block = Aabb::block(0, 0, 0);
+        let distant = block.offset(DVec3::splat(10.0));
+        for axis in [Axis::X, Axis::Y, Axis::Z] {
+            for distance in [0.0, -0.0, 5.0e-8, -5.0e-8] {
+                assert_eq!(
+                    collide(&block, &distant, distance, axis).to_bits(),
+                    0.0_f64.to_bits()
+                );
+            }
+            for distance in [COLLISION_EPSILON, -COLLISION_EPSILON, 0.1, -0.1] {
+                assert_eq!(collide(&block, &distant, distance, axis), distance);
+            }
+        }
+        let standing = Aabb::from_center(dvec3(0.5, 1.0, 0.5), 0.3, 0.9);
+        assert_eq!(block.clip_y_collide(&standing, -0.08), 0.0);
+        assert_eq!(block.clip_x_collide(&standing, 0.1), 0.1);
+        let falling = standing.offset(DVec3::Y * 0.25);
+        assert_eq!(block.clip_y_collide(&falling, -0.5), -0.25);
+    }
 
     #[test]
     fn clip_hits_the_top_of_a_slab() {
