@@ -3088,6 +3088,35 @@ pub fn update_game(
         game.item_entity_store.tick(&game.chunk_store);
         game.entity_store
             .tick_projectile_displays(&game.chunk_store);
+        // Campfire smoke is client `animateTick` ambience, separate from
+        // LevelParticles packets. Use the existing particle store so packet
+        // particles and local particles share lifetime/render handling.
+        let campfire_smoke: Vec<_> = game
+            .chunk_store
+            .block_entities
+            .keys()
+            .filter_map(|pos| {
+                let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+                let id = crate::world::block::block_id(state);
+                if !matches!(id, "campfire" | "soul_campfire") {
+                    return None;
+                }
+                let props = crate::world::block::block_properties(state);
+                let lit = props.get("lit") == Some("true");
+                let waterlogged = props.get("waterlogged") == Some("true");
+                let signal = props.get("signal_fire") == Some("true");
+                (crate::particle::campfire_smoke_enabled(lit, waterlogged)
+                    && fastrand::u32(..10) == 0)
+                    .then_some(glam::dvec3(
+                        pos.x as f64 + 0.5,
+                        pos.y as f64 + if signal { 2.0 } else { 0.8 },
+                        pos.z as f64 + 0.5,
+                    ))
+            })
+            .collect();
+        for pos in campfire_smoke {
+            game.particle_store.add_campfire_smoke(pos);
+        }
         let chunks = &game.chunk_store;
         let player = &game.player;
         let entities = &game.entity_store;

@@ -1184,7 +1184,18 @@ pub struct ParticleStore {
     dry_foliage_colormap: Arc<Colormap>,
 }
 
+/// `CampfireBlock.animateTick` only emits local smoke for dry, lit fires;
+/// block-entity particle packets remain on the server-particle path.
+pub(crate) fn campfire_smoke_enabled(lit: bool, waterlogged: bool) -> bool {
+    lit && !waterlogged
+}
+
 impl ParticleStore {
+    pub fn add_campfire_smoke(&mut self, pos: DVec3) {
+        self.pending
+            .push(Particle::smoke(pos, DVec3::ZERO, &self.generic_frames));
+    }
+
     pub fn new(
         uv_map: AtlasUVMap,
         grass_colormap: Arc<Colormap>,
@@ -1953,6 +1964,13 @@ mod tests {
         plan_explosion_particles, supports_explosion_particle,
     };
     use crate::world::chunk::ChunkStore;
+
+    #[test]
+    fn campfire_ambient_smoke_requires_lit_and_dry_state() {
+        assert!(super::campfire_smoke_enabled(true, false));
+        assert!(!super::campfire_smoke_enabled(false, false));
+        assert!(!super::campfire_smoke_enabled(true, true));
+    }
 
     #[test]
     fn block_particle_id_is_typed_and_unhandled_payload_kinds_stay_unknown() {
