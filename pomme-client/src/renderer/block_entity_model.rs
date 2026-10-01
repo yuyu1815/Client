@@ -17,8 +17,8 @@ pub fn bake_bell_model() -> BakedEntityModel {
             mirror: false,
         },
         ModelCube {
-            origin: Vec3::new(-2.0, 1.0, -2.0),
-            size: Vec3::splat(4.0),
+            origin: Vec3::new(-8.0, -12.0, -8.0),
+            size: Vec3::new(8.0, 2.0, 8.0),
             tex_offset: (0, 13),
             deformation: 0.0,
             mirror: false,
@@ -103,6 +103,208 @@ pub fn bake_banner_model(wall: bool) -> BakedEntityModel {
             generate_cube_vertices(cube, 64, 64, FACE_ALL, false, &mut vertices);
         }
         ranges.push((start, vertices.len() as u32 - start));
+    }
+    BakedEntityModel::new(parts, vertices, ranges).with_convention(ModelConvention::BlockYUp)
+}
+
+/// 26.2 DecoratedPotRenderer.createBaseLayer/createSidesLayer geometry.
+/// Body planes are intentionally one-sided like the vanilla ModelPart cubes.
+pub fn bake_decorated_pot_model() -> BakedEntityModel {
+    let mut parts = Vec::new();
+    let mut vertices = Vec::new();
+    let mut ranges = Vec::new();
+    let mut add = |name: &str,
+                   offset: Vec3,
+                   rotation: Vec3,
+                   cubes: &[ModelCube],
+                   faces: u8,
+                   size: (u32, u32)| {
+        let start = vertices.len() as u32;
+        for cube in cubes {
+            generate_cube_vertices(cube, size.0, size.1, faces, false, &mut vertices);
+        }
+        ranges.push((start, vertices.len() as u32 - start));
+        parts.push(EntityPart {
+            name: name.into(),
+            offset,
+            default_rotation: rotation,
+            cubes: Vec::new(),
+            parent: None,
+        });
+    };
+    let neck = [
+        ModelCube {
+            origin: Vec3::new(4.0, 17.0, 4.0),
+            size: Vec3::new(8.0, 3.0, 8.0),
+            tex_offset: (0, 0),
+            deformation: -0.1,
+            mirror: false,
+        },
+        ModelCube {
+            origin: Vec3::new(5.0, 20.0, 5.0),
+            size: Vec3::new(6.0, 1.0, 6.0),
+            tex_offset: (0, 5),
+            deformation: 0.2,
+            mirror: false,
+        },
+    ];
+    add(
+        "neck",
+        Vec3::new(0.0, 37.0, 16.0),
+        Vec3::new(std::f32::consts::PI, 0.0, 0.0),
+        &neck,
+        FACE_ALL,
+        (32, 32),
+    );
+    let slab = ModelCube {
+        origin: Vec3::ZERO,
+        size: Vec3::new(14.0, 0.0, 14.0),
+        tex_offset: (-14, 13),
+        deformation: 0.0,
+        mirror: false,
+    };
+    add(
+        "top",
+        Vec3::new(1.0, 16.0, 1.0),
+        Vec3::ZERO,
+        &[slab],
+        1 << 3,
+        (32, 32),
+    );
+    add(
+        "bottom",
+        Vec3::new(1.0, 0.0, 1.0),
+        Vec3::ZERO,
+        &[slab],
+        1 << 2,
+        (32, 32),
+    );
+    let side = ModelCube {
+        origin: Vec3::ZERO,
+        size: Vec3::new(14.0, 16.0, 0.0),
+        tex_offset: (1, 0),
+        deformation: 0.0,
+        mirror: false,
+    };
+    add(
+        "front",
+        Vec3::new(1.0, 16.0, 15.0),
+        Vec3::new(std::f32::consts::PI, 0.0, 0.0),
+        &[side],
+        1,
+        (16, 16),
+    );
+    add(
+        "back",
+        Vec3::new(15.0, 16.0, 1.0),
+        Vec3::new(0.0, 0.0, std::f32::consts::PI),
+        &[side],
+        1,
+        (16, 16),
+    );
+    add(
+        "left",
+        Vec3::new(1.0, 16.0, 1.0),
+        Vec3::new(0.0, -std::f32::consts::FRAC_PI_2, std::f32::consts::PI),
+        &[side],
+        1,
+        (16, 16),
+    );
+    add(
+        "right",
+        Vec3::new(15.0, 16.0, 15.0),
+        Vec3::new(0.0, std::f32::consts::FRAC_PI_2, std::f32::consts::PI),
+        &[side],
+        1,
+        (16, 16),
+    );
+    BakedEntityModel::new(parts, vertices, ranges).with_convention(ModelConvention::BlockYUp)
+}
+
+/// The 26.2 BookModel.createBodyLayer geometry and pivots (64x32 sheet).
+pub fn bake_enchanting_book_model() -> BakedEntityModel {
+    let definitions = [
+        (
+            "left_lid",
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(-6.0, -5.0, -0.005),
+            Vec3::new(6.0, 10.0, 0.005),
+            (0, 0),
+        ),
+        (
+            "right_lid",
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, -5.0, -0.005),
+            Vec3::new(6.0, 10.0, 0.005),
+            (16, 0),
+        ),
+        (
+            "seam",
+            Vec3::ZERO,
+            Vec3::new(-1.0, -5.0, 0.0),
+            Vec3::new(2.0, 10.0, 0.005),
+            (12, 0),
+        ),
+        (
+            "left_pages",
+            Vec3::ZERO,
+            Vec3::new(0.0, -4.0, -0.99),
+            Vec3::new(5.0, 8.0, 1.0),
+            (0, 10),
+        ),
+        (
+            "right_pages",
+            Vec3::ZERO,
+            Vec3::new(0.0, -4.0, -0.01),
+            Vec3::new(5.0, 8.0, 1.0),
+            (12, 10),
+        ),
+        (
+            "flip_page1",
+            Vec3::ZERO,
+            Vec3::new(0.0, -4.0, 0.0),
+            Vec3::new(5.0, 8.0, 0.005),
+            (24, 10),
+        ),
+        (
+            "flip_page2",
+            Vec3::ZERO,
+            Vec3::new(0.0, -4.0, 0.0),
+            Vec3::new(5.0, 8.0, 0.005),
+            (24, 10),
+        ),
+    ];
+    let mut parts = Vec::new();
+    let mut vertices = Vec::new();
+    let mut ranges = Vec::new();
+    for (name, offset, origin, size, tex_offset) in definitions {
+        let start = vertices.len() as u32;
+        generate_cube_vertices(
+            &ModelCube {
+                origin,
+                size,
+                tex_offset,
+                deformation: 0.0,
+                mirror: false,
+            },
+            64,
+            32,
+            FACE_ALL,
+            false,
+            &mut vertices,
+        );
+        ranges.push((start, vertices.len() as u32 - start));
+        parts.push(EntityPart {
+            name: name.into(),
+            offset,
+            default_rotation: if name == "seam" {
+                Vec3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0)
+            } else {
+                Vec3::ZERO
+            },
+            cubes: Vec::new(),
+            parent: None,
+        });
     }
     BakedEntityModel::new(parts, vertices, ranges).with_convention(ModelConvention::BlockYUp)
 }
@@ -524,11 +726,97 @@ mod conduit_tests {
     }
 
     #[test]
+    fn decorated_pot_has_all_vanilla_parts_with_nonempty_uv_baked_geometry() {
+        let model = bake_decorated_pot_model();
+        assert_eq!(model.convention, ModelConvention::BlockYUp);
+        assert_eq!(
+            model
+                .parts
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["neck", "top", "bottom", "front", "back", "left", "right"]
+        );
+        assert_eq!(
+            model
+                .part_ranges
+                .iter()
+                .map(|(_, count)| *count)
+                .collect::<Vec<_>>(),
+            [72, 6, 6, 6, 6, 6, 6]
+        );
+        let uv = crate::renderer::chunk::mesher::pack_uv;
+        assert_eq!(
+            model.vertices[84..90]
+                .iter()
+                .map(|v| v.tex_coords)
+                .collect::<Vec<_>>(),
+            [
+                uv(15.0 / 16.0, 0.0),
+                uv(1.0 / 16.0, 0.0),
+                uv(1.0 / 16.0, 1.0),
+                uv(15.0 / 16.0, 0.0),
+                uv(1.0 / 16.0, 1.0),
+                uv(15.0 / 16.0, 1.0)
+            ]
+        );
+        assert!(model.vertices.iter().any(|v| v.position != [0.0; 3]));
+    }
+
+    #[test]
+    fn enchanting_book_matches_the_seven_vanilla_book_parts_and_uv_sheet() {
+        let model = bake_enchanting_book_model();
+        assert_eq!(model.convention, ModelConvention::BlockYUp);
+        assert_eq!(
+            model
+                .parts
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "left_lid",
+                "right_lid",
+                "seam",
+                "left_pages",
+                "right_pages",
+                "flip_page1",
+                "flip_page2"
+            ]
+        );
+        assert_eq!(
+            model.part_ranges,
+            [
+                (0, 36),
+                (36, 36),
+                (72, 36),
+                (108, 36),
+                (144, 36),
+                (180, 36),
+                (216, 36)
+            ]
+        );
+        assert!(
+            model
+                .vertices
+                .iter()
+                .all(|v| (0..=65535).contains(&v.tex_coords[0])
+                    && (0..=65535).contains(&v.tex_coords[1]))
+        );
+        assert!(model.vertices.iter().any(|v| v.position != [0.0; 3]));
+    }
+
+    #[test]
     fn bell_body_uses_the_verified_32_by_32_entity_sheet() {
         let model = bake_bell_model();
         assert_eq!(model.vertices.len(), 72);
         assert_eq!(model.part_ranges, [(0, 72)]);
         assert_eq!(model.convention, ModelConvention::EntityYDown);
+        assert_eq!(model.parts[0].offset, Vec3::new(8.0, 12.0, 8.0));
+        assert_eq!(model.parts[0].cubes[0].origin, Vec3::new(-3.0, -6.0, -3.0));
+        assert_eq!(model.parts[0].cubes[0].size, Vec3::new(6.0, 7.0, 6.0));
+        assert_eq!(model.parts[0].cubes[1].origin, Vec3::new(-8.0, -12.0, -8.0));
+        assert_eq!(model.parts[0].cubes[1].size, Vec3::new(8.0, 2.0, 8.0));
+        assert_eq!(model.parts[0].cubes[1].tex_offset, (0, 13));
         assert!(model.vertices.iter().all(|v| {
             (0.0..=1.0).contains(&(v.tex_coords[0] as f32 / 65535.0))
                 && (0.0..=1.0).contains(&(v.tex_coords[1] as f32 / 65535.0))

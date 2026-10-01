@@ -40,7 +40,121 @@ pub struct StoredBlockEntity {
     pub sign_front: Option<[String; 4]>,
     pub sign_back: Option<[String; 4]>,
     pub banner_patterns: Vec<BannerPatternLayer>,
+    pub decorated_pot_sherds: [String; 4],
+    pub pot_wobble: Option<(u64, bool)>,
+    pub bell_swing: Option<BellSwing>,
+    pub book: Option<EnchantingBookState>,
     pub player_head_profile_source: Option<PlayerHeadProfileSource>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BellSwing {
+    pub ticks: u8,
+    pub direction: u8,
+    pub shaking: bool,
+}
+
+impl BellSwing {
+    pub fn trigger(&mut self, direction: u8) {
+        self.ticks = 0;
+        self.direction = direction;
+        self.shaking = true;
+    }
+
+    pub fn tick(&mut self) {
+        if self.shaking {
+            self.ticks += 1;
+        }
+        if self.ticks >= 50 {
+            self.shaking = false;
+            self.ticks = 0;
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct EnchantingBookState {
+    pub time: u32,
+    pub flip: f32,
+    pub o_flip: f32,
+    pub flip_target: f32,
+    pub flip_velocity: f32,
+    pub open: f32,
+    pub o_open: f32,
+    pub rotation: f32,
+    pub o_rotation: f32,
+    pub target_rotation: f32,
+    random: crate::util::JavaRandom,
+}
+
+impl Default for EnchantingBookState {
+    fn default() -> Self {
+        Self {
+            time: 0,
+            flip: 0.0,
+            o_flip: 0.0,
+            flip_target: 0.0,
+            flip_velocity: 0.0,
+            open: 0.0,
+            o_open: 0.0,
+            rotation: 0.0,
+            o_rotation: 0.0,
+            target_rotation: 0.0,
+            random: crate::util::JavaRandom::from_time(),
+        }
+    }
+}
+
+impl EnchantingBookState {
+    pub fn interpolated(&self, partial: f32) -> (f32, f32, f32, f32) {
+        let lerp = |a: f32, b: f32| a + (b - a) * partial;
+        (
+            lerp(self.o_flip, self.flip),
+            lerp(self.o_open, self.open),
+            self.time as f32 + partial,
+            self.o_rotation + wrap_book_angle(self.rotation - self.o_rotation) * partial,
+        )
+    }
+
+    pub fn tick(&mut self, pos: BlockPos, player: Option<glam::DVec3>) {
+        self.o_open = self.open;
+        self.o_rotation = self.rotation;
+        if let Some(player) = player {
+            let dx = player.x - (pos.x as f64 + 0.5);
+            let dz = player.z - (pos.z as f64 + 0.5);
+            self.target_rotation = (dz.atan2(dx)) as f32;
+            self.open += 0.1;
+            if self.open < 0.5 || self.random.next_int(40) == 0 {
+                let old = self.flip_target;
+                while old == self.flip_target {
+                    self.flip_target += (self.random.next_int(4) - self.random.next_int(4)) as f32;
+                }
+            }
+        } else {
+            self.target_rotation += 0.02;
+            self.open -= 0.1;
+        }
+        self.rotation = wrap_book_angle(self.rotation);
+        self.target_rotation = wrap_book_angle(self.target_rotation);
+        let diff = wrap_book_angle(self.target_rotation - self.rotation);
+        self.rotation += diff * 0.4;
+        self.open = self.open.clamp(0.0, 1.0);
+        self.time = self.time.wrapping_add(1);
+        self.o_flip = self.flip;
+        let diff = ((self.flip_target - self.flip) * 0.4).clamp(-0.2, 0.2);
+        self.flip_velocity += (diff - self.flip_velocity) * 0.9;
+        self.flip += self.flip_velocity;
+    }
+}
+
+pub(crate) fn wrap_book_angle(mut angle: f32) -> f32 {
+    while angle >= std::f32::consts::PI {
+        angle -= std::f32::consts::TAU;
+    }
+    while angle < -std::f32::consts::PI {
+        angle += std::f32::consts::TAU;
+    }
+    angle
 }
 
 impl StoredBlockEntity {
@@ -53,9 +167,42 @@ impl StoredBlockEntity {
             banner_patterns: (kind == BlockEntityKind::Banner)
                 .then(|| banner_patterns(&nbt))
                 .unwrap_or_default(),
+            decorated_pot_sherds: (kind == BlockEntityKind::DecoratedPot)
+                .then(|| decorated_pot_sherds(&nbt))
+                .unwrap_or_else(default_pot_sherds),
+            pot_wobble: None,
+            bell_swing: (kind == BlockEntityKind::Bell).then_some(BellSwing {
+                ticks: 0,
+                direction: 0,
+                shaking: false,
+            }),
+            book: (kind == BlockEntityKind::EnchantingTable).then(EnchantingBookState::default),
             player_head_profile_source: (kind == BlockEntityKind::Skull)
                 .then(|| player_head_profile_source(&nbt)),
             nbt,
+        }
+    }
+
+    pub fn start_bell_swing(&mut self, direction: u8) -> bool {
+        let Some(swing) = self.bell_swing.as_mut() else {
+            return false;
+        };
+        if direction > 5 {
+            return false;
+        }
+        swing.trigger(direction);
+        true
+    }
+
+    pub fn tick_bell_swing(&mut self) {
+        if let Some(swing) = &mut self.bell_swing {
+            swing.tick();
+        }
+    }
+
+    pub fn start_pot_wobble(&mut self, tick: u64, positive: bool) {
+        if self.kind == BlockEntityKind::DecoratedPot {
+            self.pot_wobble = Some((tick, positive));
         }
     }
 
@@ -65,6 +212,9 @@ impl StoredBlockEntity {
         self.banner_patterns = (self.kind == BlockEntityKind::Banner)
             .then(|| banner_patterns(&nbt))
             .unwrap_or_default();
+        self.decorated_pot_sherds = (self.kind == BlockEntityKind::DecoratedPot)
+            .then(|| decorated_pot_sherds(&nbt))
+            .unwrap_or_else(default_pot_sherds);
         self.player_head_profile_source =
             (self.kind == BlockEntityKind::Skull).then(|| player_head_profile_source(&nbt));
         self.nbt = nbt;
@@ -78,6 +228,33 @@ pub struct BannerPatternLayer {
     pub registry_key: Option<String>,
     pub asset_id: Option<String>,
     pub color: u8,
+}
+
+const BRICK_SHERD: &str = "brick";
+
+pub(crate) const fn pot_wobble_duration(positive: bool) -> u64 {
+    if positive { 7 } else { 10 }
+}
+
+pub(crate) fn default_pot_sherds() -> [String; 4] {
+    std::array::from_fn(|_| BRICK_SHERD.to_owned())
+}
+
+fn decorated_pot_sherds(nbt: &NbtCompound) -> [String; 4] {
+    use simdnbt::owned::{NbtList, NbtTag};
+    let mut result = default_pot_sherds();
+    if let Some(NbtTag::List(NbtList::String(items))) = nbt.get("sherds") {
+        for (dst, item) in result.iter_mut().zip(items.iter().take(4)) {
+            let item = item.to_str();
+            let name = item.rsplit(':').next().unwrap_or("brick");
+            *dst = if name.ends_with("_pottery_sherd") || name == "brick" {
+                name.to_owned()
+            } else {
+                BRICK_SHERD.to_owned()
+            };
+        }
+    }
+    result
 }
 
 const DYE_NAMES: [&str; 16] = [
@@ -451,6 +628,8 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
         s if s.ends_with("copper_chest") => Some(BlockEntityKind::Chest),
         "conduit" => Some(BlockEntityKind::Conduit),
         "bell" => Some(BlockEntityKind::Bell),
+        "decorated_pot" => Some(BlockEntityKind::DecoratedPot),
+        "enchanting_table" => Some(BlockEntityKind::EnchantingTable),
         "player_head" | "player_wall_head" => Some(BlockEntityKind::Skull),
         s if s.ends_with("copper_golem_statue") => Some(BlockEntityKind::CopperGolemStatue),
         s if s == "shulker_box" || s.ends_with("_shulker_box") => Some(BlockEntityKind::ShulkerBox),
@@ -499,6 +678,8 @@ fn is_rendered(kind: BlockEntityKind) -> bool {
             | BlockEntityKind::CopperGolemStatue
             | BlockEntityKind::Conduit
             | BlockEntityKind::Bell
+            | BlockEntityKind::DecoratedPot
+            | BlockEntityKind::EnchantingTable
             | BlockEntityKind::Banner
             | BlockEntityKind::Skull
     )
@@ -702,6 +883,72 @@ pub fn is_fluid_block(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bell_action_one_restarts_direction_and_stops_at_fifty_ticks() {
+        let mut bell = StoredBlockEntity::new(BlockEntityKind::Bell, NbtCompound::new());
+        assert!(bell.start_bell_swing(2));
+        for _ in 0..25 {
+            bell.tick_bell_swing();
+        }
+        assert_eq!(bell.bell_swing.unwrap().ticks, 25);
+        assert!(bell.start_bell_swing(5));
+        assert_eq!(bell.bell_swing.unwrap().ticks, 0);
+        assert_eq!(bell.bell_swing.unwrap().direction, 5);
+        for _ in 0..49 {
+            bell.tick_bell_swing();
+        }
+        assert!(bell.bell_swing.unwrap().shaking);
+        bell.tick_bell_swing();
+        assert_eq!(bell.bell_swing.unwrap().ticks, 0);
+        assert!(!bell.bell_swing.unwrap().shaking);
+        assert!(!bell.start_bell_swing(6));
+        let mut pot = StoredBlockEntity::new(BlockEntityKind::DecoratedPot, NbtCompound::new());
+        assert!(!pot.start_bell_swing(2));
+    }
+
+    #[test]
+    fn decorated_pot_wobble_event_uses_vanilla_style_durations() {
+        assert_eq!(pot_wobble_duration(true), 7);
+        assert_eq!(pot_wobble_duration(false), 10);
+        let mut pot = StoredBlockEntity::new(BlockEntityKind::DecoratedPot, NbtCompound::new());
+        pot.start_pot_wobble(42, false);
+        assert_eq!(pot.pot_wobble, Some((42, false)));
+        let mut bell = StoredBlockEntity::new(BlockEntityKind::Bell, NbtCompound::new());
+        bell.start_pot_wobble(42, true);
+        assert_eq!(bell.pot_wobble, None);
+    }
+
+    #[test]
+    fn decorated_pot_keeps_order_brick_fills_missing_and_unknown_items_fallback() {
+        use simdnbt::owned::NbtList;
+        assert_eq!(
+            rendered_kind("decorated_pot"),
+            Some(BlockEntityKind::DecoratedPot)
+        );
+        let mut nbt = NbtCompound::new();
+        nbt.insert(
+            "sherds",
+            NbtList::String(vec![
+                "minecraft:angler_pottery_sherd".into(),
+                "minecraft:brick".into(),
+                "minecraft:snort_pottery_sherd".into(),
+                "mod:unregistered_pottery_sherd".into(),
+            ]),
+        );
+        let mut be = StoredBlockEntity::new(BlockEntityKind::DecoratedPot, nbt);
+        assert_eq!(
+            be.decorated_pot_sherds,
+            [
+                "angler_pottery_sherd",
+                "brick",
+                "snort_pottery_sherd",
+                "unregistered_pottery_sherd"
+            ]
+        );
+        be.update_nbt(NbtCompound::new());
+        assert_eq!(be.decorated_pot_sherds, default_pot_sherds());
+    }
 
     #[test]
     fn sign_colors_share_dye_darkening_and_fullbright_glow() {
@@ -1132,6 +1379,32 @@ mod tests {
         let middle = moving_block_render_details(&halfway).unwrap().offset;
         assert_ne!(start, middle);
         assert_eq!(middle, glam::DVec3::new(0.0, 0.0, 0.5));
+    }
+
+    #[test]
+    fn enchanting_book_kind_ticks_near_players_and_interpolates_wrapped_rotation() {
+        assert_eq!(
+            rendered_kind("enchanting_table"),
+            Some(BlockEntityKind::EnchantingTable)
+        );
+        let pos = BlockPos::new(0, 64, 0);
+        let near = glam::DVec3::new(1.0, 64.0, 0.5);
+        let mut book = EnchantingBookState::default();
+        for _ in 0..20 {
+            book.tick(pos, Some(near));
+        }
+        assert_eq!(book.open, 1.0);
+        assert!(book.flip_target != 0.0);
+        for _ in 0..20 {
+            book.tick(pos, None);
+        }
+        assert_eq!(book.open, 0.0);
+        book.o_rotation = std::f32::consts::PI - 0.1;
+        book.rotation = -std::f32::consts::PI + 0.1;
+        let half = book.interpolated(0.5);
+        assert!((half.3 - std::f32::consts::PI).abs() < 1e-5);
+        assert_eq!(book.interpolated(0.0).0, book.o_flip);
+        assert_eq!(book.interpolated(1.0).0, book.flip);
     }
 
     #[test]

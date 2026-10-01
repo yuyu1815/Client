@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 ///
 /// TODO: `renderer/pipelines/{weather,sky}.rs` and `renderer/chunk/mesher.rs`
 /// each carry a private copy of this; unify them onto this type.
+#[derive(Clone)]
 pub struct JavaRandom {
     seed: u64,
 }

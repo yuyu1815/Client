@@ -1,7 +1,7 @@
 pub(super) mod sign_text;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::slice;
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +12,7 @@ use pyronyx::vk;
 use sign_text::{MAX_SIGN_VERTICES, SignVertex};
 
 use super::text_display::TextDisplayDraw;
-use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::assets::{AssetIndex, resolve_asset_path_with_pack_dirs};
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::{BakedEntityModel, ModelConvention, PartAnim};
@@ -32,11 +32,20 @@ const MAX_HEAD_TEXTURES: usize = MAX_ENTRIES + 1;
 pub struct BlockEntityRenderInfo {
     pub pos: BlockPos,
     pub player_head_profile_source: Option<PlayerHeadProfileSource>,
+    pub bell_swing: Option<crate::world::block_entity::BellSwing>,
+    pub decorated_pot_sherds: [String; 4],
+    /// (progress in [0,1], positive hit) from vanilla pot block event 1.
+    pub pot_wobble: Option<(f32, bool)>,
     pub kind: BlockEntityKind,
     /// Copper golem statue body-layer index (standing, running, sitting, star).
     pub statue_pose: Option<u8>,
     /// Vanilla BannerFlagModel phase in ticks, modulo 100.
     pub banner_phase: f32,
+    /// Render partial tick for native bell swing interpolation.
+    pub bell_partial: f32,
+    /// Interpolated vanilla enchanting-table book state (flip, openness, time,
+    /// yaw).
+    pub book: Option<(f32, f32, f32, f32)>,
     pub yaw: f32,
     /// Texture-variant index; the model index is `variant % models.len()`, so
     /// chest variants (material-major, [single, left, right] per material)
@@ -134,7 +143,36 @@ const TRAPPED_CHEST_TEXTURES: &[&[&str]] = chest_textures!("trapped");
 
 const ENDER_CHEST_TEXTURES: &[&[&str]] = &[&["minecraft/textures/entity/chest/ender.png"]];
 const BELL_TEXTURES: &[&[&str]] = &[&["minecraft/textures/entity/bell/bell_body.png"]];
-const BANNER_TEXTURES: &[&[&str]] = &[&["minecraft:textures/entity/banner/banner_base.png"]];
+const ENCHANTING_BOOK_TEXTURES: &[&[&str]] =
+    &[&["minecraft/textures/entity/enchantment/enchanting_table_book.png"]];
+const BANNER_TEXTURES: &[&[&str]] = &[&["minecraft/textures/entity/banner/banner_base.png"]];
+const DECORATED_POT_TEXTURES: &[&[&str]] = &[
+    &["minecraft/textures/entity/decorated_pot/decorated_pot_base.png"],
+    &["minecraft/textures/entity/decorated_pot/decorated_pot_side.png"],
+    &["minecraft/textures/entity/decorated_pot/angler_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/archer_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/arms_up_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/blade_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/brewer_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/burn_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/danger_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/explorer_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/flow_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/friend_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/guster_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/heart_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/heartbreak_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/howl_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/miner_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/mourner_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/plenty_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/prize_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/scrape_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/sheaf_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/shelter_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/skull_pottery_pattern.png"],
+    &["minecraft/textures/entity/decorated_pot/snort_pottery_pattern.png"],
+];
 
 // Skull variants are stored as adjacent [standing, wall] pairs. The pair bit
 // preserves the wall-head transform independently of the texture/model type.
@@ -216,14 +254,120 @@ fn name_index(table: &[&str], name: &str) -> Option<u32> {
     table.iter().position(|&n| n == name).map(|i| i as u32)
 }
 
+fn decorated_pot_texture(shard: &str) -> usize {
+    match shard.strip_suffix("_pottery_sherd").unwrap_or(shard) {
+        "angler" => 2,
+        "archer" => 3,
+        "arms_up" => 4,
+        "blade" => 5,
+        "brewer" => 6,
+        "burn" => 7,
+        "danger" => 8,
+        "explorer" => 9,
+        "flow" => 10,
+        "friend" => 11,
+        "guster" => 12,
+        "heart" => 13,
+        "heartbreak" => 14,
+        "howl" => 15,
+        "miner" => 16,
+        "mourner" => 17,
+        "plenty" => 18,
+        "prize" => 19,
+        "scrape" => 20,
+        "sheaf" => 21,
+        "shelter" => 22,
+        "skull" => 23,
+        "snort" => 24,
+        _ => 1,
+    }
+}
+
+fn decorated_pot_yaw(facing: Option<&str>) -> f32 {
+    match facing {
+        Some("north") => 0.0,
+        Some("east") => 90.0,
+        Some("south") => 180.0,
+        Some("west") => -90.0,
+        _ => 0.0,
+    }
+}
+
+fn decorated_pot_part_texture(info: &BlockEntityRenderInfo, part: &str) -> Option<usize> {
+    let side = match part {
+        "back" => 0,
+        "left" => 1,
+        "right" => 2,
+        "front" => 3,
+        _ => return None,
+    };
+    Some(decorated_pot_texture(&info.decorated_pot_sherds[side]))
+}
+
 /// Build a [`PartAnim`] applying chest/shulker lid motion. `openness` is the
 /// raw [0, 1] value; vanilla applies cubic easing so the lid decelerates as it
 /// approaches the open or closed extreme.
+pub(crate) fn bell_anim(
+    swing: Option<crate::world::block_entity::BellSwing>,
+    partial: f32,
+    yaw: f32,
+) -> PartAnim {
+    let Some(swing) = swing.filter(|s| s.shaking && s.direction >= 2) else {
+        return PartAnim::default();
+    };
+    let ticks = swing.ticks as f32 + partial.clamp(0.0, 1.0);
+    let angle = (ticks / std::f32::consts::PI).sin() / (4.0 + ticks / 3.0);
+    let world = match swing.direction {
+        2 => glam::Vec3::NEG_Z,
+        3 => glam::Vec3::Z,
+        4 => glam::Vec3::NEG_X,
+        5 => glam::Vec3::X,
+        _ => return PartAnim::default(),
+    };
+    // The root already rotates the bell by 180° - block facing. Convert the
+    // world hit vector back to model-local space before applying BellModel's axes.
+    let local = glam::Mat4::from_rotation_y(-(180.0 - yaw).to_radians()).transform_vector3(world);
+    let rotation = if local.z.abs() > local.x.abs() {
+        glam::Vec3::new(if local.z < 0.0 { -angle } else { angle }, 0.0, 0.0)
+    } else {
+        glam::Vec3::new(0.0, 0.0, if local.x < 0.0 { -angle } else { angle })
+    };
+    PartAnim {
+        rotation: vec![(0, rotation)],
+        ..Default::default()
+    }
+}
+
 pub(crate) fn banner_anim(phase: f32, flag_part: usize) -> PartAnim {
     let rotation = (-0.0125 + 0.01 * (phase * std::f32::consts::TAU).cos()) * std::f32::consts::PI;
     PartAnim {
         rotation: vec![(flag_part, glam::Vec3::new(rotation, 0.0, 0.0))],
         ..Default::default()
+    }
+}
+
+fn enchanting_book_anim(flip: f32, open: f32) -> PartAnim {
+    let frac = |v: f32| v - v.floor();
+    let openness = open;
+    let page1 = (frac(flip + 0.25) * 1.6 - 0.3).clamp(0.0, 1.0);
+    let page2 = (frac(flip + 0.75) * 1.6 - 0.3).clamp(0.0, 1.0);
+    let swing = [
+        std::f32::consts::PI + openness,
+        -openness,
+        0.0,
+        openness,
+        -openness,
+        openness - 2.0 * openness * page1,
+        openness - 2.0 * openness * page2,
+    ];
+    let x = openness.sin();
+    PartAnim {
+        rotation: swing
+            .into_iter()
+            .enumerate()
+            .map(|(i, y)| (i, glam::Vec3::new(0.0, y, 0.0)))
+            .collect(),
+        translation: (3..7).map(|i| (i, glam::Vec3::new(x, 0.0, 0.0))).collect(),
     }
 }
 
@@ -358,6 +502,7 @@ pub fn yaw_for_block(kind: BlockEntityKind, props: &crate::world::block::PropMap
                 _ => None,
             })
             .unwrap_or(0.0),
+        BlockEntityKind::DecoratedPot => decorated_pot_yaw(props.get("facing")),
         BlockEntityKind::Bell => match props.get("facing") {
             Some("south") => 0.0,
             Some("west") => 90.0,
@@ -434,9 +579,21 @@ fn kind_definitions(xmas: bool) -> Vec<KindDef> {
             tex_size: 64,
         },
         KindDef {
+            kind: BlockEntityKind::EnchantingTable,
+            models: vec![block_entity_model::bake_enchanting_book_model()],
+            tex_variants: ENCHANTING_BOOK_TEXTURES,
+            tex_size: 64,
+        },
+        KindDef {
             kind: BlockEntityKind::Bell,
             models: vec![block_entity_model::bake_bell_model()],
             tex_variants: BELL_TEXTURES,
+            tex_size: 32,
+        },
+        KindDef {
+            kind: BlockEntityKind::DecoratedPot,
+            models: vec![block_entity_model::bake_decorated_pot_model()],
+            tex_variants: DECORATED_POT_TEXTURES,
             tex_size: 32,
         },
         KindDef {
@@ -533,6 +690,21 @@ fn skull_wall_model_matrix(model: glam::Mat4, yaw: f32) -> glam::Mat4 {
         * facing
         * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.25, -0.25))
         * facing.inverse()
+}
+
+fn decorated_pot_wobble_transform(progress: f32, positive: bool) -> glam::Mat4 {
+    let pivot = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5));
+    let unpivot = glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5));
+    let rotation = if positive {
+        let phase = progress * std::f32::consts::TAU;
+        glam::Mat4::from_rotation_x((-1.5 * (phase.cos() + 0.5) * (phase * 0.5).sin()) * 0.015625)
+            * glam::Mat4::from_rotation_z(phase.sin() * 0.015625)
+    } else {
+        glam::Mat4::from_rotation_y(
+            (-progress * 3.0 * std::f32::consts::PI).sin() * 0.125 * (1.0 - progress),
+        )
+    };
+    pivot * rotation * unpivot
 }
 
 fn chest_matrix(info: &BlockEntityRenderInfo, anchor: glam::DVec3) -> glam::Mat4 {
@@ -746,6 +918,7 @@ impl BlockEntityPipeline {
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
         christmas_chests: bool,
+        pack_dirs: &[PathBuf],
     ) -> Self {
         let camera_layout = util::create_descriptor_set_layout(
             device,
@@ -898,6 +1071,7 @@ impl BlockEntityPipeline {
                 def.models,
                 def.tex_variants,
                 def.tex_size,
+                pack_dirs,
                 &mut pending_uploads,
                 &mut staging_to_free,
             );
@@ -915,6 +1089,7 @@ impl BlockEntityPipeline {
             crate::renderer::entity_model::bake_copper_golem_statue_models(),
             COPPER_GOLEM_STATUE_TEXTURES,
             64,
+            pack_dirs,
             &mut pending_uploads,
             &mut staging_to_free,
         );
@@ -1323,6 +1498,13 @@ impl BlockEntityPipeline {
                     glam::Mat4::from_translation(block_center)
                         * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians())
                 }
+                ModelConvention::BlockYUp if info.kind == BlockEntityKind::EnchantingTable => {
+                    let (_, _, time, rotation) = info.book.unwrap_or((0.0, 0.0, 0.0, 0.0));
+                    glam::Mat4::from_translation(
+                        block_center + glam::Vec3::new(0.0, 0.75 + (time * 0.1).sin() * 0.01, 0.0),
+                    ) * glam::Mat4::from_rotation_y(-rotation)
+                        * glam::Mat4::from_rotation_z(80.0f32.to_radians())
+                }
                 // Vanilla `ChestRenderer`: rotate by -facing.toYRot() about the
                 // block center; coords are relative to the block's min corner.
                 ModelConvention::BlockYUp if info.kind == BlockEntityKind::Banner => {
@@ -1342,6 +1524,12 @@ impl BlockEntityPipeline {
             };
 
             let mut model_mat = model_mat;
+            if info.kind == BlockEntityKind::DecoratedPot
+                && let Some((progress, positive)) = info.pot_wobble
+                && (0.0..=1.0).contains(&progress)
+            {
+                model_mat *= decorated_pot_wobble_transform(progress, positive);
+            }
             if info.kind == BlockEntityKind::Skull && is_wall_skull_variant(info.variant) {
                 model_mat = skull_wall_model_matrix(model_mat, info.yaw);
             }
@@ -1353,6 +1541,11 @@ impl BlockEntityPipeline {
                 PartAnim::default()
             } else if info.kind == BlockEntityKind::Banner {
                 banner_anim(info.banner_phase, model.parts.len() - 1)
+            } else if info.kind == BlockEntityKind::EnchantingTable {
+                let (flip, open, _, _) = info.book.unwrap_or((0.0, 0.0, 0.0, 0.0));
+                enchanting_book_anim(flip, open)
+            } else if info.kind == BlockEntityKind::Bell {
+                bell_anim(info.bell_swing, info.bell_partial, info.yaw)
             } else {
                 lid_anim(info.kind, info.lid_open)
             };
@@ -1360,6 +1553,23 @@ impl BlockEntityPipeline {
             for (i, (start, count)) in model.part_ranges.iter().enumerate() {
                 if *count == 0 {
                     continue;
+                }
+                let part_slot = if info.kind == BlockEntityKind::DecoratedPot {
+                    decorated_pot_part_texture(info, &model.parts[i].name)
+                        .map(|texture| &entry.textures[texture])
+                        .unwrap_or(&entry.textures[0])
+                } else {
+                    slot
+                };
+                if bound_set != part_slot.set {
+                    cmd.bind_descriptor_sets(
+                        vk::PipelineBindPoint::Graphics,
+                        self.pipeline_layout,
+                        0,
+                        &[self.camera_sets[frame], part_slot.set],
+                        &[],
+                    );
+                    bound_set = part_slot.set;
                 }
                 let part_mat = model_mat * part_transforms[i];
                 let cols = part_mat.to_cols_array();
@@ -1670,6 +1880,7 @@ fn build_entry(
     mut models: Vec<BakedEntityModel>,
     tex_variants: &[&[&str]],
     fallback_tex_size: u32,
+    pack_dirs: &[PathBuf],
     pending_uploads: &mut Vec<util::PendingImageUpload>,
     staging_to_free: &mut Vec<(vk::Buffer, Allocation)>,
 ) -> KindEntry {
@@ -1703,6 +1914,7 @@ fn build_entry(
                 asset_index,
                 keys,
                 fallback_tex_size,
+                pack_dirs,
                 pending_uploads,
                 staging_to_free,
             )
@@ -1728,13 +1940,15 @@ fn build_texture_slot(
     asset_index: &Option<AssetIndex>,
     keys: &[&str],
     fallback_tex_size: u32,
+    pack_dirs: &[PathBuf],
     pending_uploads: &mut Vec<util::PendingImageUpload>,
     staging_to_free: &mut Vec<(vk::Buffer, Allocation)>,
 ) -> TextureSlot {
     let (pixels, width, height) = keys
         .iter()
         .find_map(|key| {
-            let path = resolve_asset_path(jar_assets_dir, asset_index, key);
+            let path =
+                resolve_asset_path_with_pack_dirs(jar_assets_dir, asset_index, key, pack_dirs);
             util::load_png(&path)
         })
         .unwrap_or_else(|| {
@@ -2055,13 +2269,84 @@ mod sign_text_tests {
         assert!((anim.rotation[0].1.x - (-0.0025 * std::f32::consts::PI)).abs() < 1e-6);
     }
 
+    #[test]
+    fn bell_swing_matches_native_formula_and_local_direction_after_facing_yaw() {
+        let swing = crate::world::block_entity::BellSwing {
+            ticks: 5,
+            direction: 2,
+            shaking: true,
+        };
+        let angle = (5.5f32 / std::f32::consts::PI).sin() / (4.0 + 5.5 / 3.0);
+        let anim = bell_anim(Some(swing), 0.5, 0.0);
+        assert_eq!(anim.rotation[0].0, 0);
+        assert!((anim.rotation[0].1.x - angle).abs() < 1e-6);
+        assert_eq!(anim.rotation[0].1.z, 0.0);
+        // At yaw 0 the root is 180 degrees: world north becomes local south.
+        let local_north = bell_anim(
+            Some(crate::world::block_entity::BellSwing {
+                direction: 3,
+                ..swing
+            }),
+            0.5,
+            0.0,
+        );
+        assert!((local_north.rotation[0].1.x + angle).abs() < 1e-6);
+        for (direction, expected_z) in [(4, angle), (5, -angle)] {
+            let anim = bell_anim(
+                Some(crate::world::block_entity::BellSwing { direction, ..swing }),
+                0.5,
+                0.0,
+            );
+            assert!((anim.rotation[0].1.z - expected_z).abs() < 1e-6);
+        }
+        let idle = bell_anim(
+            Some(crate::world::block_entity::BellSwing {
+                shaking: false,
+                ..swing
+            }),
+            0.5,
+            0.0,
+        );
+        assert!(idle.rotation.is_empty());
+    }
+
+    #[test]
+    fn decorated_pot_floor_facing_yaw_matches_renderer_root_transform() {
+        assert_eq!(decorated_pot_yaw(Some("north")), 0.0);
+        assert_eq!(decorated_pot_yaw(Some("east")), 90.0);
+        assert_eq!(decorated_pot_yaw(Some("south")), 180.0);
+        assert_eq!(decorated_pot_yaw(Some("west")), -90.0);
+    }
+
+    #[test]
+    fn decorated_pot_selects_four_ordered_side_materials_and_brick_fallback() {
+        let mut info = chest(0, 0);
+        info.kind = BlockEntityKind::DecoratedPot;
+        info.decorated_pot_sherds = [
+            "angler_pottery_sherd".into(),
+            "brick".into(),
+            "snort_pottery_sherd".into(),
+            "bad_item".into(),
+        ];
+        assert_eq!(decorated_pot_part_texture(&info, "back"), Some(2));
+        assert_eq!(decorated_pot_part_texture(&info, "left"), Some(1));
+        assert_eq!(decorated_pot_part_texture(&info, "right"), Some(24));
+        assert_eq!(decorated_pot_part_texture(&info, "front"), Some(1));
+        assert_eq!(decorated_pot_part_texture(&info, "neck"), None);
+    }
+
     fn chest(x: i32, variant: u32) -> BlockEntityRenderInfo {
         BlockEntityRenderInfo {
             pos: BlockPos::new(x, 64, -9),
             player_head_profile_source: None,
+            bell_swing: None,
+            decorated_pot_sherds: crate::world::block_entity::default_pot_sherds(),
+            pot_wobble: None,
             kind: BlockEntityKind::Chest,
             statue_pose: None,
             banner_phase: 0.0,
+            bell_partial: 0.0,
+            book: None,
             yaw: 90.0,
             variant,
             lid_open: 0.0,
