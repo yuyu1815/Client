@@ -361,6 +361,23 @@ fn load_behaviors() -> HashMap<String, BehaviorEntry> {
         .expect("invalid block-behavior data")
 }
 
+fn validate_shape_boxes(shapes: &[Vec<LocalBox>]) {
+    for (shape_index, shape) in shapes.iter().enumerate() {
+        for (box_index, bounds) in shape.iter().enumerate() {
+            assert!(
+                bounds.iter().all(|coordinate| coordinate.is_finite()),
+                "shape {shape_index} box {box_index} has a non-finite coordinate"
+            );
+            for axis in 0..3 {
+                assert!(
+                    bounds[axis] <= bounds[axis + 3],
+                    "shape {shape_index} box {box_index} has inverted bounds on axis {axis}"
+                );
+            }
+        }
+    }
+}
+
 fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
     let file: BlockFile = serde_json::from_str(data.blocks).expect("invalid block-state data");
     assert_eq!(
@@ -387,6 +404,7 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
     );
     let shape_file = data.shapes.map(|json| {
         let shapes: ShapeFile = serde_json::from_str(json).expect("invalid block-shape data");
+        validate_shape_boxes(&shapes.shapes);
         assert_eq!(
             shapes.version, file.version,
             "shape data is for a different version"
@@ -980,6 +998,29 @@ mod tests {
 
     fn setup() {
         init("26.2");
+    }
+
+    #[test]
+    fn shape_dictionary_accepts_finite_ordered_boxes_outside_unit_bounds() {
+        validate_shape_boxes(&[vec![[-0.25, 0.0, 0.0, 1.0, 1.5, 1.0]]]);
+    }
+
+    #[test]
+    fn shape_dictionary_rejects_inverted_bounds() {
+        let result = std::panic::catch_unwind(|| {
+            validate_shape_boxes(&[vec![[1.0, 0.0, 0.0, 0.0, 1.0, 1.0]]]);
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn shape_dictionary_rejects_non_finite_coordinates() {
+        for coordinate in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let result = std::panic::catch_unwind(|| {
+                validate_shape_boxes(&[vec![[0.0, 0.0, 0.0, coordinate, 1.0, 1.0]]]);
+            });
+            assert!(result.is_err(), "accepted {coordinate}");
+        }
     }
 
     #[test]

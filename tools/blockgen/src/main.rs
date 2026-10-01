@@ -30,7 +30,7 @@
 //! masks are deduped into a dictionary. State counts and value ranges are
 //! cross-checked against the version's blocks table.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::process::ExitCode;
 
@@ -559,6 +559,10 @@ fn gen_shapes(
         if count == 0 {
             return Err(format!("{}: zero block states", block.name).into());
         }
+        let collision_uses_offset =
+            validate_oracle_shape(oracle_block, oracle_shapes, "collision_shapes", count)?;
+        let outline_uses_offset =
+            validate_oracle_shape(oracle_block, oracle_shapes, "outline_shapes", count)?;
         let mut block_overrides = Vec::new();
         for offset in 0..count {
             let comparison = &comparisons[(state_id + offset) as usize];
@@ -588,16 +592,14 @@ fn gen_shapes(
                 .into());
             }
 
-            let collision = oracle_shape(oracle_block, oracle_shapes, "collision_shapes", offset)?;
-            let outline = oracle_shape(oracle_block, oracle_shapes, "outline_shapes", offset)?;
-            let has_offset = oracle_block["collision_shapes"]["usesOffset"] == true
-                || oracle_block["outline_shapes"]["usesOffset"] == true;
-            if has_offset {
+            if collision_uses_offset || outline_uses_offset {
                 // Randomized boxes need the block position at their call site.
                 skipped_states += 1;
                 offset_dependent_states += 1;
                 continue;
             }
+            let collision = oracle_shape(oracle_block, oracle_shapes, "collision_shapes", offset)?;
+            let outline = oracle_shape(oracle_block, oracle_shapes, "outline_shapes", offset)?;
             if !same_boxes(&collision, &comparison.official_collision)
                 || !same_boxes(&outline, &comparison.official_outline)
             {
@@ -752,54 +754,130 @@ fn state_properties(props: &[(String, Vec<String>)], offset: u32) -> BTreeMap<St
     values
 }
 
+fn validate_oracle_shape(
+    block: &serde_json::Value,
+    dictionary: &[serde_json::Value],
+    key: &str,
+    state_count: u32,
+) -> Result<bool, Error> {
+    let name = block["name"].as_str().unwrap_or("<unnamed>");
+    let shape = block
+        .get(key)
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("{name}: {key} missing or invalid"))?;
+    let uses_offset = shape
+        .get("usesOffset")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| format!("{name}: {key}.usesOffset must be a boolean"))?;
+    let default = shape
+        .get("default")
+        .ok_or_else(|| format!("{name}: {key}.default missing"))?;
+    oracle_boxes(block, dictionary, key, default)?;
+
+    let overwrites = shape
+        .get("overwrites")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{name}: {key}.overwrites must be an array"))?;
+    let mut seen = HashSet::with_capacity(overwrites.len());
+    for entry in overwrites {
+        let offset = entry
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|offset| u32::try_from(offset).ok())
+            .ok_or_else(|| format!("{name}: {key} has an invalid overwrite offset"))?;
+        if offset >= state_count {
+            return Err(format!(
+                "{name}: {key} overwrite offset {offset} out of range 0..{state_count}"
+            )
+            .into());
+        }
+        if !seen.insert(offset) {
+            return Err(format!("{name}: {key} duplicate overwrite offset {offset}").into());
+        }
+        let shapes = entry
+            .get("shapes")
+            .ok_or_else(|| format!("{name}: {key} overwrite {offset} has no shapes"))?;
+        oracle_boxes(block, dictionary, key, shapes)?;
+    }
+    Ok(uses_offset)
+}
+
 fn oracle_shape(
     block: &serde_json::Value,
     dictionary: &[serde_json::Value],
     key: &str,
     offset: u32,
 ) -> Result<Vec<[f64; 6]>, Error> {
-    let shape = &block[key];
-    if shape["usesOffset"] != false {
+    let shape = block
+        .get(key)
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("{}: {key} missing or invalid", block["name"]))?;
+    let uses_offset = shape
+        .get("usesOffset")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| format!("{}: {key}.usesOffset must be a boolean", block["name"]))?;
+    if uses_offset {
         return Ok(Vec::new());
     }
-    let indices = shape["overwrites"]
-        .as_array()
-        .ok_or_else(|| format!("{}: {key} overwrites missing", block["name"]))?
+    let overwrites = shape
+        .get("overwrites")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{}: {key}.overwrites missing", block["name"]))?;
+    let overwrite = overwrites
         .iter()
-        .find(|entry| entry["offset"].as_u64() == Some(offset as u64))
-        .map_or(&shape["default"], |entry| &entry["shapes"]);
-    let indices = indices
-        .as_array()
-        .ok_or_else(|| format!("{}: {key} default missing", block["name"]))?;
+        .find(|entry| entry["offset"].as_u64() == Some(offset as u64));
+    let indices = match overwrite {
+        Some(entry) => entry
+            .get("shapes")
+            .ok_or_else(|| format!("{}: {key} overwrite {offset} has no shapes", block["name"]))?,
+        None => shape
+            .get("default")
+            .ok_or_else(|| format!("{}: {key}.default missing", block["name"]))?,
+    };
+    oracle_boxes(block, dictionary, key, indices)
+}
+
+fn oracle_boxes(
+    block: &serde_json::Value,
+    dictionary: &[serde_json::Value],
+    key: &str,
+    indices: &serde_json::Value,
+) -> Result<Vec<[f64; 6]>, Error> {
+    let name = block["name"].as_str().unwrap_or("<unnamed>");
     indices
+        .as_array()
+        .ok_or_else(|| format!("{name}: {key} shape indices must be an array"))?
         .iter()
         .map(|index| {
             let id = index
                 .as_u64()
-                .ok_or_else(|| format!("{}: invalid shape index", block["name"]))?
-                as usize;
+                .and_then(|id| usize::try_from(id).ok())
+                .ok_or_else(|| format!("{name}: invalid {key} shape index"))?;
             let aabb = dictionary
                 .get(id)
-                .ok_or_else(|| format!("{}: shape index {id} out of range", block["name"]))?;
+                .ok_or_else(|| format!("{name}: shape index {id} out of range"))?;
             let min = aabb["min"]
                 .as_array()
-                .ok_or_else(|| format!("{}: shape {id} has no min", block["name"]))?;
+                .ok_or_else(|| format!("{name}: shape {id} has no min"))?;
             let max = aabb["max"]
                 .as_array()
-                .ok_or_else(|| format!("{}: shape {id} has no max", block["name"]))?;
+                .ok_or_else(|| format!("{name}: shape {id} has no max"))?;
             if min.len() != 3 || max.len() != 3 {
-                return Err(format!("{}: shape {id} is not 3D", block["name"]).into());
+                return Err(format!("{name}: shape {id} is not 3D").into());
             }
             let mut result = [0.0; 6];
             for axis in 0..3 {
                 result[axis] = min[axis]
                     .as_f64()
-                    .ok_or_else(|| format!("{}: shape {id} invalid min", block["name"]))?;
+                    .ok_or_else(|| format!("{name}: shape {id} invalid min"))?;
                 result[axis + 3] = max[axis]
                     .as_f64()
-                    .ok_or_else(|| format!("{}: shape {id} invalid max", block["name"]))?;
+                    .ok_or_else(|| format!("{name}: shape {id} invalid max"))?;
+                if !result[axis].is_finite() || !result[axis + 3].is_finite() {
+                    return Err(format!("{name}: shape {id} has a non-finite coordinate").into());
+                }
                 if result[axis] > result[axis + 3] {
-                    return Err(format!("{}: shape {id} has inverted bounds", block["name"]).into());
+                    return Err(format!("{name}: shape {id} has inverted bounds").into());
                 }
             }
             Ok(result)
@@ -999,5 +1077,114 @@ fn scalar_or_array(values: &[u8]) -> Result<String, Error> {
         Ok(first.to_string())
     } else {
         Ok(serde_json::to_string(values)?)
+    }
+}
+
+#[cfg(test)]
+mod shape_validation_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn dictionary() -> Vec<serde_json::Value> {
+        vec![json!({ "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 1.0] })]
+    }
+
+    fn valid_shape() -> serde_json::Value {
+        json!({
+            "name": "example",
+            "collision_shapes": {
+                "usesOffset": false,
+                "default": [0],
+                "overwrites": [{ "offset": 1, "shapes": [0] }]
+            }
+        })
+    }
+
+    #[test]
+    fn rejects_missing_or_non_boolean_uses_offset() {
+        for invalid in [None, Some(json!("false")), Some(serde_json::Value::Null)] {
+            let mut block = valid_shape();
+            if let Some(value) = invalid {
+                block["collision_shapes"]["usesOffset"] = value;
+            } else {
+                block["collision_shapes"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("usesOffset");
+            }
+            assert!(validate_oracle_shape(&block, &dictionary(), "collision_shapes", 2).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_and_out_of_range_overwrite_offsets() {
+        let mut block = valid_shape();
+        block["collision_shapes"]["overwrites"] = json!([
+            { "offset": 1, "shapes": [0] },
+            { "offset": 1, "shapes": [0] }
+        ]);
+        assert!(
+            validate_oracle_shape(&block, &dictionary(), "collision_shapes", 2)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate overwrite offset")
+        );
+
+        block["collision_shapes"]["overwrites"] = json!([{ "offset": 2, "shapes": [0] }]);
+        assert!(
+            validate_oracle_shape(&block, &dictionary(), "collision_shapes", 2)
+                .unwrap_err()
+                .to_string()
+                .contains("out of range")
+        );
+    }
+
+    #[test]
+    fn rejects_reversed_dictionary_boxes() {
+        let block = valid_shape();
+        let reversed = vec![json!({ "min": [1.0, 0.0, 0.0], "max": [0.0, 1.0, 1.0] })];
+        assert!(
+            validate_oracle_shape(&block, &reversed, "collision_shapes", 2)
+                .unwrap_err()
+                .to_string()
+                .contains("inverted bounds")
+        );
+    }
+
+    #[test]
+    fn accepts_current_26_2_oracle_shape_metadata() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let blocks: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("pomme-client/src/world/block/data/blocks-26.2.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        let oracle: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                root.join("third_party/SteelMC/steel-registry/build_assets/blocks.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let oracle_blocks = oracle["blocks"].as_array().unwrap();
+        let dictionary = oracle["shapes"].as_array().unwrap();
+        let blocks = blocks["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), oracle_blocks.len());
+        for (block, oracle_block) in blocks.iter().zip(oracle_blocks) {
+            let state_count = block
+                .get("props")
+                .and_then(serde_json::Value::as_array)
+                .map(|props| {
+                    props
+                        .iter()
+                        .map(|property| property[1].as_array().unwrap().len() as u32)
+                        .product()
+                })
+                .unwrap_or(1);
+            for key in ["collision_shapes", "outline_shapes"] {
+                validate_oracle_shape(oracle_block, dictionary, key, state_count).unwrap();
+            }
+        }
     }
 }
