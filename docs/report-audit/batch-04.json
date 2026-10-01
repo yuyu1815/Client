@@ -1,0 +1,2731 @@
+{
+  "batch": 4,
+  "scope": {
+    "volumes": [
+      "volumes/blocks_07.md",
+      "volumes/blocks_08.md",
+      "volumes/blocks_09.md"
+    ],
+    "from": "minecraft:potted_oak_sapling",
+    "through": "minecraft:zombie_wall_head",
+    "objects": 115,
+    "records": 229
+  },
+  "report_commit": "0a1aee9c6be911a3081cf454b0bae6d694ec9d55",
+  "current_runtime_validation": "not performed (prohibited)",
+  "counts": [
+    {
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "count": 108
+    },
+    {
+      "category": "movement",
+      "classification": "observed_runtime_difference",
+      "count": 1
+    },
+    {
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "count": 112
+    },
+    {
+      "category": "rendering",
+      "classification": "observed_runtime_difference",
+      "count": 5
+    },
+    {
+      "category": "usage",
+      "classification": "confirmed_runtime_difference",
+      "count": 3
+    }
+  ],
+  "integrity": {
+    "missing_record_files": [],
+    "record_json_image_references_unavailable_in_bundle": [
+      {
+        "record_id": "USE-repeating_command_block",
+        "referenced_image": "cmdblock-hold-repeating_command_block-PommeLab.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "USE-repeating_command_block",
+        "referenced_image": "cmdblock-hold-repeating_command_block-FabricLab.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "BLOCK-shulker_box",
+        "referenced_image": "normal-fabric-fbo-block-entities-0.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "BLOCK-shulker_box",
+        "referenced_image": "normal-pomme-block-entities-0.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "BLOCK-skeleton_skull",
+        "referenced_image": "normal-fabric-fbo-block-entities-6.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "BLOCK-skeleton_skull",
+        "referenced_image": "normal-pomme-block-entities-6.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "RENDER-slime",
+        "referenced_image": "normal-fabric-fbo-transparency.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "RENDER-slime",
+        "referenced_image": "normal-pomme-transparency.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "USE-smithing_table",
+        "referenced_image": "blockmenu-hold-p-smithing_table.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "USE-smithing_table",
+        "referenced_image": "blockmenu-hold-f-smithing_table.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "BLOCK-soul_campfire",
+        "referenced_image": "normal-fabric-fbo-block-entities-4.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "BLOCK-soul_campfire",
+        "referenced_image": "normal-pomme-block-entities-4.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "USE-stonecutter",
+        "referenced_image": "blockmenu-hold-p-stonecutter.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "USE-stonecutter",
+        "referenced_image": "blockmenu-hold-f-stonecutter.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "BLOCK-white_banner",
+        "referenced_image": "normal-fabric-fbo-block-entities-3.png",
+        "status": "referenced but not present under evidence/images"
+      },
+      {
+        "record_id": "BLOCK-white_banner",
+        "referenced_image": "normal-pomme-block-entities-3.png",
+        "status": "referenced but not present under evidence/images"
+      }
+    ]
+  },
+  "root_cause_clusters": [
+    {
+      "id": "SHAPE-COLLISION-FALLBACK",
+      "record_ids": [
+        "COL-0048",
+        "COL-0049",
+        "COL-0336",
+        "COL-0337",
+        "COL-0082",
+        "COL-0083",
+        "COL-0088",
+        "COL-0089",
+        "COL-0062",
+        "COL-0063",
+        "COL-0086",
+        "COL-0087",
+        "COL-0072",
+        "COL-0073",
+        "COL-0096",
+        "COL-0097",
+        "COL-0080",
+        "COL-0081",
+        "COL-0050",
+        "COL-0051",
+        "COL-0046",
+        "COL-0047",
+        "COL-0194",
+        "COL-0195",
+        "COL-0198",
+        "COL-0199",
+        "COL-0084",
+        "COL-0085",
+        "COL-0094",
+        "COL-0095",
+        "COL-0222",
+        "COL-0223",
+        "COL-0256",
+        "COL-0257",
+        "COL-0230",
+        "COL-0231",
+        "COL-0264",
+        "COL-0265",
+        "COL-0006",
+        "COL-0007",
+        "COL-0276",
+        "COL-0277",
+        "COL-0280",
+        "COL-0281",
+        "COL-0150",
+        "COL-0151",
+        "COL-0104",
+        "COL-0105",
+        "COL-0106",
+        "COL-0107",
+        "COL-0274",
+        "COL-0275",
+        "COL-0188",
+        "COL-0189",
+        "COL-0168",
+        "COL-0169",
+        "COL-0162",
+        "COL-0163",
+        "COL-0316",
+        "COL-0317",
+        "COL-0144",
+        "COL-0032",
+        "COL-0017",
+        "COL-0290",
+        "COL-0291",
+        "COL-0178",
+        "COL-0179",
+        "COL-0019",
+        "COL-0292",
+        "COL-0293",
+        "COL-0180",
+        "COL-0181",
+        "COL-0309",
+        "COL-0307",
+        "COL-0023",
+        "COL-0296",
+        "COL-0297",
+        "COL-0184",
+        "COL-0185",
+        "COL-0313",
+        "COL-0021",
+        "COL-0294",
+        "COL-0295",
+        "COL-0182",
+        "COL-0183",
+        "COL-0311",
+        "COL-0013",
+        "COL-0286",
+        "COL-0287",
+        "COL-0174",
+        "COL-0175",
+        "COL-0303",
+        "COL-0202",
+        "COL-0203",
+        "COL-0236",
+        "COL-0237",
+        "COL-0108",
+        "COL-0109",
+        "COL-0110",
+        "COL-0111",
+        "COL-0210",
+        "COL-0211",
+        "COL-0244",
+        "COL-0245",
+        "COL-0112",
+        "COL-0113",
+        "COL-0114",
+        "COL-0115"
+      ],
+      "finding": "108 report-confirmed landing-height differences aggregate to missing per-state collision geometry. block_shape::compute_shape covers selected families only; generic collidable states fall back to full cube. Same shared cause likely explains many records; not 108 independent roots.",
+      "current_status": "Static gap likely; runtime not retested, not marked fixed.",
+      "minimal_fix": "Add reusable exact state shapes to compute_shape for missing families; use fixtures rather than per-block overrides.",
+      "test": "Compare official shape fixtures for witness + adjacent states, then center and edge landing; full-cube control."
+    },
+    {
+      "id": "SHAPE-OUTLINE-FALLBACK",
+      "record_ids": [
+        "PICK-0101",
+        "PICK-0351",
+        "PICK-0118",
+        "PICK-0121",
+        "PICK-0108",
+        "PICK-0120",
+        "PICK-0113",
+        "PICK-0125",
+        "PICK-0117",
+        "PICK-0102",
+        "PICK-0100",
+        "PICK-0268",
+        "PICK-0270",
+        "PICK-0119",
+        "PICK-0124",
+        "PICK-0020",
+        "PICK-0087",
+        "PICK-0171",
+        "PICK-0284",
+        "PICK-0301",
+        "PICK-0187",
+        "PICK-0054",
+        "PICK-0175",
+        "PICK-0288",
+        "PICK-0305",
+        "PICK-0047",
+        "PICK-0038",
+        "PICK-0191",
+        "PICK-0067",
+        "PICK-0068",
+        "PICK-0006",
+        "PICK-0052",
+        "PICK-0076",
+        "PICK-0311",
+        "PICK-0233",
+        "PICK-0028",
+        "PICK-0026",
+        "PICK-0022",
+        "PICK-0141",
+        "PICK-0142",
+        "PICK-0310",
+        "PICK-0341",
+        "PICK-0201",
+        "PICK-0252",
+        "PICK-0242",
+        "PICK-0072",
+        "PICK-0073",
+        "PICK-0333",
+        "PICK-0132",
+        "PICK-0058",
+        "PICK-0012",
+        "PICK-0008",
+        "PICK-0069",
+        "PICK-0056",
+        "PICK-0240",
+        "PICK-0198",
+        "PICK-0330",
+        "PICK-0253",
+        "PICK-0027",
+        "PICK-0029",
+        "PICK-0004",
+        "PICK-0048",
+        "PICK-0033",
+        "PICK-0195",
+        "PICK-0098",
+        "PICK-0097",
+        "PICK-0208",
+        "PICK-0218",
+        "PICK-0228",
+        "PICK-0200",
+        "PICK-0260",
+        "PICK-0049",
+        "PICK-0266",
+        "PICK-0254",
+        "PICK-0264",
+        "PICK-0255",
+        "PICK-0081",
+        "PICK-0317",
+        "PICK-0247",
+        "PICK-0082",
+        "PICK-0318",
+        "PICK-0248",
+        "PICK-0326",
+        "PICK-0325",
+        "PICK-0084",
+        "PICK-0320",
+        "PICK-0250",
+        "PICK-0328",
+        "PICK-0083",
+        "PICK-0319",
+        "PICK-0249",
+        "PICK-0327",
+        "PICK-0079",
+        "PICK-0315",
+        "PICK-0245",
+        "PICK-0323",
+        "PICK-0053",
+        "PICK-0161",
+        "PICK-0274",
+        "PICK-0291",
+        "PICK-0040",
+        "PICK-0177",
+        "PICK-0337",
+        "PICK-0044",
+        "PICK-0143",
+        "PICK-0144",
+        "PICK-0165",
+        "PICK-0278",
+        "PICK-0295",
+        "PICK-0181",
+        "PICK-0145",
+        "PICK-0146"
+      ],
+      "finding": "112 report-confirmed picking differences are mostly foreground selected instead of background. outline_shape falls back to full cube; source TODO explicitly notes small flowers/plants/torches/buttons/redstone. Keep outline distinct from collision where vanilla differs.",
+      "current_status": "Static gap likely; raycast not retested.",
+      "minimal_fix": "Add exact outline shapes via compute_outline/state metadata; do not shrink full-cube fallback globally.",
+      "test": "Replay witness front/background camera coordinates; assert target hit and actual break, plus through-empty-outline tests."
+    },
+    {
+      "id": "SKULL-BLOCK-ENTITY",
+      "record_ids": [
+        "BLOCK-skeleton_skull"
+      ],
+      "finding": "Report image comparison: skeleton skull body absent. Current renderer registers Skull with bake_player_head_model and Steve sheet; variant_for_block only distinguishes player_wall_head. Static model/texture mismatch candidate, not runtime verification.",
+      "current_status": "Static source mismatch suspected; do not call fixed.",
+      "minimal_fix": "Select skull-family models/textures separately from player profile skin; preserve player head profile path.",
+      "test": "Normal-render screenshots for skeleton/wither/zombie/creeper/player skulls, standing rotation and wall-facing; test player profile fallback."
+    },
+    {
+      "id": "OTHER-RENDER",
+      "record_ids": [
+        "BLOCK-shulker_box",
+        "RENDER-slime",
+        "BLOCK-soul_campfire",
+        "BLOCK-white_banner"
+      ],
+      "finding": "Shulker opacity, slime transparency, soul campfire smoke, and banner body are separate fixture-specific symptoms; single captures do not prove a shared cause or total subsystem failure.",
+      "current_status": "Not runtime revalidated.",
+      "minimal_fix": "Inspect each material/model/particle path independently.",
+      "test": "Repeat exact fixture; multi-frame capture for smoke; check blend/depth and visibility."
+    },
+    {
+      "id": "BLOCK-USE-MENU",
+      "record_ids": [
+        "USE-repeating_command_block",
+        "USE-smithing_table",
+        "USE-stonecutter"
+      ],
+      "finding": "Three confirmed report records: repeating command block editor, smithing table, stonecutter menu do not open in Pomme; separate from shape/raycast findings.",
+      "current_status": "Not runtime revalidated.",
+      "minimal_fix": "Trace player interaction dispatch and inbound menu packets/screens for these block IDs.",
+      "test": "150ms right click; assert expected editor/menu type; controls chest and crafting table."
+    }
+  ],
+  "source_inspection": [
+    "pomme-client/src/physics/block_shape.rs::{compute_shape,compute_outline,outline_shape}",
+    "pomme-client/src/world/block/mod.rs::{block_shape,block_outline}",
+    "pomme-client/src/player/interaction.rs::raycast",
+    "pomme-client/src/renderer/pipelines/block_entity.rs::{kind_definitions,variant_for_block}",
+    "pomme-client/src/renderer/block_entity_model.rs::bake_player_head_model"
+  ],
+  "notes": [
+    "Source records cover 229/229. All are recorded as observed/confirmed runtime differences; none in this subset are labeled invalid or uncertain.",
+    "Volunteers test on report commit and Linux/Vulkan/llvmpipe; per-record limitations remain authoritative. 339/353 total PICK witness cases are selected geometry probes, not failure-rate.",
+    "16 referenced image assets across 8 records are not present under the report evidence/images bundle; judgments use record JSON text/official snapshots and the volume report text, not reinspection of those image files. No code change, build, test, or commit."
+  ],
+  "records": [
+    {
+      "id": "COL-0048",
+      "object_id": "minecraft:potted_oak_sapling",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0048.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0049",
+      "object_id": "minecraft:potted_oak_sapling",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0049.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0101",
+      "object_id": "minecraft:potted_oak_sapling",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0101.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0336",
+      "object_id": "minecraft:potted_open_eyeblossom",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0336.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0337",
+      "object_id": "minecraft:potted_open_eyeblossom",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0337.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0351",
+      "object_id": "minecraft:potted_open_eyeblossom",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0351.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0082",
+      "object_id": "minecraft:potted_orange_tulip",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0082.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0083",
+      "object_id": "minecraft:potted_orange_tulip",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0083.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0118",
+      "object_id": "minecraft:potted_orange_tulip",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0118.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0088",
+      "object_id": "minecraft:potted_oxeye_daisy",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0088.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0089",
+      "object_id": "minecraft:potted_oxeye_daisy",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0089.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0121",
+      "object_id": "minecraft:potted_oxeye_daisy",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0121.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0062",
+      "object_id": "minecraft:potted_pale_oak_sapling",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0062.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0063",
+      "object_id": "minecraft:potted_pale_oak_sapling",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0063.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0108",
+      "object_id": "minecraft:potted_pale_oak_sapling",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0108.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0086",
+      "object_id": "minecraft:potted_pink_tulip",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0086.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0087",
+      "object_id": "minecraft:potted_pink_tulip",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0087.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0120",
+      "object_id": "minecraft:potted_pink_tulip",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0120.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0072",
+      "object_id": "minecraft:potted_poppy",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0072.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0073",
+      "object_id": "minecraft:potted_poppy",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0073.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0113",
+      "object_id": "minecraft:potted_poppy",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0113.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0096",
+      "object_id": "minecraft:potted_red_mushroom",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0096.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0097",
+      "object_id": "minecraft:potted_red_mushroom",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0097.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0125",
+      "object_id": "minecraft:potted_red_mushroom",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0125.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0080",
+      "object_id": "minecraft:potted_red_tulip",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0080.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0081",
+      "object_id": "minecraft:potted_red_tulip",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0081.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0117",
+      "object_id": "minecraft:potted_red_tulip",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0117.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0050",
+      "object_id": "minecraft:potted_spruce_sapling",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0050.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0051",
+      "object_id": "minecraft:potted_spruce_sapling",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0051.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0102",
+      "object_id": "minecraft:potted_spruce_sapling",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0102.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0046",
+      "object_id": "minecraft:potted_torchflower",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0046.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0047",
+      "object_id": "minecraft:potted_torchflower",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0047.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0100",
+      "object_id": "minecraft:potted_torchflower",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0100.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0194",
+      "object_id": "minecraft:potted_warped_fungus",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0194.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0195",
+      "object_id": "minecraft:potted_warped_fungus",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0195.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0268",
+      "object_id": "minecraft:potted_warped_fungus",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0268.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0198",
+      "object_id": "minecraft:potted_warped_roots",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0198.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0199",
+      "object_id": "minecraft:potted_warped_roots",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0199.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0270",
+      "object_id": "minecraft:potted_warped_roots",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0270.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0084",
+      "object_id": "minecraft:potted_white_tulip",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0084.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0085",
+      "object_id": "minecraft:potted_white_tulip",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0085.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0119",
+      "object_id": "minecraft:potted_white_tulip",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0119.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0094",
+      "object_id": "minecraft:potted_wither_rose",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0094.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0095",
+      "object_id": "minecraft:potted_wither_rose",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0095.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0124",
+      "object_id": "minecraft:potted_wither_rose",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0124.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0020",
+      "object_id": "minecraft:powered_rail",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0020.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0087",
+      "object_id": "minecraft:pumpkin_stem",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0087.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0171",
+      "object_id": "minecraft:purple_banner",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0171.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0222",
+      "object_id": "minecraft:purple_candle",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0222.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0223",
+      "object_id": "minecraft:purple_candle",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0223.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0284",
+      "object_id": "minecraft:purple_candle",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0284.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0256",
+      "object_id": "minecraft:purple_candle_cake",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0256.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0257",
+      "object_id": "minecraft:purple_candle_cake",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0257.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0301",
+      "object_id": "minecraft:purple_candle_cake",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0301.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0187",
+      "object_id": "minecraft:purple_wall_banner",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0187.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0054",
+      "object_id": "minecraft:rail",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0054.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0175",
+      "object_id": "minecraft:red_banner",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0175.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0230",
+      "object_id": "minecraft:red_candle",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0230.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0231",
+      "object_id": "minecraft:red_candle",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0231.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0288",
+      "object_id": "minecraft:red_candle",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0288.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0264",
+      "object_id": "minecraft:red_candle_cake",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0264.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0265",
+      "object_id": "minecraft:red_candle_cake",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0265.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0305",
+      "object_id": "minecraft:red_candle_cake",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0305.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0047",
+      "object_id": "minecraft:red_mushroom",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0047.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0038",
+      "object_id": "minecraft:red_tulip",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0038.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0191",
+      "object_id": "minecraft:red_wall_banner",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0191.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0067",
+      "object_id": "minecraft:redstone_torch",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0067.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0068",
+      "object_id": "minecraft:redstone_wall_torch",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0068.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0006",
+      "object_id": "minecraft:redstone_wire",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0006.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0052",
+      "object_id": "minecraft:redstone_wire",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0052.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0006",
+      "object_id": "minecraft:repeater",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.125、Pomme=65.0。差(Pomme−公式)=0.875ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0006.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0007",
+      "object_id": "minecraft:repeater",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.125、Pomme=65.0。差(Pomme−公式)=0.875ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0007.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0076",
+      "object_id": "minecraft:repeater",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0076.json",
+      "evidence_images": []
+    },
+    {
+      "id": "USE-repeating_command_block",
+      "object_id": "minecraft:repeating_command_block",
+      "category": "usage",
+      "classification_in_report": "confirmed_runtime_difference",
+      "conclusion": "OP・creative・空手・150ms右クリックでPommeはゲーム画面に留まる。; expected: 公式は Set Console Command for Block の編集画面を開く。",
+      "current_code_status": "not_runtime_revalidated",
+      "record_path": "records/USE-repeating_command_block.json",
+      "evidence_images": [
+        "evidence/images/cmdblock-hold-repeating_command_block-PommeLab.png",
+        "evidence/images/cmdblock-hold-repeating_command_block-FabricLab.png"
+      ]
+    },
+    {
+      "id": "COL-0276",
+      "object_id": "minecraft:sculk_sensor",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0276.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0277",
+      "object_id": "minecraft:sculk_sensor",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0277.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0311",
+      "object_id": "minecraft:sculk_sensor",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0311.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0280",
+      "object_id": "minecraft:sculk_shrieker",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0280.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0281",
+      "object_id": "minecraft:sculk_shrieker",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0281.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0150",
+      "object_id": "minecraft:sea_pickle",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0150.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0151",
+      "object_id": "minecraft:sea_pickle",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0151.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0233",
+      "object_id": "minecraft:sea_pickle",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0233.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0028",
+      "object_id": "minecraft:seagrass",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=front、Pomme=none。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0028.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0026",
+      "object_id": "minecraft:short_dry_grass",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0026.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0022",
+      "object_id": "minecraft:short_grass",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0022.json",
+      "evidence_images": []
+    },
+    {
+      "id": "BLOCK-shulker_box",
+      "object_id": "minecraft:shulker_box",
+      "category": "rendering",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "Pomme displays purple outline-like/transparent geometry; official opaque box.",
+      "current_code_status": "not_runtime_revalidated",
+      "record_path": "records/BLOCK-shulker_box.json",
+      "evidence_images": [
+        "evidence/images/normal-fabric-fbo-block-entities-0.png",
+        "evidence/images/normal-pomme-block-entities-0.png"
+      ]
+    },
+    {
+      "id": "COL-0104",
+      "object_id": "minecraft:skeleton_skull",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0104.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0105",
+      "object_id": "minecraft:skeleton_skull",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0105.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0141",
+      "object_id": "minecraft:skeleton_skull",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0141.json",
+      "evidence_images": []
+    },
+    {
+      "id": "BLOCK-skeleton_skull",
+      "object_id": "minecraft:skeleton_skull",
+      "category": "rendering",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "Skull body absent in Pomme.",
+      "current_code_status": "not_runtime_revalidated; static_source_mismatch_suspected",
+      "record_path": "records/BLOCK-skeleton_skull.json",
+      "evidence_images": [
+        "evidence/images/normal-fabric-fbo-block-entities-6.png",
+        "evidence/images/normal-pomme-block-entities-6.png"
+      ]
+    },
+    {
+      "id": "COL-0106",
+      "object_id": "minecraft:skeleton_wall_skull",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.75、Pomme=65.0。差(Pomme−公式)=0.25ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0106.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0107",
+      "object_id": "minecraft:skeleton_wall_skull",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0107.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0142",
+      "object_id": "minecraft:skeleton_wall_skull",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0142.json",
+      "evidence_images": []
+    },
+    {
+      "id": "MOVE-slime-walk",
+      "object_id": "minecraft:slime_block",
+      "category": "movement",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "約3秒の前進と約1秒の惰性を含む区間で、Pomme約9.2629、公式約3.55〜3.61ブロック進む。",
+      "current_code_status": "not_runtime_revalidated",
+      "record_path": "records/MOVE-slime-walk.json",
+      "evidence_images": []
+    },
+    {
+      "id": "RENDER-slime",
+      "object_id": "minecraft:slime_block",
+      "category": "rendering",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "同じfixtureで公式は背景が透け、Pommeでは不透明に見える。",
+      "current_code_status": "not_runtime_revalidated",
+      "record_path": "records/RENDER-slime.json",
+      "evidence_images": [
+        "evidence/images/normal-fabric-fbo-transparency.png",
+        "evidence/images/normal-pomme-transparency.png"
+      ]
+    },
+    {
+      "id": "COL-0274",
+      "object_id": "minecraft:small_amethyst_bud",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.1875、Pomme=65.0。差(Pomme−公式)=0.8125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0274.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0275",
+      "object_id": "minecraft:small_amethyst_bud",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.1875、Pomme=65.0。差(Pomme−公式)=0.8125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0275.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0310",
+      "object_id": "minecraft:small_amethyst_bud",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0310.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0341",
+      "object_id": "minecraft:small_dripleaf",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0341.json",
+      "evidence_images": []
+    },
+    {
+      "id": "USE-smithing_table",
+      "object_id": "minecraft:smithing_table",
+      "category": "usage",
+      "classification_in_report": "confirmed_runtime_difference",
+      "conclusion": "150msの右ボタン保持でもPommeはゲーム画面に留まる。対象の専用画面へ操作できない。; expected: net.minecraft.world.inventory.SmithingMenu が開き、対応スロット/操作部が表示される。",
+      "current_code_status": "not_runtime_revalidated",
+      "record_path": "records/USE-smithing_table.json",
+      "evidence_images": [
+        "evidence/images/blockmenu-hold-p-smithing_table.png",
+        "evidence/images/blockmenu-hold-f-smithing_table.png"
+      ]
+    },
+    {
+      "id": "PICK-0201",
+      "object_id": "minecraft:sniffer_egg",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0201.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0188",
+      "object_id": "minecraft:soul_campfire",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.4375、Pomme=65.0。差(Pomme−公式)=0.5625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0188.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0189",
+      "object_id": "minecraft:soul_campfire",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.4375、Pomme=65.0。差(Pomme−公式)=0.5625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0189.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0252",
+      "object_id": "minecraft:soul_campfire",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0252.json",
+      "evidence_images": []
+    },
+    {
+      "id": "BLOCK-soul_campfire",
+      "object_id": "minecraft:soul_campfire",
+      "category": "rendering",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "Flame/body visible, smoke plume not seen in Pomme during this capture.",
+      "current_code_status": "not_runtime_revalidated",
+      "record_path": "records/BLOCK-soul_campfire.json",
+      "evidence_images": [
+        "evidence/images/normal-fabric-fbo-block-entities-4.png",
+        "evidence/images/normal-pomme-block-entities-4.png"
+      ]
+    },
+    {
+      "id": "COL-0168",
+      "object_id": "minecraft:soul_lantern",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5625、Pomme=65.0。差(Pomme−公式)=0.4375ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0168.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0169",
+      "object_id": "minecraft:soul_lantern",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.4375、Pomme=65.0。差(Pomme−公式)=0.5625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0169.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0242",
+      "object_id": "minecraft:soul_lantern",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0242.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0072",
+      "object_id": "minecraft:soul_torch",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0072.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0073",
+      "object_id": "minecraft:soul_wall_torch",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0073.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0333",
+      "object_id": "minecraft:spore_blossom",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0333.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0132",
+      "object_id": "minecraft:spruce_button",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0132.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0058",
+      "object_id": "minecraft:spruce_pressure_plate",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0058.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0012",
+      "object_id": "minecraft:spruce_sapling",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0012.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0008",
+      "object_id": "minecraft:stone_button",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0008.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0069",
+      "object_id": "minecraft:stone_button",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0069.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0056",
+      "object_id": "minecraft:stone_pressure_plate",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0056.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0162",
+      "object_id": "minecraft:stonecutter",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5625、Pomme=65.0。差(Pomme−公式)=0.4375ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0162.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0163",
+      "object_id": "minecraft:stonecutter",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5625、Pomme=65.0。差(Pomme−公式)=0.4375ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0163.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0240",
+      "object_id": "minecraft:stonecutter",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0240.json",
+      "evidence_images": []
+    },
+    {
+      "id": "USE-stonecutter",
+      "object_id": "minecraft:stonecutter",
+      "category": "usage",
+      "classification_in_report": "confirmed_runtime_difference",
+      "conclusion": "150msの右ボタン保持でもPommeはゲーム画面に留まる。対象の専用画面へ操作できない。; expected: net.minecraft.world.inventory.StonecutterMenu が開き、対応スロット/操作部が表示される。",
+      "current_code_status": "not_runtime_revalidated",
+      "record_path": "records/USE-stonecutter.json",
+      "evidence_images": [
+        "evidence/images/blockmenu-hold-p-stonecutter.png",
+        "evidence/images/blockmenu-hold-f-stonecutter.png"
+      ]
+    },
+    {
+      "id": "PICK-0198",
+      "object_id": "minecraft:structure_void",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0198.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0316",
+      "object_id": "minecraft:sulfur_spike",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.6875、Pomme=65.0。差(Pomme−公式)=0.3125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0316.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0317",
+      "object_id": "minecraft:sulfur_spike",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0317.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0330",
+      "object_id": "minecraft:sulfur_spike",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0330.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0253",
+      "object_id": "minecraft:sweet_berry_bush",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0253.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0027",
+      "object_id": "minecraft:tall_dry_grass",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0027.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0029",
+      "object_id": "minecraft:tall_seagrass",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=front、Pomme=none。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0029.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0004",
+      "object_id": "minecraft:torch",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0004.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0048",
+      "object_id": "minecraft:torch",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0048.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0033",
+      "object_id": "minecraft:torchflower",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0033.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0195",
+      "object_id": "minecraft:torchflower_crop",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0195.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0098",
+      "object_id": "minecraft:tripwire",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0098.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0097",
+      "object_id": "minecraft:tripwire_hook",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0097.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0208",
+      "object_id": "minecraft:tube_coral",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0208.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0218",
+      "object_id": "minecraft:tube_coral_fan",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0218.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0228",
+      "object_id": "minecraft:tube_coral_wall_fan",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0228.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0144",
+      "object_id": "minecraft:turtle_egg",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.4375、Pomme=65.0。差(Pomme−公式)=0.5625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0144.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0200",
+      "object_id": "minecraft:turtle_egg",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0200.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0260",
+      "object_id": "minecraft:twisting_vines",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0260.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0049",
+      "object_id": "minecraft:wall_torch",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0049.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0266",
+      "object_id": "minecraft:warped_button",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0266.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0254",
+      "object_id": "minecraft:warped_fungus",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0254.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0264",
+      "object_id": "minecraft:warped_pressure_plate",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0264.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0255",
+      "object_id": "minecraft:warped_roots",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0255.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0032",
+      "object_id": "minecraft:water_cauldron",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.25、Pomme=65.0。差(Pomme−公式)=0.75ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0032.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0017",
+      "object_id": "minecraft:waxed_copper_bars",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0017.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0081",
+      "object_id": "minecraft:waxed_copper_bars",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0081.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0290",
+      "object_id": "minecraft:waxed_copper_golem_statue",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0290.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0291",
+      "object_id": "minecraft:waxed_copper_golem_statue",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0291.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0317",
+      "object_id": "minecraft:waxed_copper_golem_statue",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0317.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0178",
+      "object_id": "minecraft:waxed_copper_lantern",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5625、Pomme=65.0。差(Pomme−公式)=0.4375ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0178.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0179",
+      "object_id": "minecraft:waxed_copper_lantern",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.4375、Pomme=65.0。差(Pomme−公式)=0.5625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0179.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0247",
+      "object_id": "minecraft:waxed_copper_lantern",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0247.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0019",
+      "object_id": "minecraft:waxed_exposed_copper_bars",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0019.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0082",
+      "object_id": "minecraft:waxed_exposed_copper_bars",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0082.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0292",
+      "object_id": "minecraft:waxed_exposed_copper_golem_statue",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0292.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0293",
+      "object_id": "minecraft:waxed_exposed_copper_golem_statue",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0293.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0318",
+      "object_id": "minecraft:waxed_exposed_copper_golem_statue",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0318.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0180",
+      "object_id": "minecraft:waxed_exposed_copper_lantern",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5625、Pomme=65.0。差(Pomme−公式)=0.4375ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0180.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0181",
+      "object_id": "minecraft:waxed_exposed_copper_lantern",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.4375、Pomme=65.0。差(Pomme−公式)=0.5625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0181.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0248",
+      "object_id": "minecraft:waxed_exposed_copper_lantern",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0248.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0309",
+      "object_id": "minecraft:waxed_exposed_lightning_rod",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0309.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0326",
+      "object_id": "minecraft:waxed_exposed_lightning_rod",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0326.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0307",
+      "object_id": "minecraft:waxed_lightning_rod",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0307.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0325",
+      "object_id": "minecraft:waxed_lightning_rod",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0325.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0023",
+      "object_id": "minecraft:waxed_oxidized_copper_bars",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0023.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0084",
+      "object_id": "minecraft:waxed_oxidized_copper_bars",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0084.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0296",
+      "object_id": "minecraft:waxed_oxidized_copper_golem_statue",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0296.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0297",
+      "object_id": "minecraft:waxed_oxidized_copper_golem_statue",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0297.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0320",
+      "object_id": "minecraft:waxed_oxidized_copper_golem_statue",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0320.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0184",
+      "object_id": "minecraft:waxed_oxidized_copper_lantern",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5625、Pomme=65.0。差(Pomme−公式)=0.4375ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0184.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0185",
+      "object_id": "minecraft:waxed_oxidized_copper_lantern",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.4375、Pomme=65.0。差(Pomme−公式)=0.5625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0185.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0250",
+      "object_id": "minecraft:waxed_oxidized_copper_lantern",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0250.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0313",
+      "object_id": "minecraft:waxed_oxidized_lightning_rod",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0313.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0328",
+      "object_id": "minecraft:waxed_oxidized_lightning_rod",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0328.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0021",
+      "object_id": "minecraft:waxed_weathered_copper_bars",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0021.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0083",
+      "object_id": "minecraft:waxed_weathered_copper_bars",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0083.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0294",
+      "object_id": "minecraft:waxed_weathered_copper_golem_statue",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0294.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0295",
+      "object_id": "minecraft:waxed_weathered_copper_golem_statue",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0295.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0319",
+      "object_id": "minecraft:waxed_weathered_copper_golem_statue",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0319.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0182",
+      "object_id": "minecraft:waxed_weathered_copper_lantern",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5625、Pomme=65.0。差(Pomme−公式)=0.4375ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0182.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0183",
+      "object_id": "minecraft:waxed_weathered_copper_lantern",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.4375、Pomme=65.0。差(Pomme−公式)=0.5625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0183.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0249",
+      "object_id": "minecraft:waxed_weathered_copper_lantern",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0249.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0311",
+      "object_id": "minecraft:waxed_weathered_lightning_rod",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0311.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0327",
+      "object_id": "minecraft:waxed_weathered_lightning_rod",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0327.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0013",
+      "object_id": "minecraft:weathered_copper_bars",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0013.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0079",
+      "object_id": "minecraft:weathered_copper_bars",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0079.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0286",
+      "object_id": "minecraft:weathered_copper_golem_statue",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0286.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0287",
+      "object_id": "minecraft:weathered_copper_golem_statue",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0287.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0315",
+      "object_id": "minecraft:weathered_copper_golem_statue",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0315.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0174",
+      "object_id": "minecraft:weathered_copper_lantern",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5625、Pomme=65.0。差(Pomme−公式)=0.4375ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0174.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0175",
+      "object_id": "minecraft:weathered_copper_lantern",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.4375、Pomme=65.0。差(Pomme−公式)=0.5625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0175.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0245",
+      "object_id": "minecraft:weathered_copper_lantern",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0245.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0303",
+      "object_id": "minecraft:weathered_lightning_rod",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0303.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0323",
+      "object_id": "minecraft:weathered_lightning_rod",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0323.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0053",
+      "object_id": "minecraft:wheat",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0053.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0161",
+      "object_id": "minecraft:white_banner",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0161.json",
+      "evidence_images": []
+    },
+    {
+      "id": "BLOCK-white_banner",
+      "object_id": "minecraft:white_banner",
+      "category": "rendering",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "Banner cloth/body absent in Pomme.",
+      "current_code_status": "not_runtime_revalidated",
+      "record_path": "records/BLOCK-white_banner.json",
+      "evidence_images": [
+        "evidence/images/normal-fabric-fbo-block-entities-3.png",
+        "evidence/images/normal-pomme-block-entities-3.png"
+      ]
+    },
+    {
+      "id": "COL-0202",
+      "object_id": "minecraft:white_candle",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0202.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0203",
+      "object_id": "minecraft:white_candle",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0203.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0274",
+      "object_id": "minecraft:white_candle",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0274.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0236",
+      "object_id": "minecraft:white_candle_cake",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0236.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0237",
+      "object_id": "minecraft:white_candle_cake",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0237.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0291",
+      "object_id": "minecraft:white_candle_cake",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0291.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0040",
+      "object_id": "minecraft:white_tulip",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0040.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0177",
+      "object_id": "minecraft:white_wall_banner",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0177.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0337",
+      "object_id": "minecraft:wildflowers",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0337.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0044",
+      "object_id": "minecraft:wither_rose",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0044.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0108",
+      "object_id": "minecraft:wither_skeleton_skull",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0108.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0109",
+      "object_id": "minecraft:wither_skeleton_skull",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0109.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0143",
+      "object_id": "minecraft:wither_skeleton_skull",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0143.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0110",
+      "object_id": "minecraft:wither_skeleton_wall_skull",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.75、Pomme=65.0。差(Pomme−公式)=0.25ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0110.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0111",
+      "object_id": "minecraft:wither_skeleton_wall_skull",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0111.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0144",
+      "object_id": "minecraft:wither_skeleton_wall_skull",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0144.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0165",
+      "object_id": "minecraft:yellow_banner",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0165.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0210",
+      "object_id": "minecraft:yellow_candle",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0210.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0211",
+      "object_id": "minecraft:yellow_candle",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0211.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0278",
+      "object_id": "minecraft:yellow_candle",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0278.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0244",
+      "object_id": "minecraft:yellow_candle_cake",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0244.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0245",
+      "object_id": "minecraft:yellow_candle_cake",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0245.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0295",
+      "object_id": "minecraft:yellow_candle_cake",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0295.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0181",
+      "object_id": "minecraft:yellow_wall_banner",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0181.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0112",
+      "object_id": "minecraft:zombie_head",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0112.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0113",
+      "object_id": "minecraft:zombie_head",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0113.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0145",
+      "object_id": "minecraft:zombie_head",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0145.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0114",
+      "object_id": "minecraft:zombie_wall_head",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.75、Pomme=65.0。差(Pomme−公式)=0.25ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0114.json",
+      "evidence_images": []
+    },
+    {
+      "id": "COL-0115",
+      "object_id": "minecraft:zombie_wall_head",
+      "category": "collision",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/COL-0115.json",
+      "evidence_images": []
+    },
+    {
+      "id": "PICK-0146",
+      "object_id": "minecraft:zombie_wall_head",
+      "category": "picking",
+      "classification_in_report": "observed_runtime_difference",
+      "conclusion": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "current_code_status": "not_runtime_revalidated; static_fallback_gap_likely",
+      "record_path": "records/PICK-0146.json",
+      "evidence_images": []
+    }
+  ]
+}

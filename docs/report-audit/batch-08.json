@@ -1,0 +1,98 @@
+{
+  "batch": "08",
+  "scope": "Generic block-shape audit only; no source edits, build, or tests performed.",
+  "inputs": {
+    "report_root": "report-root",
+    "shape_index": "shape_index.json",
+    "comparison": "evidence/all-state-shape-comparison.json",
+    "summary": "evidence/all-state-shape-summary.json",
+    "client": "."
+  },
+  "coverage": {
+    "blocks": 1196,
+    "states": 32366,
+    "compared_states": 32321,
+    "context_dependent_states": 45,
+    "compared_equal_collision_and_outline": 15231,
+    "outline_only_differences": 14511,
+    "collision_only_differences": 9,
+    "collision_and_outline_differences": 2570,
+    "states_with_any_static_difference": 17090,
+    "blocks_with_candidate_states_in_shape_index": 406,
+    "blocks_with_comparison_differences": 403,
+    "shape_index_sums": {
+      "candidate_states": 17090,
+      "context_states": 45
+    },
+    "context_blocks": {
+      "moving_piston": 12,
+      "scaffolding": 32,
+      "powder_snow": 1
+    },
+    "interpretation": "The comparison is exhaustive over all 32,366 enumerated states, not only the candidate subset: each state has a status, and the 17,090 shape_index candidates equal all static mismatches in the comparison. The remaining 15,231 compared states match both channels. Candidate/difference means computed-vs-oracle discrepancy, not a proven player-visible or live-game bug. The separate 45 statuses are context-dependent and are not static mismatches."
+  },
+  "largest_shared_families_and_examples": [
+    {
+      "priority": 1,
+      "family": "Unmodeled/special outline shapes, especially non-colliding plants, wires, fire, rails, controls, banners, coral, etc.",
+      "evidence": "outline-only differences dominate: 14,511 states; examples redstone_wire 1,296, fire 512, wall families 322 states each, tripwire 128, glow_lichen/resin_clump/sculk_vein 126 each. These are often currently full-cube outline fallback despite empty collision.",
+      "sample": "redstone_wire with east/north/south/west connections up/side has empty collision and vanilla outline composed of 1/16- and 1/16..1.0 wire parts; current outline is the full [0,0,0,1,1,1] cube.",
+      "likely_effect": "Can make interaction raycasts hit broad invisible regions or make small/non-colliding blocks targetable as full cubes; this is a code-level discrepancy, not proof of a reported live bug."
+    },
+    {
+      "priority": 2,
+      "family": "Walls and wall-like connection shapes; existing wall_shape ignores vanilla outline height cap.",
+      "evidence": "Many stone/resin/deepslate/sulfur/cinnabar wall IDs each have 322 outline differences. Existing wall_shape is used as collision and fallback outline; on a sample no-connections wall it returns central post y=0..1.5, while oracle outline is y=0..1.0. Connected arms also need low/tall-specific outline heights and vanilla post/arm unions.",
+      "sample": "cobblestone_wall, east/north/south/west=none, up=true, waterlogged=true: collision central box [0.25,0,0.25,0.75,1.5,0.75]; outline [0.25,0,0.25,0.75,1,0.75]."
+    },
+    {
+      "priority": 3,
+      "family": "Block-specific shared collision+outline geometry, including block model/interaction classes that currently fall through to cube.",
+      "evidence": "2,570 states mismatch both channels; examples calibrated_sculk_sensor 384, repeater 64, copper_bars variants 32 each, heads/skulls 32 each, daylight_detector 32, copper_golem_statue variants, lightning rods, cauldron/brewing stand/candles/crops/eggs/pistons. This spans both real collision geometry and noncolliding selection geometry; do not implement as one suffix heuristic.",
+      "sample": "calibrated_sculk_sensor active state currently full cube but vanilla collision and outline are [0,0,0,1,0.5,1]."
+    },
+    {
+      "priority": 4,
+      "family": "Existing handlers with wrong/incomplete properties or missing state branches.",
+      "evidence": "copper_bars (all eight oxidation/wax families) have 256 combined state differences; existing generic _pane condition only handles names ending _pane, while _bars only handles iron_bars. open fence gates are correctly no-collision but their nonempty outline is missed (oak_fence_gate family 32 states per wood; open north sample oracle outline [0,0,0.375,1,0.8125,0.625], current empty). Copper/regular rails and buttons share this risk; controls need their actual outline tables, not cube fallback."
+    },
+    {
+      "priority": 5,
+      "family": "Small collision exceptions to prioritize separately from outline-only coverage.",
+      "evidence": "Only 2,579 static collision mismatches: 2,570 also outline, 9 collision-only. collision-only states are 8 sculk_shrieker states and mud. Other frequent collision+outline clusters include repeater (64), calibrated_sculk_sensor (384), copper_bars variants, heads, lights, and block entities."
+    }
+  ],
+  "context_dependent_detail": {
+    "moving_piston": "12 states; collision/outline depends on moving piston/entity progress and carried block state, so a single state-id shape table cannot reproduce runtime shape. Needs world/entity context and interpolation if exactness is desired.",
+    "scaffolding": "32 states; comparison marks collision/outline context-dependent (neighbor/support context), not an ordinary state-property-only lookup. Preserve contextual path or intentionally accept a documented approximation.",
+    "powder_snow": "1 state; entity-context collision (e.g. entity ability/boots) must not be conflated with static shape. Keep entity-dependent decision at collision call site."
+  },
+  "root_cause_and_minimal_recommendation": {
+    "current_flow": "pomme-client/src/physics/block_shape.rs::compute_shape/compute_outline derive partial geometry from hand-coded id/property branches; unhandled shapes become None. pomme-client/src/world/block/mod.rs::build_table (around lines 400-430) computes these per state and stores BlockData.shape/outline. partial_shape falls back to an empty slice when has_collision=false, while outline_shape falls back to a full cube. Thus a noncolliding small outline needs an explicit compute_outline entry; a collision shape needs compute_shape; a collision-vs-outline difference needs both.",
+    "root_issue": "A hand-maintained partial family allowlist is serving as a universal shape oracle. Unhandled state-dependent shapes silently become full cube for outline and full cube for collidable collision. The discrepancy is broad coverage debt, not one shared coordinate bug.",
+    "recommended_change": "Use the existing per-version vanilla shape capture/generation approach rather than growing match arms or adding a giant Rust hardcode. Extend the current vanilla-driven generator pipeline (tools/stategen/StateDump.java plus tools/blockgen/src/main.rs, or a small sibling shape dumper/compactor) to emit each state’s static collision and outline AABBs keyed in the same dense state-id order as blocks-<version>.json; deduplicate equal shapes and encode each block as default shape index plus sparse state-offset overrides (or a compact per-state index array when denser). Embed generated compact shape data next to blocks-<version>.json, decode once in build_table into the existing BlockData.shape/outline fields, and retain contextual handlers exclusively for the 45 marked states. For every generated dataset validate version, block/state counts and state-order alignment before use. If staged instead of wholesale, first add outline data for small noncolliding shapes and accurate wall outline; then prioritize actual collision discrepancies separately.",
+    "minimal_runtime_contract": "Continue representing None as full cube, Some([]) as empty, and Some(boxes) as explicit geometry. Populate the exact static per-state shapes before BlockData construction; do not alter has_collision semantics to manufacture collision. Keep context-dependent collision decisions outside this static table. Avoid runtime parsing of a giant oracle JSON; generated compact embedded indices and shared box dictionary are preferable.",
+    "existing_vanilla_data_reuse": "third_party/SteelMC/steel-registry/build_assets/blocks.json already contains vanilla-derived collision_shapes, outline_shapes, support_shapes, occlusion_shapes and an interned global shapes dictionary with per-block overwrites; it is an immediately reusable oracle for the available registry version and existing tests already compare selected cases to it. It is 20,132,079 bytes and is not the client’s current embedded per-version shape table, so include_str!/runtime-parsing it wholesale is not a sensible shipped solution and it does not establish coverage for every protocol table. Existing pomme-client/src/world/block/data/blocks-<version>.json (e.g. 26.2: 172,683 bytes) supplies IDs/properties only; state-<version>.json (26.2: 310,990 bytes) supplies baked light/collision flag fields, not AABBs. A vanilla Java dump/compact generation step per supported version is the correct reuse path; do not mistake the Steel registry oracle’s current single generated data for all 13 embedded versions."
+  },
+  "relevant_files": [
+    "pomme-client/src/physics/block_shape.rs: LocalBox; partial_shape; outline_shape; compute_shape; compute_outline; wall_shape; cross_collision_shape; stair_boxes; static shape unit tests.",
+    "pomme-client/src/world/block/mod.rs: BlockData.shape/outline; EmbeddedBlocks and BLOCK_DATA per protocol; build_table around lines 400-430; block_shape/block_outline; has_collision.",
+    "pomme-client/src/world/block/registry.rs: render/model registry; does not supply physics voxel AABBs, so adding geometry here would put data in the wrong subsystem.",
+    "tools/stategen/StateDump.java: existing vanilla runtime reflection dump pattern, currently emits state light fields and hasCollision only.",
+    "tools/blockgen/src/main.rs: existing compact, version/state-order-validated generated data pipeline.",
+    "third_party/SteelMC/steel-registry/build_assets/blocks.json: pre-existing deduplicated shape oracle (20,132,079 bytes).",
+    "Client/AGENTS.md: read; requires mise for Rust build/check/test commands; none were run. ponytail SKILL.md was read."
+  ],
+  "checks": {
+    "read": "Client/AGENTS.md, ponytail SKILL.md, block_shape.rs, world/block/mod.rs, world/block/registry.rs, tools/blockgen/src/main.rs, tools/stategen/StateDump.java, selected Steel blocks.json data.",
+    "machine_aggregation": "Node.js read of shape_index.json, all-state-shape-comparison.json, all-state-shape-summary.json; checked 32,366 rows, equality/status distribution, per-block counts and sample AABBs. Exit code 0.",
+    "data_sizes": "Node.js fs.statSync: all-state-shape-comparison.json 19,122,136 bytes; shape_index.json 184,258 bytes; Steel blocks.json 20,132,079 bytes; blocks-26.2.json 172,683 bytes; state-26.2.json 310,990 bytes. Exit code 0.",
+    "environment_note": "Initial PowerShell command `Get-ChildItem` under bash exited 127; Python invocation resolved to WindowsApps stub and exited 49. Switched to bash find/grep and Node.js; final aggregation succeeded.",
+    "forbidden_actions": "No source changes, code commits, builds, or tests. Only this requested docs/report-audit/batch-08.json report was written."
+  },
+  "caveats": [
+    "Oracle-vs-current computed shape differences are comparison candidates, not proven live/runtime bugs; correlate with gameplay evidence and actual call-site effect before calling them user-visible defects.",
+    "Comparison static coverage is exhaustive for the captured native-version shape dataset; do not infer that its oracle data covers all client protocol versions.",
+    "The 45 context-dependent entries are explicitly separated and should not be forced into a state-only shape table."
+  ]
+}

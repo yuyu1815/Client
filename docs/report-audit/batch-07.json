@@ -1,0 +1,98 @@
+{
+  "batch": 7,
+  "scope": {
+    "repo": ".",
+    "report": "report-root/volumes/entities_03.md",
+    "range": "minecraft:silverfish through minecraft:zombified_piglin, inclusive",
+    "target_count": 27,
+    "record_count": 27,
+    "reference_commit": "0a1aee9c6be911a3081cf454b0bae6d694ec9d55"
+  },
+  "summary": {
+    "confirmed_visual_differences": 26,
+    "unconfirmed_candidates": 1,
+    "root_cause_confidence": "Confirmed for these missing-body records: matching EntityKind has no MobDef in the current renderer; EntityRenderer::draw continues when the mob map lookup misses. This explains absent entity model/texture/draw. Not evidence of packet decode failure, and does not establish the cause of unrelated entity visual differences.",
+    "evidence_inventory": "Each of the 27 sections links the corresponding ENT/CANDIDATE record. Evidence root contains entity-gallery-results.csv, entity-gallery-summary.json, entity-group-000..052-clean-entities.json and entity-visual-observations.json. The referenced screenshot files use evidence/images/*.png, but this package's evidence directory has no images/ subdirectory; PNG pixels therefore could not be independently inspected here. Report statuses and image filenames are transcribed as reported, not re-classified from image pixels.",
+    "not_verified": [
+      "No build or tests were run (explicitly prohibited).",
+      "No code changes except this required report JSON; no commit.",
+      "No live server/client reproduction was performed during this audit.",
+      "Exact entity wire-type decoding in external Azalea dependencies was not traced end-to-end; report captures prove server-side existence, while current client receive bridge was not independently exercised.",
+      "Per-entity model geometry, texture paths, metadata variants, animation, lighting, and GPU output are not implemented/verified merely by confirming the generic renderer omission."
+    ]
+  },
+  "confirmed_records": [
+    {"id":"ENT-silverfish","entity":"minecraft:silverfish","group":38,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-038-clean-{fabric,pomme}.png","record":"records/ENT-silverfish.json"},
+    {"id":"ENT-small_fireball","entity":"minecraft:small_fireball","group":39,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-039-clean-{fabric,pomme}.png","record":"records/ENT-small_fireball.json"},
+    {"id":"ENT-sniffer","entity":"minecraft:sniffer","group":40,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-040-clean-{fabric,pomme}.png","record":"records/ENT-sniffer.json"},
+    {"id":"ENT-snow_golem","entity":"minecraft:snow_golem","group":40,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-040-clean-{fabric,pomme}.png","record":"records/ENT-snow_golem.json"},
+    {"id":"ENT-spawner_minecart","entity":"minecraft:spawner_minecart","group":41,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-041-clean-{fabric,pomme}.png","record":"records/ENT-spawner_minecart.json"},
+    {"id":"ENT-splash_potion","entity":"minecraft:splash_potion","group":35,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-035-clean-{fabric,pomme}.png","record":"records/ENT-splash_potion.json"},
+    {"id":"ENT-spruce_boat","entity":"minecraft:spruce_boat","group":42,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-042-clean-{fabric,pomme}.png","record":"records/ENT-spruce_boat.json"},
+    {"id":"ENT-spruce_chest_boat","entity":"minecraft:spruce_chest_boat","group":42,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-042-clean-{fabric,pomme}.png","record":"records/ENT-spruce_chest_boat.json"},
+    {"id":"ENT-strider","entity":"minecraft:strider","group":43,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-043-clean-{fabric,pomme}.png","record":"records/ENT-strider.json"},
+    {"id":"ENT-sulfur_cube","entity":"minecraft:sulfur_cube","group":43,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-043-clean-{fabric,pomme}.png","record":"records/ENT-sulfur_cube.json"},
+    {"id":"ENT-tadpole","entity":"minecraft:tadpole","group":44,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-044-clean-{fabric,pomme}.png","record":"records/ENT-tadpole.json"},
+    {"id":"ENT-tnt","entity":"minecraft:tnt","group":44,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-044-clean-{fabric,pomme}.png","record":"records/ENT-tnt.json"},
+    {"id":"ENT-tnt_minecart","entity":"minecraft:tnt_minecart","group":45,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-045-clean-{fabric,pomme}.png","record":"records/ENT-tnt_minecart.json"},
+    {"id":"ENT-trader_llama","entity":"minecraft:trader_llama","group":45,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-045-clean-{fabric,pomme}.png","record":"records/ENT-trader_llama.json"},
+    {"id":"ENT-trident","entity":"minecraft:trident","group":45,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-045-clean-{fabric,pomme}.png","record":"records/ENT-trident.json"},
+    {"id":"ENT-turtle","entity":"minecraft:turtle","group":46,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-046-clean-{fabric,pomme}.png","record":"records/ENT-turtle.json"},
+    {"id":"ENT-vex","entity":"minecraft:vex","group":46,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-046-clean-{fabric,pomme}.png","record":"records/ENT-vex.json"},
+    {"id":"ENT-vindicator","entity":"minecraft:vindicator","group":47,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-047-clean-{fabric,pomme}.png","record":"records/ENT-vindicator.json"},
+    {"id":"ENT-wandering_trader","entity":"minecraft:wandering_trader","group":47,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-047-clean-{fabric,pomme}.png","record":"records/ENT-wandering_trader.json"},
+    {"id":"ENT-warden","entity":"minecraft:warden","group":48,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-048-clean-{fabric,pomme}.png","record":"records/ENT-warden.json"},
+    {"id":"ENT-wither","entity":"minecraft:wither","group":49,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-049-clean-{fabric,pomme}.png","record":"records/ENT-wither.json"},
+    {"id":"ENT-wither_skeleton","entity":"minecraft:wither_skeleton","group":50,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-050-clean-{fabric,pomme}.png","record":"records/ENT-wither_skeleton.json"},
+    {"id":"ENT-wither_skull","entity":"minecraft:wither_skull","group":50,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-050-clean-{fabric,pomme}.png","record":"records/ENT-wither_skull.json"},
+    {"id":"ENT-zoglin","entity":"minecraft:zoglin","group":51,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-051-clean-{fabric,pomme}.png","record":"records/ENT-zoglin.json"},
+    {"id":"ENT-zombie_nautilus","entity":"minecraft:zombie_nautilus","group":52,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-052-clean-{fabric,pomme}.png","record":"records/ENT-zombie_nautilus.json"},
+    {"id":"ENT-zombified_piglin","entity":"minecraft:zombified_piglin","group":52,"status":"reference_visible_pomme_body_absent","evidence":"evidence/images/current-entity-group-052-clean-{fabric,pomme}.png","record":"records/ENT-zombified_piglin.json"}
+  ],
+  "candidate_records": [
+    {
+      "id":"CANDIDATE-material-zombie_villager",
+      "entity":"minecraft:zombie_villager",
+      "classification":"unconfirmed_visual_candidate; do not count as a confirmed difference or fixed",
+      "observed":"Hat/profession clothing may differ, but evidence record says visible_both_not_full_compatibility_claim in gallery group 52; profession/type/equipment and steady capture were not isolated.",
+      "record":"records/CANDIDATE-material-zombie_villager.json",
+      "evidence":"evidence/images/current-entity-group-052-clean-{fabric,pomme}.png"
+    }
+  ],
+  "code_findings": {
+    "receive_and_metadata": {
+      "symbols_and_files":["pomme-client/src/entity/mod.rs: EntityStore::set_vehicle_kind, spawn_living, set_*_metadata_at","pomme-client/src/app/core.rs: set_vehicle_spawn_transform call","pomme-client/src/net/azalea_compat.rs: packet-to-store bridge"],
+      "assessment":"Current source has typed EntityKind storage and per-entity metadata handling for supported kinds; examples include ZombieVillager conversion metadata. The report confirms target existence/position server-side, but does not prove that each target type and its wire metadata reach this store correctly. For a target whose kind is received but has no renderer entry, metadata cannot supply missing geometry or texture. No receive-path failure was demonstrated for the 26 records. Zombie villager candidate must be investigated independently: renderer already defines ZombieVillager and profession/type overlays, so its candidate is not explained by missing MobDef."
+    },
+    "model_texture_and_draw": {
+      "file":"pomme-client/src/renderer/pipelines/entity_renderer.rs",
+      "symbols":["mob_definitions","MobDef","EntityRenderer::new","EntityRenderer::draw"],
+      "finding":"mob_definitions() registers only a limited subset (including Arrow, common farm mobs, ZombieVillager, Skeleton/Stray/Bogged, etc.). None of the 26 confirmed record kinds is registered as a MobDef in the inspected current source; the model bake functions were likewise not found for the target models. The renderer builds the mobs HashMap only from those definitions. In draw, missing self.mobs.get(&info.entity_kind) takes continue, producing neither model nor texture draw. Thus the directly evidenced implementation gap is renderer model/texture registration (including model bake/variant/texture and per-kind animation as applicable), not a shared Vulkan failure. Texture-only additions cannot fix it."
+    },
+    "candidate_zombie_villager": {
+      "file":"pomme-client/src/renderer/pipelines/entity_renderer.rs",
+      "finding":"ZombieVillager is registered with bake_zombie_villager_model and base texture, plus villager_like_overlays for type/profession/level and baby overlays. Existing metadata store handles relevant curing flag, but the candidate is hat/profession apparel, so compare actual received villager type/profession/level/hats metadata and overlay gating/index selection against a fixed-state reference. Do not mark this as a bug or resolved absent further controlled evidence."
+    }
+  },
+  "minimal_fix_proposal_not_applied": [
+    "For each confirmed missing entity type, add the smallest correct baked model and MobDef entry in entity_renderer.rs using existing model/texture/variant abstractions where geometrically appropriate. Add type-specific metadata decoding only where protocol/vanilla state requires variants or layers; do not invent metadata fixes before packet values are traced.",
+    "Preserve already working shared rendering. Do not edit shared renderer in this audit; no source change was made.",
+    "For equipment/variant overlays, implement only the layer required by the tested state; avoid a broad all-entity rendering rewrite. Minecart carried block/TNT, boat chest, thrown projectiles, undead/equipment variants need their actual distinct geometry/layers, not unrelated placeholder reuse."
+  ],
+  "test_proposal_not_run": [
+    "Unit test mob_definitions contains each newly supported EntityKind and verifies expected base variants / required overlays are nonempty; ensure existing kind entries remain unique.",
+    "Model-bake tests assert each model has nonempty expected geometry and valid texture dimensions/UVs; add targeted pivot/animation assertions for moving models and mounted/passenger cases.",
+    "EntityStore tests feed protocol-specific spawn and metadata values for each supported state (e.g. age, variant, equipment, charged/puff/conversion flags as applicable), assert stored EntityKind and decoded fields; use captured server wire packets rather than assumed indices.",
+    "End-to-end paired gallery re-run using report procedure: stationary entity, identical camera/time/lighting, confirm Pos before and after, compare reference/Pomme image with each record's exact summon state. Include separate tests for boat/chest boat, minecart/TNT payload, potion/fireball/trident orientation, baby/adult and equipment layers where relevant.",
+    "Re-run CANDIDATE-material-zombie_villager with same UUID/entity state and fixed profession, villager type, level, hat flag/equipment, camera, lighting and animation phase; record overlays separately from base body."
+  ],
+  "validation": {
+    "commands": [
+      {"command":"Read ./AGENTS.md and ponytail SKILL.md","result":"Read; investigation only; commands/build/test prohibited by request."},
+      {"command":"Search/read volumes/entities_03.md, referenced records, evidence inventory and renderer/entity source","result":"27 target sections checked: 26 ENT records classified observed missing bodies, 1 candidate record classified unconfirmed."},
+      {"command":"Build/test/git status","result":"Not run (explicitly prohibited); no claims of pass or clean status."}
+    ],
+    "exit_codes": "Not applicable for read/search tool calls; no validation command with process exit status was run.",
+    "artifact_only_change":"docs/report-audit/batch-07.json"
+  }
+}

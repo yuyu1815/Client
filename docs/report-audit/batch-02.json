@@ -1,0 +1,3268 @@
+{
+  "batch": 2,
+  "scope": {
+    "volumes": [
+      "volumes/blocks_03.md",
+      "volumes/blocks_04.md"
+    ],
+    "from": "minecraft:dandelion",
+    "through": "minecraft:light_gray_candle",
+    "objects": 80,
+    "records": 133
+  },
+  "report_commit": "0a1aee9c6be911a3081cf454b0bae6d694ec9d55",
+  "current_runtime_validation": "not performed (prohibited); no record claimed fixed without verification",
+  "counts": [
+    {
+      "category": "collision",
+      "classification": "as reported, observed/confirmed runtime difference",
+      "count": 48
+    },
+    {
+      "category": "movement",
+      "classification": "as reported, observed/confirmed runtime difference",
+      "count": 2
+    },
+    {
+      "category": "picking",
+      "classification": "as reported, observed/confirmed runtime difference",
+      "count": 76
+    },
+    {
+      "category": "rendering",
+      "classification": "as reported, observed/confirmed runtime difference",
+      "count": 4
+    },
+    {
+      "category": "usage",
+      "classification": "as reported, observed/confirmed runtime difference",
+      "count": 3
+    }
+  ],
+  "integrity": {
+    "missing_record_files": [],
+    "missing_evidence_files": [
+      [
+        "USE-dispenser",
+        "blockmenu-hold-p-dispenser.png"
+      ],
+      [
+        "USE-dispenser",
+        "blockmenu-hold-f-dispenser.png"
+      ],
+      [
+        "USE-dropper",
+        "blockmenu-hold-p-dropper.png"
+      ],
+      [
+        "USE-dropper",
+        "blockmenu-hold-f-dropper.png"
+      ],
+      [
+        "USE-grindstone",
+        "blockmenu-hold-p-grindstone.png"
+      ],
+      [
+        "USE-grindstone",
+        "blockmenu-hold-f-grindstone.png"
+      ]
+    ],
+    "missing_evidence_files_note": "Six named usage screenshots (Pomme/reference for dispenser, dropper, grindstone) are linked by the detailed reports but absent from evidence/images in the supplied report package. The corresponding raw JSON records are present."
+  },
+  "root_cause_clusters": [
+    {
+      "id": "SHAPE-COLLISION-FALLBACK",
+      "record_ids": [
+        "COL-0134",
+        "COL-0135",
+        "COL-0124",
+        "COL-0125",
+        "COL-0126",
+        "COL-0127",
+        "COL-0148",
+        "COL-0149",
+        "COL-0026",
+        "COL-0027",
+        "COL-0038",
+        "COL-0039",
+        "COL-0139",
+        "COL-0011",
+        "COL-0284",
+        "COL-0285",
+        "COL-0172",
+        "COL-0173",
+        "COL-0301",
+        "COL-0044",
+        "COL-0045",
+        "COL-0216",
+        "COL-0217",
+        "COL-0250",
+        "COL-0251",
+        "COL-0228",
+        "COL-0229",
+        "COL-0262",
+        "COL-0263",
+        "COL-0158",
+        "COL-0159",
+        "COL-0332",
+        "COL-0333",
+        "COL-0166",
+        "COL-0167",
+        "COL-0270",
+        "COL-0271",
+        "COL-0034",
+        "COL-0160",
+        "COL-0161",
+        "COL-0136",
+        "COL-0137",
+        "COL-0208",
+        "COL-0209",
+        "COL-0242",
+        "COL-0243",
+        "COL-0218",
+        "COL-0219"
+      ],
+      "status": "実機差観測・原因未確定",
+      "current_code": [
+        "pomme-client/src/physics/block_shape.rs: compute_shape, partial_shape",
+        "pomme-client/src/physics/collision.rs: visit_block_aabbs_bounded"
+      ],
+      "basis": "対象別compute_shape形状なし。partial_shapeのNoneは衝突収集で全立方体へ落ちる。実機COLの高さはPommeが非立方体面より高く停止。",
+      "minimum_fix": "共有形状担当が既存形状表へ公式状態依存collision shapeを追加。ここでは重複実装しない。",
+      "test": "対象COL記録の中心/端・状態別足元Yに加え隣接状態とフルブロック対照を照合。"
+    },
+    {
+      "id": "SHAPE-OUTLINE-FALLBACK",
+      "record_ids": [
+        "PICK-0002",
+        "PICK-0031",
+        "PICK-0137",
+        "PICK-0063",
+        "PICK-0017",
+        "PICK-0158",
+        "PICK-0204",
+        "PICK-0214",
+        "PICK-0224",
+        "PICK-0205",
+        "PICK-0215",
+        "PICK-0225",
+        "PICK-0024",
+        "PICK-0206",
+        "PICK-0216",
+        "PICK-0226",
+        "PICK-0207",
+        "PICK-0217",
+        "PICK-0227",
+        "PICK-0203",
+        "PICK-0213",
+        "PICK-0223",
+        "PICK-0346",
+        "PICK-0021",
+        "PICK-0095",
+        "PICK-0151",
+        "PICK-0152",
+        "PICK-0202",
+        "PICK-0091",
+        "PICK-0093",
+        "PICK-0094",
+        "PICK-0193",
+        "PICK-0078",
+        "PICK-0314",
+        "PICK-0244",
+        "PICK-0322",
+        "PICK-0023",
+        "PICK-0050",
+        "PICK-0211",
+        "PICK-0221",
+        "PICK-0231",
+        "PICK-0099",
+        "PICK-0335",
+        "PICK-0345",
+        "PICK-0032",
+        "PICK-0168",
+        "PICK-0281",
+        "PICK-0298",
+        "PICK-0184",
+        "PICK-0174",
+        "PICK-0287",
+        "PICK-0304",
+        "PICK-0190",
+        "PICK-0238",
+        "PICK-0342",
+        "PICK-0347",
+        "PICK-0156",
+        "PICK-0212",
+        "PICK-0222",
+        "PICK-0232",
+        "PICK-0134",
+        "PICK-0060",
+        "PICK-0014",
+        "PICK-0199",
+        "PICK-0241",
+        "PICK-0308",
+        "PICK-0338",
+        "PICK-0007",
+        "PICK-0055",
+        "PICK-0160",
+        "PICK-0164",
+        "PICK-0277",
+        "PICK-0294",
+        "PICK-0180",
+        "PICK-0169",
+        "PICK-0282"
+      ],
+      "status": "実機差観測・原因未確定",
+      "current_code": [
+        "pomme-client/src/physics/block_shape.rs: outline_shape, compute_outline",
+        "pomme-client/src/world/block/mod.rs: block_outline",
+        "pomme-client/src/player/interaction.rs: raycast"
+      ],
+      "basis": "未定義outlineはfull cube fallback、block_outlineはoutline.or(shape)。調査した80対象で対象別outline shape実装なし。PICKは多くが手前誤選択。PICK-0199 kelpは逆に公式front/Pomme noneで個別追跡。",
+      "minimum_fix": "共有形状担当がoutlineをcollisionと区別して登録。kelpのmissはraycast/input経路も個別確認。",
+      "test": "各PICKの保存視点でBlockHitResultを直接比較し、最終破壊対象も照合。kelpはnoneの再現を分離。"
+    },
+    {
+      "id": "BLOCK-ENTITY-RENDER",
+      "record_ids": [
+        "BLOCK-decorated_pot",
+        "BLOCK-dragon_head",
+        "BLOCK-enchanting_table"
+      ],
+      "status": "実機差観測・現行コードに未対応候補、修正未確認",
+      "current_code": [
+        "pomme-client/src/world/block_entity.rs: rendered_kind, is_block_entity_block",
+        "pomme-client/src/renderer/pipelines/block_entity.rs: kind_definitions",
+        "pomme-client/src/renderer/pipelines/book_preview.rs: BookPreviewPipeline"
+      ],
+      "basis": "decorated_pot/dragon_head本体なし、enchanting_table本なし。現行rendered_kindにdecorated pot/dragon head登録は見当たらず、book_previewはGUI用経路。",
+      "minimum_fix": "Decorated pot/dragon headのblock entity kind・モデル/textureを追加。enchanting bookはワールド描画・animationを別途追加。",
+      "test": "payload/draw countと同一カメラ通常描画比較、bookの開閉・ページアニメーションも確認。"
+    },
+    {
+      "id": "MENU-UNSUPPORTED",
+      "record_ids": [
+        "USE-dispenser",
+        "USE-dropper",
+        "USE-grindstone"
+      ],
+      "status": "実機差観測・現行コードに未対応分岐あり、修正未確認",
+      "current_code": [
+        "pomme-client/src/player/interaction.rs: menu-block use TODO",
+        "pomme-client/src/app/core.rs: container_screen_for_menu",
+        "pomme-client/src/player/menu_click.rs: ContainerKind"
+      ],
+      "basis": "dispenser/dropper/grindstoneは150ms操作でメニュー不表示。container_screen_for_menuの未登録menu kindはNone。",
+      "minimum_fix": "3種のscreen/container kind/slot layoutとOpenScreen dispatchを実装し、クリックをconsume。",
+      "test": "対象操作再現、menu kind/slot数、server slot更新とcloseを確認。"
+    },
+    {
+      "id": "LADDER-MOVEMENT",
+      "record_ids": [
+        "MOVE-ladder-walk_approach",
+        "MOVE-ladder-jump_approach"
+      ],
+      "status": "3回反復差観測・原因未確定",
+      "current_code": [
+        "pomme-client/src/physics/movement.rs: is_on_climbable, climbable movement branches",
+        "pomme-client/src/physics/block_shape.rs: ladder shape"
+      ],
+      "basis": "Wのみで公式上昇・Pomme停止、W+Spaceも差。is_on_climbableはladder判定する一方、上向き速度0.2はjump_held分岐。因果分離は未実施。",
+      "minimum_fix": "接触検出とW入力の上昇結合をtraceし、公式挙動に合わせる。",
+      "test": "valid approachのみwalk/jump各3反復、位置・速度軌跡比較。"
+    },
+    {
+      "id": "HONEY-TRANSPARENCY",
+      "record_ids": [
+        "RENDER-honey"
+      ],
+      "status": "llvmpipeで実機差・原因未確定",
+      "current_code": [
+        "pomme-client/src/renderer/chunk/mesher.rs: material/alpha path not isolated",
+        "pomme-client/shaders/: exact shader not isolated"
+      ],
+      "basis": "背面赤stoneが公式で透過、Pommeで不透明。block_shape honey overrideはcollision/outline用で透過原因を示さず。",
+      "minimum_fix": "render material alpha/blend分類で公式との最初の差分箇所を特定して修正。",
+      "test": "同視点・時刻・光量でllvmpipeと実GPUを比較。"
+    }
+  ],
+  "objects": [
+    {
+      "target": "minecraft:dandelion",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dandelion.md",
+      "record_ids": [
+        "PICK-0002",
+        "PICK-0031"
+      ]
+    },
+    {
+      "target": "minecraft:dark_oak_button",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dark_oak_button.md",
+      "record_ids": [
+        "PICK-0137"
+      ]
+    },
+    {
+      "target": "minecraft:dark_oak_pressure_plate",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dark_oak_pressure_plate.md",
+      "record_ids": [
+        "PICK-0063"
+      ]
+    },
+    {
+      "target": "minecraft:dark_oak_sapling",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dark_oak_sapling.md",
+      "record_ids": [
+        "PICK-0017"
+      ]
+    },
+    {
+      "target": "minecraft:daylight_detector",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/daylight_detector.md",
+      "record_ids": [
+        "COL-0134",
+        "COL-0135",
+        "PICK-0158"
+      ]
+    },
+    {
+      "target": "minecraft:dead_brain_coral",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_brain_coral.md",
+      "record_ids": [
+        "PICK-0204"
+      ]
+    },
+    {
+      "target": "minecraft:dead_brain_coral_fan",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_brain_coral_fan.md",
+      "record_ids": [
+        "PICK-0214"
+      ]
+    },
+    {
+      "target": "minecraft:dead_brain_coral_wall_fan",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_brain_coral_wall_fan.md",
+      "record_ids": [
+        "PICK-0224"
+      ]
+    },
+    {
+      "target": "minecraft:dead_bubble_coral",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_bubble_coral.md",
+      "record_ids": [
+        "PICK-0205"
+      ]
+    },
+    {
+      "target": "minecraft:dead_bubble_coral_fan",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_bubble_coral_fan.md",
+      "record_ids": [
+        "PICK-0215"
+      ]
+    },
+    {
+      "target": "minecraft:dead_bubble_coral_wall_fan",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_bubble_coral_wall_fan.md",
+      "record_ids": [
+        "PICK-0225"
+      ]
+    },
+    {
+      "target": "minecraft:dead_bush",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_bush.md",
+      "record_ids": [
+        "PICK-0024"
+      ]
+    },
+    {
+      "target": "minecraft:dead_fire_coral",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_fire_coral.md",
+      "record_ids": [
+        "PICK-0206"
+      ]
+    },
+    {
+      "target": "minecraft:dead_fire_coral_fan",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_fire_coral_fan.md",
+      "record_ids": [
+        "PICK-0216"
+      ]
+    },
+    {
+      "target": "minecraft:dead_fire_coral_wall_fan",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_fire_coral_wall_fan.md",
+      "record_ids": [
+        "PICK-0226"
+      ]
+    },
+    {
+      "target": "minecraft:dead_horn_coral",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_horn_coral.md",
+      "record_ids": [
+        "PICK-0207"
+      ]
+    },
+    {
+      "target": "minecraft:dead_horn_coral_fan",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_horn_coral_fan.md",
+      "record_ids": [
+        "PICK-0217"
+      ]
+    },
+    {
+      "target": "minecraft:dead_horn_coral_wall_fan",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_horn_coral_wall_fan.md",
+      "record_ids": [
+        "PICK-0227"
+      ]
+    },
+    {
+      "target": "minecraft:dead_tube_coral",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_tube_coral.md",
+      "record_ids": [
+        "PICK-0203"
+      ]
+    },
+    {
+      "target": "minecraft:dead_tube_coral_fan",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_tube_coral_fan.md",
+      "record_ids": [
+        "PICK-0213"
+      ]
+    },
+    {
+      "target": "minecraft:dead_tube_coral_wall_fan",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dead_tube_coral_wall_fan.md",
+      "record_ids": [
+        "PICK-0223"
+      ]
+    },
+    {
+      "target": "minecraft:decorated_pot",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/decorated_pot.md",
+      "record_ids": [
+        "PICK-0346",
+        "BLOCK-decorated_pot"
+      ]
+    },
+    {
+      "target": "minecraft:detector_rail",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/detector_rail.md",
+      "record_ids": [
+        "PICK-0021"
+      ]
+    },
+    {
+      "target": "minecraft:dispenser",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dispenser.md",
+      "record_ids": [
+        "USE-dispenser"
+      ]
+    },
+    {
+      "target": "minecraft:dragon_egg",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dragon_egg.md",
+      "record_ids": [
+        "PICK-0095"
+      ]
+    },
+    {
+      "target": "minecraft:dragon_head",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dragon_head.md",
+      "record_ids": [
+        "COL-0124",
+        "COL-0125",
+        "PICK-0151",
+        "BLOCK-dragon_head"
+      ]
+    },
+    {
+      "target": "minecraft:dragon_wall_head",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dragon_wall_head.md",
+      "record_ids": [
+        "COL-0126",
+        "COL-0127",
+        "PICK-0152"
+      ]
+    },
+    {
+      "target": "minecraft:dried_ghast",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dried_ghast.md",
+      "record_ids": [
+        "COL-0148",
+        "COL-0149",
+        "PICK-0202"
+      ]
+    },
+    {
+      "target": "minecraft:dropper",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/dropper.md",
+      "record_ids": [
+        "USE-dropper"
+      ]
+    },
+    {
+      "target": "minecraft:enchanting_table",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/enchanting_table.md",
+      "record_ids": [
+        "COL-0026",
+        "COL-0027",
+        "PICK-0091",
+        "BLOCK-enchanting_table"
+      ]
+    },
+    {
+      "target": "minecraft:end_portal",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/end_portal.md",
+      "record_ids": [
+        "PICK-0093"
+      ]
+    },
+    {
+      "target": "minecraft:end_portal_frame",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/end_portal_frame.md",
+      "record_ids": [
+        "COL-0038",
+        "COL-0039",
+        "PICK-0094"
+      ]
+    },
+    {
+      "target": "minecraft:end_rod",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/end_rod.md",
+      "record_ids": [
+        "COL-0139",
+        "PICK-0193"
+      ]
+    },
+    {
+      "target": "minecraft:exposed_copper_bars",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/exposed_copper_bars.md",
+      "record_ids": [
+        "COL-0011",
+        "PICK-0078"
+      ]
+    },
+    {
+      "target": "minecraft:exposed_copper_golem_statue",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/exposed_copper_golem_statue.md",
+      "record_ids": [
+        "COL-0284",
+        "COL-0285",
+        "PICK-0314"
+      ]
+    },
+    {
+      "target": "minecraft:exposed_copper_lantern",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/exposed_copper_lantern.md",
+      "record_ids": [
+        "COL-0172",
+        "COL-0173",
+        "PICK-0244"
+      ]
+    },
+    {
+      "target": "minecraft:exposed_lightning_rod",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/exposed_lightning_rod.md",
+      "record_ids": [
+        "COL-0301",
+        "PICK-0322"
+      ]
+    },
+    {
+      "target": "minecraft:fern",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/fern.md",
+      "record_ids": [
+        "PICK-0023"
+      ]
+    },
+    {
+      "target": "minecraft:fire",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/fire.md",
+      "record_ids": [
+        "PICK-0050"
+      ]
+    },
+    {
+      "target": "minecraft:fire_coral",
+      "volume": "volumes/blocks_03.md",
+      "report": "reports/blocks/fire_coral.md",
+      "record_ids": [
+        "PICK-0211"
+      ]
+    },
+    {
+      "target": "minecraft:fire_coral_fan",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/fire_coral_fan.md",
+      "record_ids": [
+        "PICK-0221"
+      ]
+    },
+    {
+      "target": "minecraft:fire_coral_wall_fan",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/fire_coral_wall_fan.md",
+      "record_ids": [
+        "PICK-0231"
+      ]
+    },
+    {
+      "target": "minecraft:flower_pot",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/flower_pot.md",
+      "record_ids": [
+        "COL-0044",
+        "COL-0045",
+        "PICK-0099"
+      ]
+    },
+    {
+      "target": "minecraft:flowering_azalea",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/flowering_azalea.md",
+      "record_ids": [
+        "PICK-0335"
+      ]
+    },
+    {
+      "target": "minecraft:frogspawn",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/frogspawn.md",
+      "record_ids": [
+        "PICK-0345"
+      ]
+    },
+    {
+      "target": "minecraft:golden_dandelion",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/golden_dandelion.md",
+      "record_ids": [
+        "PICK-0032"
+      ]
+    },
+    {
+      "target": "minecraft:gray_banner",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/gray_banner.md",
+      "record_ids": [
+        "PICK-0168"
+      ]
+    },
+    {
+      "target": "minecraft:gray_candle",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/gray_candle.md",
+      "record_ids": [
+        "COL-0216",
+        "COL-0217",
+        "PICK-0281"
+      ]
+    },
+    {
+      "target": "minecraft:gray_candle_cake",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/gray_candle_cake.md",
+      "record_ids": [
+        "COL-0250",
+        "COL-0251",
+        "PICK-0298"
+      ]
+    },
+    {
+      "target": "minecraft:gray_wall_banner",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/gray_wall_banner.md",
+      "record_ids": [
+        "PICK-0184"
+      ]
+    },
+    {
+      "target": "minecraft:green_banner",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/green_banner.md",
+      "record_ids": [
+        "PICK-0174"
+      ]
+    },
+    {
+      "target": "minecraft:green_candle",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/green_candle.md",
+      "record_ids": [
+        "COL-0228",
+        "COL-0229",
+        "PICK-0287"
+      ]
+    },
+    {
+      "target": "minecraft:green_candle_cake",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/green_candle_cake.md",
+      "record_ids": [
+        "COL-0262",
+        "COL-0263",
+        "PICK-0304"
+      ]
+    },
+    {
+      "target": "minecraft:green_wall_banner",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/green_wall_banner.md",
+      "record_ids": [
+        "PICK-0190"
+      ]
+    },
+    {
+      "target": "minecraft:grindstone",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/grindstone.md",
+      "record_ids": [
+        "COL-0158",
+        "COL-0159",
+        "PICK-0238",
+        "USE-grindstone"
+      ]
+    },
+    {
+      "target": "minecraft:hanging_roots",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/hanging_roots.md",
+      "record_ids": [
+        "PICK-0342"
+      ]
+    },
+    {
+      "target": "minecraft:heavy_core",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/heavy_core.md",
+      "record_ids": [
+        "COL-0332",
+        "COL-0333",
+        "PICK-0347"
+      ]
+    },
+    {
+      "target": "minecraft:heavy_weighted_pressure_plate",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/heavy_weighted_pressure_plate.md",
+      "record_ids": [
+        "PICK-0156"
+      ]
+    },
+    {
+      "target": "minecraft:honey_block",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/honey_block.md",
+      "record_ids": [
+        "RENDER-honey"
+      ]
+    },
+    {
+      "target": "minecraft:horn_coral",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/horn_coral.md",
+      "record_ids": [
+        "PICK-0212"
+      ]
+    },
+    {
+      "target": "minecraft:horn_coral_fan",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/horn_coral_fan.md",
+      "record_ids": [
+        "PICK-0222"
+      ]
+    },
+    {
+      "target": "minecraft:horn_coral_wall_fan",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/horn_coral_wall_fan.md",
+      "record_ids": [
+        "PICK-0232"
+      ]
+    },
+    {
+      "target": "minecraft:jungle_button",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/jungle_button.md",
+      "record_ids": [
+        "PICK-0134"
+      ]
+    },
+    {
+      "target": "minecraft:jungle_pressure_plate",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/jungle_pressure_plate.md",
+      "record_ids": [
+        "PICK-0060"
+      ]
+    },
+    {
+      "target": "minecraft:jungle_sapling",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/jungle_sapling.md",
+      "record_ids": [
+        "PICK-0014"
+      ]
+    },
+    {
+      "target": "minecraft:kelp",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/kelp.md",
+      "record_ids": [
+        "PICK-0199"
+      ]
+    },
+    {
+      "target": "minecraft:ladder",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/ladder.md",
+      "record_ids": [
+        "MOVE-ladder-walk_approach",
+        "MOVE-ladder-jump_approach"
+      ]
+    },
+    {
+      "target": "minecraft:lantern",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/lantern.md",
+      "record_ids": [
+        "COL-0166",
+        "COL-0167",
+        "PICK-0241"
+      ]
+    },
+    {
+      "target": "minecraft:large_amethyst_bud",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/large_amethyst_bud.md",
+      "record_ids": [
+        "COL-0270",
+        "COL-0271",
+        "PICK-0308"
+      ]
+    },
+    {
+      "target": "minecraft:lava_cauldron",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/lava_cauldron.md",
+      "record_ids": [
+        "COL-0034"
+      ]
+    },
+    {
+      "target": "minecraft:leaf_litter",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/leaf_litter.md",
+      "record_ids": [
+        "PICK-0338"
+      ]
+    },
+    {
+      "target": "minecraft:lectern",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/lectern.md",
+      "record_ids": [
+        "COL-0160",
+        "COL-0161"
+      ]
+    },
+    {
+      "target": "minecraft:lever",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/lever.md",
+      "record_ids": [
+        "PICK-0007",
+        "PICK-0055"
+      ]
+    },
+    {
+      "target": "minecraft:light",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/light.md",
+      "record_ids": [
+        "COL-0136",
+        "COL-0137",
+        "PICK-0160"
+      ]
+    },
+    {
+      "target": "minecraft:light_blue_banner",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/light_blue_banner.md",
+      "record_ids": [
+        "PICK-0164"
+      ]
+    },
+    {
+      "target": "minecraft:light_blue_candle",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/light_blue_candle.md",
+      "record_ids": [
+        "COL-0208",
+        "COL-0209",
+        "PICK-0277"
+      ]
+    },
+    {
+      "target": "minecraft:light_blue_candle_cake",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/light_blue_candle_cake.md",
+      "record_ids": [
+        "COL-0242",
+        "COL-0243",
+        "PICK-0294"
+      ]
+    },
+    {
+      "target": "minecraft:light_blue_wall_banner",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/light_blue_wall_banner.md",
+      "record_ids": [
+        "PICK-0180"
+      ]
+    },
+    {
+      "target": "minecraft:light_gray_banner",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/light_gray_banner.md",
+      "record_ids": [
+        "PICK-0169"
+      ]
+    },
+    {
+      "target": "minecraft:light_gray_candle",
+      "volume": "volumes/blocks_04.md",
+      "report": "reports/blocks/light_gray_candle.md",
+      "record_ids": [
+        "COL-0218",
+        "COL-0219",
+        "PICK-0282"
+      ]
+    }
+  ],
+  "records": [
+    {
+      "id": "PICK-0002",
+      "target": "minecraft:dandelion",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0002.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0031",
+      "target": "minecraft:dandelion",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0031.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0137",
+      "target": "minecraft:dark_oak_button",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0137.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0063",
+      "target": "minecraft:dark_oak_pressure_plate",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0063.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0017",
+      "target": "minecraft:dark_oak_sapling",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0017.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0134",
+      "target": "minecraft:daylight_detector",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0134.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0135",
+      "target": "minecraft:daylight_detector",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0135.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0158",
+      "target": "minecraft:daylight_detector",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0158.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0204",
+      "target": "minecraft:dead_brain_coral",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0204.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0214",
+      "target": "minecraft:dead_brain_coral_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0214.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0224",
+      "target": "minecraft:dead_brain_coral_wall_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0224.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0205",
+      "target": "minecraft:dead_bubble_coral",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0205.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0215",
+      "target": "minecraft:dead_bubble_coral_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0215.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0225",
+      "target": "minecraft:dead_bubble_coral_wall_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0225.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0024",
+      "target": "minecraft:dead_bush",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0024.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0206",
+      "target": "minecraft:dead_fire_coral",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0206.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0216",
+      "target": "minecraft:dead_fire_coral_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0216.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0226",
+      "target": "minecraft:dead_fire_coral_wall_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0226.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0207",
+      "target": "minecraft:dead_horn_coral",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0207.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0217",
+      "target": "minecraft:dead_horn_coral_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0217.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0227",
+      "target": "minecraft:dead_horn_coral_wall_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0227.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0203",
+      "target": "minecraft:dead_tube_coral",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0203.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0213",
+      "target": "minecraft:dead_tube_coral_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0213.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0223",
+      "target": "minecraft:dead_tube_coral_wall_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0223.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0346",
+      "target": "minecraft:decorated_pot",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0346.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "BLOCK-decorated_pot",
+      "target": "minecraft:decorated_pot",
+      "category": "rendering",
+      "classification": "observed_runtime_difference",
+      "finding": "Pot body absent in Pomme.",
+      "independent_root_cause_confirmed": false,
+      "record": "records/BLOCK-decorated_pot.json",
+      "evidence_references": [],
+      "limitations": [
+        "静止したデフォルト状態の表示比較。インタラクション・アニメーション全体は未検証。",
+        "煙が見えない観測は一時点の画像。全ての粒子処理が欠落すると断定しない。",
+        "灯り未点灯のbeacon/conduitや空のlecternは意図的なfixtureで、機能失敗として数えない。"
+      ]
+    },
+    {
+      "id": "PICK-0021",
+      "target": "minecraft:detector_rail",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0021.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "USE-dispenser",
+      "target": "minecraft:dispenser",
+      "category": "usage",
+      "classification": "confirmed_runtime_difference",
+      "finding": "150msの右ボタン保持でもPommeはゲーム画面に留まる。対象の専用画面へ操作できない。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/USE-dispenser.json",
+      "evidence_references": [
+        "blockmenu-hold-p-dispenser.png",
+        "blockmenu-hold-f-dispenser.png"
+      ],
+      "limitations": [
+        "使用画面の到達性を確認した試験。ブロックのサーバー側機構全体が停止していると断定しない。",
+        "各種類の有効な150ms比較は1回。初回0ms入力は別の短押し検証として扱い、この結論の主要根拠にしない。",
+        "公式側の床のマゼンタ/シアン模様は意図的なstoneテクスチャ検証パック。対象ブロックやGUIを変更するパックではない。"
+      ]
+    },
+    {
+      "id": "PICK-0095",
+      "target": "minecraft:dragon_egg",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0095.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0124",
+      "target": "minecraft:dragon_head",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0124.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0125",
+      "target": "minecraft:dragon_head",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0125.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0151",
+      "target": "minecraft:dragon_head",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0151.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "BLOCK-dragon_head",
+      "target": "minecraft:dragon_head",
+      "category": "rendering",
+      "classification": "observed_runtime_difference",
+      "finding": "Head body absent in Pomme.",
+      "independent_root_cause_confirmed": false,
+      "record": "records/BLOCK-dragon_head.json",
+      "evidence_references": [],
+      "limitations": [
+        "静止したデフォルト状態の表示比較。インタラクション・アニメーション全体は未検証。",
+        "煙が見えない観測は一時点の画像。全ての粒子処理が欠落すると断定しない。",
+        "灯り未点灯のbeacon/conduitや空のlecternは意図的なfixtureで、機能失敗として数えない。"
+      ]
+    },
+    {
+      "id": "COL-0126",
+      "target": "minecraft:dragon_wall_head",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.75、Pomme=65.0。差(Pomme−公式)=0.25ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0126.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0127",
+      "target": "minecraft:dragon_wall_head",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0127.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0152",
+      "target": "minecraft:dragon_wall_head",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0152.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0148",
+      "target": "minecraft:dried_ghast",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.625、Pomme=65.0。差(Pomme−公式)=0.375ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0148.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0149",
+      "target": "minecraft:dried_ghast",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.625、Pomme=65.0。差(Pomme−公式)=0.375ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0149.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0202",
+      "target": "minecraft:dried_ghast",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0202.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "USE-dropper",
+      "target": "minecraft:dropper",
+      "category": "usage",
+      "classification": "confirmed_runtime_difference",
+      "finding": "150msの右ボタン保持でもPommeはゲーム画面に留まる。対象の専用画面へ操作できない。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/USE-dropper.json",
+      "evidence_references": [
+        "blockmenu-hold-p-dropper.png",
+        "blockmenu-hold-f-dropper.png"
+      ],
+      "limitations": [
+        "使用画面の到達性を確認した試験。ブロックのサーバー側機構全体が停止していると断定しない。",
+        "各種類の有効な150ms比較は1回。初回0ms入力は別の短押し検証として扱い、この結論の主要根拠にしない。",
+        "公式側の床のマゼンタ/シアン模様は意図的なstoneテクスチャ検証パック。対象ブロックやGUIを変更するパックではない。"
+      ]
+    },
+    {
+      "id": "COL-0026",
+      "target": "minecraft:enchanting_table",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.75、Pomme=65.0。差(Pomme−公式)=0.25ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0026.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0027",
+      "target": "minecraft:enchanting_table",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.75、Pomme=65.0。差(Pomme−公式)=0.25ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0027.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0091",
+      "target": "minecraft:enchanting_table",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0091.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "BLOCK-enchanting_table",
+      "target": "minecraft:enchanting_table",
+      "category": "rendering",
+      "classification": "observed_runtime_difference",
+      "finding": "Block body visible; animated book absent in Pomme.",
+      "independent_root_cause_confirmed": false,
+      "record": "records/BLOCK-enchanting_table.json",
+      "evidence_references": [],
+      "limitations": [
+        "静止したデフォルト状態の表示比較。インタラクション・アニメーション全体は未検証。",
+        "煙が見えない観測は一時点の画像。全ての粒子処理が欠落すると断定しない。",
+        "灯り未点灯のbeacon/conduitや空のlecternは意図的なfixtureで、機能失敗として数えない。"
+      ]
+    },
+    {
+      "id": "PICK-0093",
+      "target": "minecraft:end_portal",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0093.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0038",
+      "target": "minecraft:end_portal_frame",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.8125、Pomme=65.0。差(Pomme−公式)=0.1875ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0038.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0039",
+      "target": "minecraft:end_portal_frame",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.8125、Pomme=65.0。差(Pomme−公式)=0.1875ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0039.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0094",
+      "target": "minecraft:end_portal_frame",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0094.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0139",
+      "target": "minecraft:end_rod",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0139.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0193",
+      "target": "minecraft:end_rod",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0193.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0011",
+      "target": "minecraft:exposed_copper_bars",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0011.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0078",
+      "target": "minecraft:exposed_copper_bars",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0078.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0284",
+      "target": "minecraft:exposed_copper_golem_statue",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0284.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0285",
+      "target": "minecraft:exposed_copper_golem_statue",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0285.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0314",
+      "target": "minecraft:exposed_copper_golem_statue",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0314.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0172",
+      "target": "minecraft:exposed_copper_lantern",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.5625、Pomme=65.0。差(Pomme−公式)=0.4375ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0172.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0173",
+      "target": "minecraft:exposed_copper_lantern",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.4375、Pomme=65.0。差(Pomme−公式)=0.5625ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0173.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0244",
+      "target": "minecraft:exposed_copper_lantern",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0244.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0301",
+      "target": "minecraft:exposed_lightning_rod",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0301.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0322",
+      "target": "minecraft:exposed_lightning_rod",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0322.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0023",
+      "target": "minecraft:fern",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0023.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0050",
+      "target": "minecraft:fire",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0050.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0211",
+      "target": "minecraft:fire_coral",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0211.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0221",
+      "target": "minecraft:fire_coral_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0221.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0231",
+      "target": "minecraft:fire_coral_wall_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0231.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0044",
+      "target": "minecraft:flower_pot",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0044.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0045",
+      "target": "minecraft:flower_pot",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0045.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0099",
+      "target": "minecraft:flower_pot",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0099.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0335",
+      "target": "minecraft:flowering_azalea",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0335.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0345",
+      "target": "minecraft:frogspawn",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0345.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0032",
+      "target": "minecraft:golden_dandelion",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0032.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0168",
+      "target": "minecraft:gray_banner",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0168.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0216",
+      "target": "minecraft:gray_candle",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0216.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0217",
+      "target": "minecraft:gray_candle",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0217.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0281",
+      "target": "minecraft:gray_candle",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0281.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0250",
+      "target": "minecraft:gray_candle_cake",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0250.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0251",
+      "target": "minecraft:gray_candle_cake",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0251.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0298",
+      "target": "minecraft:gray_candle_cake",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0298.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0184",
+      "target": "minecraft:gray_wall_banner",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0184.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0174",
+      "target": "minecraft:green_banner",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0174.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0228",
+      "target": "minecraft:green_candle",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0228.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0229",
+      "target": "minecraft:green_candle",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0229.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0287",
+      "target": "minecraft:green_candle",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0287.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0262",
+      "target": "minecraft:green_candle_cake",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0262.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0263",
+      "target": "minecraft:green_candle_cake",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0263.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0304",
+      "target": "minecraft:green_candle_cake",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0304.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0190",
+      "target": "minecraft:green_wall_banner",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0190.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0158",
+      "target": "minecraft:grindstone",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0158.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0159",
+      "target": "minecraft:grindstone",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0159.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0238",
+      "target": "minecraft:grindstone",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0238.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "USE-grindstone",
+      "target": "minecraft:grindstone",
+      "category": "usage",
+      "classification": "confirmed_runtime_difference",
+      "finding": "150msの右ボタン保持でもPommeはゲーム画面に留まる。対象の専用画面へ操作できない。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/USE-grindstone.json",
+      "evidence_references": [
+        "blockmenu-hold-p-grindstone.png",
+        "blockmenu-hold-f-grindstone.png"
+      ],
+      "limitations": [
+        "使用画面の到達性を確認した試験。ブロックのサーバー側機構全体が停止していると断定しない。",
+        "各種類の有効な150ms比較は1回。初回0ms入力は別の短押し検証として扱い、この結論の主要根拠にしない。",
+        "公式側の床のマゼンタ/シアン模様は意図的なstoneテクスチャ検証パック。対象ブロックやGUIを変更するパックではない。"
+      ]
+    },
+    {
+      "id": "PICK-0342",
+      "target": "minecraft:hanging_roots",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0342.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0332",
+      "target": "minecraft:heavy_core",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0332.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0333",
+      "target": "minecraft:heavy_core",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0333.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0347",
+      "target": "minecraft:heavy_core",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0347.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0156",
+      "target": "minecraft:heavy_weighted_pressure_plate",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0156.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "RENDER-honey",
+      "target": "minecraft:honey_block",
+      "category": "rendering",
+      "classification": "observed_runtime_difference",
+      "finding": "背後に赤いコンクリートを置く。公式は透け、Pommeは不透明に見える。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/RENDER-honey.json",
+      "evidence_references": [],
+      "limitations": [
+        "GPUはllvmpipeソフトウェア実装。実GPUやMac実機の描画結果は未確認。",
+        "材質や光源処理の根本原因は未確定。",
+        "画像キャプチャは公式FBOの1280x720版を採用。旧Xwindow切り抜きサイズ違いを製品不具合として扱わない。"
+      ]
+    },
+    {
+      "id": "PICK-0212",
+      "target": "minecraft:horn_coral",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0212.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0222",
+      "target": "minecraft:horn_coral_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0222.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0232",
+      "target": "minecraft:horn_coral_wall_fan",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0232.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0134",
+      "target": "minecraft:jungle_button",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0134.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0060",
+      "target": "minecraft:jungle_pressure_plate",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0060.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0014",
+      "target": "minecraft:jungle_sapling",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0014.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0199",
+      "target": "minecraft:kelp",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=front、Pomme=none。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0199.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "MOVE-ladder-walk_approach",
+      "target": "minecraft:ladder",
+      "category": "movement",
+      "classification": "observed_runtime_difference",
+      "finding": "有効な梯子への接近開始位置で3回/クライアント。WのみはPomme Y64、公式Y69.12〜69.66。W+SpaceはPommeY73.56〜73.91、公式Y69.63〜69.96。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/MOVE-ladder-walk_approach.json",
+      "evidence_references": [],
+      "limitations": [
+        "キー保持時間にスクリーンショット取得時間も含まれる。高さ差を厳密な速度倍率とは解釈しない。",
+        "旧focused ladderは身体が梯子衝突形状へ入り込む初期配置で無効。ここには修正した別fixtureの結果だけを採用。"
+      ]
+    },
+    {
+      "id": "MOVE-ladder-jump_approach",
+      "target": "minecraft:ladder",
+      "category": "movement",
+      "classification": "observed_runtime_difference",
+      "finding": "有効な梯子への接近開始位置で3回/クライアント。WのみはPomme Y64、公式Y69.12〜69.66。W+SpaceはPommeY73.56〜73.91、公式Y69.63〜69.96。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/MOVE-ladder-jump_approach.json",
+      "evidence_references": [],
+      "limitations": [
+        "キー保持時間にスクリーンショット取得時間も含まれる。高さ差を厳密な速度倍率とは解釈しない。",
+        "旧focused ladderは身体が梯子衝突形状へ入り込む初期配置で無効。ここには修正した別fixtureの結果だけを採用。"
+      ]
+    },
+    {
+      "id": "COL-0166",
+      "target": "minecraft:lantern",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.5625、Pomme=65.0。差(Pomme−公式)=0.4375ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0166.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0167",
+      "target": "minecraft:lantern",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.4375、Pomme=65.0。差(Pomme−公式)=0.5625ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0167.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0241",
+      "target": "minecraft:lantern",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0241.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0270",
+      "target": "minecraft:large_amethyst_bud",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.3125、Pomme=65.0。差(Pomme−公式)=0.6875ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0270.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0271",
+      "target": "minecraft:large_amethyst_bud",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.3125、Pomme=65.0。差(Pomme−公式)=0.6875ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0271.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0308",
+      "target": "minecraft:large_amethyst_bud",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0308.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0034",
+      "target": "minecraft:lava_cauldron",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.25、Pomme=65.0。差(Pomme−公式)=0.75ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0034.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0338",
+      "target": "minecraft:leaf_litter",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0338.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0160",
+      "target": "minecraft:lectern",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0160.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0161",
+      "target": "minecraft:lectern",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0161.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0007",
+      "target": "minecraft:lever",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0007.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0055",
+      "target": "minecraft:lever",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0055.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0136",
+      "target": "minecraft:light",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0136.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0137",
+      "target": "minecraft:light",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0137.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0160",
+      "target": "minecraft:light",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0160.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0164",
+      "target": "minecraft:light_blue_banner",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0164.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0208",
+      "target": "minecraft:light_blue_candle",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0208.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0209",
+      "target": "minecraft:light_blue_candle",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0209.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0277",
+      "target": "minecraft:light_blue_candle",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0277.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0242",
+      "target": "minecraft:light_blue_candle_cake",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.875、Pomme=65.0。差(Pomme−公式)=0.125ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0242.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0243",
+      "target": "minecraft:light_blue_candle_cake",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.5、Pomme=65.0。差(Pomme−公式)=0.5ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0243.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0294",
+      "target": "minecraft:light_blue_candle_cake",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0294.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0180",
+      "target": "minecraft:light_blue_wall_banner",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0180.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "PICK-0169",
+      "target": "minecraft:light_gray_banner",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0169.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    },
+    {
+      "id": "COL-0218",
+      "target": "minecraft:light_gray_candle",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.375、Pomme=65.0。差(Pomme−公式)=0.625ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0218.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "COL-0219",
+      "target": "minecraft:light_gray_candle",
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "finding": "ブロック設置Y=64。公式の足元Y=64.0、Pomme=65.0。差(Pomme−公式)=1.0ブロック。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/COL-0219.json",
+      "evidence_references": [],
+      "limitations": [
+        "これは1つの観測条件であり、独立した1件の根本原因が確定した意味ではない。材質・色・木材種・中心/端条件で原因を共有する可能性がある。",
+        "プレイヤー幅は約0.6。オフセット0.04の端条件は点ではなく身体AABBと形状との交差を測る。",
+        "サーバーPosはクライアント報告を受理した座標であり、サーバーが衝突を独立計算して証明した値ではない。",
+        "各条件は同一バッチで1回/クライアント。全条件で複数回再試験したわけではない。",
+        "公式の実状態が変化/消失した無効条件はこの一覧から除外済み。文脈依存ブロックを空のワールド形状だけで断定しない。"
+      ]
+    },
+    {
+      "id": "PICK-0282",
+      "target": "minecraft:light_gray_candle",
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "finding": "公式の選択/破壊対象=back、Pomme=front。前景形状の脇または上を狙う幾何学的な候補条件。",
+      "independent_root_cause_confirmed": false,
+      "record": "records/PICK-0282.json",
+      "evidence_references": [],
+      "limitations": [
+        "形状差が予測された位置を集中的に狙った選別済み標本。件数比はゲーム全体の不具合率ではない。",
+        "公式とPommeの破壊入力方法は上記の通り異なる。公式のhitResultと最終ブロック状態を両方記録している。",
+        "支持ブロックの破壊で前景も落ちる場合は、背景破壊を優先して選択を判定した。前景/背景が両方空気でも2回攻撃の証拠ではない。",
+        "前景が検証直前に消失していた9条件は別表の無効条件として除外。",
+        "1条件1回/クライアントであり、個別条件すべてを複数回再検証したわけではない。"
+      ]
+    }
+  ],
+  "notes": [
+    "All 133 raw record JSON files exist; all record classifications are preserved below.",
+    "No raw record confirms an independent root cause; unverified is not fixed.",
+    "Shape code ownership is delegated to another investigator; no duplicate shape implementation proposed.",
+    "Evidence images not found at report-package paths are listed in integrity; no pixel-level claim beyond report metadata."
+  ],
+  "counts_by_classification": [
+    {
+      "category": "collision",
+      "classification": "observed_runtime_difference",
+      "count": 48
+    },
+    {
+      "category": "movement",
+      "classification": "observed_runtime_difference",
+      "count": 2
+    },
+    {
+      "category": "picking",
+      "classification": "observed_runtime_difference",
+      "count": 76
+    },
+    {
+      "category": "rendering",
+      "classification": "observed_runtime_difference",
+      "count": 4
+    },
+    {
+      "category": "usage",
+      "classification": "confirmed_runtime_difference",
+      "count": 3
+    }
+  ]
+}

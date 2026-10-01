@@ -1,0 +1,78 @@
+{
+  "batch": "05",
+  "scope": {
+    "volume": "volumes/entities_01.md",
+    "objects": "minecraft:acacia_boat through minecraft:fox (40 target headings)",
+    "report_commit": "0a1aee9c6be911a3081cf454b0bae6d694ec9d55",
+    "code_change": false,
+    "build_test_commit": false
+  },
+  "findings": {
+    "confirmed_common_cause": {
+      "record_classification": "observed_runtime_difference",
+      "root_cause": "Renderer only draws EntityKind values that have a MobEntry: entity_renderer.rs render loop calls self.mobs.get(&info.entity_kind), then continue on None. mob_definitions() contains a finite explicit list; target kinds with no definition have no baked model/texture and are silently skipped. Network spawn/metadata receipt therefore does not imply render support.",
+      "code_evidence": [
+        "pomme-client/src/renderer/pipelines/entity_renderer.rs:1875-1878 (missing MobEntry => continue)",
+        "pomme-client/src/renderer/pipelines/entity_renderer.rs:~700 onward (explicit MobDef model/texture registration; no boat, allay, armadillo, etc. entries for most absent targets)",
+        "pomme-client/src/net/handler.rs:1161 onward (AddEntity converted into EntitySpawned event)",
+        "pomme-client/src/net/handler.rs:1493 onward (scalar synced metadata forwarded to EntityData)",
+        "pomme-client/src/entity/mod.rs:1890 onward (per-kind/index metadata application)"
+      ],
+      "smallest_fix_direction": "Implement/render the missing entity kinds with their appropriate model and texture, routing special renderer families (boats/minecarts/projectiles/displays/block entities) through suitable existing or dedicated render paths. Do not patch metadata as a general remedy: for an absent MobEntry, even correctly received metadata is never rendered.",
+      "evidence_status": "Source confirms the skip mechanism and missing explicit registrations. No source edits or runtime retest performed; not marked fixed."
+    },
+    "metadata_and_variants": {
+      "finding": "Received AddEntity carries EntityKind and transforms into a spawn event. SetEntityData scalar values are forwarded to EntityStore::apply_entity_data, which interprets by kind/index and normalizes version-sensitive ageable/player indices. Renderer receives already assembled EntityRenderInfo including variant_index, overlays, and pose fields. Existing support is model-specific, not a universal entity renderer.",
+      "candidate_handling": "Bogged and zombie_villager have registered base rendering paths. Bogged head mushrooms and zombie-villager hat/profession clothing remain unconfirmed candidates; candidate observations themselves do not confirm material/variant metadata bugs.",
+      "candidates": ["CANDIDATE-material-bogged", "CANDIDATE-material-zombie_villager", "CANDIDATE-shadow-planes"]
+    },
+    "evidence_qualifications": [
+      "Gallery records show the entity exists before and after at the same position for body-absent rows; this rules out fixture loss for those rows but does not by itself isolate rendering code.",
+      "Rows marked visible_both_not_full_compatibility_claim are not full compatibility passes.",
+      "The source snapshot currently inspected was not built or run in this task. The report is for commit 0a1aee9; do not infer code-vs-report runtime deltas or claim corrections without a run."
+    ]
+  },
+  "records": [
+    {"id":"ENT-acacia_boat","object":"minecraft:acacia_boat","conclusion":"Confirmed runtime body absent (gallery status reference_visible_pomme_body_absent; present before/after). Current EntityRenderer has no boat MobEntry; renderer silently skips missing model. Confirmed source-level common cause; not fixed."},
+    {"id":"ENT-acacia_chest_boat","object":"minecraft:acacia_chest_boat","conclusion":"Confirmed runtime body absent and persisted entity. No boat/chest-boat MobEntry, so current entity pipeline skips it. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-allay","object":"minecraft:allay","conclusion":"Confirmed runtime body absent and persisted entity. No Allay MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-armadillo","object":"minecraft:armadillo","conclusion":"Confirmed runtime body absent and persisted entity. No Armadillo MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-armor_stand","object":"minecraft:armor_stand","conclusion":"Confirmed runtime body absent and persisted entity. No armor-stand MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-axolotl","object":"minecraft:axolotl","conclusion":"Confirmed runtime body absent and persisted entity. No Axolotl MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-bamboo_chest_raft","object":"minecraft:bamboo_chest_raft","conclusion":"Confirmed runtime body absent and persisted entity. No raft/chest-raft MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-bamboo_raft","object":"minecraft:bamboo_raft","conclusion":"Confirmed runtime body absent and persisted entity. No raft MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-bee","object":"minecraft:bee","conclusion":"Confirmed runtime body absent and persisted entity. No Bee MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-birch_boat","object":"minecraft:birch_boat","conclusion":"Confirmed runtime body absent and persisted entity. No boat MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-birch_chest_boat","object":"minecraft:birch_chest_boat","conclusion":"Confirmed runtime body absent and persisted entity. No boat/chest-boat MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-blaze","object":"minecraft:blaze","conclusion":"Confirmed runtime body absent and persisted entity. No Blaze MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-block_display","object":"minecraft:block_display","conclusion":"Confirmed runtime body absent and persisted entity. AddEntity/metadata receipt does not imply renderer support; no BlockDisplay MobEntry in entity MobDef list. Special display metadata requires its own transform/block-state render path; generic mob model is not appropriate. Confirmed source-level gap; not fixed."},
+    {"id":"CANDIDATE-material-bogged","object":"minecraft:bogged","conclusion":"Unconfirmed visual candidate: mushroom visibility difference. Gallery shows both visible; current renderer has Bogged model/overlay support and EntityStore has sheared state handling. Variant/metadata/lighting/pose not isolated. Do not call a confirmed defect or fixed."},
+    {"id":"ENT-breeze","object":"minecraft:breeze","conclusion":"Confirmed runtime body absent and persisted entity. No Breeze MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-camel","object":"minecraft:camel","conclusion":"Confirmed runtime body absent and persisted entity. No Camel MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-camel_husk","object":"minecraft:camel_husk","conclusion":"Confirmed runtime body absent and persisted entity. No Camel Husk MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"RENDER-cat","object":"minecraft:cat","conclusion":"Confirmed runtime visual difference: black-variant cat tuxedo markings absent in Pomme while source renderer supports Cat and variant textures. This is not explained by missing MobEntry; exact variant texture selection/material/lighting cause remains unconfirmed. Candidate is real observation, root cause unresolved, not fixed."},
+    {"id":"ENT-cave_spider","object":"minecraft:cave_spider","conclusion":"Confirmed runtime body absent and persisted entity. Current MobDef list includes Spider, not CaveSpider; renderer map lookup skips CaveSpider. Confirmed source-level registration gap; not fixed."},
+    {"id":"ENT-cherry_boat","object":"minecraft:cherry_boat","conclusion":"Confirmed runtime body absent and persisted entity. No boat MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-cherry_chest_boat","object":"minecraft:cherry_chest_boat","conclusion":"Confirmed runtime body absent and persisted entity. No boat/chest-boat MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-chest_minecart","object":"minecraft:chest_minecart","conclusion":"Confirmed runtime body absent and persisted entity. No minecart MobEntry; skipped by renderer. Chest contents are a special layer beyond base cart mesh. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-command_block_minecart","object":"minecraft:command_block_minecart","conclusion":"Confirmed runtime body absent and persisted entity. No minecart MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-copper_golem","object":"minecraft:copper_golem","conclusion":"Confirmed runtime body absent and persisted entity. No Copper Golem MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-creaking","object":"minecraft:creaking","conclusion":"Confirmed runtime body absent and persisted entity. No Creaking MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-dark_oak_boat","object":"minecraft:dark_oak_boat","conclusion":"Confirmed runtime body absent and persisted entity. No boat MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-dark_oak_chest_boat","object":"minecraft:dark_oak_chest_boat","conclusion":"Confirmed runtime body absent and persisted entity. No boat/chest-boat MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-dolphin","object":"minecraft:dolphin","conclusion":"Confirmed runtime body absent and persisted entity. No Dolphin MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-dragon_fireball","object":"minecraft:dragon_fireball","conclusion":"Confirmed runtime body absent and persisted entity. No projectile MobEntry/texture route for this kind; renderer skips it. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-egg","object":"minecraft:egg","conclusion":"Confirmed runtime body absent and persisted entity. Existing projectile support does not include Egg; no MobEntry so skipped. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-elder_guardian","object":"minecraft:elder_guardian","conclusion":"Confirmed runtime body absent and persisted entity. No Elder Guardian MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-end_crystal","object":"minecraft:end_crystal","conclusion":"Confirmed runtime body absent and persisted entity. No End Crystal MobEntry; its beam/base also needs special rendering. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-ender_pearl","object":"minecraft:ender_pearl","conclusion":"Confirmed runtime body absent and persisted entity. No Ender Pearl projectile MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-endermite","object":"minecraft:endermite","conclusion":"Confirmed runtime body absent and persisted entity. No Endermite MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-evoker","object":"minecraft:evoker","conclusion":"Confirmed runtime body absent and persisted entity. No Evoker MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-experience_bottle","object":"minecraft:experience_bottle","conclusion":"Confirmed runtime body absent and persisted entity. No thrown-bottle MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-experience_orb","object":"minecraft:experience_orb","conclusion":"Confirmed runtime body absent and persisted entity. No orb MobEntry or item-entity dispatch for experience-orb kind; skipped. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-falling_block","object":"minecraft:falling_block","conclusion":"Confirmed runtime body absent and persisted entity. Falling block requires metadata-selected block-state mesh, not a static mob texture; no MobEntry/special dispatch found. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-fireball","object":"minecraft:fireball","conclusion":"Confirmed runtime body absent and persisted entity. No Fireball MobEntry/projectile texture route; skipped by renderer. Confirmed source-level gap; not fixed."},
+    {"id":"ENT-fox","object":"minecraft:fox","conclusion":"Confirmed runtime body absent and persisted entity. No Fox MobEntry; skipped by renderer. Confirmed source-level gap; not fixed."}
+  ],
+  "additional_scope_note": "RENDER-cat is the actual record for minecraft:cat (record kind differs from ENT); it is included above. Cat was visible in gallery, but the separate normal-render record confirms the black-cat pattern difference. CANDIDATE-material-zombie_villager is an additional relevant candidate (record is for minecraft:zombie_villager, outside the acacia_boat..fox heading set); its renderer has base/overlay support but candidate remains unconfirmed."
+}

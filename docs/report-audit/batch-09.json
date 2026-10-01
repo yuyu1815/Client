@@ -1,0 +1,448 @@
+{
+  "batch": 9,
+  "scope": {
+    "repository": ".",
+    "report_root": "report-root",
+    "volume_files": [
+      "volumes/items_01.md",
+      "volumes/features_01.md"
+    ],
+    "objects": 25,
+    "records": 26,
+    "current_head": "914ebf2 Scope short right-click latch to live game input",
+    "notices": [
+      "Investigation only; no Rust code changed and no build or tests run.",
+      "pomme-client/src/app/input.rs and pomme-client/src/app/phases/mod.rs are excluded from edits per parallel agent coordination; short-right-click already has commits 0533a1f and 914ebf2.",
+      "Report environment: Minecraft 26.2, Linux x86_64 Vulkan llvmpipe, source unmodified at baseline 0a1aee9. Runtime results below are report observations, not re-run against current HEAD.",
+      "A status of unverified is not equivalent to fixed or working."
+    ]
+  },
+  "objects": [
+    {
+      "target": "minecraft:crossbow",
+      "records": [
+        {
+          "id": "ITEM-crossbow",
+          "classification": "reproduced difference, 3 repetitions",
+          "finding": "Holding right-click for 2.125-2.161s fired four bolts/reduced arrows 16 to 11 and dealt durability damage 4; reference held for 2.284-2.302s, loaded one projectile only, no damage until release.",
+          "evidence": "records/ITEM-crossbow.json; evidence/images/weapon-{f,p}-{0,1,2}-crossbow-{held,released}.png",
+          "current_code": "pomme-client/src/player/interaction.rs: InteractionState::start_use_item, use_item, update_using_item, release_using_item. use_item has an explicit Bow duration branch but no Crossbow charged-projectile/use-release branch; current click/tick path warrants tracing. Cause not proven.",
+          "minimum_fix": "Implement crossbow charge/release semantics in shared held-use state: start charging on press, do not fire on repeated held frames, send/finish exactly once on release after valid charge.",
+          "test": "Pure state test: press+held across ticks yields no repeated release/fire; release after adequate charge emits one release; insufficient charge and switching item cancel; then local server integration reproduces arrow count/durability."
+        }
+      ],
+      "status": "open; current behavior not re-run"
+    },
+    {
+      "target": "minecraft:shield",
+      "records": [
+        {
+          "id": "ITEM-shield",
+          "classification": "reproduced rendering difference, 3 repetitions",
+          "finding": "Inventory confirmed shield x1 while Pomme showed neither hotbar shield icon nor first-person raised shield; reference displayed both.",
+          "evidence": "records/ITEM-shield.json; evidence/images/weapon-{f,p}-{0,1,2}-shield-{held,released}.png",
+          "current_code": "pomme-client/src/ui/inventory.rs uses SpriteId::EmptyShield for empty offhand slot; item atlas/render path in pomme-client/src/world/block/model.rs and pomme-client/src/renderer/pipelines/held_item.rs. InteractionState::use_item sends generic UseItem but no shield-specific use animation/model found in reviewed paths; verify item registry sprite and display-transform lookup before attributing root cause.",
+          "minimum_fix": "Add/route shield item icon and first-person blocking transform/pose through existing item model/held-item renderer; do not infer damage blocking from a render-only observation.",
+          "test": "Asset/model lookup test for minecraft:shield GUI and first-person transforms plus visual regression while holding; separately test server-verified damage reduction by direction before claiming functional blocking."
+        }
+      ],
+      "status": "open; rendering difference only, blocking behavior unverified"
+    },
+    {
+      "target": "minecraft:spyglass",
+      "records": [
+        {
+          "id": "ITEM-spyglass",
+          "classification": "reproduced difference, 3 repetitions",
+          "finding": "While held ~2.124-2.164s, view remained normal and no looking-through overlay; reference zoomed with black scope frame.",
+          "evidence": "records/ITEM-spyglass.json; evidence/images/weapon-{f,p}-{0,1,2}-spyglass-{held,released}.png",
+          "current_code": "pomme-client/src/app/core.rs: compute_fov_modifier explicitly TODOs spyglass scoping; pomme-client/src/renderer/camera.rs controls base/dynamic FOV; pomme-client/src/ui/hud.rs TODO lists spyglass overlay.",
+          "minimum_fix": "Set scoped FOV from active spyglass use state (with configured FOV effect scale) and draw scope overlay only during that use; restore on release/cancel.",
+          "test": "FOV unit/state tests for start, held, release, item swap, offhand and FOV-effects=0; visual check for scope mask."
+        }
+      ],
+      "status": "confirmed gap in current code comment; no post-change validation"
+    },
+    {
+      "target": "minecraft:trident",
+      "records": [
+        {
+          "id": "ITEM-trident",
+          "classification": "reproduced difference, 3 repetitions",
+          "finding": "After 2.123-2.130s hold and release, Pomme retained trident and no projectile existed; reference consumed it and server confirmed thrown Trident each repetition.",
+          "evidence": "records/ITEM-trident.json; evidence/images/weapon-{f,p}-{0,1,2}-trident-{held,released}.png",
+          "current_code": "pomme-client/src/player/interaction.rs: InteractionState::use_item treats Bow specially, then only consumable-component items; no Trident charge/release branch observed. ItemUseAnimation/ActiveUse has no trident throw handling in examined region.",
+          "minimum_fix": "Add trident charge timer and release action in shared interaction controller, respecting survival/creative and only consume/send throw after minimum charge; leave Loyalty/Riptide variants as follow-on unless supported.",
+          "test": "State tests for charge threshold/release, repeated held ticks, cancellation/item swap and creative; localhost server check inventory decrements and exactly one projectile appears."
+        }
+      ],
+      "status": "open; enchants unverified"
+    },
+    {
+      "target": "auto_fps_test",
+      "records": [
+        {
+          "id": "TEST-auto-fps-mtime",
+          "classification": "environment-dependent test failure candidate",
+          "finding": "stable_chunks_timeout_and_one_shot failed 'benchmark file was not updated by this run'; three isolated repeats failed. Diagnostic: mtimes of 20 Rust-written files about 3ms earlier than write-start system time; GUI benchmark completed.",
+          "evidence": "records/TEST-auto-fps-mtime.json; reports/features/auto_fps_test.md",
+          "current_code": "pomme-client/src/app/auto_fps.rs: AutoFpsTest::start stores SystemTime started_at; completion checks file metadata modified() < started_at at ~252; test stable_chunks_timeout_and_one_shot at ~461.",
+          "minimum_fix": "Use a run-specific output path or verify contents/run_id changed instead of ordering coarse filesystem mtime against wall clock; avoid weakening assertion or skipping test.",
+          "test": "Unit test with stale preexisting output and filesystem timestamp granularity; then normal single test and full mise task only after delegated investigation permits it."
+        }
+      ],
+      "status": "unresolved environment/fs timestamp candidate; test not run in this task"
+    },
+    {
+      "target": "benchmark_metrics",
+      "records": [
+        {
+          "id": "MEASUREMENT-spike-threshold",
+          "classification": "metric interpretation caveat, not confirmed defect",
+          "finding": "10s at 30FPS: 298 frames, average 29.781101 FPS / 33.578342ms; absolute >8ms threshold reports all 298 as spikes. This does not mean 298 perceptible stalls.",
+          "evidence": "records/MEASUREMENT-spike-threshold.json; evidence/images/8181-pomme-benchmark-finished.png",
+          "current_code": "Benchmark metrics implementation was not inspected far enough to prove whether threshold is absolute; report explicitly calls for spec confirmation.",
+          "minimum_fix": "If intended to flag frame pacing rather than time-over-threshold, scale threshold relative to configured frame budget or label current absolute >8ms metric clearly; no change until meaning decided.",
+          "test": "Deterministic frame-duration vector at 30FPS: distinguish threshold hits from missed frame budget; UI label/value agree. No FPS performance claim from llvmpipe."
+        }
+      ],
+      "status": "candidate/interpretation only; not an established bug"
+    },
+    {
+      "target": "benchmark_ui",
+      "records": [
+        {
+          "id": "GUI-benchmark-escape-overlap",
+          "classification": "observed once",
+          "finding": "Escape on benchmark results draws pause menu over result text and Upload & copy link.",
+          "evidence": "records/GUI-benchmark-escape-overlap.json; evidence/images/8181-pomme-benchmark-finished.png, 8182-pomme-dismiss-benchmark.png",
+          "current_code": "pomme-client/src/ui/common.rs: benchmark-result action returns ResultAction::Dismiss on Escape/click; pomme-client/src/ui/pause.rs has PauseScreen::Benchmark. Caller screen transition/overlay clearing is the path to inspect; exact root cause not established.",
+          "minimum_fix": "Make result dismissal replace/close the active overlay before generic Escape opens pause, with one authoritative result action.",
+          "test": "State/UI regression: benchmark result + one Escape -> only expected pause/main screen controls; verify no stale result buttons hit-test behind it."
+        }
+      ],
+      "status": "open; one recorded reproduction"
+    },
+    {
+      "target": "command_chat",
+      "records": [
+        {
+          "id": "COMMAND-error-context",
+          "classification": "compared difference",
+          "finding": "Post-execution /give @s stone -1 and nonexistent item errors show only one error line in Pomme; reference additionally marks input context and <--[HERE]. Invalid command itself is rejected; not an execution safety failure.",
+          "evidence": "records/COMMAND-error-context.json; evidence/images/error-english-{pomme-item-result,pomme-negative-result,reference-item-valid-result,reference-negative-valid-result}.png",
+          "current_code": "pomme-client/src/net/commands.rs has SyntaxError{cursor} and CommandParse::usage; pomme-client/src/ui/chat.rs displays client parse/suggestion usage. Server-originated component messages arrive through pomme-client/src/net/chat.rs but lack an associated submitted command/cursor context. Separate local parser usage from server result history.",
+          "minimum_fix": "For server error response, preserve the most recent relevant command and derive/render caret context only when correlation is reliable; avoid adding caret to unrelated system messages. Local parse errors already have cursor data.",
+          "test": "UI tests: local parse and server error show context once; successful/system chat and unrelated delayed error do not attach stale command. Recheck both negative numeric and invalid identifier cases."
+        }
+      ],
+      "status": "open; command feature otherwise not generally broken"
+    },
+    {
+      "target": "creative_inventory",
+      "records": [
+        {
+          "id": "GUI-ja-search-label",
+          "classification": "observed",
+          "finding": "Japanese locale searches 石 and item name is Japanese, but Search/Building Blocks/Natural Blocks headings remain English.",
+          "evidence": "records/GUI-ja-search-label.json; evidence/images/8179-pomme-japanese-tooltip.png, 8242-fabric-creative-search-ja.png",
+          "current_code": "pomme-client/src/ui/creative_tab_data.rs contains tab/category labels; pomme-client/src/ui/menu_overlay.rs renders creative labels. No localized string audit completed; search static English UI identifiers and reuse existing option_text/translation keys.",
+          "minimum_fix": "Replace only the reported heading/category literals with existing Minecraft translation keys or add Japanese mappings using shared translation path.",
+          "test": "Localization snapshot at ja_jp verifies labels and tooltip category while pasted 石 still returns minecraft:stone; en_us unchanged."
+        }
+      ],
+      "status": "open; Japanese search itself passed"
+    },
+    {
+      "target": "entity_shadows",
+      "records": [
+        {
+          "id": "CANDIDATE-shadow-planes",
+          "classification": "unconfirmed candidate",
+          "finding": "White rectangular planes below entities with missing bodies (e.g. snow golem/TNT/vex); could be shadow/material artifact, not independently established from body-render failures.",
+          "evidence": "records/CANDIDATE-shadow-planes.json",
+          "current_code": "pomme-client/src/renderer/ entity shadow/material path; shader file list not resolved in this inspection. No causal shader identified.",
+          "minimum_fix": "Do not patch until isolate shadow geometry/texture/alpha and compare same entity with body present.",
+          "test": "Capture same entity/pose/background with shadows toggled and distinct lighting; verify plane corresponds to shadow pass before any regression test."
+        }
+      ],
+      "status": "candidate only; root cause unverified"
+    },
+    {
+      "target": "integrated_server",
+      "records": [
+        {
+          "id": "TEST-integrated-stack-overflow",
+          "classification": "test startup abnormal exit",
+          "finding": "ignored-inclusive pomme-singleplayer dev-fast test had world_settings_reach_the_steel_config succeed, then integrated-server thread stack overflow/SIGABRT, exit code 101. Release external server succeeded; release integrated-server remained unverified due environment service connection block.",
+          "evidence": "records/TEST-integrated-stack-overflow.json",
+          "current_code": "pomme-singleplayer integration startup/Steel world settings path; precise recursion symbol not resolved from current source inspection. Do not equate environment-blocked release launch with a product crash.",
+          "minimum_fix": "Use stacktrace/backtrace to identify recursion/re-entrant config call before changing stack size or launch behavior.",
+          "test": "Re-run focused ignored startup test under allowed environment, capture thread backtrace and exit code; then regular integration tests."
+        }
+      ],
+      "status": "reported failure, cause/location not yet traced"
+    },
+    {
+      "target": "main_hand",
+      "records": [
+        {
+          "id": "SETTING-main-hand",
+          "classification": "compared difference",
+          "finding": "skin_main_hand_right=false persisted and UI said Left, but first-person diamond sword stayed right; report cautions attack indicator uses this setting, so not wholly inert.",
+          "evidence": "records/SETTING-main-hand.json; evidence/images/settings-pomme-left-hand-sword.png, settings-reference-left-hand-sword.png",
+          "current_code": "pomme-client/src/ui/menu/mod.rs Settings::skin_main_hand_right; options.rs Main Hand toggles/saves it; pomme-client/src/net/connection.rs ClientInformation hardcodes HumanoidArm::Right (report's former net/mod.rs path is stale); pomme-client/src/ui/hud.rs positions attack indicator using main_hand_right. First-person hand projection/draw in pomme-client/src/renderer/pipelines/held_item.rs and hand.rs currently needs handedness input.",
+          "minimum_fix": "Plumb selected HumanoidArm into ClientInformation and first-person held-item/hand projection consistently; preserve attack-indicator mapping.",
+          "test": "Settings serialize/reload left; ClientInformation encodes left; first-person hand/item mirror and offhand/attack indicator remain on proper sides."
+        }
+      ],
+      "status": "open; setting persists and indicator path exists"
+    },
+    {
+      "target": "mouse_input",
+      "records": [
+        {
+          "id": "INPUT-short-right-click",
+          "classification": "confirmed on report build; implementation now committed",
+          "finding": "Report: chest opens Pomme 0/2 for specified 0,1,5ms; 1/2 at 10ms; 2/2 from 20-150ms. Reference 2/2 throughout. Synthetic Linux Xvfb timings are requested delay, not measured event interval.",
+          "evidence": "records/INPUT-short-right-click.json; evidence/images/click-{f,p}-{0,1}-{0,1,5,10,20,40,80,150}ms.png",
+          "current_code": "Already implemented; HEAD includes 0533a1f Preserve short right-click input until tick and 914ebf2 Scope short right-click latch to live game input. Key path: pomme-client/src/app/input.rs right_use_just_pressed/action_just_pressed/clear_just_pressed_actions; pomme-client/src/player/interaction.rs consumes action_just_pressed(Action::Use); app phase clearing path in phases/mod.rs.",
+          "minimum_fix": "No additional change from this audit. Do not edit input.rs or phases/mod.rs. Must not claim runtime regression pass solely from code/tests present.",
+          "test": "After coordinated fix agent reports validation, run focused input unit coverage for press+release before tick and non-live/UI captured click suppression; recorded server reproduction matrix if permitted."
+        }
+      ],
+      "status": "implementation committed; validation/status of fix not re-run in this investigation"
+    },
+    {
+      "target": "move-levitation_stationary",
+      "records": [
+        {
+          "id": "MOVE-levitation_stationary",
+          "classification": "observed, 3 repeats per client",
+          "finding": "On stone floor after Levitation effect with no movement, reference rose to end Y~69.19-69.28/max~70.14-70.23; Pomme remained at Y64 exactly all three repeats.",
+          "evidence": "records/MOVE-levitation_stationary.json",
+          "current_code": "pomme-client/src/physics/ movement effect integration (exact movement module path from report only); effect update is not traced. inspect physics/movement.rs and app tick effect path.",
+          "minimum_fix": "Implement Levitation vertical velocity/update in common movement tick, matching effect level/tick timing; avoid inferring from unrelated stationary/bubble movement.",
+          "test": "Physics unit trajectory with zero input, controlled starting Y/effect amplifier/duration, then live 4s stationary integration repeated three times; ensure effect clear/ground reset."
+        }
+      ],
+      "status": "open; report configuration valid"
+    },
+    {
+      "target": "render-night",
+      "records": [
+        {
+          "id": "RENDER-night",
+          "classification": "observed visual difference on llvmpipe",
+          "finding": "At time 18000 with glowstone/torch and matched camera, terrain appeared much brighter and light attenuation differed from reference.",
+          "evidence": "records/RENDER-night.json; evidence/images/normal-{fabric-fbo,pomme}-night-isolated.png",
+          "current_code": "pomme-client/src/renderer/chunk/mesher.rs: block/sky light and ambient shading; shaders/ directory. No exact shader cause determined; hardware is llvmpipe, not Mac/real GPU.",
+          "minimum_fix": "Compare lightmap/color-space/block-light propagation and night sky contribution against reference; adjust only the measured pass.",
+          "test": "Reference/Pomme captures with exact time, weather, positions, Vulkan 1280x720; shader tests for known light levels if CPU mirror exists; repeat on real GPU before broad claim."
+        }
+      ],
+      "status": "observed; root cause and non-llvmpipe result unverified"
+    },
+    {
+      "target": "render-sky-band",
+      "records": [
+        {
+          "id": "RENDER-sky-band",
+          "classification": "observed visual difference on llvmpipe",
+          "finding": "At time 6000, matched yaw180/pitch8 view showed horizontal sky color boundary near horizon.",
+          "evidence": "records/RENDER-sky-band.json; evidence/images/normal-{fabric-fbo,pomme}-transparency.png",
+          "current_code": "pomme-client/src/renderer sky pipeline/shaders; exact shader was not isolated (shader inventory was unavailable from glob read).",
+          "minimum_fix": "Inspect sky gradient interpolation/linear-vs-sRGB and horizon blending in sky render path; adjust only after comparing same camera/time captures.",
+          "test": "Deterministic sky-color sampling/render capture across horizon and time-of-day; reference and Pomme at same camera and resolution, with normal startup and probes off."
+        }
+      ],
+      "status": "observed; cause/hardware generality unverified"
+    },
+    {
+      "target": "resource_packs",
+      "records": [
+        {
+          "id": "SETTING-pack-in-game",
+          "classification": "compared difference",
+          "finding": "With local pack installed, quick-access join -> Pause/Options/Resource Packs showed empty Available; title screen options found same pack. Title route applied it successfully, so pack loading in general is not broken.",
+          "evidence": "records/SETTING-pack-in-game.json; evidence/images/pack-pomme-after-restart.png, pack-pomme-available.png, pack-pomme-title-list.png, pack-reference-available.png",
+          "current_code": "pomme-client/src/resource_pack.rs: ResourcePackManager::new/scan_local_packs. pomme-client/src/ui/menu/options.rs sets rescan_packs on navigating into pack screen; pomme-client/src/app/phases/in_menu.rs consumes rescan_packs and updates menu lists. In-game uses a different phase; likely scan flag not serviced there, but verify in_game handling.",
+          "minimum_fix": "Make same rescan request serviced on in-game phase/transition, or scan on screen entry through shared core helper; do not duplicate pack parser.",
+          "test": "Temp fixture pack visible from title and quick-access in-game screens; adding pack while game open then entering screen refreshes; selected pack reloads assets.",
+          "current_audit_update": {
+            "implementation_commit": "db06606bd982739ec64069ea64f8bd97d9e30da9",
+            "status": "screen scan implemented; code check reported passed; runtime/test not run",
+            "remaining": "immediate in-game apply is deferred until a subsequent menu transition"
+          }
+        },
+        {
+          "id": "SETTING-pack-persistence",
+          "classification": "compared difference with clean exit",
+          "finding": "Selected local CS_Test_Stone visually applied; after Quit Game, confirmed process exit0 and restart same gameDir, reverted to default. First Alt-F4 attempt excluded due WM-less environment.",
+          "evidence": "records/SETTING-pack-persistence.json; evidence/images/pack-pomme-after-quit-restart.png, pack-pomme-selected-before-quit.png, pack-pomme-world.png, pack-reference-restart-confirmed.png",
+          "current_code": "pomme-client/src/resource_pack.rs: ResourcePackManager::new starts active_packs empty and has no startup restore of enabled local selection. pomme-client/src/ui/menu/mod.rs Settings serialization persists many options but no active pack ids.",
+          "minimum_fix": "Persist only ordered local pack identifiers in existing Settings; restore valid paths on manager init, ignoring missing entries. Keep server pack lifecycle separate.",
+          "test": "Enable one/two local packs, restart manager and preserve priority; deleted/invalid pack is skipped; server-provided packs are never persisted as local.",
+          "current_audit_update": {
+            "implementation_commit": "db06606bd982739ec64069ea64f8bd97d9e30da9",
+            "status": "selected local pack persistence/save and restore implemented; code check reported passed; runtime/test not run"
+          }
+        }
+      ],
+      "status": "both report differences remain plausible/current code lacks respective behavior; not re-run"
+    },
+    {
+      "target": "setting_auto-jump",
+      "records": [
+        {
+          "id": "SETTING-disabled-auto-jump",
+          "classification": "explicitly unsupported UI option",
+          "finding": "Auto-Jump row grey and not interactable; report says intentionally disabled, not a save failure.",
+          "evidence": "records/SETTING-disabled-auto-jump.json; evidence/images/settings-sensitivity-disabled-controls-disabled-invert.png",
+          "current_code": "pomme-client/src/ui/menu/options.rs build_options_accessibility-style row and disabled prefixes include Auto-Jump:. No setting model/physics integration evidenced in reviewed source.",
+          "minimum_fix": "If implementing, add persisted boolean and drive its movement semantics before enabling the control; otherwise leave explicitly disabled and do not label functional.",
+          "test": "When implemented, serialization/reload plus obstacle approach auto-jump on/off parity. No claim of fix by cosmetic enabling."
+        }
+      ],
+      "status": "intentionally unsupported, not an active regression"
+    },
+    {
+      "target": "setting_brightness",
+      "records": [
+        {
+          "id": "SETTING-disabled-brightness",
+          "classification": "explicitly unsupported UI option",
+          "finding": "Brightness slider grey; this is UI unsupported, not evidence of failed persistence.",
+          "evidence": "records/SETTING-disabled-brightness.json",
+          "current_code": "pomme-client/src/ui/menu/options.rs build_options_video disabled list includes Brightness:; renderer has lighting pipeline but connection to setting not proven.",
+          "minimum_fix": "Add setting storage and feed gamma/brightness into the correct postprocess/lightmap path before enabling; otherwise leave disabled.",
+          "test": "Change minimum/mid/maximum, save/reload and compare measured output luminance in controlled day/night scene."
+        }
+      ],
+      "status": "intentionally unsupported; no implementation claim"
+    },
+    {
+      "target": "setting_graphics",
+      "records": [
+        {
+          "id": "SETTING-disabled-graphics",
+          "classification": "explicitly unsupported UI option",
+          "finding": "Graphics quality control shown disabled; report does not claim actual renderer preset comparison.",
+          "evidence": "records/SETTING-disabled-graphics.json",
+          "current_code": "pomme-client/src/ui/menu/options.rs build_options_video disables Graphics:; no preset state/application confirmed.",
+          "minimum_fix": "Do not enable until a real quality setting maps to renderer behavior; otherwise keep disabled.",
+          "test": "If added, verify each preset changes documented rendering options and persists; no false interactive-looking control."
+        }
+      ],
+      "status": "intentionally unsupported"
+    },
+    {
+      "target": "setting_invert-mouse",
+      "records": [
+        {
+          "id": "SETTING-disabled-invert-mouse",
+          "classification": "explicitly unsupported UI option",
+          "finding": "Invert Mouse row disabled; report shows current control unsupported, not setting-save defect.",
+          "evidence": "records/SETTING-disabled-invert-mouse.json; evidence/images/settings-sensitivity-disabled-controls-disabled-invert.png",
+          "current_code": "pomme-client/src/ui/menu/options.rs accessibility disabled list includes Invert Mouse:; mouse look input path needs setting integration.",
+          "minimum_fix": "Add persisted inversion and apply sign once in mouse-look delta before enabling.",
+          "test": "Positive/negative vertical delta parity for on/off, restart persistence; horizontal movement unaffected."
+        }
+      ],
+      "status": "intentionally unsupported"
+    },
+    {
+      "target": "setting_keybindings",
+      "records": [
+        {
+          "id": "SETTING-disabled-keybindings",
+          "classification": "explicitly unsupported UI option",
+          "finding": "Key Binds screen entry is disabled; cannot rebind through tested UI.",
+          "evidence": "records/SETTING-disabled-keybindings.json",
+          "current_code": "pomme-client/src/ui/menu/options.rs disables Key Binds... navigation; pomme-client/src/app/input.rs action bindings/input state; no rebinding persistence flow identified.",
+          "minimum_fix": "Implement only when binding model, conflict/duplicate policy and persistence have an end-to-end path; otherwise keep navigation disabled.",
+          "test": "Remap one action, restart and activate remapped key; conflict and reset-default behaviors."
+        }
+      ],
+      "status": "intentionally unsupported"
+    },
+    {
+      "target": "setting_particles",
+      "records": [
+        {
+          "id": "SETTING-disabled-particles",
+          "classification": "explicitly unsupported UI option",
+          "finding": "Particles amount control disabled; no actual particle-level comparison from this record.",
+          "evidence": "records/SETTING-disabled-particles.json",
+          "current_code": "pomme-client/src/ui/menu/options.rs video disabled prefixes include Particles:; particle emit/render systems exist but no setting linkage established.",
+          "minimum_fix": "Persist particle setting and gate spawn/render by selected mode before enabling.",
+          "test": "All/decreased/minimal particle scenarios, deterministic spawn-count comparison, save/reload."
+        }
+      ],
+      "status": "intentionally unsupported"
+    },
+    {
+      "target": "setting_skin-layers",
+      "records": [
+        {
+          "id": "SETTING-disabled-skin-layers",
+          "classification": "explicitly unsupported UI option",
+          "finding": "Individual skin-part visibility switches disabled; not a conclusion that skin layers fail to render.",
+          "evidence": "records/SETTING-disabled-skin-layers.json",
+          "current_code": "pomme-client/src/ui/menu/options.rs disables Cape/hat/body part labels; pomme-client/src/net/connection.rs ClientInformation hardcodes model parts (report mentions hardcoded values). Settings persists skin_hat only, not all toggles.",
+          "minimum_fix": "Persist per-part flags and encode them in ClientInformation; verify local player renderer uses same metadata before enabling.",
+          "test": "Toggle each part, rejoin/restart and compare both self and remote player model-part metadata."
+        }
+      ],
+      "status": "intentionally unsupported; model parts hardcoded"
+    },
+    {
+      "target": "setting_smooth-lighting",
+      "records": [
+        {
+          "id": "SETTING-disabled-smooth-lighting",
+          "classification": "explicitly unsupported UI option",
+          "finding": "Smooth Lighting switch disabled in tested options UI.",
+          "evidence": "records/SETTING-disabled-smooth-lighting.json",
+          "current_code": "pomme-client/src/ui/menu/options.rs disables Smooth Lighting:; mesher supports ambient_occlusion path in pomme-client/src/renderer/chunk/mesher.rs, but setting does not expose/control it.",
+          "minimum_fix": "Persist and thread ambient-occlusion/smooth-lighting choice to mesher rebuild before enabling; do not conflate with shader night-light difference.",
+          "test": "AO on/off controlled adjacent-block corner capture, rebuild on toggle, restart persistence."
+        }
+      ],
+      "status": "intentionally unsupported; renderer path exists, UI hookup unverified"
+    }
+  ],
+  "verification": {
+    "commands": [
+      {
+        "command": "Read Client/AGENTS.md and ponytail SKILL.md",
+        "result": "Read both; no project builds/tests permitted."
+      },
+      {
+        "command": "git -C . status --short --branch && git -C . log -5 --oneline --decorate",
+        "exit_code": 0,
+        "result": "## master...origin/master [ahead 14]; HEAD 914ebf2, parent 0533a1f. No dirty working-tree lines."
+      },
+      {
+        "command": "Read volumes/items_01.md, volumes/features_01.md; enumerate reports/features/*.md and report record headings",
+        "result": "25 targets, 26 IDs. All item records and all 21 feature objects reviewed; resource_packs has two IDs."
+      },
+      {
+        "command": "Targeted grep/read of interaction.rs, input.rs, resource_pack.rs, options.rs, core.rs, net/commands.rs, net/chat.rs and relevant renderer/UI paths",
+        "result": "Read-only symbol tracing; input.rs and phases/mod.rs not edited."
+      },
+      {
+        "command": "Build/test/runtime replay",
+        "result": "Not run, as explicitly forbidden."
+      }
+    ],
+    "not_verified": [
+      "Current HEAD gameplay compared against report build",
+      "hardware other than report's llvmpipe",
+      "real-server item use or screen rendering replays",
+      "exact source root for stack overflow",
+      "exact shader responsible for sky band/night",
+      "post-commit focused tests for 914ebf2"
+    ]
+  }
+}

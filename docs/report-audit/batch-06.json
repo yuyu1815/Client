@@ -1,0 +1,135 @@
+{
+  "batch": 6,
+  "repository": ".",
+  "source_report": "report-root/volumes/entities_02.md",
+  "report_commit": "0a1aee9c6be911a3081cf454b0bae6d694ec9d55",
+  "scope": {
+    "requested": "frog through shulker_bullet, 40 targets / 40 records",
+    "count": 40,
+    "record_breakdown": {"observed_ENT": 38, "unconfirmed_CANDIDATE": 2},
+    "evidence_summary": "38 ENT records classify observed runtime differences: reference body visible, Pomme body absent. Two candidate records are expressly unconfirmed and are not counted as bugs. Evidence CSV has paired screenshot filenames, entity exists_before_and_after=True, and unchanged before/after position for gallery ENT cases. Individual ENT JSON includes repeatable stationary summon/capture setup."
+  },
+  "records": [
+    {"id":"ENT-frog","entity":"frog","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-furnace_minecart","entity":"furnace_minecart","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-ghast","entity":"ghast","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-giant","entity":"giant","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-goat","entity":"goat","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-guardian","entity":"guardian","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-happy_ghast","entity":"happy_ghast","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-hoglin","entity":"hoglin","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-hopper_minecart","entity":"hopper_minecart","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-illusioner","entity":"illusioner","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-item_display","entity":"item_display","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-jungle_boat","entity":"jungle_boat","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-jungle_chest_boat","entity":"jungle_chest_boat","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-lingering_potion","entity":"lingering_potion","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-llama","entity":"llama","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-llama_spit","entity":"llama_spit","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-magma_cube","entity":"magma_cube","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-mangrove_boat","entity":"mangrove_boat","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-mangrove_chest_boat","entity":"mangrove_chest_boat","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-mannequin","entity":"mannequin","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-minecart","entity":"minecart","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-mooshroom","entity":"mooshroom","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-nautilus","entity":"nautilus","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-oak_boat","entity":"oak_boat","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-oak_chest_boat","entity":"oak_chest_boat","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-pale_oak_boat","entity":"pale_oak_boat","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-pale_oak_chest_boat","entity":"pale_oak_chest_boat","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-panda","entity":"panda","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-parched","entity":"parched","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-parrot","entity":"parrot","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-phantom","entity":"phantom","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-piglin","entity":"piglin","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-piglin_brute","entity":"piglin_brute","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-pillager","entity":"pillager","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-polar_bear","entity":"polar_bear","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-ravager","entity":"ravager","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-shulker","entity":"shulker","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"ENT-shulker_bullet","entity":"shulker_bullet","conclusion":"Observed: reference visible, Pomme body absent; entity remained at recorded position."},
+    {"id":"CANDIDATE-material-item","entity":"item","conclusion":"Unconfirmed candidate only: dropped diamond differs in orientation/height; animation phase differs and report expressly says it is not evidence of a bug. Do not mark fixed or faulty."},
+    {"id":"CANDIDATE-material-pig","entity":"pig","conclusion":"Unconfirmed candidate only: initial color/texture suspicion; variant metadata and lighting not isolated. Do not generalize to pig variants or mark fixed/faulty."}
+  ],
+  "confirmed_differences": [
+    "38 of 40 records are concrete ENT screenshot-comparison observations, not merely shape/model candidates. Each ENT record reports matching entity presence and stable position before/after capture. The two CANDIDATE records (item and pig) are expressly uncertain, for distinct recorded reasons, and do not establish defects.",
+    "This establishes missing body rendering in the recorded setup. It does not establish 40 independent root causes or a metadata/network receive failure.",
+    "The current mob renderer's mob_definitions() table and render-time self.mobs lookup form an explicit allowlist: in render(), a missing kind entry immediately continues without a draw. The listed kinds have no corresponding mob_definitions entry in pomme-client/src/renderer/pipelines/entity_renderer.rs.",
+    "The same base-model/texture registration omission explains the mob subset's absent bodies more directly than a texture-file failure: without a MobEntry/variant no model draw is enqueued, irrespective of whether a texture could load."
+  ],
+  "candidate_differences_and_root_cause_status": [
+    {
+      "candidate": "Entity metadata handling contributes to all 40 body-absence observations.",
+      "status": "Not established; unlikely to explain missing base bodies alone.",
+      "basis": "net/handler.rs forwards scalar metadata generically as EntityData, while selected non-scalar variants are special-cased. entity/mod.rs applies known (kind,index) values. Missing variant/pose support could affect appearance/state, but a missing renderer entry skips drawing entirely. No inbound packet trace from these entity-specific captures was inspected."
+    },
+    {
+      "candidate": "Missing model/texture registrations are the direct cause for mob-family records.",
+      "status": "Strong source-level explanation; runtime root cause remains unconfirmed.",
+      "basis": "entity_renderer.rs: mob_definitions() is the registration source; EntityRenderer::render skips any kind absent from self.mobs. The target list is not registered there. Confirming against the captured executable and per-kind received store state requires reproduction/diagnostic instrumentation, neither performed."
+    },
+    {
+      "candidate": "Every target can be fixed by adding to the shared mob renderer.",
+      "status": "Rejected as an over-broad fix approach.",
+      "basis": "The range spans living mobs, boats/minecarts, display entities, and projectiles; distinct model/metadata/render pipelines are required. EntityRenderer mob_definitions is not an adequate renderer for every target. Shared renderer must not be edited as requested."
+    }
+  ],
+  "pipeline_specific_diagnosis": {
+    "mob_models_and_textures": {
+      "entities": ["frog","ghast","giant","goat","guardian","happy_ghast","hoglin","illusioner","llama","magma_cube","mooshroom","nautilus","panda","parched","parrot","phantom","piglin","piglin_brute","pillager","polar_bear","ravager","shulker"],
+      "finding": "No MobDef entry means no baked model, texture variant, overlay/layer, culling bounds, or draw record. Even correct official texture paths cannot render until geometry and texture are registered and the kind enters the draw path. Special layered/variant cases (e.g. shulker color/opening, piglin family, mooshroom overlay, magma cube size) additionally need metadata-to-render-state mapping."
+    },
+    "vehicle_models": {
+      "entities": ["furnace_minecart","hopper_minecart","minecart","jungle_boat","jungle_chest_boat","mangrove_boat","mangrove_chest_boat","oak_boat","oak_chest_boat","pale_oak_boat","pale_oak_chest_boat"],
+      "finding": "These are vehicle/nonliving kinds rather than mob meshes. EntityStore has VehicleState and set_vehicle_kind, but the inspected entity renderer's allowlist is not a minecart/boat model renderer. Their bodies need a dedicated vehicle mesh/material draw path (minecart contents/variant and boat wood/chest state must be represented); adding a MobDef is not a sufficient diagnosis/fix."
+    },
+    "projectile_and_display_models": {
+      "entities": ["item_display","lingering_potion","llama_spit","shulker_bullet"],
+      "finding": "These need the respective display transform/item, potion bottle/projectile, spit, and shulker projectile model paths. The generic entity renderer contains an Arrow entry, not these kinds. Existing item-entity handling is distinct from ItemDisplay. Check packet-specific metadata handlers and draw extraction before implementing; no proof here that metadata failed to arrive."
+    },
+    "mannequin": {
+      "entities": ["mannequin"],
+      "finding": "No registered model/texture path was found in the inspected mob allowlist. Treat as its own mannequin/player-like renderer/state implementation, not automatically as a player entity; inspect 26.2 type and metadata schema before mapping."
+    },
+    "metadata_receive_and_apply": {
+      "finding": "SetEntityData in net/handler.rs preserves scalar Bool/Int/Byte/Float/Long via NetworkEvent::EntityData, forwards entity pose/custom name and a subset of variants separately; EntityStore::apply_entity_data interprets selected kind/index pairs. Thus receiving/decoding, field application, and renderer consumption are separable stages. For these records the report verifies entity existence, not that a particular metadata packet/value was received. Do not mark metadata support fixed or faulty without tracing packet -> event -> store -> render info."
+    }
+  },
+  "minimal_fix_recommendation": [
+    "Do not patch shared renderer until the missing-kind stage is established. Instrument or unit-test extraction to distinguish: entity absent from store, kind absent from renderer registration, variant/state lacking metadata, and draw culled/omitted.",
+    "For supported mob family entities, minimally add per-kind model bake, official texture key/fallback, correct texture size, bounds, and only required metadata-driven state/layers to the existing renderer registry; avoid a broad generic fallback mesh that conceals unsupported types.",
+    "Implement vehicle, projectile and display types through the appropriate specialized pipeline(s), not by forcing all into MobDef. Share mesh/material only for demonstrably identical model families (boat woods / minecart variants) while preserving per-kind and per-metadata selection.",
+    "Prioritize deterministic, low-variant static body visibility first, then add metadata-dependent visual states in separate scoped changes. Keep each change away from shared renderer if ownership requires; document API/interface need rather than silently editing shared code."
+  ],
+  "test_plan_not_run": [
+    "Per-kind ingestion test: synthetic spawn plus SetEntityData packet; assert entity kind, expected decoded variant/state fields, and the render-extraction output. Include protocol 26.2 serializer/index expectations and relevant legacy protocol translation if supported.",
+    "Renderer registration/draw test: assert each intentionally supported kind resolves a renderer/model and emits at least one draw for an in-frustum stationary entity; assert unsupported kinds are explicitly classified rather than accidentally silently skipped.",
+    "Metadata matrix: compare default and non-default state for frog variants, shulker color/peek, piglin-family states, magma-cube size, boat wood/chest state, minecart type/content, projectile/display item/transform; verify state selects expected mesh/material/transform.",
+    "Paired runtime regression: replay report summon setup against same 26.2 reference and Pomme, confirm before/after existence and unchanged coordinates, then capture same camera/time and check body present. Check shadows/white planes separately from body visibility."
+  ],
+  "evidence_and_limits": {
+    "source_record_checked": "records/ENT-frog.json: classification=observed_runtime_difference; group 17; status=reference_visible_pomme_body_absent; exists_before_and_after=True; unchanged position (0.0,64.0,0.5); camera (0,63.98,10), yaw 180, pitch 0; NoAI/NoGravity static showcase.",
+    "aggregate_evidence_checked": "evidence/entity-gallery-results.csv header and representative row; volume record links show records/ENT-<entity>.json for each target.",
+    "image_limitation": "Referenced current-entity-group-NNN-clean-pomme/fabric PNGs are named in records/CSV but were not present under package evidence in the file listing; visual inspection of PNG pixels was not repeated. Trust is limited to report's recorded classifications and JSON metadata.",
+    "not_verified": ["All 40 individual JSON payloads were not independently opened; 38 ENT IDs and 2 candidate IDs/titles/status conclusions were checked against the volume markdown; a representative ENT JSON and aggregate CSV structure were inspected.","No runtime reproduction, network capture, rendering test, build, or test was run.","No claim that a code fix exists or has been validated.","No changes made to source code, commits, builds, or tests; only this requested report JSON was saved."]
+  },
+  "reviewed_sources": [
+    "./AGENTS.md",
+    "ponytail skill (SKILL.md)",
+    "pomme-client/src/renderer/pipelines/entity_renderer.rs",
+    "pomme-client/src/entity/mod.rs",
+    "pomme-client/src/net/handler.rs",
+    "pomme-client/src/app/phases/in_game.rs",
+    "report records/ENT-frog.json",
+    "report evidence/entity-gallery-results.csv",
+    "report volumes/entities_02.md"
+  ],
+  "checks": {
+    "executed": [
+      {"command":"find Client for AGENTS.md and report for volumes/entities_02.md; list report package files","result":"AGENTS.md and target volume found; package evidence includes entity-gallery-results.csv, per-group JSON, entity-gallery-summary.json; paired PNGs not found in listing.","exit_code":0},
+      {"command":"grep volume headings and ENT record references; inspect entity_renderer.rs mob_definitions/render lookup; inspect net/handler.rs SetEntityData and entity/mod.rs metadata application","result":"38 ENT IDs and 2 candidate IDs in the requested range; the ENT headings report observed body absence and candidate sections are expressly uncertain. Renderer registry misses target kinds and render loop skips when no self.mobs entry. Metadata receive/application is partial and distinct.","exit_code":0},
+      {"command":"python - <<'PY' ... read_text and split markdown to count headings ...","result":"Unable to run: shell returned `Python` and exit code 49; enumeration was completed with grep instead.","exit_code":49}
+    ],
+    "not_run_by_instruction": ["mise check/build/test", "cargo build/test", "runtime repro", "commit"]
+  }
+}
