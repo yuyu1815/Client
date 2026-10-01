@@ -2105,7 +2105,9 @@ fn mesh_chunk_snapshot(
                     if logged_missing.insert(id) {
                         tracing::warn!("Missing model: {id}");
                     }
-                    emit_missing_cube(sink, block_pos, snapshot, registry, uv_map, bx, by, bz);
+                    emit_missing_cube(
+                        sink, block_pos, state, snapshot, registry, uv_map, bx, by, bz,
+                    );
                 }
 
                 // Vanilla renders a water fluid state in addition to the block
@@ -2390,6 +2392,7 @@ fn edit_state_supported(
     }
     if crate::world::block::fluid(state).kind != crate::world::block::FluidKind::Empty
         || crate::world::block_entity::is_block_entity_block(crate::world::block::block_id(state))
+        || crate::world::block::block_offset(state, pos) != glam::DVec3::ZERO
     {
         return false;
     }
@@ -2601,6 +2604,21 @@ fn emit_moving_state(
     }
 }
 
+fn model_vertex_origin(
+    block_pos: [f32; 3],
+    state: BlockState,
+    bx: i32,
+    by: i32,
+    bz: i32,
+) -> [f32; 3] {
+    let offset = crate::world::block::block_offset(state, BlockPos::new(bx, by, bz));
+    [
+        block_pos[0] + offset.x as f32,
+        block_pos[1] + offset.y as f32,
+        block_pos[2] + offset.z as f32,
+    ]
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_baked_model(
     sink: &mut MeshSink,
@@ -2616,6 +2634,7 @@ fn emit_baked_model(
     trace_target: Option<&TraceTarget>,
     trace_output: &mut Vec<Value>,
 ) {
+    let vertex_origin = model_vertex_origin(block_pos, state, bx, by, bz);
     for quad in &model.quads {
         if let Some(cullface) = quad.cullface {
             let offset = cullface.offset();
@@ -2649,7 +2668,7 @@ fn emit_baked_model(
         );
         emit_face(
             sink,
-            block_pos,
+            vertex_origin,
             &quad.positions,
             &quad.uvs,
             lights,
@@ -2686,7 +2705,7 @@ fn emit_baked_model(
                 "indexList": index_list,
                 "indexStart": index_start,
                 "indexCount": index_count,
-                "positions": quad.positions.map(|p| [p[0] + block_pos[0], p[1] + block_pos[1], p[2] + block_pos[2]]),
+                "positions": quad.positions.map(|p| [p[0] + vertex_origin[0], p[1] + vertex_origin[1], p[2] + vertex_origin[2]]),
                 "uvs": quad.uvs,
                 "lights": lights,
                 "atlasRect": {"sprite": region.sprite, "pixelRect": region.pixel_rect, "uv": [region.u_min, region.v_min, region.u_max, region.v_max]},
@@ -2708,6 +2727,7 @@ fn emit_cube_faces(
     by: i32,
     bz: i32,
 ) {
+    let block_pos = model_vertex_origin(block_pos, state, bx, by, bz);
     let tint = tint_color(
         textures.tint,
         state,
@@ -3316,6 +3336,7 @@ fn emit_multipart(
     trace_target: Option<&TraceTarget>,
     trace_output: &mut Vec<Value>,
 ) {
+    let vertex_origin = model_vertex_origin(block_pos, state, bx, by, bz);
     for quad in quads {
         if let Some(cullface) = quad.cullface {
             let offset = cullface.offset();
@@ -3341,7 +3362,7 @@ fn emit_multipart(
         let translucent_start = sink.translucent.len();
         emit_face(
             sink,
-            block_pos,
+            vertex_origin,
             &quad.positions,
             &quad.uvs,
             model_quad_lights(
@@ -3385,7 +3406,7 @@ fn emit_multipart(
                 "indexList": index_list,
                 "indexStart": index_start,
                 "indexCount": index_count,
-                "positions": quad.positions.map(|p| [p[0] + block_pos[0], p[1] + block_pos[1], p[2] + block_pos[2]]),
+                "positions": quad.positions.map(|p| [p[0] + vertex_origin[0], p[1] + vertex_origin[1], p[2] + vertex_origin[2]]),
                 "uvs": quad.uvs,
                 "atlasRect": {"sprite": region.sprite, "pixelRect": region.pixel_rect, "uv": [region.u_min, region.v_min, region.u_max, region.v_max]},
             }));
@@ -3464,6 +3485,7 @@ const MISSING_TINT: u32 = pack_tint_shifted([1.0, 0.0, 1.0]);
 fn emit_missing_cube(
     sink: &mut MeshSink,
     block_pos: [f32; 3],
+    state: BlockState,
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
     uv_map: &AtlasUVMap,
@@ -3471,6 +3493,7 @@ fn emit_missing_cube(
     by: i32,
     bz: i32,
 ) {
+    let block_pos = model_vertex_origin(block_pos, state, bx, by, bz);
     let missing = uv_map.missing_region();
     for dir in &CUBE_FACE_DIRS {
         let offset = dir.offset();
@@ -4828,6 +4851,81 @@ mod terrain_uv_tests {
         assert!(overlay.cells.contains_key(&unrelated));
         drop(dispatcher);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn offset_model_origins_match_shared_helper_and_signed_section_packing() {
+        crate::world::block::init("26.2");
+        let flower = crate::world::block::find_state("dandelion", &[]);
+        let bamboo = crate::world::block::find_state("bamboo_sapling", &[]);
+        let spike = crate::world::block::find_state(
+            "pointed_dripstone",
+            &[
+                ("thickness", "base"),
+                ("vertical_direction", "up"),
+                ("waterlogged", "false"),
+            ],
+        );
+        for state in [flower, bamboo, spike] {
+            let mut found_negative_edge = false;
+            let mut found_positive_edge = false;
+            for x in (-256..=256).step_by(16) {
+                let pos = BlockPos::new(x, 64, 0);
+                let expected = crate::world::block::block_offset(state, pos);
+                let actual = model_vertex_origin([0.0; 3], state, pos.x, pos.y, pos.z);
+                assert_eq!(
+                    actual,
+                    [expected.x as f32, expected.y as f32, expected.z as f32]
+                );
+                let packed = pack_vertex(&TerrainVertex {
+                    position: actual,
+                    sprite_uv: [0.0; 2],
+                    sprite: 0,
+                    light_tint: 0,
+                });
+                let decoded = packed
+                    .pos
+                    .map(|v| v as f32 / 65535.0 * POS_RANGE - POS_BIAS);
+                for (a, b) in decoded.into_iter().zip(actual) {
+                    assert!((a - b).abs() <= POS_RANGE / 65535.0);
+                }
+                found_negative_edge |= expected.x < 0.0 && packed.pos[0] != 0;
+                let edge_pos = BlockPos::new(pos.x + 15, pos.y, pos.z);
+                let edge_offset = crate::world::block::block_offset(state, edge_pos);
+                let beyond = model_vertex_origin(
+                    [16.0, 0.0, 0.0],
+                    state,
+                    edge_pos.x,
+                    edge_pos.y,
+                    edge_pos.z,
+                );
+                if edge_offset.x > 0.0 {
+                    let packed = pack_vertex(&TerrainVertex {
+                        position: beyond,
+                        sprite_uv: [0.0; 2],
+                        sprite: 0,
+                        light_tint: 0,
+                    });
+                    let decoded_x = packed.pos[0] as f32 / 65535.0 * POS_RANGE - POS_BIAS;
+                    assert!((decoded_x - beyond[0]).abs() <= POS_RANGE / 65535.0);
+                    found_positive_edge = true;
+                }
+            }
+            assert!(
+                found_negative_edge,
+                "{} has no negative boundary sample",
+                crate::world::block::block_id(state)
+            );
+            assert!(
+                found_positive_edge,
+                "{} has no positive boundary sample",
+                crate::world::block::block_id(state)
+            );
+        }
+        assert_eq!(model_vertex_origin([1.0, 2.0, 3.0], flower, 0, 0, 0), {
+            crate::world::block::init("1.21.11");
+            [1.0, 2.0, 3.0]
+        });
     }
 
     #[test]
