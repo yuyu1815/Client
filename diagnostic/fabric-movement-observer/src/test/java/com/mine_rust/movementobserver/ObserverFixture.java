@@ -20,7 +20,11 @@ import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.shapes.CollisionContext;
 import net.minecraft.world.phys.shapes.Shapes;
+import net.minecraft.world.effect.MobEffect;
+import net.minecraft.core.Holder;
+import sun.misc.Unsafe;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -33,7 +37,8 @@ public final class ObserverFixture {
         packets();
         promises();
         collisionShapes();
-        System.out.println("observer fixture: PASS (bootstrapped block collision/outline shapes, negative-coordinate transform, box cap/privacy/status; typed packets and promises)");
+        vanillaGravity();
+        System.out.println("observer fixture: PASS (bootstrapped block collision/outline shapes, negative-coordinate transform, box cap/privacy/status; vanilla effective gravity; typed packets and promises)");
     }
 
     private static void collisionShapes() {
@@ -62,6 +67,31 @@ public final class ObserverFixture {
         assert emptySnapshot.get("block_cells").isJsonArray() && emptySnapshot.get("shape_aabbs").isJsonArray();
         assert emptySnapshot.getAsJsonObject("visited_range").getAsJsonArray("min").get(0).getAsInt() == -1;
         assert !emptySnapshot.toString().contains("custom_name") && !emptySnapshot.toString().contains("uuid") && !emptySnapshot.toString().contains("nbt") && !emptySnapshot.toString().contains("chat");
+    }
+
+    private static void vanillaGravity() {
+        try {
+            Field field = Unsafe.class.getDeclaredField("theUnsafe");
+            field.setAccessible(true);
+            TestLivingEntity entity = (TestLivingEntity)((Unsafe)field.get(null)).allocateInstance(TestLivingEntity.class);
+            assert entity.effectiveGravity() == 0.08;
+            entity.slowFalling = true;
+            assert entity.effectiveGravity() == 0.01;
+            entity.deltaY = 0.1;
+            assert entity.effectiveGravity() == 0.08 : "slow falling only applies while descending";
+        } catch (ReflectiveOperationException e) { throw new AssertionError(e); }
+    }
+
+    private static final class TestLivingEntity extends net.minecraft.world.entity.LivingEntity {
+        boolean slowFalling;
+        double deltaY;
+        TestLivingEntity() { super(null, null); }
+        @Override public net.minecraft.world.entity.HumanoidArm getMainArm() { return net.minecraft.world.entity.HumanoidArm.RIGHT; }
+        double effectiveGravity() { return super.getEffectiveGravity(); }
+        @Override public boolean isNoGravity() { return false; }
+        @Override protected double getDefaultGravity() { return 0.08; }
+        @Override public Vec3 getDeltaMovement() { return new Vec3(0, deltaY, 0); }
+        @Override public boolean hasEffect(Holder<MobEffect> effect) { return slowFalling; }
     }
 
     private static void packets() {

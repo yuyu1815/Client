@@ -15,6 +15,11 @@ sourceSets.test.compileClasspath += sourceSets.client.output + sourceSets.client
 sourceSets.test.runtimeClasspath += sourceSets.client.output + sourceSets.client.runtimeClasspath
 
 tasks.named('test') { enabled = false }
+tasks.named('runClient') {
+    if (providers.gradleProperty('observerSmoke').isPresent()) {
+        jvmArgs '-Dmovementobserver.classloadSmoke=true', '-Dmovementobserver.smokeAutoStop=true'
+    }
+}
 tasks.register('packetFieldsSmoke', JavaExec) {
     dependsOn tasks.testClasses
     classpath = sourceSets.test.runtimeClasspath

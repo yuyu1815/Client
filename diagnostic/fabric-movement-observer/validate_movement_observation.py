@@ -32,6 +32,20 @@ def validate(text: str) -> tuple[int, dict]:
             travel = data.get("travel_observation")
             assert isinstance(travel, dict), "after_tick must contain travel_observation"
             assert TRAVEL_KEYS <= travel.keys(), f"travel_observation missing keys: {TRAVEL_KEYS - travel.keys()}"
+            reasons = travel.get("unavailable_reasons")
+            assert isinstance(reasons, dict), "travel_observation must distinguish unavailable/null values with unavailable_reasons"
+            for key in TRAVEL_KEYS:
+                if travel[key] is None:
+                    reason = reasons.get(key)
+                    assert isinstance(reason, str) and reason.strip(), f"null travel field lacks a reason: {key}"
+                    if key == "entity_shapes" or key.startswith("entity_shapes_"):
+                        assert "requery" in reason.lower() or "resolver" in reason.lower(), f"shape null needs query-vs-resolver semantics: {key}"
+                    if key == "actual_gravity_f64":
+                        assert "gravity" in reason.lower() and "branch" in reason.lower(), "gravity null needs a branch reason"
+                    if key == "native_physics":
+                        assert "physics" in reason.lower() and ("branch" in reason.lower() or "call site" in reason.lower()), "native physics null needs a call-site reason"
+                    if key in {"frame_nanos", "frame_elapsed_sec"}:
+                        assert "frame_observation" in reason, f"{key} null must identify the separate frame observation"
         if "packet" in data:
             assert isinstance(data["packet"], str) and isinstance(data.get("fields"), dict), "packet fields must be explicit typed JSON"
             assert "native_id" in data, "numeric native ID must be explicit (null when unavailable)"
@@ -59,16 +73,29 @@ def validate(text: str) -> tuple[int, dict]:
     return len(events), f
 
 def self_test():
+    null_travel = {key: None for key in TRAVEL_KEYS}
+    null_travel["unavailable_reasons"] = {
+        key: ("bounded shape requery is not actual resolver inputs" if key.startswith("entity_shapes_") or key == "entity_shapes"
+              else "separate frame_observation" if key.startswith("frame_") or key == "native_partial_ticks_f32"
+              else "gravity call site not invoked in this branch" if key == "actual_gravity_f64"
+              else "no hooked physics branch in this tick" if key == "native_physics"
+              else "actual hook not observed in this branch")
+        for key in TRAVEL_KEYS
+    }
     rows = [
         {"type":"header", "schema":1, "client_kind":"fabric", "wire_protocol":776},
         {"seq":1,"offset_us":5,"direction":"local","stage":"before_tick","data":{"event":"movement_tick"}},
-        {"seq":2,"offset_us":5,"direction":"local","stage":"after_tick","data":{"event":"movement_tick","travel_observation":{key:None for key in TRAVEL_KEYS}}},
+        {"seq":2,"offset_us":5,"direction":"local","stage":"after_tick","data":{"event":"movement_tick","travel_observation":null_travel}},
         {"seq":3,"offset_us":5,"direction":"outbound","stage":"transport_write_attempt","data":{"packet":"move_player_rot","native_id":None,"fields":{"position":None,"yaw_pitch":[90.0,10.0],"on_ground":True,"horizontal_collision":False}}},
         {"seq":4,"offset_us":5,"direction":"inbound","stage":"apply_before","data":{"packet":"block_ack","native_id":None,"fields":{"sequence":17},"applied_state":{"prediction_state":None}}},
         {"seq":5,"offset_us":5,"direction":"outbound","stage":"transport_write_failure","data":{"packet":"use_item","native_id":None,"fields":{"hand":0,"sequence":2,"yaw_pitch":[0.0,0.0]},"error_class":"java.io.IOException"}},
         {"type":"footer","written":5,"dropped":1,"oversize_omitted":0,"last_seq":5,"complete":False},
     ]
     assert validate("\n".join(map(json.dumps, rows)))[0] == 5
+    bad_reasons = json.loads(json.dumps(rows)); del bad_reasons[2]["data"]["travel_observation"]["unavailable_reasons"]["actual_gravity_f64"]
+    try: validate("\n".join(map(json.dumps, bad_reasons)))
+    except AssertionError: pass
+    else: raise AssertionError("validator accepted a null field without an unavailable reason")
     bad = json.loads(json.dumps(rows)); bad[1]["data"]["raw_bytes"] = "no"
     try: validate("\n".join(map(json.dumps, bad)))
     except AssertionError: pass

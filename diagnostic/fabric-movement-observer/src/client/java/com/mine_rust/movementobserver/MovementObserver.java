@@ -293,11 +293,14 @@ public final class MovementObserver implements ClientModInitializer {
             JsonElement value = travel.get(key);
             if (value == null || value.isJsonNull()) {
                 String reason = switch (key) {
-                    case "entity_shapes" -> "actual resolver collider inputs are not exposed by the observer";
-                    case "context" -> "collision resolver context is not captured";
-                    case "frame_nanos", "frame_elapsed_sec" -> "full runTick duration is recorded in the separate frame_observation after LocalPlayer.tick";
+                    case "entity_shapes", "entity_shapes_truncated", "entity_shapes_omitted", "entity_shapes_max" -> "shape requery is nested in shape_snapshot only after collision clipping or a correction; it is not an actual resolver-input capture";
+                    case "context" -> "collision resolver input context is unavailable; CollisionContext.of(player) is used only for the bounded diagnostic requery";
+                    case "frame_nanos", "frame_elapsed_sec" -> "full runTick duration is emitted in frame_observation after LocalPlayer.tick, so it is not available in this tick snapshot";
+                    case "frame_id", "frame_player_tick_count", "native_partial_ticks_f32" -> "runTick frame hook was not active for this LocalPlayer.tick; these samples are emitted in frame_observation when available";
+                    case "actual_gravity_f64" -> "getEffectiveGravity was not invoked in this travel branch; values are captured only at hooked air, fluid, and fall-flying call sites";
+                    case "native_physics" -> "no hooked air, water, lava, or fall-flying physics call site completed for this player tick";
                     case "ground_decision" -> "Entity.move result hook was not observed in this tick";
-                    default -> "actual vanilla hook was not observed in this tick or branch";
+                    default -> "this actual vanilla call site was not observed in the current tick or branch";
                 };
                 reasons.addProperty(key, reason);
             }
