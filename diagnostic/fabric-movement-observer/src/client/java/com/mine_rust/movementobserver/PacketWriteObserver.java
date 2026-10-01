@@ -3,6 +3,7 @@ package com.mine_rust.movementobserver;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.PacketFlow;
 
 /** Observes the actual channel write promise without changing the packet or writing it twice. */
 public final class PacketWriteObserver {
@@ -12,6 +13,10 @@ public final class PacketWriteObserver {
     }
 
     private PacketWriteObserver() {}
+
+    public static boolean shouldObserveOutbound(boolean recording, PacketFlow receiving) {
+        return recording && receiving == PacketFlow.CLIENTBOUND;
+    }
 
     public static void write(ChannelHandlerContext context, Object message, ChannelPromise promise, boolean observe, Event event) throws Exception {
         if (!observe || !(message instanceof Packet<?> packet)) {

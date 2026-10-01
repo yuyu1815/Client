@@ -28,7 +28,7 @@ public abstract class ConnectionMixin {
             }
             @Override public void write(ChannelHandlerContext context, Object msg, io.netty.channel.ChannelPromise promise) throws Exception {
                 PacketWriteObserver.write(context, msg, promise,
-                        MovementObserver.isRecordingFast() && receiving == net.minecraft.network.protocol.PacketFlow.SERVERBOUND,
+                        PacketWriteObserver.shouldObserveOutbound(MovementObserver.isRecordingFast(), receiving),
                         (packet, stage, cause) -> MovementObserver.packet(packet, "outbound", stage,
                                 cause == null ? (stage.equals("transport_write_failure") ? "unknown" : null) : cause.getClass().getName()));
             }

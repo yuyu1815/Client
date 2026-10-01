@@ -5,7 +5,10 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.MessageToByteEncoder;
+import io.netty.buffer.ByteBuf;
 import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
 import net.minecraft.network.protocol.game.ServerboundAcceptTeleportationPacket;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
@@ -36,6 +39,7 @@ public final class ObserverFixture {
         Bootstrap.bootStrap();
         packets();
         promises();
+        outboundDirection();
         collisionShapes();
         vanillaGravity();
         System.out.println("observer fixture: PASS (bootstrapped block collision/outline shapes, negative-coordinate transform, box cap/privacy/status; vanilla effective gravity; typed packets and promises)");
@@ -123,6 +127,56 @@ public final class ObserverFixture {
         JsonObject teleport = PacketFields.capture(new ServerboundAcceptTeleportationPacket(23));
         assert teleport.get("packet").getAsString().equals("accept_teleportation");
         assert teleport.getAsJsonObject("fields").get("teleport_id").getAsInt() == 23;
+    }
+
+    private static void outboundDirection() {
+        assert PacketWriteObserver.shouldObserveOutbound(true, PacketFlow.CLIENTBOUND);
+        assert !PacketWriteObserver.shouldObserveOutbound(true, PacketFlow.SERVERBOUND);
+        assert !PacketWriteObserver.shouldObserveOutbound(false, PacketFlow.CLIENTBOUND);
+        checkOutbound(PacketFlow.CLIENTBOUND, 2);
+        checkOutbound(PacketFlow.SERVERBOUND, 0);
+    }
+
+    private static void checkOutbound(PacketFlow receiving, int expectedEvents) {
+        Packet<?> packet = new ServerboundAcceptTeleportationPacket(17);
+        AtomicInteger mappedEvents = new AtomicInteger();
+        AtomicInteger encodedWrites = new AtomicInteger();
+        AtomicInteger encodedByte = new AtomicInteger();
+        PacketWriteObserver.Event event = (observed, stage, cause) -> {
+            assert observed == packet;
+            assert cause == null;
+            mappedEvents.incrementAndGet();
+        };
+        ChannelOutboundHandlerAdapter sink = new ChannelOutboundHandlerAdapter() {
+            @Override public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
+                assert msg instanceof ByteBuf;
+                encodedWrites.incrementAndGet();
+                encodedByte.set(((ByteBuf)msg).getUnsignedByte(0));
+                ctx.write(msg, promise);
+            }
+        };
+        MessageToByteEncoder<Packet<?>> encoder = new MessageToByteEncoder<>() {
+            @Override protected void encode(ChannelHandlerContext ctx, Packet<?> msg, ByteBuf out) {
+                assert msg == packet;
+                out.writeByte(0x5a);
+            }
+        };
+        ChannelOutboundHandlerAdapter observer = new ChannelOutboundHandlerAdapter() {
+            @Override public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+                PacketWriteObserver.write(ctx, msg, promise,
+                        PacketWriteObserver.shouldObserveOutbound(true, receiving), event);
+            }
+        };
+        EmbeddedChannel channel = new EmbeddedChannel(sink, encoder, observer);
+        assert channel.writeOutbound(packet);
+        channel.runPendingTasks();
+        Object encoded = channel.readOutbound();
+        assert encoded instanceof ByteBuf;
+        ((ByteBuf)encoded).release();
+        assert encodedWrites.get() == 1 : encodedWrites;
+        assert encodedByte.get() == 0x5a : encodedByte;
+        assert mappedEvents.get() == expectedEvents : mappedEvents;
+        channel.finishAndReleaseAll();
     }
 
     private static void promises() {
