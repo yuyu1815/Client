@@ -41,6 +41,72 @@ pub fn bake_bell_model() -> BakedEntityModel {
     )
 }
 
+/// 26.2 BannerModel and BannerFlagModel geometry (64x64 `banner_base` sheet).
+/// Wall variants omit the freestanding pole and move the bar/cloth toward the
+/// wall.
+pub fn bake_banner_model(wall: bool) -> BakedEntityModel {
+    let mut parts = Vec::new();
+    if !wall {
+        parts.push(EntityPart {
+            name: "pole".into(),
+            offset: Vec3::ZERO,
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-1.0, -42.0, -1.0),
+                size: Vec3::new(2.0, 42.0, 2.0),
+                tex_offset: (44, 0),
+                deformation: 0.0,
+                mirror: false,
+            }],
+            parent: None,
+        });
+    }
+    parts.push(EntityPart {
+        name: "bar".into(),
+        offset: Vec3::ZERO,
+        default_rotation: Vec3::ZERO,
+        cubes: vec![ModelCube {
+            origin: Vec3::new(
+                -10.0,
+                if wall { -20.5 } else { -44.0 },
+                if wall { 9.5 } else { -1.0 },
+            ),
+            size: Vec3::new(20.0, 2.0, 2.0),
+            tex_offset: (0, 42),
+            deformation: 0.0,
+            mirror: false,
+        }],
+        parent: None,
+    });
+    parts.push(EntityPart {
+        name: "flag".into(),
+        offset: Vec3::new(
+            0.0,
+            if wall { -20.5 } else { -44.0 },
+            if wall { 10.5 } else { 0.0 },
+        ),
+        default_rotation: Vec3::ZERO,
+        cubes: vec![ModelCube {
+            origin: Vec3::new(-10.0, 0.0, -2.0),
+            size: Vec3::new(20.0, 40.0, 1.0),
+            tex_offset: (0, 0),
+            deformation: 0.0,
+            mirror: false,
+        }],
+        parent: None,
+    });
+    let mut vertices = Vec::new();
+    let mut ranges = Vec::new();
+    for part in &parts {
+        let start = vertices.len() as u32;
+        for cube in &part.cubes {
+            generate_cube_vertices(cube, 64, 64, FACE_ALL, false, &mut vertices);
+        }
+        ranges.push((start, vertices.len() as u32 - start));
+    }
+    BakedEntityModel::new(parts, vertices, ranges).with_convention(ModelConvention::BlockYUp)
+}
+
 /// Inactive conduit shell and default player head idle geometry.
 pub fn bake_conduit_model() -> BakedEntityModel {
     let cube = ModelCube {

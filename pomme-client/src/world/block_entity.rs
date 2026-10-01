@@ -384,6 +384,7 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
         "player_head" | "player_wall_head" => Some(BlockEntityKind::Skull),
         s if s.ends_with("copper_golem_statue") => Some(BlockEntityKind::CopperGolemStatue),
         s if s == "shulker_box" || s.ends_with("_shulker_box") => Some(BlockEntityKind::ShulkerBox),
+        s if s.ends_with("_banner") => Some(BlockEntityKind::Banner),
         // Hanging boards must stay in the chunk-model path (the mesher treats
         // non-Sign rendered kinds as BE-only geometry).
         s if s.ends_with("_sign") && !s.ends_with("_hanging_sign") => Some(BlockEntityKind::Sign),
@@ -428,6 +429,7 @@ fn is_rendered(kind: BlockEntityKind) -> bool {
             | BlockEntityKind::CopperGolemStatue
             | BlockEntityKind::Conduit
             | BlockEntityKind::Bell
+            | BlockEntityKind::Banner
             | BlockEntityKind::Skull
     )
 }
@@ -865,6 +867,37 @@ mod tests {
             assert!(entries[&pos].sign_front.is_some());
         }
         assert!(is_block_entity_block("oak_sign"));
+    }
+
+    #[test]
+    fn all_banner_colors_route_to_the_banner_block_entity_renderer() {
+        for color in [
+            "white",
+            "orange",
+            "magenta",
+            "light_blue",
+            "yellow",
+            "lime",
+            "pink",
+            "gray",
+            "light_gray",
+            "cyan",
+            "purple",
+            "blue",
+            "brown",
+            "green",
+            "red",
+            "black",
+        ] {
+            for name in [format!("{color}_banner"), format!("{color}_wall_banner")] {
+                assert_eq!(
+                    rendered_kind(&name),
+                    Some(BlockEntityKind::Banner),
+                    "{name}"
+                );
+                assert!(is_block_entity_block(&name));
+            }
+        }
     }
 
     #[test]

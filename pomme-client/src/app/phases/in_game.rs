@@ -5159,6 +5159,12 @@ pub fn update_game(
                     player_head_profile_source,
                     kind: be.kind,
                     statue_pose: statue.map(|(pose, _)| pose),
+                    banner_phase: (pos.x as i64 * 7
+                        + pos.y as i64 * 9
+                        + pos.z as i64 * 13
+                        + game.tick_count as i64)
+                        .rem_euclid(100) as f32
+                        + partial_tick,
                     yaw,
                     variant,
                     lid_open,

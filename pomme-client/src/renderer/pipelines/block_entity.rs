@@ -35,6 +35,8 @@ pub struct BlockEntityRenderInfo {
     pub kind: BlockEntityKind,
     /// Copper golem statue body-layer index (standing, running, sitting, star).
     pub statue_pose: Option<u8>,
+    /// Vanilla BannerFlagModel phase in ticks, modulo 100.
+    pub banner_phase: f32,
     pub yaw: f32,
     /// Texture-variant index; the model index is `variant % models.len()`, so
     /// chest variants (material-major, [single, left, right] per material)
@@ -132,6 +134,7 @@ const TRAPPED_CHEST_TEXTURES: &[&[&str]] = chest_textures!("trapped");
 
 const ENDER_CHEST_TEXTURES: &[&[&str]] = &[&["minecraft/textures/entity/chest/ender.png"]];
 const BELL_TEXTURES: &[&[&str]] = &[&["minecraft/textures/entity/bell/bell_body.png"]];
+const BANNER_TEXTURES: &[&[&str]] = &[&["minecraft:textures/entity/banner/banner_base.png"]];
 
 // Skull variants are stored as adjacent [standing, wall] pairs. The pair bit
 // preserves the wall-head transform independently of the texture/model type.
@@ -181,6 +184,34 @@ const SHULKER_TEXTURES: &[&[&str]] = &[
     &["minecraft/textures/entity/shulker/shulker.png"],
 ];
 
+fn banner_color_tint(color: usize) -> [f32; 4] {
+    const RGB: [[u8; 3]; 16] = [
+        [249, 255, 254],
+        [249, 128, 29],
+        [199, 78, 189],
+        [58, 179, 218],
+        [254, 216, 61],
+        [128, 199, 31],
+        [243, 139, 170],
+        [71, 79, 82],
+        [157, 157, 151],
+        [22, 156, 156],
+        [137, 50, 184],
+        [60, 68, 170],
+        [131, 84, 50],
+        [94, 124, 22],
+        [176, 46, 38],
+        [29, 29, 33],
+    ];
+    let rgb = RGB[color.min(15)];
+    [
+        rgb[0] as f32 / 255.0,
+        rgb[1] as f32 / 255.0,
+        rgb[2] as f32 / 255.0,
+        1.0,
+    ]
+}
+
 fn name_index(table: &[&str], name: &str) -> Option<u32> {
     table.iter().position(|&n| n == name).map(|i| i as u32)
 }
@@ -188,6 +219,14 @@ fn name_index(table: &[&str], name: &str) -> Option<u32> {
 /// Build a [`PartAnim`] applying chest/shulker lid motion. `openness` is the
 /// raw [0, 1] value; vanilla applies cubic easing so the lid decelerates as it
 /// approaches the open or closed extreme.
+pub(crate) fn banner_anim(phase: f32, flag_part: usize) -> PartAnim {
+    let rotation = (-0.0125 + 0.01 * (phase * std::f32::consts::TAU).cos()) * std::f32::consts::PI;
+    PartAnim {
+        rotation: vec![(flag_part, glam::Vec3::new(rotation, 0.0, 0.0))],
+        ..Default::default()
+    }
+}
+
 pub(crate) fn lid_anim(kind: BlockEntityKind, openness: f32) -> PartAnim {
     if openness <= 0.0 {
         return PartAnim::default();
@@ -239,6 +278,15 @@ pub fn variant_for_block(
             .strip_suffix("_shulker_box")
             .and_then(|s| name_index(&DYE_COLOR_NAMES, s))
             .unwrap_or(16),
+        BlockEntityKind::Banner => {
+            let wall = name.ends_with("_wall_banner");
+            let color = name
+                .strip_suffix("_wall_banner")
+                .or_else(|| name.strip_suffix("_banner"))
+                .and_then(|s| name_index(&DYE_COLOR_NAMES, s))
+                .unwrap_or(0);
+            color * 2 + u32::from(wall)
+        }
         BlockEntityKind::Skull => skull_variant(name),
         BlockEntityKind::Sign | BlockEntityKind::HangingSign => name
             .strip_suffix("_wall_hanging_sign")
@@ -287,6 +335,18 @@ pub fn yaw_for_block(kind: BlockEntityKind, props: &crate::world::block::PropMap
         // Standing signs use a 0..15 rotation; wall signs have no rotation
         // property and face one of the four horizontal directions instead.
         BlockEntityKind::Skull => props
+            .get("rotation")
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(|r| r * 22.5)
+            .or_else(|| match props.get("facing") {
+                Some("south") => Some(0.0),
+                Some("west") => Some(90.0),
+                Some("north") => Some(180.0),
+                Some("east") => Some(270.0),
+                _ => None,
+            })
+            .unwrap_or(0.0),
+        BlockEntityKind::Banner => props
             .get("rotation")
             .and_then(|s| s.parse::<f32>().ok())
             .map(|r| r * 22.5)
@@ -378,6 +438,15 @@ fn kind_definitions(xmas: bool) -> Vec<KindDef> {
             models: vec![block_entity_model::bake_bell_model()],
             tex_variants: BELL_TEXTURES,
             tex_size: 32,
+        },
+        KindDef {
+            kind: BlockEntityKind::Banner,
+            models: vec![
+                block_entity_model::bake_banner_model(false),
+                block_entity_model::bake_banner_model(true),
+            ],
+            tex_variants: BANNER_TEXTURES,
+            tex_size: 64,
         },
         KindDef {
             kind: BlockEntityKind::Skull,
@@ -1256,6 +1325,13 @@ impl BlockEntityPipeline {
                 }
                 // Vanilla `ChestRenderer`: rotate by -facing.toYRot() about the
                 // block center; coords are relative to the block's min corner.
+                ModelConvention::BlockYUp if info.kind == BlockEntityKind::Banner => {
+                    // BannerRenderer's MODEL_SCALE=(2/3,-2/3,-2/3), with
+                    // its origin at the block center (standing and wall).
+                    glam::Mat4::from_translation(block_center)
+                        * glam::Mat4::from_rotation_y((-info.yaw).to_radians())
+                        * glam::Mat4::from_scale(glam::Vec3::new(2.0 / 3.0, -2.0 / 3.0, -2.0 / 3.0))
+                }
                 ModelConvention::BlockYUp if is_statue => {
                     // CopperGolemStatueBlockRenderer translates to block
                     // center and rotates by -opposite(facing).toYRot().
@@ -1275,6 +1351,8 @@ impl BlockEntityPipeline {
             }
             let anim = if is_statue {
                 PartAnim::default()
+            } else if info.kind == BlockEntityKind::Banner {
+                banner_anim(info.banner_phase, model.parts.len() - 1)
             } else {
                 lid_anim(info.kind, info.lid_open)
             };
@@ -1292,7 +1370,13 @@ impl BlockEntityPipeline {
                 let uv_params = [0.0f32; 4];
                 let mut bytes = [0u8; 112];
                 bytes[..64].copy_from_slice(bytemuck::cast_slice(&cols));
-                bytes[64..80].copy_from_slice(bytemuck::cast_slice(&WHITE_TINT));
+                let tint = if info.kind == BlockEntityKind::Banner && model.parts[i].name == "flag"
+                {
+                    banner_color_tint((info.variant / 2) as usize)
+                } else {
+                    WHITE_TINT
+                };
+                bytes[64..80].copy_from_slice(bytemuck::cast_slice(&tint));
                 bytes[80..96].copy_from_slice(bytemuck::cast_slice(&no_overlay));
                 bytes[96..112].copy_from_slice(bytemuck::cast_slice(&uv_params));
                 cmd.push_constants(
@@ -1931,12 +2015,53 @@ fn world_font_writes(
 mod sign_text_tests {
     use super::*;
 
+    #[test]
+    fn banner_variants_cover_every_dye_for_standing_and_wall_models() {
+        let defs = kind_definitions(false);
+        let banner = defs
+            .iter()
+            .find(|d| d.kind == BlockEntityKind::Banner)
+            .unwrap();
+        assert_eq!(banner.models.len(), 2);
+        assert_eq!(banner.tex_variants, BANNER_TEXTURES);
+        for (i, color) in DYE_COLOR_NAMES.iter().enumerate() {
+            assert_eq!(
+                variant_for_block(
+                    BlockEntityKind::Banner,
+                    &format!("{color}_banner"),
+                    &Default::default()
+                ),
+                (i as u32) * 2
+            );
+            assert_eq!(
+                variant_for_block(
+                    BlockEntityKind::Banner,
+                    &format!("{color}_wall_banner"),
+                    &Default::default()
+                ),
+                (i as u32) * 2 + 1
+            );
+            assert_eq!(banner_color_tint(i)[3], 1.0);
+        }
+        assert_ne!(banner_color_tint(0), banner_color_tint(15));
+        let standing = &banner.models[0];
+        let wall = &banner.models[1];
+        assert_eq!(standing.parts.len(), 3);
+        assert_eq!(wall.parts.len(), 2);
+        assert!(standing.vertices.len() > wall.vertices.len());
+        assert!(!standing.vertices.is_empty() && !wall.vertices.is_empty());
+        let anim = banner_anim(0.0, 2);
+        assert_eq!(anim.rotation[0].0, 2);
+        assert!((anim.rotation[0].1.x - (-0.0025 * std::f32::consts::PI)).abs() < 1e-6);
+    }
+
     fn chest(x: i32, variant: u32) -> BlockEntityRenderInfo {
         BlockEntityRenderInfo {
             pos: BlockPos::new(x, 64, -9),
             player_head_profile_source: None,
             kind: BlockEntityKind::Chest,
             statue_pose: None,
+            banner_phase: 0.0,
             yaw: 90.0,
             variant,
             lid_open: 0.0,
