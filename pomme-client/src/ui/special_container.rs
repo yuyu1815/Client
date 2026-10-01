@@ -33,7 +33,7 @@ impl SpecialMenu {
     }
 
     pub const fn slot_count(self) -> usize {
-        self.storage_slots() + 36
+        self.storage_slots() + 36 + if matches!(self, Self::Crafter) { 1 } else { 0 }
     }
 
     pub const fn result_slot(self) -> Option<usize> {
@@ -41,6 +41,7 @@ impl SpecialMenu {
             Self::Cartography | Self::Grindstone => Some(2),
             Self::Stonecutter => Some(1),
             Self::Smithing | Self::Loom => Some(3),
+            Self::Crafter => Some(45),
             _ => None,
         }
     }
@@ -87,10 +88,17 @@ pub fn build(
     advanced_tooltips: bool,
 ) -> ContainerResult {
     let (height, slot_positions, player_y) = match menu {
-        SpecialMenu::Dispenser | SpecialMenu::Crafter => (
+        SpecialMenu::Dispenser => (
             166.0,
             (0..9)
                 .map(|i| (62.0 + (i % 3) as f32 * 18.0, 17.0 + (i / 3) as f32 * 18.0))
+                .collect::<Vec<_>>(),
+            84.0,
+        ),
+        SpecialMenu::Crafter => (
+            166.0,
+            (0..9)
+                .map(|i| (26.0 + (i % 3) as f32 * 18.0, 17.0 + (i / 3) as f32 * 18.0))
                 .collect::<Vec<_>>(),
             84.0,
         ),
@@ -146,12 +154,23 @@ pub fn build(
     }
     let inv = menu.storage_slots() as u16;
     ctx.player_rows(slots, inv, inv + 27, player_y);
+    if menu == SpecialMenu::Crafter {
+        // Official CrafterMenu appends a NonInteractiveResultSlot after the
+        // 45 crafting/player slots.
+        ctx.slot(
+            134.0,
+            35.0,
+            slots.get(45).unwrap_or(&ItemStack::Empty),
+            None,
+            45,
+        );
+    }
     let (hovered, shown_cursor) = ctx.finish(cursor_item);
     if menu == SpecialMenu::Crafter {
         for i in 0..9 {
             if crafter_slot_disabled(data[0], i) {
                 elements.push(MenuElement::Rect {
-                    x: panel.ox + (60.0 + (i % 3) as f32 * 18.0) * panel.scale,
+                    x: panel.ox + (24.0 + (i % 3) as f32 * 18.0) * panel.scale,
                     y: panel.oy + (15.0 + (i / 3) as f32 * 18.0) * panel.scale,
                     w: 18.0 * panel.scale,
                     h: 18.0 * panel.scale,
@@ -192,6 +211,10 @@ pub fn build(
     if button.is_some() {
         ops.clear();
     }
+    if menu == SpecialMenu::Crafter {
+        // The official output slot is a NonInteractiveResultSlot.
+        ops.retain(|op| op.slot_num() != Some(45));
+    }
     ContainerResult {
         clicked_outside,
         ops,
@@ -221,7 +244,7 @@ mod tests {
             (M::Cartography, 39, Some(2)),
             (M::Grindstone, 39, Some(2)),
             (M::Smithing, 40, Some(3)),
-            (M::Crafter, 45, None),
+            (M::Crafter, 46, Some(45)),
             (M::Stonecutter, 38, Some(1)),
             (M::Loom, 40, Some(3)),
         ] {

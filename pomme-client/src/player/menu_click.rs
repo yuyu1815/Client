@@ -50,7 +50,10 @@ impl ContainerKind {
             Self::Beacon => 37,
             Self::Merchant => 39,
             Self::Horse { columns } => 38 + 3 * columns as usize,
-            Self::Dispenser | Self::Crafter => 45,
+            Self::Dispenser => 45,
+            // CrafterMenu appends its NonInteractiveResultSlot after the 45
+            // standard crafting/player slots.
+            Self::Crafter => 46,
             Self::BrewingStand => 41,
             Self::Cartography | Self::Grindstone => 39,
             Self::Smithing | Self::Loom => 40,
@@ -97,16 +100,16 @@ impl ContainerKind {
             | Self::Cartography
             | Self::Grindstone
             | Self::Smithing
-            | Self::Crafter
             | Self::Stonecutter
             | Self::Loom => None,
+            Self::Crafter => Some(45),
         }
     }
 
     /// Menu slot holding hotbar index `i` (0-8), the SWAP click target.
     pub fn hotbar_menu_slot(self, i: u8) -> u16 {
         match self {
-            Self::Player => 36 + i as u16,
+            Self::Player | Self::Crafter => 36 + i as u16,
             _ => (self.slot_count() - 9) as u16 + i as u16,
         }
     }
@@ -828,6 +831,16 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn crafter_layout_includes_readonly_result_after_player_inventory() {
+        let crafter = super::ContainerKind::Crafter;
+        assert_eq!(crafter.slot_count(), 46);
+        assert_eq!(crafter.inv_start(), 9);
+        assert_eq!(crafter.hotbar_menu_slot(0), 36);
+        assert_eq!(crafter.hotbar_menu_slot(8), 44);
+        assert_eq!(crafter.crafting_result_slot(), Some(45));
     }
 
     #[test]
