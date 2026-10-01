@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use azalea_block::BlockState;
+use azalea_core::position::BlockPos;
+use glam::DVec3;
 
 use crate::physics::block_shape::{LocalBox, compute_outline, compute_shape};
 
@@ -133,6 +135,9 @@ struct BlockData {
     /// Outline shape (vanilla `getShape`) where it differs from `shape`; `None`
     /// means the two agree and the collision shape doubles as the outline.
     outline: Option<Box<[LocalBox]>>,
+    /// 26.2 BlockBehaviour randomized XZ offset maximum; zero for other
+    /// versions.
+    max_horizontal_offset: f32,
     is_air: bool,
     /// Vanilla `hasCollision` (`BlockBehaviour.Properties.noCollision()`).
     collides: bool,
@@ -565,11 +570,52 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
                     .then(|| collision.clone().into_boxed_slice());
                 let outline_field = (outline != collision).then(|| outline.into_boxed_slice());
                 (collision_field, outline_field)
+            } else if file.version != "26.2"
+                && matches!(
+                    name,
+                    "mangrove_propagule"
+                        | "dandelion"
+                        | "golden_dandelion"
+                        | "torchflower"
+                        | "poppy"
+                        | "blue_orchid"
+                        | "allium"
+                        | "azure_bluet"
+                        | "red_tulip"
+                        | "orange_tulip"
+                        | "white_tulip"
+                        | "pink_tulip"
+                        | "oxeye_daisy"
+                        | "cornflower"
+                        | "wither_rose"
+                        | "lily_of_the_valley"
+                        | "bamboo_sapling"
+                        | "bamboo"
+                        | "pointed_dripstone"
+                        | "sulfur_spike"
+                        | "open_eyeblossom"
+                        | "closed_eyeblossom"
+                )
+            {
+                (None, None)
             } else {
                 (
                     compute_shape(name, &properties).map(Vec::into_boxed_slice),
                     compute_outline(name, &properties).map(Vec::into_boxed_slice),
                 )
+            };
+            let max_horizontal_offset = if file.version == "26.2" {
+                match name {
+                    "mangrove_propagule" | "dandelion" | "golden_dandelion" | "torchflower"
+                    | "poppy" | "blue_orchid" | "allium" | "azure_bluet" | "red_tulip"
+                    | "orange_tulip" | "white_tulip" | "pink_tulip" | "oxeye_daisy"
+                    | "cornflower" | "wither_rose" | "lily_of_the_valley" | "bamboo_sapling"
+                    | "bamboo" | "open_eyeblossom" | "closed_eyeblossom" => 0.25,
+                    "pointed_dripstone" | "sulfur_spike" => 0.125,
+                    _ => 0.0,
+                }
+            } else {
+                0.0
             };
             let light = LightProps {
                 emission: state_entry.e.get(offset as usize),
@@ -607,6 +653,7 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
                 behavior,
                 shape,
                 outline,
+                max_horizontal_offset,
                 is_air,
                 collides,
                 blocks_motion,
@@ -712,6 +759,7 @@ fn block_data(state: BlockState) -> &'static BlockData {
         behavior: DEFAULT_BEHAVIOR,
         shape: None,
         outline: None,
+        max_horizontal_offset: 0.0,
         is_air: false,
         collides: true,
         blocks_motion: true,
@@ -829,6 +877,35 @@ pub fn block_id(state: BlockState) -> &'static str {
 
 pub fn block_properties(state: BlockState) -> &'static PropMap {
     &block_data(state).properties
+}
+
+/// Vanilla 26.2 BlockBehaviour.Properties.offsetType XZ translation.
+pub fn block_offset(state: BlockState, pos: BlockPos) -> DVec3 {
+    let max = block_data(state).max_horizontal_offset;
+    if max == 0.0 {
+        return DVec3::ZERO;
+    }
+    // Mth.getSeed(x, 0, z), with Java's wrapping signed-long arithmetic.
+    // Mth.getSeed's first product is int arithmetic before its cast to long;
+    // the z product and following polynomial use wrapping Java-long arithmetic.
+    let x_seed = i64::from(pos.x.wrapping_mul(3_129_871));
+    let z_seed = i64::from(pos.z).wrapping_mul(116_129_781);
+    let seed = x_seed ^ z_seed;
+    let seed = seed
+        .wrapping_mul(seed)
+        .wrapping_mul(42_317_861)
+        .wrapping_add(seed.wrapping_mul(11))
+        >> 16;
+    let component = |nibble: u32| {
+        // Java divides floats first, then promotes the quotient to double.
+        let fraction = (nibble as f32 / 15.0_f32) as f64;
+        ((fraction - 0.5) * 0.5).clamp(-f64::from(max), f64::from(max))
+    };
+    DVec3::new(
+        component((seed & 15) as u32),
+        0.0,
+        component(((seed >> 8) & 15) as u32),
+    )
 }
 
 pub fn block_behavior(state: BlockState) -> &'static BlockBehavior {
@@ -998,6 +1075,40 @@ mod tests {
 
     fn setup() {
         init("26.2");
+    }
+
+    #[test]
+    fn vanilla_26_2_block_offsets_match_xz_seed_contract_and_version_gate() {
+        setup();
+        let plant = find_state("dandelion", &[]);
+        let same_column = block_offset(plant, BlockPos::new(-123, -40, 77));
+        assert_eq!(
+            same_column,
+            block_offset(plant, BlockPos::new(-123, 900, 77))
+        );
+        assert!((same_column.x - -0.21666666492819786).abs() < 1.0e-12);
+        assert!((same_column.z - -0.11666665971279144).abs() < 1.0e-12);
+        assert!(same_column.x.abs() <= 0.25 && same_column.z.abs() <= 0.25);
+        let spike = find_state(
+            "pointed_dripstone",
+            &[
+                ("thickness", "base"),
+                ("vertical_direction", "up"),
+                ("waterlogged", "false"),
+            ],
+        );
+        let spike_offset = block_offset(spike, BlockPos::new(i32::MIN, 0, i32::MAX));
+        assert!(spike_offset.x.abs() <= 0.125 && spike_offset.z.abs() <= 0.125);
+        assert_eq!(
+            block_offset(find_state("stone", &[]), BlockPos::new(-1, 0, -1)),
+            DVec3::ZERO
+        );
+        init("1.21.11");
+        let old_plant = find_state("dandelion", &[]);
+        assert_eq!(
+            block_offset(old_plant, BlockPos::new(17, 0, -21)),
+            DVec3::ZERO
+        );
     }
 
     #[test]

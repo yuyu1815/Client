@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use azalea_block::BlockState;
 use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
@@ -2200,26 +2200,33 @@ pub fn raycast(
 
     let reach_end = origin + dir * max_dist as f64;
     let mut t = 0.0_f64;
+    let mut checked = HashSet::new();
+    let mut nearest: Option<BlockHitResult> = None;
     while t <= max_dist as f64 {
-        let state = chunks.get_block_state(bx, by, bz);
-        if !is_air(state) {
-            let block_pos = BlockPos {
-                x: bx,
-                y: by,
-                z: bz,
-            };
-            let outline = block_shape::outline_shape(state);
-            if let Some((hit_point, face, inside)) =
-                clip_with_interaction_override(origin, reach_end, block_pos, outline, state)
-            {
-                return Some(border_hit(
-                    origin,
-                    hit_point,
-                    block_pos,
-                    face,
-                    inside,
-                    world_border,
-                ));
+        // A 26.2 offset shape can protrude up to 1/16 block across its cell.
+        // Check horizontal neighbors as well; state-only shape tables stay canonical.
+        for x in bx - 1..=bx + 1 {
+            for z in bz - 1..=bz + 1 {
+                let block_pos = BlockPos { x, y: by, z };
+                if !checked.insert(block_pos) {
+                    continue;
+                }
+                let state = chunks.get_block_state(x, by, z);
+                if is_air(state) {
+                    continue;
+                }
+                let outline = block_shape::outline_shape(state);
+                if let Some((hit_point, face, inside)) =
+                    clip_with_interaction_override(origin, reach_end, block_pos, outline, state)
+                {
+                    let hit = border_hit(origin, hit_point, block_pos, face, inside, world_border);
+                    if nearest.is_none_or(|old| {
+                        hit.hit_point.distance_squared(origin)
+                            < old.hit_point.distance_squared(origin)
+                    }) {
+                        nearest = Some(hit);
+                    }
+                }
             }
         }
         if t_max_x < t_max_y && t_max_x < t_max_z {
@@ -2241,7 +2248,7 @@ pub fn raycast(
         reach_end.y.floor() as i32,
         reach_end.z.floor() as i32,
     );
-    Some(border_hit(
+    let border = Some(border_hit(
         origin,
         reach_end,
         block_pos,
@@ -2249,7 +2256,17 @@ pub fn raycast(
         false,
         world_border,
     ))
-    .filter(|hit| hit.world_border)
+    .filter(|hit| hit.world_border);
+    match (nearest, border) {
+        (Some(block), Some(border))
+            if border.hit_point.distance_squared(origin)
+                < block.hit_point.distance_squared(origin) =>
+        {
+            Some(border)
+        }
+        (Some(block), _) => Some(block),
+        (None, border) => border,
+    }
 }
 
 fn border_hit(
@@ -2381,10 +2398,20 @@ fn clip_shape(
     block_pos: BlockPos,
     boxes: &[LocalBox],
 ) -> Option<(DVec3, Direction, bool)> {
+    clip_shape_with_offset(from, to, block_pos, boxes, DVec3::ZERO)
+}
+
+fn clip_shape_with_offset(
+    from: DVec3,
+    to: DVec3,
+    block_pos: BlockPos,
+    boxes: &[LocalBox],
+    shape_offset: DVec3,
+) -> Option<(DVec3, Direction, bool)> {
     if boxes.is_empty() {
         return None;
     }
-    let offset = dvec3(block_pos.x as f64, block_pos.y as f64, block_pos.z as f64);
+    let offset = dvec3(block_pos.x as f64, block_pos.y as f64, block_pos.z as f64) + shape_offset;
     let ray = to - from;
     let probe = from + ray * INSIDE_PROBE_FRACTION;
 
@@ -2408,7 +2435,9 @@ fn clip_with_interaction_override(
     outline: &[LocalBox],
     state: BlockState,
 ) -> Option<(DVec3, Direction, bool)> {
-    let (point, mut face, inside) = clip_shape(from, to, block_pos, outline)?;
+    let shape_offset = crate::world::block::block_offset(state, block_pos);
+    let (point, mut face, inside) =
+        clip_shape_with_offset(from, to, block_pos, outline, shape_offset)?;
     if let Some((override_point, override_face, _)) =
         clip_shape(from, to, block_pos, block_shape::interaction_shape(state))
         && override_point.distance_squared(from) < point.distance_squared(from)

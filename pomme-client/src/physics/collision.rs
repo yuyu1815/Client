@@ -8,6 +8,7 @@ use crate::entity::components::Velocity;
 use crate::world::chunk::ChunkStore;
 
 const COLLISION_EPSILON: f64 = 1.0e-7;
+const MAX_BLOCK_SHAPE_OFFSET: f64 = 0.25;
 
 pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb> {
     collect_block_aabbs_for_player(chunk_store, region, None)
@@ -65,13 +66,14 @@ fn visit_block_aabbs_bounded(
     mut cell: impl FnMut(i32, i32, i32) -> (BlockState, Option<(BlockState, DVec3)>),
     mut visit: impl FnMut(BlockPos, Aabb),
 ) {
-    let min_x = region.min.x.floor() as i32;
+    // Include neighboring cells whose offset shapes can protrude into the query.
+    let min_x = (region.min.x - MAX_BLOCK_SHAPE_OFFSET).floor() as i32;
     // Fences, walls and closed gates extend 0.5 blocks above their cell.
     let min_y = region.min.y.floor() as i32 - 1;
-    let min_z = region.min.z.floor() as i32;
-    let max_x = region.max.x.ceil() as i32;
+    let min_z = (region.min.z - MAX_BLOCK_SHAPE_OFFSET).floor() as i32;
+    let max_x = (region.max.x + MAX_BLOCK_SHAPE_OFFSET).ceil() as i32;
     let max_y = region.max.y.ceil() as i32;
-    let max_z = region.max.z.ceil() as i32;
+    let max_z = (region.max.z + MAX_BLOCK_SHAPE_OFFSET).ceil() as i32;
 
     let mut visited = 0usize;
     for by in min_y..max_y {
@@ -142,7 +144,9 @@ fn visit_block_aabbs_bounded(
                 }
                 match block_shape::partial_shape(state) {
                     Some(boxes) => {
-                        let offset = dvec3(bx as f64, by as f64, bz as f64);
+                        let pos = BlockPos::new(bx, by, bz);
+                        let offset = dvec3(bx as f64, by as f64, bz as f64)
+                            + crate::world::block::block_offset(state, pos);
                         boxes
                             .iter()
                             .for_each(|&b| push(Aabb::from_local(b, offset)));

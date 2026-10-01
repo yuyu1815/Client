@@ -74,6 +74,15 @@ pub(crate) fn compute_shape(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> 
     }
 
     match id {
+        "mangrove_propagule" | "dandelion" | "golden_dandelion" | "torchflower" | "poppy"
+        | "blue_orchid" | "allium" | "azure_bluet" | "red_tulip" | "orange_tulip"
+        | "white_tulip" | "pink_tulip" | "oxeye_daisy" | "cornflower" | "wither_rose"
+        | "lily_of_the_valley" | "bamboo_sapling" | "open_eyeblossom" | "closed_eyeblossom" => {
+            Some(Vec::new())
+        }
+        "bamboo" | "pointed_dripstone" | "sulfur_spike" => {
+            Some(vec![canonical_plant_shape(id, props, true)])
+        }
         "chest" | "trapped_chest" | "copper_chest" => Some(chest_shape(props)),
         _ if id.ends_with("_copper_chest") => Some(chest_shape(props)),
         "ender_chest" => Some(vec![[0.0625, 0.0, 0.0625, 0.9375, 0.875, 0.9375]]),
@@ -132,6 +141,13 @@ pub(crate) fn compute_shape(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> 
 /// the two agree, so `compute_shape`'s result doubles as the outline.
 pub(crate) fn compute_outline(id: &str, props: &PropMap) -> Option<Vec<LocalBox>> {
     match id {
+        "mangrove_propagule" | "dandelion" | "golden_dandelion" | "torchflower" | "poppy"
+        | "blue_orchid" | "allium" | "azure_bluet" | "red_tulip" | "orange_tulip"
+        | "white_tulip" | "pink_tulip" | "oxeye_daisy" | "cornflower" | "wither_rose"
+        | "lily_of_the_valley" | "bamboo_sapling" | "bamboo" | "open_eyeblossom"
+        | "closed_eyeblossom" | "pointed_dripstone" | "sulfur_spike" => {
+            Some(vec![canonical_plant_shape(id, props, false)])
+        }
         // These override collision only, inheriting BlockBehaviour.getShape.
         "soul_sand" | "honey_block" => Some(FULL_CUBE_SHAPE.to_vec()),
         // Most specific suffix first: all four families also end in _sign.
@@ -161,6 +177,73 @@ pub(crate) fn compute_outline(id: &str, props: &PropMap) -> Option<Vec<LocalBox>
         "water" | "lava" | "bubble_column" => Some(Vec::new()),
         _ => None,
     }
+}
+
+/// Canonical 26.2 block-local shapes from the official block class
+/// constructors.
+fn canonical_plant_shape(id: &str, props: &PropMap, collision: bool) -> LocalBox {
+    if id == "mangrove_propagule" {
+        let age = if props.get("hanging") == Some("true") {
+            props
+                .get("age")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0)
+                .min(4)
+        } else {
+            4
+        };
+        let min_y = [13.0, 10.0, 7.0, 3.0, 0.0][age] / 16.0;
+        return [0.4375, min_y, 0.4375, 0.5625, 1.0, 0.5625];
+    }
+    if matches!(id, "bamboo_sapling") {
+        return [0.25, 0.0, 0.25, 0.75, 0.75, 0.75];
+    }
+    if matches!(id, "bamboo") {
+        let (width, height) = if collision {
+            (3.0 / 16.0, 1.0)
+        } else if props.get("leaves") == Some("large") {
+            (10.0 / 16.0, 1.0)
+        } else {
+            (6.0 / 16.0, 1.0)
+        };
+        let half = width / 2.0;
+        return [0.5 - half, 0.0, 0.5 - half, 0.5 + half, height, 0.5 + half];
+    }
+    if matches!(id, "pointed_dripstone" | "sulfur_spike") {
+        let thickness = props.get("thickness").unwrap_or("tip");
+        let direction_up = props.get("vertical_direction") == Some("up");
+        let (width, y0, y1) = match thickness {
+            "tip_merge" => (6.0, 0.0, 16.0),
+            "tip" if direction_up => (6.0, 0.0, 11.0),
+            "tip" => (6.0, 5.0, 16.0),
+            "frustum" => (8.0, 0.0, 16.0),
+            "middle" => (10.0, 0.0, 16.0),
+            _ => (12.0, 0.0, 16.0),
+        };
+        let half = width / 32.0;
+        return [
+            0.5 - half,
+            y0 / 16.0,
+            0.5 - half,
+            0.5 + half,
+            y1 / 16.0,
+            0.5 + half,
+        ];
+    }
+    let (width, height) = if id == "bamboo_sapling" {
+        (8.0, 12.0)
+    } else {
+        (6.0, 10.0)
+    };
+    let half = width / 32.0;
+    [
+        0.5 - half,
+        0.0,
+        0.5 - half,
+        0.5 + half,
+        height / 16.0,
+        0.5 + half,
+    ]
 }
 
 fn chest_shape(props: &PropMap) -> Vec<LocalBox> {
@@ -1169,6 +1252,158 @@ mod tests {
             shape("white_bed", &[("part", "foot"), ("facing", "north")]).len(),
             3
         );
+    }
+
+    #[test]
+    fn offset_shape_families_keep_26_2_canonical_state_geometry() {
+        crate::world::block::init("26.2");
+        for id in [
+            "dandelion",
+            "golden_dandelion",
+            "torchflower",
+            "poppy",
+            "blue_orchid",
+            "allium",
+            "azure_bluet",
+            "red_tulip",
+            "orange_tulip",
+            "white_tulip",
+            "pink_tulip",
+            "oxeye_daisy",
+            "cornflower",
+            "wither_rose",
+            "lily_of_the_valley",
+            "open_eyeblossom",
+            "closed_eyeblossom",
+        ] {
+            let state = crate::world::block::default_state_of(id).unwrap();
+            assert_eq!(partial_shape(state), Some(&[][..]), "{id}");
+            assert_eq!(
+                outline_shape(state),
+                &[[0.3125, 0.0, 0.3125, 0.6875, 0.625, 0.6875]],
+                "{id}"
+            );
+        }
+        let propagule = crate::world::block::find_state(
+            "mangrove_propagule",
+            &[
+                ("age", "2"),
+                ("hanging", "true"),
+                ("stage", "0"),
+                ("waterlogged", "false"),
+            ],
+        );
+        assert_eq!(
+            outline_shape(propagule),
+            &[[0.4375, 7.0 / 16.0, 0.4375, 0.5625, 1.0, 0.5625]]
+        );
+        let sapling = crate::world::block::default_state_of("bamboo_sapling").unwrap();
+        assert_eq!(
+            outline_shape(sapling),
+            &[[0.25, 0.0, 0.25, 0.75, 0.75, 0.75]]
+        );
+        let bamboo = crate::world::block::find_state(
+            "bamboo",
+            &[("age", "1"), ("leaves", "large"), ("stage", "1")],
+        );
+        assert_eq!(
+            partial_shape(bamboo),
+            Some(&[[0.40625, 0.0, 0.40625, 0.59375, 1.0, 0.59375]][..])
+        );
+        assert_eq!(
+            outline_shape(bamboo),
+            &[[0.1875, 0.0, 0.1875, 0.8125, 1.0, 0.8125]]
+        );
+        for id in ["pointed_dripstone", "sulfur_spike"] {
+            let tip = crate::world::block::find_state(
+                id,
+                &[
+                    ("thickness", "tip"),
+                    ("vertical_direction", "down"),
+                    ("waterlogged", "true"),
+                ],
+            );
+            assert_eq!(
+                partial_shape(tip),
+                Some(&[[0.3125, 0.3125, 0.3125, 0.6875, 1.0, 0.6875]][..]),
+                "{id}"
+            );
+            assert_eq!(outline_shape(tip), partial_shape(tip).unwrap(), "{id}");
+        }
+    }
+
+    #[test]
+    fn world_offset_translates_outline_raycast_and_collision_boxes() {
+        use azalea_core::position::{BlockPos, ChunkPos};
+        use glam::{Vec3, dvec3};
+
+        use crate::physics::aabb::Aabb;
+        use crate::world::border::WorldBorder;
+        use crate::world::chunk::ChunkStore;
+
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        chunks.partial_storage.set(
+            &ChunkPos::new(-1, 0),
+            Some(azalea_world::chunk::Chunk::default()),
+            &mut chunks.chunk_storage,
+        );
+        let pos = BlockPos::new(-2, 64, 2);
+        let bamboo = crate::world::block::find_state(
+            "bamboo",
+            &[("age", "0"), ("leaves", "none"), ("stage", "0")],
+        );
+        chunks.set_block_state(pos.x, pos.y, pos.z, bamboo);
+        let offset = crate::world::block::block_offset(bamboo, pos);
+        let boxes = crate::physics::collision::collect_block_aabbs(
+            &chunks,
+            &Aabb::new(dvec3(-2.0, 64.0, 2.0), dvec3(-1.0, 65.0, 3.0)),
+        );
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(
+            boxes[0].min,
+            dvec3(-2.0, 64.0, 2.0) + offset + dvec3(0.40625, 0.0, 0.40625)
+        );
+        assert_eq!(
+            boxes[0].max,
+            dvec3(-2.0, 64.0, 2.0) + offset + dvec3(0.59375, 1.0, 0.59375)
+        );
+
+        let flower = crate::world::block::default_state_of("dandelion").unwrap();
+        chunks.set_block_state(pos.x, pos.y, pos.z, flower);
+        let shifted_center = dvec3(-2.0, 64.0, 2.0)
+            + crate::world::block::block_offset(flower, pos)
+            + dvec3(0.5, 0.8, 0.5);
+        let hit = crate::player::interaction::raycast(
+            shifted_center + dvec3(0.0, 1.0, 0.0),
+            Vec3::NEG_Y,
+            2.0,
+            &chunks,
+            &WorldBorder::default(),
+        )
+        .unwrap();
+        assert_eq!(hit.block_pos, pos);
+
+        // Large-leaf bamboo protrudes 1/16 into the next cell after XZ offset.
+        let edge_pos = BlockPos::new(-8, 64, 3);
+        let large_bamboo = crate::world::block::find_state(
+            "bamboo",
+            &[("age", "0"), ("leaves", "large"), ("stage", "0")],
+        );
+        chunks.set_block_state(edge_pos.x, edge_pos.y, edge_pos.z, large_bamboo);
+        let offset = crate::world::block::block_offset(large_bamboo, edge_pos);
+        assert!(offset.x > 0.19);
+        let edge_ray = dvec3(-8.0 + offset.x + 0.95, 65.5, 3.5 + offset.z);
+        assert_eq!(edge_ray.x.floor() as i32, -7, "ray is in adjacent cell");
+        let hit = crate::player::interaction::raycast(
+            edge_ray,
+            Vec3::NEG_Y,
+            2.0,
+            &chunks,
+            &WorldBorder::default(),
+        )
+        .unwrap();
+        assert_eq!(hit.block_pos, edge_pos);
     }
 
     #[test]
