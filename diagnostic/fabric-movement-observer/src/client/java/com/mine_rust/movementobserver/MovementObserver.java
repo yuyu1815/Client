@@ -125,6 +125,91 @@ public final class MovementObserver implements ClientModInitializer {
         }
         return out;
     }
+    private static final ThreadLocal<MoveCapture> MOVE = new ThreadLocal<>();
+    private static final ThreadLocal<AirCapture> AIR = new ThreadLocal<>();
+    private static final ThreadLocal<JumpCapture> JUMP = new ThreadLocal<>();
+    private static final class JumpCapture {
+        final JsonObject data = new JsonObject();
+        boolean powerSeen, factorSeen;
+    }
+    private static final class AirCapture {
+        final JsonObject data = new JsonObject();
+        boolean onGround;
+        boolean used;
+    }
+    private static final class MoveCapture {
+        final JsonObject data = new JsonObject();
+        Vec3 clipped;
+    }
+    public static void beginJump(net.minecraft.world.entity.LivingEntity entity) {
+        if (!ACTIVE.get() || client == null || entity != client.player) return;
+        try { JumpCapture c = new JumpCapture(); c.data.addProperty("event", "jump_observation"); c.data.addProperty("sprinting_before_jump", entity.isSprinting()); c.data.add("velocity_before", vec(entity.getDeltaMovement())); JUMP.set(c); }
+        catch (RuntimeException ignored) { JUMP.remove(); }
+    }
+    public static void jumpPower(net.minecraft.world.entity.LivingEntity entity, float power) {
+        JumpCapture c = JUMP.get(); if (c != null && client != null && entity == client.player) { c.powerSeen = true; c.data.addProperty("jump_power_f32", (double)power); c.data.addProperty("zero_power_early_return", power <= 1.0E-5f); }
+    }
+    public static void blockJumpFactor(net.minecraft.world.entity.LivingEntity entity, float factor) {
+        JumpCapture c = JUMP.get(); if (c != null && client != null && entity == client.player) { c.factorSeen = true; c.data.addProperty("used_block_jump_factor_f32", (double)factor); }
+    }
+    public static void endJump(net.minecraft.world.entity.LivingEntity entity) {
+        JumpCapture c = JUMP.get(); JUMP.remove(); if (c == null || client == null || entity != client.player) return;
+        if (!c.powerSeen) c.data.add("jump_power_f32", null);
+        if (!c.factorSeen) { c.data.add("used_block_jump_factor_f32", null); c.data.addProperty("block_jump_factor_reason", "call not observed in this jump branch"); }
+        c.data.add("velocity_after", vec(entity.getDeltaMovement())); offer("local", "jump_observation", c.data);
+    }
+    public static void beginAirTravel(net.minecraft.world.entity.LivingEntity entity) {
+        if (!ACTIVE.get() || client == null || entity != client.player) return;
+        try { AirCapture c = new AirCapture(); c.onGround = entity.onGround(); c.data.addProperty("event", "travel_observation"); c.data.addProperty("branch", "air"); c.data.addProperty("on_ground_at_start", c.onGround); AIR.set(c); }
+        catch (RuntimeException ignored) { AIR.remove(); }
+    }
+    public static void airFrictionSource(net.minecraft.world.entity.LivingEntity entity, net.minecraft.core.BlockPos pos) {
+        AirCapture c = AIR.get(); if (c != null && client != null && entity == client.player) c.data.add("friction_source_pos", blockPos(pos));
+    }
+    public static void airBlockFriction(net.minecraft.world.entity.LivingEntity entity, float friction) {
+        AirCapture c = AIR.get(); if (c != null && client != null && entity == client.player) { c.used = true; c.data.addProperty("used_friction_f32", (double)friction); }
+    }
+    public static void endAirTravel(net.minecraft.world.entity.LivingEntity entity) {
+        AirCapture c = AIR.get(); AIR.remove(); if (c == null || client == null || entity != client.player) return;
+        if (!c.used) { c.data.add("used_friction_f32", null); c.data.addProperty("used_friction_reason", "friction helper invocation was not observed"); }
+        if (!c.onGround) { c.data.add("friction_source_pos", null); c.data.addProperty("friction_source_reason", "airborne branch uses 1.0f; no block friction source is used"); }
+        offer("local", "travel_observation", c.data);
+    }
+    private static JsonArray blockPos(net.minecraft.core.BlockPos p) {
+        if (p == null) return null;
+        JsonArray a = new JsonArray(); a.add(p.getX()); a.add(p.getY()); a.add(p.getZ()); return a;
+    }
+    public static void beginMove(Entity entity, net.minecraft.world.entity.MoverType type, Vec3 requested) {
+        if (!ACTIVE.get() || client == null || entity != client.player) return;
+        try {
+            MoveCapture c = new MoveCapture(); MOVE.set(c);
+            c.data.addProperty("event", "collision_move"); c.data.addProperty("mover_type", type.name());
+            c.data.add("move_requested_delta", vec(requested)); c.data.add("bbox_before", box(entity.getBoundingBox()));
+            c.data.add("support_before", blockPos(entity.mainSupportingBlockPos.orElse(null)));
+            c.data.addProperty("on_ground_before", entity.onGround());
+        } catch (RuntimeException ignored) { MOVE.remove(); }
+    }
+    public static void collided(Entity entity, Vec3 requested, Vec3 clipped) {
+        MoveCapture c = MOVE.get();
+        if (c == null || client == null || entity != client.player) return;
+        c.clipped = clipped; c.data.add("requested_delta", vec(requested)); c.data.add("clipped_delta", vec(clipped));
+        c.data.addProperty("original_requested_y_negative", requested.y < 0.0);
+        c.data.addProperty("final_y_clipped", requested.y != clipped.y);
+    }
+    public static void endMove(Entity entity) {
+        MoveCapture c = MOVE.get(); MOVE.remove();
+        if (c == null || client == null || entity != client.player) return;
+        try {
+            if (c.clipped == null) { c.data.add("requested_delta", null); c.data.add("clipped_delta", null); c.data.addProperty("collision_result_reason", "Entity.collide was not invoked in this move branch"); }
+            c.data.add("bbox_after", box(entity.getBoundingBox()));
+            c.data.add("support_after", blockPos(entity.mainSupportingBlockPos.orElse(null)));
+            c.data.addProperty("on_ground_after", entity.onGround());
+            c.data.addProperty("horizontal_collision", entity.horizontalCollision);
+            c.data.addProperty("vertical_collision", entity.verticalCollision);
+            c.data.addProperty("vertical_collision_below", entity.verticalCollisionBelow);
+            offer("local", "collision_move", c.data);
+        } catch (RuntimeException ignored) { /* read-only diagnostic */ }
+    }
     public static void tick(LocalPlayer p, String stage) {
         if (!ACTIVE.get()) return;
         JsonObject d = new JsonObject();
