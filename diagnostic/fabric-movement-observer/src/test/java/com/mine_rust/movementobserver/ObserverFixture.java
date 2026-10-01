@@ -63,6 +63,10 @@ public final class ObserverFixture {
         assert emptySnapshot.get("status").getAsString().equals("null_world");
         assert emptySnapshot.get("max_block_cells").getAsInt() == 32;
         assert emptySnapshot.get("max_boxes").getAsInt() == 128;
+        assert emptySnapshot.get("entity_shapes_max").getAsInt() == 8;
+        assert emptySnapshot.get("world_border_shapes_max").getAsInt() == 8;
+        assert emptySnapshot.get("entity_shapes_semantics").getAsString().contains("NOT actual collision inputs");
+        assert emptySnapshot.get("world_border_shapes_semantics").getAsString().contains("NOT actual collision inputs");
         assert emptySnapshot.get("visited_cells").getAsInt() == 0;
         assert emptySnapshot.get("block_cells").isJsonArray() && emptySnapshot.get("shape_aabbs").isJsonArray();
         assert emptySnapshot.getAsJsonObject("visited_range").getAsJsonArray("min").get(0).getAsInt() == -1;
