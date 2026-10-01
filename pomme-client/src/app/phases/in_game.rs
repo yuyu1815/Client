@@ -4965,6 +4965,7 @@ pub fn update_game(
                     body_transform: extras.body_transform,
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
                     attack_time: e.swing_progress(partial_tick),
+                    vex_charging: extras.vex_charging,
                     skip_cull: false,
                 })
             })
@@ -4978,7 +4979,6 @@ pub fn update_game(
         game.probe_actor_diag_tick = game.tick_count;
         let camera = gfx.renderer.camera_render_position();
         let actors: Vec<String> = game
-                    vex_charging: extras.vex_charging,
             .entity_store
             .living
             .iter()
@@ -6409,6 +6409,7 @@ struct EntityExtras {
     bat_elapsed_secs: Option<f32>,
     golem_attack_ticks: f32,
     golem_offer_flower_ticks: u32,
+    vex_charging: bool,
 }
 
 /// Only the first overlay slot visible, untinted.
@@ -6432,7 +6433,6 @@ fn slot0_overlay(id: u32) -> ([Option<[f32; 4]>; MAX_OVERLAYS], [u32; MAX_OVERLA
 fn entity_extras(
     entity_id: i32,
     e: &crate::entity::LivingEntity,
-    vex_charging: bool,
     alpha: f32,
     game_time: i64,
 ) -> EntityExtras {
@@ -6441,29 +6441,6 @@ fn entity_extras(
             variant_index: e.variant,
             ..Default::default()
         },
-        EntityKind::Chicken => EntityExtras {
-            variant_index: e.variant,
-            flap: e.prev_flap.lerp(e.flap, alpha),
-            flap_speed: e.prev_flap_speed.lerp(e.flap_speed, alpha),
-            ..Default::default()
-        },
-        EntityKind::Sheep => sheep_extras(entity_id, e, alpha),
-        EntityKind::Villager => villager_like_extras(e, &VILLAGER_TYPE_HAT),
-        EntityKind::ZombieVillager => villager_like_extras(e, &ZOMBIE_VILLAGER_TYPE_HAT),
-        EntityKind::Bogged => EntityExtras {
-            overlay_tints: SLOT0_TINTS,
-            variant_index: e.is_sheared as u32,
-            ..Default::default()
-        },
-        // Always-visible slot-0 overlay (spider eyes, drowned/stray clothing).
-        EntityKind::Spider | EntityKind::Drowned | EntityKind::Stray => EntityExtras {
-            overlay_tints: SLOT0_TINTS,
-            ..Default::default()
-        },
-        EntityKind::Enderman => EntityExtras {
-            overlay_tints: SLOT0_TINTS,
-            // Vanilla `EndermanRenderer.getRenderOffset`: per-frame gaussian
-            // x/z shake while screaming.
         EntityKind::Bee => EntityExtras {
             variant_index: (if e.anger_end_time > game_time { 1 } else { 0 })
                 + (if e.bee_flags & 0x08 != 0 { 2 } else { 0 }),
@@ -6517,6 +6494,29 @@ fn entity_extras(
             },
             ..Default::default()
         },
+        EntityKind::Chicken => EntityExtras {
+            variant_index: e.variant,
+            flap: e.prev_flap.lerp(e.flap, alpha),
+            flap_speed: e.prev_flap_speed.lerp(e.flap_speed, alpha),
+            ..Default::default()
+        },
+        EntityKind::Sheep => sheep_extras(entity_id, e, alpha),
+        EntityKind::Villager => villager_like_extras(e, &VILLAGER_TYPE_HAT),
+        EntityKind::ZombieVillager => villager_like_extras(e, &ZOMBIE_VILLAGER_TYPE_HAT),
+        EntityKind::Bogged => EntityExtras {
+            overlay_tints: SLOT0_TINTS,
+            variant_index: e.is_sheared as u32,
+            ..Default::default()
+        },
+        // Always-visible slot-0 overlay (spider eyes, drowned/stray clothing).
+        EntityKind::Spider | EntityKind::Drowned | EntityKind::Stray => EntityExtras {
+            overlay_tints: SLOT0_TINTS,
+            ..Default::default()
+        },
+        EntityKind::Enderman => EntityExtras {
+            overlay_tints: SLOT0_TINTS,
+            // Vanilla `EndermanRenderer.getRenderOffset`: per-frame gaussian
+            // x/z shake while screaming.
             render_offset: if e.is_creepy {
                 glam::DVec3::new(
                     crate::particle::next_gaussian() * 0.02,
