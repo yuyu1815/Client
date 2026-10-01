@@ -96,14 +96,8 @@ pub struct AttributeData {
 }
 
 impl AttributeData {
-    /// LivingEntity.setSprinting replaces ONLY the vanilla sprint identity.
-    /// Keep the received snapshot intact for diagnostics and every other mod.
-    pub fn value(&self, sprinting: Option<bool>) -> f64 {
-        let modifiers = || {
-            self.modifiers
-                .iter()
-                .filter(|m| sprinting.is_none() || !is_sprinting_modifier(&m.id))
-        };
+    pub fn value(&self) -> f64 {
+        let modifiers = || self.modifiers.iter();
         let mut base = self.base;
         for m in modifiers().filter(|m| m.operation == Op::AddValue) {
             base += m.amount;
@@ -114,9 +108,6 @@ impl AttributeData {
         }
         for m in modifiers().filter(|m| m.operation == Op::AddMultipliedTotal) {
             value *= 1.0 + m.amount;
-        }
-        if sprinting == Some(true) {
-            value *= 1.0 + 0.3_f32 as f64;
         }
         value
     }
@@ -318,7 +309,7 @@ impl LocalPlayer {
             base: snapshot.base,
             modifiers: snapshot.modifiers,
         };
-        let value = sanitize_attribute(id, data.value(None));
+        let value = sanitize_attribute(id, data.value());
         match id {
             "max_health" => self.max_health = value as f32,
             "armor" => self.armor = value.round() as u32,
@@ -331,17 +322,31 @@ impl LocalPlayer {
         let id = canonical_attribute(id);
         sanitize_attribute(
             id,
-            self.attributes.get(id).map_or_else(
-                || {
-                    if id == "movement_speed" && self.sprinting {
-                        default * (1.0 + 0.3_f32 as f64)
-                    } else {
-                        default
-                    }
-                },
-                |data| data.value((id == "movement_speed").then_some(self.sprinting)),
-            ),
+            self.attributes
+                .get(id)
+                .map_or(default, AttributeData::value),
         )
+    }
+
+    /// Vanilla only replaces the sprint identity when setSprinting is called,
+    /// not while evaluating a newly received attribute snapshot.
+    pub fn set_sprinting(&mut self, sprinting: bool) {
+        self.sprinting = sprinting;
+        let speed = self
+            .attributes
+            .entry("movement_speed".into())
+            .or_insert_with(|| AttributeData {
+                base: f64::from(0.1_f32),
+                modifiers: Vec::new(),
+            });
+        speed.modifiers.retain(|m| !is_sprinting_modifier(&m.id));
+        if sprinting {
+            speed.modifiers.push(AttributeModifier {
+                id: "minecraft:sprinting".into(),
+                amount: f64::from(0.3_f32),
+                operation: Op::AddMultipliedTotal,
+            });
+        }
     }
 
     pub fn reset_death_time(&mut self) {

@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::ops::Add;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -618,6 +617,7 @@ fn send_mounted_movement(
     entities: &crate::entity::EntityStore,
     player: &LocalPlayer,
     riding_vehicle_id: Option<i32>,
+    was_sprinting: &mut bool,
 ) -> bool {
     if riding_vehicle_id.is_none() {
         return false;
@@ -639,8 +639,29 @@ fn send_mounted_movement(
             horse.look_dir.x_rot_deg(),
             horse.on_ground,
         ));
+        send_sprint_state(sender, player, was_sprinting);
     }
     true
+}
+
+fn send_sprint_state(
+    sender: &crate::net::sender::PacketSender,
+    player: &LocalPlayer,
+    was_sprinting: &mut bool,
+) {
+    if player.sprinting != *was_sprinting {
+        use azalea_protocol::packets::game::s_player_command::Action;
+        sender.send(player_command_packet(
+            player.entity_id,
+            if player.sprinting {
+                Action::StartSprinting
+            } else {
+                Action::StopSprinting
+            },
+            0,
+        ));
+        *was_sprinting = player.sprinting;
+    }
 }
 
 pub(crate) fn apply_entity_attribute(
@@ -656,7 +677,7 @@ pub(crate) fn apply_entity_attribute(
             base: snapshot.base,
             modifiers: snapshot.modifiers.clone(),
         }
-        .value(None),
+        .value(),
     );
     entities.set_attribute(entity_id, key, value);
     if let Some(entity) = entities.living.get_mut(&entity_id)
@@ -902,21 +923,59 @@ fn player_rotation_packet(look: LookDirection) -> ServerboundGamePacket {
     })
 }
 
-fn post_teleport_echo(
-    player: &LocalPlayer,
-    position: Position,
-    look: LookDirection,
-) -> ServerboundGamePacket {
+fn post_teleport_echo(player: &LocalPlayer) -> ServerboundGamePacket {
     ServerboundGamePacket::MovePlayerPosRot(
         azalea_protocol::packets::game::ServerboundMovePlayerPosRot {
-            pos: position.into(),
-            look_direction: look.into(),
-            flags: azalea_protocol::common::movements::MoveFlags {
-                on_ground: player.on_ground,
-                horizontal_collision: player.horizontal_collision,
-            },
+            pos: player.position.into(),
+            look_direction: player.look_dir.into(),
+            flags: azalea_protocol::common::movements::MoveFlags::default(),
         },
     )
+}
+
+fn apply_player_correction(
+    player: &mut LocalPlayer,
+    passenger: bool,
+    change: azalea_protocol::common::movements::PositionMoveRotation,
+    relative: &azalea_protocol::common::movements::RelativeMovements,
+    id: u32,
+    sender: &crate::net::sender::PacketSender,
+) {
+    if !passenger {
+        let (position, velocity, yaw, pitch) = resolve_entity_teleport(
+            player.position,
+            *player.velocity,
+            player.look_dir,
+            change.pos.into(),
+            Some(glam::dvec3(change.delta.x, change.delta.y, change.delta.z)),
+            change.look_direction.y_rot(),
+            change.look_direction.x_rot(),
+            Some(relative),
+        );
+        // setValuesFromPositionPacket resolves old position/rotation from
+        // their own previous bases, not from the corrected current pose.
+        let (old_position, _, old_yaw, old_pitch) = resolve_entity_teleport(
+            player.prev_position,
+            glam::DVec3::ZERO,
+            player.prev_look_dir,
+            change.pos.into(),
+            None,
+            change.look_direction.y_rot(),
+            change.look_direction.x_rot(),
+            Some(relative),
+        );
+        player.position = position;
+        player.prev_position = old_position;
+        player.velocity = velocity.unwrap().into();
+        player.look_dir = LookDirection::new(yaw, pitch);
+        player.prev_look_dir = LookDirection::new(old_yaw, old_pitch);
+    }
+    sender.send(ServerboundGamePacket::AcceptTeleportation(
+        azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation {
+            id,
+        },
+    ));
+    sender.send(post_teleport_echo(player));
 }
 
 fn resolve_rotation(
@@ -2077,53 +2136,16 @@ impl AppCore {
                     change,
                     relative,
                 } => {
-                    fn resolve<T: Add<Output = T>>(base: T, is_relative: bool, value: T) -> T {
-                        if is_relative { base + value } else { value }
-                    }
-
-                    let new_position = Position::new(
-                        resolve(game.player.position.x, relative.x, change.pos.x),
-                        resolve(game.player.position.y, relative.y, change.pos.y),
-                        resolve(game.player.position.z, relative.z, change.pos.z),
+                    apply_player_correction(
+                        &mut game.player,
+                        game.riding_vehicle_id.is_some(),
+                        change,
+                        &relative,
+                        id,
+                        &connection.packet_tx,
                     );
-
-                    let new_look_dir = LookDirection::new(
-                        resolve(
-                            game.player.look_dir.y_rot_deg(),
-                            relative.y_rot,
-                            change.look_direction.y_rot(),
-                        ),
-                        resolve(
-                            game.player.look_dir.x_rot_deg(),
-                            relative.x_rot,
-                            change.look_direction.x_rot(),
-                        ),
-                    );
-
-                    let new_velocity = {
-                        let mut new_velocity = game.player.velocity;
-                        if relative.rotate_delta {
-                            let x_rot_delta =
-                                game.player.look_dir.x_rot_deg() - new_look_dir.x_rot_deg();
-                            let y_rot_delta =
-                                game.player.look_dir.y_rot_deg() - new_look_dir.y_rot_deg();
-
-                            new_velocity = new_velocity
-                                .x_rot(x_rot_delta.to_radians() as f64)
-                                .y_rot(y_rot_delta.to_radians() as f64);
-                        }
-                        Velocity::new(
-                            resolve(new_velocity.x, relative.delta_x, change.delta.x),
-                            resolve(new_velocity.y, relative.delta_y, change.delta.y),
-                            resolve(new_velocity.z, relative.delta_z, change.delta.z),
-                        )
-                    };
-
-                    game.player.position = new_position;
-                    game.player.prev_position = game.player.position;
-                    game.player.velocity = new_velocity;
-                    game.player.look_dir = new_look_dir;
-                    game.player.prev_look_dir = game.player.look_dir;
+                    let new_position = game.player.position;
+                    let new_look_dir = game.player.look_dir;
                     game.interaction.on_teleport();
 
                     let to_chunk_coord = |v: f64| (v.floor() as i32).div_euclid(16);
@@ -2136,7 +2158,9 @@ impl AppCore {
                     // The camera is the eye, as `sync_camera_pos` keeps it
                     // every frame; the feet would seed it a block and a half
                     // low until the first in-game frame.
-                    renderer.reset_camera(game.player.eye_pos(), new_look_dir);
+                    if game.riding_vehicle_id.is_none() {
+                        renderer.reset_camera(game.player.eye_pos(), new_look_dir);
+                    }
 
                     if !game.position_set {
                         game.position_set = true;
@@ -2147,18 +2171,6 @@ impl AppCore {
                             new_position.z
                         );
                     }
-
-                    // Vanilla `handleMovePlayer` sends the acknowledgement and
-                    // this echo back to back once the pose is applied (a 26.3
-                    // wire folds the two).
-                    connection.packet_tx.send(ServerboundGamePacket::AcceptTeleportation(
-                        azalea_protocol::packets::game::s_accept_teleportation::ServerboundAcceptTeleportation { id },
-                    ));
-                    connection.packet_tx.send(post_teleport_echo(
-                        &game.player,
-                        new_position,
-                        new_look_dir,
-                    ));
                 }
                 NetworkEvent::MoveVehicle { pos, yaw, pitch } => {
                     apply_horse_correction(
@@ -4316,7 +4328,6 @@ impl AppCore {
             let neutral = InputState::released();
             Self::send_abilities_packet(connection, game);
             Self::send_input_packet(&neutral, connection, game);
-            self.send_sprint_command(connection, game);
             self.send_position_packet(connection, game);
 
             connection.packet_tx.recorder.record("local", "movement_tick", || Some(serde_json::json!({"player":crate::movement_record::player(game),"input":movement_input(&neutral)})));
@@ -4475,7 +4486,6 @@ impl AppCore {
 
         Self::send_abilities_packet(connection, game);
         Self::send_input_packet(input, connection, game);
-        self.send_sprint_command(connection, game);
         self.send_position_packet(connection, game);
 
         let eye_pos = game.player.eye_pos();
@@ -4665,16 +4675,7 @@ impl AppCore {
     }
 
     pub fn send_sprint_command(&self, connection: &ConnectionHandle, game: &mut GameState) {
-        let sprinting = game.player.sprinting;
-        if sprinting != game.was_sprinting {
-            let action = if sprinting {
-                azalea_protocol::packets::game::s_player_command::Action::StartSprinting
-            } else {
-                azalea_protocol::packets::game::s_player_command::Action::StopSprinting
-            };
-            self.send_player_command(connection, game.player.entity_id, action);
-            game.was_sprinting = sprinting;
-        }
+        send_sprint_state(&connection.packet_tx, &game.player, &mut game.was_sprinting);
     }
 
     /// Vanilla InBedChatScreen: leaving bed sends PlayerCommand STOP_SLEEPING.
@@ -4699,10 +4700,11 @@ impl AppCore {
             &game.entity_store,
             &game.player,
             game.riding_vehicle_id,
+            &mut game.was_sprinting,
         ) {
-            game.last_sent_look_dir = look_dir;
             return;
         }
+        self.send_sprint_command(connection, game);
 
         let dx = pos.x - game.last_sent_pos.x;
         let dy = pos.y - game.last_sent_pos.y;
@@ -5925,25 +5927,102 @@ mod tests {
     }
 
     #[test]
-    fn post_teleport_echo_carries_current_pose_and_movement_flags() {
+    fn post_teleport_echo_carries_current_pose_with_false_flags() {
         use crate::entity::components::{LookDirection, Position};
 
         let mut player = crate::player::LocalPlayer::new();
         player.on_ground = true;
         player.horizontal_collision = true;
-        let ServerboundGamePacket::MovePlayerPosRot(packet) = post_teleport_echo(
-            &player,
-            Position::new(4.0, 5.0, 6.0),
-            LookDirection::new(90.0, 30.0),
-        ) else {
+        player.position = Position::new(4.0, 5.0, 6.0);
+        player.look_dir = LookDirection::new(90.0, 30.0);
+        let ServerboundGamePacket::MovePlayerPosRot(packet) = post_teleport_echo(&player) else {
             panic!("teleport echo must send position and rotation");
         };
 
         assert_eq!((packet.pos.x, packet.pos.y, packet.pos.z), (4.0, 5.0, 6.0));
         assert_eq!(packet.look_direction.y_rot(), 90.0);
         assert_eq!(packet.look_direction.x_rot(), 30.0);
-        assert!(packet.flags.on_ground);
-        assert!(packet.flags.horizontal_collision);
+        assert!(!packet.flags.on_ground);
+        assert!(!packet.flags.horizontal_collision);
+    }
+
+    #[test]
+    fn correction_confirm_echo_and_passenger_state_are_vanilla() {
+        use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+
+        use crate::entity::components::{LookDirection, Position};
+        use crate::net::sender::{Outbound, PacketSender};
+        for passenger in [false, true] {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let sender = PacketSender::new(tx);
+            let mut player = crate::player::LocalPlayer::new();
+            player.position = Position::new(1.0, 2.0, 3.0);
+            player.prev_position = Position::new(-1.0, -2.0, -3.0);
+            player.velocity = super::Velocity::new(0.1, 0.2, 0.3);
+            player.look_dir = LookDirection::new(30.0, 10.0);
+            player.prev_look_dir = LookDirection::new(20.0, 5.0);
+            player.on_ground = true;
+            player.horizontal_collision = true;
+            let before = (
+                player.position,
+                player.prev_position,
+                *player.velocity,
+                player.look_dir,
+                player.prev_look_dir,
+            );
+            super::apply_player_correction(
+                &mut player,
+                passenger,
+                PositionMoveRotation {
+                    pos: azalea_core::position::Vec3::new(4.0, 5.0, 6.0),
+                    delta: azalea_core::position::Vec3::new(0.4, 0.5, 0.6),
+                    look_direction: LookDirection::new(90.0, 20.0).into(),
+                },
+                &RelativeMovements {
+                    x: true,
+                    y_rot: true,
+                    delta_x: true,
+                    ..Default::default()
+                },
+                17,
+                &sender,
+            );
+            if passenger {
+                assert_eq!(
+                    (
+                        player.position,
+                        player.prev_position,
+                        *player.velocity,
+                        player.look_dir,
+                        player.prev_look_dir
+                    ),
+                    before
+                );
+            } else {
+                assert_eq!(player.position, Position::new(5.0, 5.0, 6.0));
+                assert_eq!(player.prev_position, Position::new(3.0, 5.0, 6.0));
+                assert_eq!(*player.velocity, glam::dvec3(0.5, 0.5, 0.6));
+                assert_eq!(player.look_dir, LookDirection::new(120.0, 20.0));
+                assert_eq!(player.prev_look_dir, LookDirection::new(110.0, 20.0));
+            }
+            assert!(
+                matches!(rx.try_recv(), Ok(Outbound::Packet(p)) if matches!(p.as_ref(), ServerboundGamePacket::AcceptTeleportation(c) if c.id == 17))
+            );
+            let Ok(Outbound::Packet(p)) = rx.try_recv() else {
+                panic!("echo missing")
+            };
+            let ServerboundGamePacket::MovePlayerPosRot(echo) = *p else {
+                panic!("wrong echo")
+            };
+            assert_eq!(
+                (echo.pos.x, echo.pos.y, echo.pos.z),
+                (player.position.x, player.position.y, player.position.z)
+            );
+            assert_eq!(echo.look_direction.y_rot(), player.look_dir.y_rot_deg());
+            assert!(!echo.flags.on_ground && !echo.flags.horizontal_collision);
+            assert!(player.on_ground && player.horizontal_collision);
+            assert!(rx.try_recv().is_err());
+        }
     }
 
     #[test]
@@ -6503,6 +6582,7 @@ mod mounted_tick_tests {
         player: LocalPlayer,
         input: InputState,
         last_input: PlayerInputState,
+        was_sprinting: bool,
         sender: PacketSender,
         rx: tokio::sync::mpsc::UnboundedReceiver<Outbound>,
         mounted: Option<i32>,
@@ -6552,6 +6632,7 @@ mod mounted_tick_tests {
                 player,
                 input,
                 last_input: PlayerInputState::default(),
+                was_sprinting: false,
                 sender: PacketSender::new(tx),
                 rx,
                 mounted: Some(HORSE),
@@ -6596,7 +6677,13 @@ mod mounted_tick_tests {
                 self.player.was_jump_pressed = jump_held;
             }
             send_changed_player_input(&self.input, &self.sender, &mut self.last_input);
-            send_mounted_movement(&self.sender, &self.entities, &self.player, self.mounted);
+            send_mounted_movement(
+                &self.sender,
+                &self.entities,
+                &self.player,
+                self.mounted,
+                &mut self.was_sprinting,
+            );
             self.drain()
         }
 
@@ -6662,6 +6749,32 @@ mod mounted_tick_tests {
             };
             assert_vehicle(bytes, ride.horse());
         }
+    }
+
+    #[test]
+    fn mounted_tick_orders_input_rotation_vehicle_then_sprint() {
+        let mut ride = Ride::new(0.0);
+        ride.player.set_sprinting(true);
+        let packets = ride.tick();
+        assert_eq!(packets.len(), 4);
+        assert!(
+            matches!(&packets[0], Outbound::Packet(p) if matches!(p.as_ref(), ServerboundGamePacket::PlayerInput(_)))
+        );
+        assert!(
+            matches!(&packets[1], Outbound::Packet(p) if matches!(p.as_ref(), ServerboundGamePacket::MovePlayerRot(_)))
+        );
+        assert!(matches!(&packets[2], Outbound::Raw(_)));
+        assert!(
+            matches!(&packets[3], Outbound::Packet(p) if matches!(p.as_ref(), ServerboundGamePacket::PlayerCommand(c) if c.action == azalea_protocol::packets::game::s_player_command::Action::StartSprinting))
+        );
+        assert_eq!(ride.tick().len(), 2);
+        ride.entities.living.get_mut(&HORSE).unwrap().saddled = false;
+        ride.player.set_sprinting(false);
+        assert_eq!(ride.tick().len(), 1);
+        assert!(
+            ride.was_sprinting,
+            "non-authoritative passenger must not send sprint command"
+        );
     }
 
     #[test]

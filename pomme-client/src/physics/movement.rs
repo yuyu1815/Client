@@ -124,7 +124,7 @@ pub fn tick_with_context(
 
     let (sin_y_rot, cos_y_rot) = vanilla_yaw_sin_cos(player.look_dir.y_rot_deg());
 
-    update_fly_state(player, input, sin_y_rot, cos_y_rot);
+    update_fly_state(player, input, chunk_store, sin_y_rot, cos_y_rot);
 
     if player.flying {
         let mut input_ya = 0.0f32;
@@ -159,7 +159,7 @@ pub fn tick_with_context(
         } else if (player.on_ground || (in_water && player.fluid_height <= FLUID_JUMP_THRESHOLD))
             && player.no_jump_delay == 0
         {
-            jump_from_ground(player, sin_y_rot, cos_y_rot);
+            jump_from_ground(player, chunk_store, sin_y_rot, cos_y_rot);
             player.no_jump_delay = JUMP_DELAY_TICKS;
         }
     } else {
@@ -270,7 +270,7 @@ pub fn tick_dead_with_context(
     border_bounds: Option<[f64; 4]>,
 ) {
     player.no_jump_delay = 0;
-    player.sprinting = false;
+    player.set_sprinting(false);
 
     // Local players enter death through SetHealth; entity event 3 intentionally
     // skips LivingEntity.die for players, so the current ordinary player pose
@@ -307,7 +307,13 @@ pub fn tick_dead_with_context(
 
 // Vanilla `LocalPlayer.aiStep`: a fresh jump press arms the toggle window;
 // a second one inside it toggles flight.
-fn update_fly_state(player: &mut LocalPlayer, input: &InputState, sin_y_rot: f32, cos_y_rot: f32) {
+fn update_fly_state(
+    player: &mut LocalPlayer,
+    input: &InputState,
+    chunk_store: &ChunkStore,
+    sin_y_rot: f32,
+    cos_y_rot: f32,
+) {
     if player.may_fly {
         if player.game_mode == 3 {
             // Spectator flight is forced on. TODO: spectator noclip
@@ -321,7 +327,7 @@ fn update_fly_state(player: &mut LocalPlayer, input: &InputState, sin_y_rot: f32
             } else if !player.swimming {
                 player.flying = !player.flying;
                 if player.flying && player.on_ground {
-                    jump_from_ground(player, sin_y_rot, cos_y_rot);
+                    jump_from_ground(player, chunk_store, sin_y_rot, cos_y_rot);
                 }
                 player.abilities_dirty = true;
                 player.jump_trigger_time = 0;
@@ -347,8 +353,41 @@ fn zero_small_velocity(player: &mut LocalPlayer) {
     player.collision_delta = [DVec3::ZERO; 2];
 }
 
-fn jump_from_ground(player: &mut LocalPlayer, sin_y_rot: f32, cos_y_rot: f32) {
-    let jump = player.attribute_value("minecraft:jump_strength", f64::from(JUMP_VELOCITY)) as f32;
+fn jump_from_ground(player: &mut LocalPlayer, chunks: &ChunkStore, sin_y_rot: f32, cos_y_rot: f32) {
+    // ponytail: no mainSupportingBlockPos yet; use vanilla's floor fallback
+    // until the shared supporting-block context is implemented.
+    let factor_at = |y: f64| {
+        let state = chunks.get_block_state(
+            player.position.x.floor() as i32,
+            y.floor() as i32,
+            player.position.z.floor() as i32,
+        );
+        if crate::world::block::block_id(state) == "honey_block" {
+            0.5_f32
+        } else {
+            1.0_f32
+        }
+    };
+    let here = factor_at(player.position.y);
+    let factor = if here == 1.0 {
+        factor_at(player.position.y - f64::from(0.500001_f32))
+    } else {
+        here
+    };
+    let boost = player
+        .effects
+        .sorted_desc()
+        .iter()
+        .find(|effect| {
+            crate::mob_effect::info(effect.effect_id).is_some_and(|info| info.name == "jump_boost")
+        })
+        .map_or(0.0, |effect| 0.1_f32 * (f32::from(effect.amplifier) + 1.0));
+    let jump = player.attribute_value("minecraft:jump_strength", f64::from(JUMP_VELOCITY)) as f32
+        * factor
+        + boost;
+    if jump <= 1.0e-5_f32 {
+        return;
+    }
     player.velocity.y = f64::from(jump).max(player.velocity.y);
 
     if player.sprinting {
@@ -781,7 +820,7 @@ fn apply_collision_with_context(
         && forward > 0.0
         && !is_minor_horizontal_collision(forward, strafe, sin_y_rot, cos_y_rot, resolved)
     {
-        player.sprinting = false;
+        player.set_sprinting(false);
     }
 }
 
@@ -843,18 +882,19 @@ fn update_sprint_state(
     // Crouching blocks starting a sprint but doesn't stop one in progress.
     // Vanilla `canStartSprinting` also denies it while slowed by an item use,
     // and the slowed input impulse (< 0.8) stops a sprint in progress.
-    let can_sprint = forward > 0.0
+    let can_sprint = !player.sprinting
+        && forward > 0.0
         && player.food > SPRINT_HUNGER_THRESHOLD
         && !player.crouching
         && !slow_due_to_using_item;
 
     if input.performing_action(input::Action::Sprint) && can_sprint {
-        player.sprinting = true;
+        player.set_sprinting(true);
     }
 
     if !player.was_forward_pressed && forward_pressed && can_sprint {
         if player.sprint_toggle_timer > 0 {
-            player.sprinting = true;
+            player.set_sprinting(true);
         }
         player.sprint_toggle_timer = DEFAULT_SPRINT_WINDOW;
     }
@@ -862,7 +902,7 @@ fn update_sprint_state(
     if player.sprinting
         && (forward <= 0.0 || player.food <= SPRINT_HUNGER_THRESHOLD || slow_due_to_using_item)
     {
-        player.sprinting = false;
+        player.set_sprinting(false);
     }
 }
 
@@ -1489,7 +1529,9 @@ mod tests {
                 (11.0, 60.0, 10)
             );
             assert!(
-                (player.attribute_value("minecraft:generic.movement_speed", 0.0) - 0.33).abs()
+                (player.attribute_value("minecraft:generic.movement_speed", 0.0)
+                    - 0.33 * (1.0 + f64::from(0.3_f32)))
+                .abs()
                     < 1e-14
             );
             let mut input = InputState::released();
@@ -1537,7 +1579,10 @@ mod tests {
             tick(&mut player, &InputState::released(), &chunks, 1.0, false);
             assert!(!player.sprinting);
             assert_eq!(movement_speed(&player), 0.33);
-            assert_eq!(player.attributes["movement_speed"].modifiers, modifiers);
+            assert_eq!(
+                player.attributes["movement_speed"].modifiers,
+                modifiers[..3]
+            );
         }
     }
 
@@ -1560,13 +1605,82 @@ mod tests {
             crate::player::canonical_attribute("custom:generic.movement_speed"),
             "custom:generic.movement_speed"
         );
-        player.sprinting = true;
+        player.set_sprinting(true);
         assert_eq!(
             movement_speed(&player),
             (0.3 * (1.0 + 0.3_f32 as f64)) as f32
         );
-        player.sprinting = false;
+        player.set_sprinting(false);
         assert_eq!(movement_speed(&player), 0.3);
+    }
+
+    #[test]
+    fn jump_boost_honey_and_zero_power_match_float_jump() {
+        let chunks = flat_floor();
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(4.5, 61.0, 4.5).into();
+        player.effects.update(crate::mob_effect::MobEffectInstance {
+            effect_id: 7,
+            amplifier: 0,
+            duration: 200,
+            ambient: false,
+            show_particles: true,
+            show_icon: true,
+        });
+        player.on_ground = true;
+        let mut input = InputState::released();
+        input.set_test_key(KeyCode::Space, true);
+        tick(&mut player, &input, &chunks, 1.0, false);
+        assert_eq!(player.collision_delta[0].y, f64::from(0.42_f32 + 0.1_f32));
+        player.position = dvec3(4.5, 61.0, 4.5).into();
+        let honey = crate::world::block::first_state_of("honey_block").unwrap();
+        for y in [60, 61] {
+            chunks.set_block_state(4, y, 4, honey);
+            player.velocity = crate::entity::components::Velocity::default();
+            jump_from_ground(&mut player, &chunks, 0.0, 1.0);
+            assert_eq!(player.velocity.y, f64::from(0.42_f32 * 0.5_f32 + 0.1_f32));
+        }
+        player.effects.clear();
+        let stone = crate::world::block::first_state_of("stone").unwrap();
+        chunks.set_block_state(4, 60, 4, stone);
+        chunks.set_block_state(4, 61, 4, azalea_block::BlockState::AIR);
+        player.set_sprinting(true);
+        for power in [0.0, f64::from(1.0e-5_f32)] {
+            player.set_attribute_value("jump_strength", power);
+            player.velocity = crate::entity::components::Velocity::new(0.01, -0.02, 0.03);
+            jump_from_ground(&mut player, &chunks, 0.0, 1.0);
+            assert_eq!(*player.velocity, dvec3(0.01, -0.02, 0.03));
+        }
+    }
+
+    #[test]
+    fn server_sprint_snapshot_survives_idle_tick_until_set_sprinting() {
+        use azalea_core::attribute_modifier_operation::AttributeModifierOperation as Op;
+        use azalea_inventory::components::AttributeModifier;
+        use azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot;
+        let mut player = LocalPlayer::new();
+        player.apply_attribute(AttributeSnapshot {
+            attribute: azalea_registry::builtin::Attribute::MovementSpeed,
+            base: f64::from(0.1_f32),
+            modifiers: vec![AttributeModifier {
+                id: "minecraft:sprinting".into(),
+                amount: f64::from(0.3_f32),
+                operation: Op::AddMultipliedTotal,
+            }],
+        });
+        assert!(!player.sprinting);
+        let snapshot_speed = (f64::from(0.1_f32) * (1.0 + f64::from(0.3_f32))) as f32;
+        assert_eq!(movement_speed(&player), snapshot_speed);
+        tick(
+            &mut player,
+            &InputState::released(),
+            &flat_floor(),
+            1.0,
+            false,
+        );
+        assert_eq!(movement_speed(&player), snapshot_speed);
+        player.set_sprinting(false);
+        assert_eq!(movement_speed(&player), 0.1_f32);
     }
 
     #[test]
@@ -1766,7 +1880,7 @@ mod tests {
     fn movement_speed_matches_vanilla_attribute_rounding() {
         let mut player = LocalPlayer::new();
         assert_eq!(movement_speed(&player).to_bits(), 0x3dcccccd);
-        player.sprinting = true;
+        player.set_sprinting(true);
         assert_eq!(movement_speed(&player).to_bits(), 0x3e051eb9);
 
         let mut player = LocalPlayer::new();
@@ -1793,11 +1907,11 @@ mod tests {
         player.set_attribute_value("minecraft:generic.gravity", 0.04);
         player.set_attribute_value("minecraft:generic.jump_strength", 0.6);
         assert_eq!(movement_speed(&player), 0.2);
-        player.sprinting = true;
+        player.set_sprinting(true);
         assert_eq!(movement_speed(&player), 0.26);
         assert_eq!(effective_gravity(&player), 0.04);
         let (sin, cos) = vanilla_yaw_sin_cos(0.0);
-        jump_from_ground(&mut player, sin, cos);
+        jump_from_ground(&mut player, &flat_floor(), sin, cos);
         assert_eq!(player.velocity.y, f64::from(0.6_f32));
     }
 

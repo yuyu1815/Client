@@ -979,9 +979,9 @@ impl InteractionState {
             effects,
         );
         // `use_item` may send a packet and still PASS locally (e.g. a stick);
-        // only SUCCESS/FAIL stops vanilla's offhand fallback.
-        if used != ItemUseResult::Pass {
-            if matches!(self.target, Some(HitResult::Entity(_))) && used == ItemUseResult::Success {
+        // Air item-use FAIL also falls through; only SUCCESS stops the loop.
+        if used == ItemUseResult::Success {
+            if matches!(self.target, Some(HitResult::Entity(_))) {
                 self.swing_use(sender, hand);
             }
             return true;
@@ -993,7 +993,7 @@ impl InteractionState {
         if should_try_offhand(
             self.target.is_none(),
             !hit_block || matches!(self.target, Some(HitResult::Block(_))),
-            used == ItemUseResult::Pass,
+            used != ItemUseResult::Success,
             offhand_stack.is_some(),
         ) {
             if let Some(HitResult::Block(hit)) = self.target {
@@ -1038,7 +1038,7 @@ impl InteractionState {
                 offhand_on_cooldown,
                 has_projectile,
                 effects,
-            ) != ItemUseResult::Pass;
+            ) == ItemUseResult::Success;
         }
         hit_block
     }
@@ -1081,7 +1081,7 @@ impl InteractionState {
         }));
 
         if hand_on_cooldown {
-            return ItemUseResult::Fail;
+            return ItemUseResult::Pass;
         }
         // LocalPlayer.openItemGui opens writable books immediately; the server
         // sends OpenBook only for written books with content.
@@ -1112,6 +1112,9 @@ impl InteractionState {
 
         let Some(consumable) = stack_component::<Consumable>(stack) else {
             return if main_hand_use_succeeds(stack) {
+                if stack.kind == ItemKind::EnderPearl {
+                    self.swing_use(sender, hand);
+                }
                 ItemUseResult::Success
             } else {
                 ItemUseResult::Pass
@@ -1885,7 +1888,7 @@ fn should_try_offhand(
 fn main_hand_use_succeeds(stack: &ItemStackData) -> bool {
     matches!(
         stack.kind,
-        ItemKind::Bow | ItemKind::WritableBook | ItemKind::WrittenBook
+        ItemKind::Bow | ItemKind::WritableBook | ItemKind::WrittenBook | ItemKind::EnderPearl
     ) || stack_component::<Consumable>(stack).is_some()
         || stack_component::<BlocksAttacks>(stack).is_some()
         || stack_component::<KineticWeapon>(stack).is_some()
@@ -2863,7 +2866,7 @@ mod tests {
                     false,
                     &mut effects,
                 ) == if cooldown {
-                    ItemUseResult::Fail
+                    ItemUseResult::Pass
                 } else {
                     ItemUseResult::Success
                 },
@@ -2875,6 +2878,95 @@ mod tests {
             assert_eq!(state.take_writable_book_open(), None);
         }
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn air_use_cooldown_and_fail_allow_offhand_food_through_real_tick() {
+        use crate::net::sender::Outbound;
+        for (kind, cooldown, food, expected_use) in [
+            (
+                ItemKind::EnderPearl,
+                true,
+                10,
+                Some(InteractionHand::OffHand),
+            ),
+            (ItemKind::Bow, false, 10, Some(InteractionHand::OffHand)),
+            (ItemKind::Apple, false, 20, None),
+            (ItemKind::EnderPearl, false, 10, None),
+        ] {
+            let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+            let mut input = InputState::new();
+            input.on_mouse_button(
+                winit::event::MouseButton::Right,
+                winit::event::ElementState::Pressed,
+            );
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let sender = PacketSender::new(tx);
+            let mut state = InteractionState::new();
+            let main = ItemStackData::new(kind, 1);
+            let off = ItemStackData::new(ItemKind::Apple, 1);
+            let pos = dvec3(0.5, 64.0, 0.5);
+            let biome_climate = HashMap::new();
+            state.tick(
+                &input,
+                &chunks,
+                &sender,
+                &mut audio,
+                pos,
+                Aabb::from_center(pos, 0.3, 0.9),
+                pos + DVec3::Y * 1.62,
+                LookDirection::default(),
+                true,
+                false,
+                false,
+                &entities,
+                InteractionHand::MainHand,
+                cooldown,
+                food,
+                0,
+                Some(&main),
+                Some(&off),
+                false,
+                None,
+                None,
+                false,
+                false,
+                &mut BreakEffects {
+                    particles: &mut particles,
+                    registry: &registry,
+                    biome_climate: &biome_climate,
+                },
+            );
+            let mut uses = Vec::new();
+            let mut swings = Vec::new();
+            while let Ok(outbound) = rx.try_recv() {
+                if let Outbound::Packet(p) = outbound {
+                    match *p {
+                        ServerboundGamePacket::UseItem(p) => uses.push((p.hand, p.seq)),
+                        ServerboundGamePacket::Swing(p) => swings.push(p.hand),
+                        ServerboundGamePacket::SetCarriedItem(_) => {}
+                        p => panic!("unexpected {p:?}"),
+                    }
+                } else {
+                    panic!("unexpected raw packet")
+                }
+            }
+            let fallback = kind != ItemKind::EnderPearl || cooldown;
+            let mut expected = vec![(InteractionHand::MainHand, 1)];
+            if fallback {
+                expected.push((InteractionHand::OffHand, 2));
+            }
+            assert_eq!(uses, expected, "{kind:?}");
+            assert_eq!(
+                swings,
+                if fallback {
+                    vec![]
+                } else {
+                    vec![InteractionHand::MainHand]
+                }
+            );
+            assert_eq!(state.using_item.as_ref().map(|u| u.hand), expected_use);
+        }
     }
 
     #[test]

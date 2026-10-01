@@ -2357,8 +2357,10 @@ fn legacy_movement_attribute_alias_and_sprint_uuid_reach_local_physics() {
         panic!("event")
     };
     crate::app::core::apply_entity_attribute(&mut player, &mut entities, entity_id, snapshot);
+    assert_eq!(crate::physics::movement::movement_speed(&player), 0.26);
+    player.set_sprinting(false);
     assert_eq!(crate::physics::movement::movement_speed(&player), 0.2);
-    player.sprinting = true;
+    player.set_sprinting(true);
     assert_eq!(crate::physics::movement::movement_speed(&player), 0.26);
     assert_eq!(player.attributes["movement_speed"].modifiers.len(), 1);
 }
