@@ -51,6 +51,12 @@ public final class MovementObserver implements ClientModInitializer {
 
     @Override public void onInitializeClient() {
         client = Minecraft.getInstance();
+        if (Boolean.getBoolean("movementobserver.classloadSmoke")) {
+            for (String name : List.of("net.minecraft.client.multiplayer.ClientPacketListener", "net.minecraft.world.entity.Entity", "net.minecraft.world.entity.LivingEntity", "net.minecraft.client.player.LocalPlayer", "net.minecraft.network.Connection")) {
+                try { Class.forName(name, false, Minecraft.class.getClassLoader()); System.out.println("[movementobserver] classloadSmoke PASS " + name); }
+                catch (ClassNotFoundException e) { throw new IllegalStateException("classloadSmoke FAILED " + name, e); }
+            }
+        }
         ClientTickEvents.END_CLIENT_TICK.register(mc -> { while (TOGGLE.consumeClick()) { if (ACTIVE.get()) stop("user_stop"); else start(mc); } });
         ClientPlayConnectionEvents.DISCONNECT.register((handler, mc) -> stop("disconnect"));
         ClientLifecycleEvents.CLIENT_STOPPING.register(mc -> stop("end_game"));
