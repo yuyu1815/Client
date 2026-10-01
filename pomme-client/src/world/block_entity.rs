@@ -39,6 +39,7 @@ pub struct StoredBlockEntity {
     pub nbt: NbtCompound,
     pub sign_front: Option<[String; 4]>,
     pub sign_back: Option<[String; 4]>,
+    pub banner_patterns: Vec<BannerPatternLayer>,
     pub player_head_profile_source: Option<PlayerHeadProfileSource>,
 }
 
@@ -49,6 +50,9 @@ impl StoredBlockEntity {
             kind,
             sign_front: is_sign.then(|| sign_lines(&nbt, true)),
             sign_back: is_sign.then(|| sign_lines(&nbt, false)),
+            banner_patterns: (kind == BlockEntityKind::Banner)
+                .then(|| banner_patterns(&nbt))
+                .unwrap_or_default(),
             player_head_profile_source: (kind == BlockEntityKind::Skull)
                 .then(|| player_head_profile_source(&nbt)),
             nbt,
@@ -58,10 +62,76 @@ impl StoredBlockEntity {
     pub fn update_nbt(&mut self, nbt: NbtCompound) {
         self.sign_front = is_sign_kind(self.kind).then(|| sign_lines(&nbt, true));
         self.sign_back = is_sign_kind(self.kind).then(|| sign_lines(&nbt, false));
+        self.banner_patterns = (self.kind == BlockEntityKind::Banner)
+            .then(|| banner_patterns(&nbt))
+            .unwrap_or_default();
         self.player_head_profile_source =
             (self.kind == BlockEntityKind::Skull).then(|| player_head_profile_source(&nbt));
         self.nbt = nbt;
     }
+}
+
+/// A 26.2 BannerPatternLayers holder. References carry a registry key;
+/// direct values carry `asset_id`. Neither field is inferred from the other.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BannerPatternLayer {
+    pub registry_key: Option<String>,
+    pub asset_id: Option<String>,
+    pub color: u8,
+}
+
+const DYE_NAMES: [&str; 16] = [
+    "white",
+    "orange",
+    "magenta",
+    "light_blue",
+    "yellow",
+    "lime",
+    "pink",
+    "gray",
+    "light_gray",
+    "cyan",
+    "purple",
+    "blue",
+    "brown",
+    "green",
+    "red",
+    "black",
+];
+
+fn banner_patterns(nbt: &NbtCompound) -> Vec<BannerPatternLayer> {
+    use simdnbt::owned::{NbtList, NbtTag};
+    let Some(NbtTag::List(NbtList::Compound(entries))) = nbt.get("patterns") else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let pattern = entry.get("pattern")?;
+            let (registry_key, asset_id) = match pattern {
+                NbtTag::String(key) => (Some(key.to_str().into_owned()), None),
+                NbtTag::Compound(value) => {
+                    let asset = value.get("asset_id")?.string()?.to_str().into_owned();
+                    (None, Some(asset))
+                }
+                _ => return None,
+            };
+            let color = entry.get("color")?;
+            let color = match color {
+                NbtTag::String(name) => DYE_NAMES
+                    .iter()
+                    .position(|&candidate| candidate == name.to_str())?,
+                NbtTag::Int(value) if (0..16).contains(value) => *value as usize,
+                _ => return None,
+            };
+            Some(BannerPatternLayer {
+                registry_key,
+                asset_id,
+                color: color as u8,
+            })
+        })
+        .take(6)
+        .collect()
 }
 
 /// Complete cache identity: static profiles must never become online lookups.
@@ -669,6 +739,79 @@ mod tests {
         assert!(valid_profile_name("Player_1"));
         assert!(!valid_profile_name("player name"));
         assert!(!valid_profile_name(&"a".repeat(17)));
+    }
+
+    #[test]
+    fn modern_banner_layers_keep_holder_order_and_dye_colors() {
+        use simdnbt::owned::NbtList;
+
+        let layer = |pattern: &str, color: &str| {
+            let mut compound = NbtCompound::new();
+            compound.insert("pattern", pattern);
+            compound.insert("color", color);
+            compound
+        };
+        let mut nbt = NbtCompound::new();
+        nbt.insert(
+            "patterns",
+            NbtList::Compound(vec![
+                layer("minecraft:stripe_downright", "red"),
+                layer("minecraft:creeper", "light_blue"),
+            ]),
+        );
+        let mut banner = StoredBlockEntity::new(BlockEntityKind::Banner, nbt);
+        assert_eq!(banner.banner_patterns.len(), 2);
+        assert_eq!(
+            banner.banner_patterns[0].registry_key.as_deref(),
+            Some("minecraft:stripe_downright")
+        );
+        assert_eq!(banner.banner_patterns[0].color, 14);
+        assert_eq!(
+            banner.banner_patterns[1].registry_key.as_deref(),
+            Some("minecraft:creeper")
+        );
+        assert_eq!(banner.banner_patterns[1].color, 3);
+
+        let mut replacement = NbtCompound::new();
+        replacement.insert(
+            "patterns",
+            NbtList::Compound(vec![layer("custom:swirl", "blue")]),
+        );
+        banner.update_nbt(replacement);
+        assert_eq!(
+            banner.banner_patterns[0].registry_key.as_deref(),
+            Some("custom:swirl")
+        );
+        assert_eq!(banner.banner_patterns[0].color, 11);
+        assert!(banner.banner_patterns[0].asset_id.is_none());
+        banner.update_nbt(NbtCompound::new());
+        assert!(banner.banner_patterns.is_empty());
+    }
+
+    #[test]
+    fn banner_pattern_parser_preserves_distinct_asset_id_and_caps_native_layers() {
+        use simdnbt::owned::NbtList;
+
+        let mut direct = NbtCompound::new();
+        direct.insert("asset_id", "example:ornate/leaf");
+        direct.insert("translation_key", "block.example.banner.leaf");
+        let mut first = NbtCompound::new();
+        first.insert("pattern", direct);
+        first.insert("color", "green");
+        let mut entries = vec![first];
+        for i in 0..7 {
+            let mut entry = NbtCompound::new();
+            entry.insert("pattern", format!("minecraft:p{i}"));
+            entry.insert("color", "white");
+            entries.push(entry);
+        }
+        let mut nbt = NbtCompound::new();
+        nbt.insert("patterns", NbtList::Compound(entries));
+        let parsed = banner_patterns(&nbt);
+        assert_eq!(parsed.len(), 6);
+        assert_eq!(parsed[0].registry_key, None);
+        assert_eq!(parsed[0].asset_id.as_deref(), Some("example:ornate/leaf"));
+        assert_eq!(parsed[0].color, 13);
     }
 
     #[test]
