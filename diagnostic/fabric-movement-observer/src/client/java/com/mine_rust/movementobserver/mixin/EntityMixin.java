@@ -24,6 +24,20 @@ public abstract class EntityMixin {
         return clipped;
     }
 
+    @Redirect(method="move", at=@At(value="INVOKE", target="Lnet/minecraft/world/entity/Entity;getBlockSpeedFactor()F"), require=1)
+    private float movementobserver$usedBlockSpeedFactor(Entity entity) {
+        float factor = ((EntityInvoker)(Object)entity).movementobserver$getBlockSpeedFactor();
+        MovementObserver.usedBlockSpeedFactor(entity, factor);
+        return factor;
+    }
+
+    @Redirect(method="collide", at=@At(value="INVOKE", target="Lnet/minecraft/world/entity/Entity;maxUpStep()F", ordinal=2), require=1)
+    private float movementobserver$usedStepHeight(Entity entity) {
+        float height = ((EntityInvoker)(Object)entity).movementobserver$maxUpStep();
+        MovementObserver.usedStepHeight(entity, height);
+        return height;
+    }
+
     @Inject(method="move", at=@At("RETURN"), require=1)
     private void movementobserver$endMove(MoverType type, Vec3 requested, CallbackInfo ci) {
         MovementObserver.endMove((Entity)(Object)this);

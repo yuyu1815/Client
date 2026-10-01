@@ -43,6 +43,8 @@ final class PacketFields {
         } else if (p instanceof ClientboundSetEntityMotionPacket q) { kind="set_entity_motion"; f.addProperty("entity_id",q.id()); f.add("velocity",vec(q.movement()));
         } else if (p instanceof ClientboundTeleportEntityPacket q) {
             kind="teleport_entity"; f.addProperty("entity_id",q.id()); f.add("change",change(q.change())); f.add("relative",relative(q.relatives())); f.addProperty("on_ground",q.onGround());
+        } else if (p instanceof ClientboundEntityPositionSyncPacket q) {
+            kind="entity_position_sync"; f.addProperty("entity_id",q.id()); f.add("change",change(q.values())); f.addProperty("on_ground",q.onGround());
         } else if (p instanceof ClientboundBlockUpdatePacket q) {
             kind="block_update"; f.add("block",pos(q.getPos())); f.addProperty("state",net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.getId(q.getBlockState())); f.addProperty("block_name",BuiltInRegistries.BLOCK.getKey(q.getBlockState().getBlock()).toString());
         } else if (p instanceof ClientboundSectionBlocksUpdatePacket q) {

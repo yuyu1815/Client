@@ -9,4 +9,6 @@ import net.minecraft.world.entity.Entity;
 public interface EntityInvoker {
     @Invoker("collide") Vec3 movementobserver$collide(Vec3 requested);
     @Invoker("getBlockJumpFactor") float movementobserver$getBlockJumpFactor();
+    @Invoker("maxUpStep") float movementobserver$maxUpStep();
+    @Invoker("getBlockSpeedFactor") float movementobserver$getBlockSpeedFactor();
 }

@@ -11,6 +11,18 @@ dependencies {
     implementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
 }
 
+sourceSets.test.compileClasspath += sourceSets.client.output + sourceSets.client.compileClasspath
+sourceSets.test.runtimeClasspath += sourceSets.client.output + sourceSets.client.runtimeClasspath
+
+tasks.named('test') { enabled = false }
+tasks.register('packetFieldsSmoke', JavaExec) {
+    dependsOn tasks.testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.mine_rust.movementobserver.ObserverFixture'
+    enableAssertions = true
+}
+tasks.check { dependsOn tasks.packetFieldsSmoke }
+
 def revision = providers.exec { commandLine 'git', '-C', rootProject.projectDir.toPath().resolve('../..').normalize().toString(), 'rev-parse', 'HEAD' }.standardOutput.asText.map { it.trim() }
 processClientResources {
     inputs.property 'version', project.version

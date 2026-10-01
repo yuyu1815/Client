@@ -2,6 +2,7 @@ package com.mine_rust.movementobserver;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -38,6 +39,7 @@ public final class MovementObserver implements ClientModInitializer {
     private static final int QUEUE = 128, MAX_ROW = 512 * 1024;
     private static final long LIMIT = 64L * 1024 * 1024;
     private static final AtomicBoolean ACTIVE = new AtomicBoolean();
+    private static final AtomicBoolean WRITER_RUNNING = new AtomicBoolean();
     private static final ArrayBlockingQueue<String> ROWS = new ArrayBlockingQueue<>(QUEUE);
     private static final AtomicLong SEQ = new AtomicLong(), DROPPED = new AtomicLong();
     private static final ExecutorService WRITER = Executors.newSingleThreadExecutor(r -> { Thread t = new Thread(r, "movement-observer-writer"); t.setDaemon(true); return t; });
@@ -56,13 +58,17 @@ public final class MovementObserver implements ClientModInitializer {
 
     private static synchronized void start(Minecraft mc) {
         if (ACTIVE.get()) return;
+        if (WRITER_RUNNING.get()) {
+            mc.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.literal("Movement observer is still finishing the previous file; try F8 again shortly."));
+            return;
+        }
         try {
             Path dir = net.fabricmc.loader.api.FabricLoader.getInstance().getGameDir().resolve("movement-observations");
             Files.createDirectories(dir);
             path = dir.resolve("movement-" + UUID.randomUUID() + ".jsonl");
             startedNanos = System.nanoTime(); startWall = System.currentTimeMillis(); stopReason = "stop";
-            SEQ.set(0); DROPPED.set(0); ROWS.clear(); ACTIVE.set(true);
-            WRITER.execute(() -> writeFile(path, mc));
+            SEQ.set(0); DROPPED.set(0); ROWS.clear(); WRITER_RUNNING.set(true); ACTIVE.set(true);
+            WRITER.execute(() -> { try { writeFile(path, mc); } finally { WRITER_RUNNING.set(false); } });
             mc.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.literal("Movement observer recording: " + path));
         } catch (IOException e) { mc.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.literal("Movement observer start failed: " + e)); }
     }
@@ -100,7 +106,7 @@ public final class MovementObserver implements ClientModInitializer {
             JsonObject d=PacketFields.capture(packet); if(d==null)return;
             d.add("native_id", null); d.addProperty("native_stage", "client_packet_listener_"+stage);
             JsonObject state=new JsonObject(); LocalPlayer p=client.player;
-            if(p!=null && (packet instanceof net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket || packet instanceof net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket || (packet instanceof net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket m && m.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket t && t.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket a && a.getEntityId()==p.getId()))) state.add("player",playerState(p));
+            if(p!=null && (packet instanceof net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket || packet instanceof net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket || (packet instanceof net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket m && m.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket t && t.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket s && s.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket a && a.getEntityId()==p.getId()))) state.add("player",playerState(p));
             else state.add("player",null);
             if (p!=null && packet instanceof net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket a && a.getEntityId()==p.getId()) state.add("attributes",attributeState(p,a));
             JsonArray bs=new JsonArray(); blocks.forEach(bs::add); state.add("blocks",bs);
@@ -128,6 +134,7 @@ public final class MovementObserver implements ClientModInitializer {
     private static final ThreadLocal<MoveCapture> MOVE = new ThreadLocal<>();
     private static final ThreadLocal<AirCapture> AIR = new ThreadLocal<>();
     private static final ThreadLocal<JumpCapture> JUMP = new ThreadLocal<>();
+    private static JsonObject TICK_TRAVEL = new JsonObject();
     private static final class JumpCapture {
         final JsonObject data = new JsonObject();
         boolean powerSeen, factorSeen;
@@ -136,6 +143,7 @@ public final class MovementObserver implements ClientModInitializer {
         final JsonObject data = new JsonObject();
         boolean onGround;
         boolean used;
+        float friction;
     }
     private static final class MoveCapture {
         final JsonObject data = new JsonObject();
@@ -156,24 +164,30 @@ public final class MovementObserver implements ClientModInitializer {
         JumpCapture c = JUMP.get(); JUMP.remove(); if (c == null || client == null || entity != client.player) return;
         if (!c.powerSeen) c.data.add("jump_power_f32", null);
         if (!c.factorSeen) { c.data.add("used_block_jump_factor_f32", null); c.data.addProperty("block_jump_factor_reason", "call not observed in this jump branch"); }
-        c.data.add("velocity_after", vec(entity.getDeltaMovement())); offer("local", "jump_observation", c.data);
+        c.data.add("velocity_after", vec(entity.getDeltaMovement())); mergeTravel(c.data); offer("local", "jump_observation", c.data);
     }
     public static void beginAirTravel(net.minecraft.world.entity.LivingEntity entity) {
         if (!ACTIVE.get() || client == null || entity != client.player) return;
-        try { AirCapture c = new AirCapture(); c.onGround = entity.onGround(); c.data.addProperty("event", "travel_observation"); c.data.addProperty("branch", "air"); c.data.addProperty("on_ground_at_start", c.onGround); AIR.set(c); }
+        try { AirCapture c = new AirCapture(); c.onGround = entity.onGround(); c.data.addProperty("event", "travel_observation"); c.data.addProperty("branch", "air"); c.data.addProperty("on_ground_at_start", c.onGround); c.data.addProperty("on_ground_at_land_start", c.onGround); AIR.set(c); }
         catch (RuntimeException ignored) { AIR.remove(); }
     }
     public static void airFrictionSource(net.minecraft.world.entity.LivingEntity entity, net.minecraft.core.BlockPos pos) {
         AirCapture c = AIR.get(); if (c != null && client != null && entity == client.player) c.data.add("friction_source_pos", blockPos(pos));
     }
     public static void airBlockFriction(net.minecraft.world.entity.LivingEntity entity, float friction) {
-        AirCapture c = AIR.get(); if (c != null && client != null && entity == client.player) { c.used = true; c.data.addProperty("used_friction_f32", (double)friction); }
+        AirCapture c = AIR.get(); if (c != null && client != null && entity == client.player) { c.used = true; c.friction = friction; c.data.addProperty("used_friction_f32", (double)friction); }
+    }
+    public static void airGroundDrag(net.minecraft.world.entity.LivingEntity entity, float airDrag) {
+        AirCapture c = AIR.get();
+        if (c != null && client != null && entity == client.player && c.used) {
+            c.data.addProperty("used_ground_drag_f32", (double)(c.friction * airDrag));
+        }
     }
     public static void endAirTravel(net.minecraft.world.entity.LivingEntity entity) {
         AirCapture c = AIR.get(); AIR.remove(); if (c == null || client == null || entity != client.player) return;
         if (!c.used) { c.data.add("used_friction_f32", null); c.data.addProperty("used_friction_reason", "friction helper invocation was not observed"); }
         if (!c.onGround) { c.data.add("friction_source_pos", null); c.data.addProperty("friction_source_reason", "airborne branch uses 1.0f; no block friction source is used"); }
-        offer("local", "travel_observation", c.data);
+        mergeTravel(c.data); offer("local", "travel_observation", c.data);
     }
     private static JsonArray blockPos(net.minecraft.core.BlockPos p) {
         if (p == null) return null;
@@ -188,6 +202,12 @@ public final class MovementObserver implements ClientModInitializer {
             c.data.add("support_before", blockPos(entity.mainSupportingBlockPos.orElse(null)));
             c.data.addProperty("on_ground_before", entity.onGround());
         } catch (RuntimeException ignored) { MOVE.remove(); }
+    }
+    public static void usedStepHeight(Entity entity, float height) {
+        MoveCapture c = MOVE.get(); if (c != null && client != null && entity == client.player) c.data.addProperty("used_step_height", (double)height);
+    }
+    public static void usedBlockSpeedFactor(Entity entity, float factor) {
+        MoveCapture c = MOVE.get(); if (c != null && client != null && entity == client.player) c.data.addProperty("used_block_speed_factor_f32", (double)factor);
     }
     public static void collided(Entity entity, Vec3 requested, Vec3 clipped) {
         MoveCapture c = MOVE.get();
@@ -207,11 +227,47 @@ public final class MovementObserver implements ClientModInitializer {
             c.data.addProperty("horizontal_collision", entity.horizontalCollision);
             c.data.addProperty("vertical_collision", entity.verticalCollision);
             c.data.addProperty("vertical_collision_below", entity.verticalCollisionBelow);
-            offer("local", "collision_move", c.data);
+            mergeTravel(c.data); offer("local", "collision_move", c.data);
         } catch (RuntimeException ignored) { /* read-only diagnostic */ }
+    }
+    private static void mergeTravel(JsonObject source) {
+        if (source.has("friction_source_pos") || source.has("used_friction_f32")) {
+            TICK_TRAVEL.add("friction_source_pos", source.has("friction_source_pos") ? source.get("friction_source_pos").deepCopy() : com.google.gson.JsonNull.INSTANCE);
+            TICK_TRAVEL.add("used_friction_f32", source.has("used_friction_f32") ? source.get("used_friction_f32").deepCopy() : com.google.gson.JsonNull.INSTANCE);
+            TICK_TRAVEL.add("used_ground_drag_f32", source.has("used_ground_drag_f32") ? source.get("used_ground_drag_f32").deepCopy() : com.google.gson.JsonNull.INSTANCE);
+        }
+        if (source.has("on_ground_at_land_start")) TICK_TRAVEL.add("on_ground_at_land_start", source.get("on_ground_at_land_start").deepCopy());
+        if (source.has("jump_power_f32")) TICK_TRAVEL.add("jump_power_f32", source.get("jump_power_f32").deepCopy());
+        if (source.has("used_block_jump_factor_f32")) TICK_TRAVEL.add("used_block_jump_factor_f32", source.get("used_block_jump_factor_f32").deepCopy());
+        for (String key : List.of("used_step_height", "used_block_speed_factor_f32", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped")) {
+            if (!source.has(key)) continue;
+            JsonElement value = source.get(key);
+            if (value != null && !value.isJsonNull()) {
+                if (key.equals("bbox_before") || key.equals("bbox_after")) value = rustBox(value);
+                else if (key.equals("requested_delta") || key.equals("clipped_delta")) value = rustVec(value);
+            }
+            TICK_TRAVEL.add(key, value.deepCopy());
+        }
+    }
+    private static JsonArray rustVec(JsonElement value) {
+        if (value == null || value.isJsonNull()) return null;
+        JsonObject v = value.getAsJsonObject(); JsonArray a = new JsonArray(); a.add(v.get("x")); a.add(v.get("y")); a.add(v.get("z")); return a;
+    }
+    private static JsonArray rustBox(JsonElement value) {
+        if (value == null || value.isJsonNull()) return null;
+        JsonObject b = value.getAsJsonObject(); JsonArray a = new JsonArray(); a.add(rustVec(b.get("min"))); a.add(rustVec(b.get("max"))); return a;
+    }
+    private static JsonObject emptyTravel() {
+        JsonObject o = new JsonObject();
+        for (String key : List.of("friction_source_pos", "used_friction_f32", "used_ground_drag_f32", "on_ground_at_land_start", "jump_power_f32", "used_block_jump_factor_f32", "used_block_speed_factor_f32", "used_step_height", "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped", "ground_decision", "entity_shapes", "entity_shapes_truncated", "entity_shapes_omitted", "context", "frame_nanos")) o.add(key, null);
+        o.addProperty("semantics", "values captured at actual vanilla hook call sites; null means not observed or unsupported, never snapshot-requeried");
+        o.addProperty("available_fields", "used_friction_f32,friction_source_pos,used_ground_drag_f32,on_ground_at_land_start,jump_power_f32,used_block_jump_factor_f32,used_block_speed_factor_f32,used_step_height,bbox_before,bbox_after,support_before,support_after,requested_delta,clipped_delta,original_requested_y_negative,final_y_clipped");
+        o.addProperty("unsupported_fields", "water/lava/fall-flying, effective gravity, pose-at-move, resolver/block/entity shapes, ground decision, frame timing");
+        return o;
     }
     public static void tick(LocalPlayer p, String stage) {
         if (!ACTIVE.get()) return;
+        if (stage.equals("before_tick")) TICK_TRAVEL = emptyTravel();
         JsonObject d = new JsonObject();
         d.addProperty("event", "movement_tick");
         d.addProperty("tick", p.tickCount);
@@ -229,6 +285,7 @@ public final class MovementObserver implements ClientModInitializer {
         d.addProperty("step_height", p.maxUpStep());
         d.addProperty("food_level", p.getFoodData().getFoodLevel());
         d.addProperty("attributes_semantics", "effective values at snapshot; not a per-travel used-value capture");
+        if (stage.equals("after_tick")) d.add("travel_observation", TICK_TRAVEL.deepCopy());
         offer("local", stage, d);
     }
     private static JsonObject vec(Vec3 v) { JsonObject a = new JsonObject(); a.addProperty("x",v.x); a.addProperty("y",v.y); a.addProperty("z",v.z); return a; }
@@ -261,5 +318,5 @@ public final class MovementObserver implements ClientModInitializer {
         if(raw==null)return null;
         try { Path p=Path.of(raw); JsonObject o=new JsonObject(); o.addProperty("path",p.toString()); if(Files.isRegularFile(p)){o.addProperty("size_bytes",Files.size(p));o.addProperty("mtime_unix_ms",Files.getLastModifiedTime(p).toMillis()); MessageDigest md=MessageDigest.getInstance("SHA-256"); try(var in=Files.newInputStream(p)){byte[] b=new byte[65536];int n;while((n=in.read(b))>0)md.update(b,0,n);}o.addProperty("sha256",HexFormat.of().formatHex(md.digest()));} else {o.add("size_bytes",null);o.add("mtime_unix_ms",null);o.add("sha256",null);} o.addProperty("semantics","current Java process executable; not Minecraft artifact");return o;}catch(Exception e){return null;}
     }
-    private MovementObserver() {}
+    public MovementObserver() {}
 }
