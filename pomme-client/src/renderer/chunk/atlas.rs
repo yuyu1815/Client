@@ -9,6 +9,13 @@ use pyronyx::vk;
 use crate::assets::{AssetId, AssetIndex};
 use crate::renderer::util;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpriteTransparency {
+    Opaque,
+    Cutout,
+    Translucent,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AtlasRegion {
     /// Exact normalized bounds of the sprite's level-0 content rectangle.
@@ -551,7 +558,9 @@ fn load_source(
             let alpha_mask =
                 retain_alpha_mask.then(|| sprite_alpha_mask_from_rgba(&data, width, &animation));
             let alpha_counts = sprite_alpha_counts(&data);
-            let (opaque, translucent) = sprite_transparency(&data);
+            let transparency = sprite_transparency(&data);
+            let opaque = transparency == SpriteTransparency::Opaque;
+            let translucent = transparency == SpriteTransparency::Translucent;
             let display =
                 extract_frame_rgba(&data, width, &animation, animation.initial_display_frame);
             let texture = metadata.texture.as_ref();
@@ -1495,9 +1504,15 @@ fn sprite_alpha_counts(data: &[u8]) -> [u32; 3] {
     counts
 }
 
-fn sprite_transparency(data: &[u8]) -> (bool, bool) {
+fn sprite_transparency(data: &[u8]) -> SpriteTransparency {
     let counts = sprite_alpha_counts(data);
-    (counts[0] == 0 && counts[1] == 0, counts[1] != 0)
+    if counts[1] != 0 {
+        SpriteTransparency::Translucent
+    } else if counts[0] == 0 {
+        SpriteTransparency::Opaque
+    } else {
+        SpriteTransparency::Cutout
+    }
 }
 
 type PackResult = (HashMap<String, Option<(u32, u32)>>, AtlasRegion);
@@ -1620,7 +1635,9 @@ mod tests {
         for pixel in data.as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&color);
         }
-        let (opaque, translucent) = sprite_transparency(&data);
+        let transparency = sprite_transparency(&data);
+        let opaque = transparency == SpriteTransparency::Opaque;
+        let translucent = transparency == SpriteTransparency::Translucent;
         Source {
             name: name.to_string(),
             data: data.clone(),
@@ -1680,15 +1697,15 @@ mod tests {
     fn sprite_transparency_follows_vanilla_alpha_classes() {
         assert_eq!(
             sprite_transparency(&[0, 0, 0, 255, 0, 0, 0, 255]),
-            (true, false)
+            SpriteTransparency::Opaque
         );
         assert_eq!(
             sprite_transparency(&[0, 0, 0, 255, 0, 0, 0, 0]),
-            (false, false)
+            SpriteTransparency::Cutout
         );
         assert_eq!(
             sprite_transparency(&[0, 0, 0, 255, 0, 0, 0, 128]),
-            (false, true)
+            SpriteTransparency::Translucent
         );
     }
 

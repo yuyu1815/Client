@@ -333,7 +333,10 @@ struct SectionAlloc {
     /// the same index allocation. Drawn in a separate blended pass.
     water_first_index: u32,
     water_index_count: u32,
-    /// Total allocated index slice length (opaque + water), for freeing.
+    translucent_first_index: u32,
+    translucent_index_count: u32,
+    /// Total allocated index slice length (opaque + water + translucent), for
+    /// freeing.
     idx_len: u32,
     vertex_offset: i32,
     vtx_len: u32,
@@ -1023,6 +1026,7 @@ impl ChunkBufferStore {
             verts: &'a [PackedVertex],
             indices: &'a [u32],
             water_indices: &'a [u32],
+            translucent_indices: &'a [u32],
             vtx_off: u32,
             idx_off: u32,
             solid_index_count: u32,
@@ -1095,7 +1099,7 @@ impl ChunkBufferStore {
                 && upload_secs.iter().any(|s| {
                     staging_upload_section_too_large(
                         s.vertices.len(),
-                        s.indices.len() + s.water_indices.len(),
+                        s.indices.len() + s.water_indices.len() + s.translucent_indices.len(),
                         staging_half,
                     )
                 });
@@ -1107,7 +1111,9 @@ impl ChunkBufferStore {
             for sec in &upload_secs {
                 let vcount = sec.vertices.len() as u32;
                 // Opaque and water indices share one slice (opaque first, water after).
-                let icount = (sec.indices.len() + sec.water_indices.len()) as u32;
+                let icount = (sec.indices.len()
+                    + sec.water_indices.len()
+                    + sec.translucent_indices.len()) as u32;
                 if vcount == 0 || icount == 0 {
                     continue;
                 }
@@ -1130,6 +1136,7 @@ impl ChunkBufferStore {
                     verts: &sec.vertices,
                     indices: &sec.indices,
                     water_indices: &sec.water_indices,
+                    translucent_indices: &sec.translucent_indices,
                     vtx_off,
                     idx_off,
                     solid_index_count: sec.solid_index_count,
@@ -1197,7 +1204,8 @@ impl ChunkBufferStore {
                     let vbytes = p.verts.len() * VERTEX_SIZE as usize;
                     let opaque: &[u8] = bytemuck::cast_slice(p.indices);
                     let water: &[u8] = bytemuck::cast_slice(p.water_indices);
-                    let ibytes = opaque.len() + water.len();
+                    let translucent: &[u8] = bytemuck::cast_slice(p.translucent_indices);
+                    let ibytes = opaque.len() + water.len() + translucent.len();
                     // Flush between sections, not chunks: a tall column can exceed
                     // staging capacity while each section still fits.
                     if staging_needs_flush(stg_v, stg_i, vbytes, ibytes, staging_half) {
@@ -1218,7 +1226,10 @@ impl ChunkBufferStore {
 
                     let off = staging_half + stg_i;
                     buf[off..off + opaque.len()].copy_from_slice(opaque);
-                    buf[off + opaque.len()..off + ibytes].copy_from_slice(water);
+                    buf[off + opaque.len()..off + opaque.len() + water.len()]
+                        .copy_from_slice(water);
+                    buf[off + opaque.len() + water.len()..off + ibytes]
+                        .copy_from_slice(translucent);
                     copy_i.push(vk::BufferCopy {
                         src_offset: off as u64,
                         dst_offset: p.idx_off as u64 * INDEX_SIZE,
@@ -1239,10 +1250,14 @@ impl ChunkBufferStore {
                     for p in &plans {
                         let opaque: &[u8] = bytemuck::cast_slice(p.indices);
                         let water: &[u8] = bytemuck::cast_slice(p.water_indices);
+                        let translucent: &[u8] = bytemuck::cast_slice(p.translucent_indices);
                         let off = p.idx_off as usize * INDEX_SIZE as usize;
                         ibuf[off..off + opaque.len()].copy_from_slice(opaque);
                         ibuf[off + opaque.len()..off + opaque.len() + water.len()]
                             .copy_from_slice(water);
+                        ibuf[off + opaque.len() + water.len()
+                            ..off + opaque.len() + water.len() + translucent.len()]
+                            .copy_from_slice(translucent);
                     }
                 }
             }
@@ -1338,7 +1353,11 @@ impl ChunkBufferStore {
                 solid_index_count: p.solid_index_count,
                 water_first_index: p.idx_off + p.indices.len() as u32,
                 water_index_count: p.water_indices.len() as u32,
-                idx_len: (p.indices.len() + p.water_indices.len()) as u32,
+                translucent_first_index: p.idx_off
+                    + (p.indices.len() + p.water_indices.len()) as u32,
+                translucent_index_count: p.translucent_indices.len() as u32,
+                idx_len: (p.indices.len() + p.water_indices.len() + p.translucent_indices.len())
+                    as u32,
                 vertex_offset: p.vtx_off as i32,
                 vtx_len: p.verts.len() as u32,
                 uploaded_at: section_upload_time(
@@ -1853,6 +1872,62 @@ impl ChunkBufferStore {
         }
     }
 
+    /// Draw generic partial-alpha model quads back-to-front by section center.
+    pub fn draw_translucent(
+        &self,
+        cmd: vk::CommandBuffer,
+        layout: vk::PipelineLayout,
+        frustum: &[[f32; 4]; 6],
+        anchor: DVec3,
+        eye: DVec3,
+    ) {
+        let mut sections = Vec::new();
+        for (pos, alloc) in &self.chunks {
+            let col_vis = self.chunk_visibility.get(pos).copied().unwrap_or(u32::MAX);
+            let nearby = self.column_nearby(*pos, eye);
+            for sec in &alloc.sections {
+                if sec.translucent_index_count == 0
+                    || col_vis & (1u32 << sec.section_index) == 0
+                    || !aabb_in_frustum(&sec.aabb, sec.origin, frustum, eye)
+                {
+                    continue;
+                }
+                let center = origin_dvec(sec.origin)
+                    + DVec3::from_array([
+                        f64::from((sec.aabb.min[0] + sec.aabb.max[0]) * 0.5),
+                        f64::from((sec.aabb.min[1] + sec.aabb.max[1]) * 0.5),
+                        f64::from((sec.aabb.min[2] + sec.aabb.max[2]) * 0.5),
+                    ]);
+                sections.push((center.distance_squared(eye), sec, nearby));
+            }
+        }
+        // ponytail: sort sections by center only; sort individual quads if overlap
+        // artifacts warrant it.
+        sections
+            .sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+        cmd.bind_index_buffer(self.index_buffer, 0, vk::IndexType::Uint32);
+        let now = std::time::Instant::now();
+        for (_, sec, nearby) in sections {
+            let vis = Self::section_visibility(nearby, sec, now);
+            let rel = (origin_dvec(sec.origin) - anchor).as_vec3();
+            let origin_fade = [rel.x, rel.y, rel.z, vis];
+            cmd.push_constants(
+                layout,
+                vk::ShaderStageFlags::Vertex,
+                0,
+                bytemuck::bytes_of(&origin_fade),
+            );
+            cmd.draw_indexed(
+                sec.translucent_index_count,
+                1,
+                sec.translucent_first_index,
+                sec.vertex_offset,
+                0,
+            );
+        }
+    }
+
     /// Call only after the existing frame-slot fence. Includes air cells in
     /// the mask, but never issues empty geometry draws.
     pub(crate) fn prepare_edits(&mut self, frame: usize) -> Vec<[i32; 4]> {
@@ -2106,6 +2181,8 @@ mod staging_tests {
             solid_index_count: 6,
             water_first_index: 6,
             water_index_count: 0,
+            translucent_first_index: 6,
+            translucent_index_count: 0,
             idx_len: 6,
             vertex_offset: 0,
             vtx_len: 4,

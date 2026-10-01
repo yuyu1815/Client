@@ -210,6 +210,7 @@ mod tests {
                 indices: Vec::new(),
                 solid_index_count: 0,
                 water_indices: Vec::new(),
+                translucent_indices: Vec::new(),
                 emitted_chests: Vec::new(),
                 trace: Vec::new(),
             },

@@ -2633,6 +2633,17 @@ impl Renderer {
                 self.particle_pipeline
                     .update_and_draw(cmd, frame, &self.camera, particles);
 
+                // Generic partial-alpha block models use their own sorted,
+                // blended pass; water remains on its fluid-specific geometry path.
+                self.chunk_pipeline.bind_translucent(cmd, frame);
+                self.chunk_buffers.draw_translucent(
+                    cmd,
+                    self.chunk_pipeline.pipeline_layout,
+                    &ent_frustum,
+                    anchor,
+                    eye,
+                );
+
                 // Translucent water draws after opaque terrain and entities so it
                 // blends over them; depth-tested (occluded by geometry in front)
                 // but doesn't write depth. CPU frustum-culled, reusing the entity

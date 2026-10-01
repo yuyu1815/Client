@@ -16,6 +16,7 @@ pub struct ChunkPipeline {
     /// Translucent water variant: alpha blending on, depth write off. Shares
     /// the terrain pipelines' layout and descriptor sets.
     pub water_pipeline: vk::Pipeline,
+    pub translucent_pipeline: vk::Pipeline,
     pub pipeline_layout: vk::PipelineLayout,
     pub descriptor_set_layout_camera: vk::DescriptorSetLayout,
     pub descriptor_set_layout_atlas: vk::DescriptorSetLayout,
@@ -110,6 +111,8 @@ impl ChunkPipeline {
         let (pipeline_solid, pipeline_cutout) =
             create_pipelines(device, render_pass, pipeline_layout);
         let water_pipeline = create_water_pipeline(device, render_pass, pipeline_layout);
+        let translucent_pipeline =
+            create_translucent_pipeline(device, render_pass, pipeline_layout);
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -221,6 +224,7 @@ impl ChunkPipeline {
             pipeline_solid,
             pipeline_cutout,
             water_pipeline,
+            translucent_pipeline,
             pipeline_layout,
             descriptor_set_layout_camera: camera_layout,
             descriptor_set_layout_atlas: atlas_layout,
@@ -300,6 +304,18 @@ impl ChunkPipeline {
         );
     }
 
+    /// Bind generic partial-alpha terrain quads.
+    pub fn bind_translucent(&self, cmd: vk::CommandBuffer, frame: usize) {
+        cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.translucent_pipeline);
+        cmd.bind_descriptor_sets(
+            vk::PipelineBindPoint::Graphics,
+            self.pipeline_layout,
+            0,
+            &[self.camera_sets[frame], self.atlas_set],
+            &[],
+        );
+    }
+
     /// Bind the translucent water pipeline (same descriptor sets as `bind`).
     pub fn bind_water(&self, cmd: vk::CommandBuffer, frame: usize) {
         cmd.bind_pipeline(vk::PipelineBindPoint::Graphics, self.water_pipeline);
@@ -334,6 +350,7 @@ impl ChunkPipeline {
         device.destroy_pipeline(self.pipeline_solid, None);
         device.destroy_pipeline(self.pipeline_cutout, None);
         device.destroy_pipeline(self.water_pipeline, None);
+        device.destroy_pipeline(self.translucent_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.descriptor_set_layout_camera, None);
@@ -424,6 +441,38 @@ fn create_water_pipeline(
         layout,
         shader::include_spirv!("water.vert.spv"),
         shader::include_spirv!("water.frag.spv"),
+        &color_blend,
+        false,
+        false,
+    )
+}
+
+fn create_translucent_pipeline(
+    device: &vk::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+) -> vk::Pipeline {
+    let blend_attachment = [vk::PipelineColorBlendAttachmentState {
+        blend_enable: vk::TRUE,
+        src_color_blend_factor: vk::BlendFactor::SrcAlpha,
+        dst_color_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        color_blend_op: vk::BlendOp::Add,
+        src_alpha_blend_factor: vk::BlendFactor::One,
+        dst_alpha_blend_factor: vk::BlendFactor::OneMinusSrcAlpha,
+        alpha_blend_op: vk::BlendOp::Add,
+        color_write_mask: vk::ColorComponentFlags::RGBA,
+    }];
+    let color_blend = vk::PipelineColorBlendStateCreateInfo {
+        attachment_count: 1,
+        attachments: blend_attachment.as_ptr(),
+        ..Default::default()
+    };
+    create_chunk_variant(
+        device,
+        render_pass,
+        layout,
+        shader::include_spirv!("water.vert.spv"),
+        shader::include_spirv!("translucent.frag.spv"),
         &color_blend,
         false,
         false,

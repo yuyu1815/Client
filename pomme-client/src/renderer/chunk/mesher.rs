@@ -280,6 +280,9 @@ pub struct SectionMesh {
     /// Translucent (water) indices into the same `vertices`, drawn in a
     /// separate blended pass after opaque geometry.
     pub water_indices: Vec<u32>,
+    /// Partial-alpha model quads; unlike fluids, these use generic terrain
+    /// vertices.
+    pub translucent_indices: Vec<u32>,
     /// Only chests with emitted indexed geometry.
     pub emitted_chests: Vec<EmittedChest>,
     /// Probe-only target records; empty unless a trace is armed.
@@ -296,14 +299,16 @@ struct MeshSink {
     solid: Vec<u32>,
     cutout: Vec<u32>,
     water: Vec<u32>,
+    translucent: Vec<u32>,
     trace: Vec<Value>,
 }
 
 impl MeshSink {
-    /// Index list a quad's triangles go in: solid sprites render in the
-    /// no-discard pass, everything else in the discard (cutout) pass.
-    fn indices_for(&mut self, opaque: bool) -> &mut Vec<u32> {
-        if opaque {
+    /// Keep binary-alpha cutouts separate from partial-alpha blended quads.
+    fn indices_for(&mut self, region: AtlasRegion) -> &mut Vec<u32> {
+        if region.translucent {
+            &mut self.translucent
+        } else if region.opaque {
             &mut self.solid
         } else {
             &mut self.cutout
@@ -1213,6 +1218,7 @@ fn recycle_mesh_buffers(pool: &BufferPool, mesh: ChunkMeshData) {
         pool.recycle_vertices(sec.vertices);
         pool.recycle_indices(sec.indices);
         pool.recycle_indices(sec.water_indices);
+        pool.recycle_indices(sec.translucent_indices);
     }
 }
 
@@ -1936,6 +1942,7 @@ fn mesh_chunk_snapshot(
         sink.vertices = pool.take_scratch();
         sink.solid = pool.take_indices();
         sink.water = pool.take_indices();
+        sink.translucent = pool.take_indices();
     }
 
     // The type map is a state->id map, so it only needs the meshed span (+1-block
@@ -2251,7 +2258,7 @@ fn mesh_chunk_snapshot(
                 continue;
             }
             let origin_y = min_y + si * 16;
-            let (verts, indices, opaque) = chest_quads(
+            let (verts, indices, _opaque) = chest_quads(
                 &models[chest.variant],
                 [
                     (chest.pos.x - world_x) as f32,
@@ -2271,7 +2278,7 @@ fn mesh_chunk_snapshot(
             if verts.is_empty() || indices.is_empty() || offset + verts.len() > u32::MAX as usize {
                 continue;
             }
-            let target = sink.indices_for(opaque);
+            let target = sink.indices_for(region);
             target.extend(indices.into_iter().map(|i| i + offset as u32));
             chest_vertices[si as usize].extend(verts);
             emitted[si as usize].push(EmittedChest {
@@ -2288,10 +2295,15 @@ fn mesh_chunk_snapshot(
     // capacity.
     let mut sections = Vec::with_capacity(sinks.len());
     for (i, mut sink) in sinks.into_iter().enumerate() {
-        if sink.solid.is_empty() && sink.cutout.is_empty() && sink.water.is_empty() {
+        if sink.solid.is_empty()
+            && sink.cutout.is_empty()
+            && sink.water.is_empty()
+            && sink.translucent.is_empty()
+        {
             pool.recycle_scratch(sink.vertices);
             pool.recycle_indices(sink.solid);
             pool.recycle_indices(sink.water);
+            pool.recycle_indices(sink.translucent);
             continue;
         }
         let solid_index_count = sink.solid.len() as u32;
@@ -2343,6 +2355,7 @@ fn mesh_chunk_snapshot(
             indices: sink.solid,
             solid_index_count,
             water_indices: sink.water,
+            translucent_indices: sink.translucent,
             emitted_chests: std::mem::take(&mut emitted[i]),
             trace,
         });
@@ -2471,6 +2484,7 @@ fn mesh_edit_cell(
             indices: sink.solid,
             solid_index_count,
             water_indices: Vec::new(),
+            translucent_indices: Vec::new(),
             emitted_chests: Vec::new(),
             trace: Vec::new(),
         },
@@ -3384,7 +3398,7 @@ fn emit_lod_cube(
                 light_tint: pack_light_tint(light, tint),
             });
         }
-        sink.indices_for(region.opaque).extend_from_slice(&[
+        sink.indices_for(region).extend_from_slice(&[
             base,
             base + 1,
             base + 2,
@@ -3458,14 +3472,20 @@ fn emit_face(
     region: AtlasRegion,
     tint: u32,
 ) {
-    let opaque = region.opaque;
     let MeshSink {
         vertices,
         solid,
         cutout,
+        translucent,
         ..
     } = sink;
-    let indices = if opaque { solid } else { cutout };
+    let indices = if region.translucent {
+        translucent
+    } else if region.opaque {
+        solid
+    } else {
+        cutout
+    };
     emit_face_into(
         vertices, indices, block_pos, positions, uvs, lights, region, tint,
     );
@@ -4888,5 +4908,25 @@ mod terrain_uv_tests {
         assert_eq!(snapshot["enabled"], true);
         assert_eq!(snapshot["records"].as_array().unwrap().len(), 64);
         assert_eq!(snapshot["config"]["traceId"], "test");
+    }
+
+    #[test]
+    fn generic_quad_indices_route_opaque_cutout_and_partial_alpha_separately() {
+        let region = AtlasUVMap::test_empty().missing_region();
+        let mut sink = MeshSink::default();
+        sink.indices_for(region).push(1);
+        sink.indices_for(AtlasRegion {
+            opaque: false,
+            ..region
+        })
+        .push(2);
+        sink.indices_for(AtlasRegion {
+            translucent: true,
+            ..region
+        })
+        .push(3);
+        assert_eq!(sink.solid, [1]);
+        assert_eq!(sink.cutout, [2]);
+        assert_eq!(sink.translucent, [3]);
     }
 }
