@@ -223,6 +223,9 @@ pub struct LocalPlayer {
     pub attributes: HashMap<String, AttributeData>,
     /// Entity.move request/resolution, before travel's end-of-tick drag.
     pub collision_delta: [glam::DVec3; 2],
+    /// Exact values copied at their use sites; never used by simulation.
+    pub last_travel_observation: crate::physics::movement::TravelObservation,
+    pub observe_collision_shapes: bool,
 }
 
 impl LocalPlayer {
@@ -296,6 +299,8 @@ impl LocalPlayer {
             effects: crate::mob_effect::ActiveMobEffects::default(),
             attributes: HashMap::new(),
             collision_delta: [glam::DVec3::ZERO; 2],
+            last_travel_observation: Default::default(),
+            observe_collision_shapes: false,
         }
     }
 

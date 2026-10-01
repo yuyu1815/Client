@@ -60,6 +60,32 @@ const MINOR_COLLISION_ANGLE: f64 = 0.139_626_339_077_949_52;
 const DEG_TO_RAD: f32 = std::f32::consts::PI / 180.0_f32;
 const SIN_SCALE: f64 = 10_430.378_350_470_453;
 
+/// Constant-size diagnostic copies only. Null means this path did not use it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TravelObservation {
+    pub friction: Option<f32>,
+    pub friction_pos: Option<azalea_core::position::BlockPos>,
+    pub ground_drag: Option<f32>,
+    pub on_ground_at_start: bool,
+    pub block_speed_factor: Option<f32>,
+    pub block_jump_factor: Option<f32>,
+    pub jump_power: Option<f32>,
+    pub step_height: Option<f64>,
+    pub bbox_before: Option<Aabb>,
+    pub bbox_after: Option<Aabb>,
+    pub support_before: Option<azalea_core::position::BlockPos>,
+    pub support_after: Option<azalea_core::position::BlockPos>,
+    pub pose_at_move: Option<EntityPose>,
+    pub descending: bool,
+    pub leather_boots: bool,
+    pub fall_distance: f64,
+    pub entity_collider_count: usize,
+    pub entity_shapes_captured: bool,
+    pub entity_shapes: [Option<Aabb>; 8],
+    pub border_bounds: Option<[f64; 4]>,
+    pub ground_decision: Option<bool>,
+}
+
 pub fn tick(
     player: &mut LocalPlayer,
     input: &InputState,
@@ -87,6 +113,7 @@ pub fn tick_with_context(
     use_speed_multiplier: f32,
     slow_due_to_using_item: bool,
 ) {
+    player.last_travel_observation = TravelObservation::default();
     let jump_held = input.performing_action(input::Action::Jump);
 
     // Vanilla `LivingEntity.aiStep`.
@@ -271,6 +298,7 @@ pub fn tick_dead_with_context(
     entity_aabbs: &[Aabb],
     border_bounds: Option<[f64; 4]>,
 ) {
+    player.last_travel_observation = TravelObservation::default();
     player.no_jump_delay = 0;
     player.set_sprinting(false);
 
@@ -369,6 +397,8 @@ fn jump_from_ground(player: &mut LocalPlayer, chunks: &ChunkStore, sin_y_rot: f3
     let jump = player.attribute_value("minecraft:jump_strength", f64::from(JUMP_VELOCITY)) as f32
         * factor
         + boost;
+    player.last_travel_observation.block_jump_factor = Some(factor);
+    player.last_travel_observation.jump_power = Some(jump);
     if jump <= 1.0e-5_f32 {
         return;
     }
@@ -397,7 +427,10 @@ fn tick_land(
 
     let saved_vy = player.velocity.y;
     let speed = movement_speed(player);
-    let friction = player_block_friction(chunk_store, player);
+    let (friction, friction_pos) = player_block_friction(chunk_store, player);
+    player.last_travel_observation.friction = Some(friction);
+    player.last_travel_observation.friction_pos = Some(friction_pos);
+    player.last_travel_observation.on_ground_at_start = on_ground_at_start;
     let climbing = is_on_climbable(chunk_store, player.position.into());
     let accel = friction_influenced_speed(speed, player, friction);
     let (move_x, move_z) = movement_delta(forward, strafe, accel, sin_y_rot, cos_y_rot);
@@ -432,6 +465,7 @@ fn tick_land(
     } else {
         HORIZONTAL_DRAG
     };
+    player.last_travel_observation.ground_drag = Some(h_friction);
     player.velocity.x *= f64::from(h_friction);
     player.velocity.z *= f64::from(h_friction);
 
@@ -712,6 +746,26 @@ fn apply_collision_with_context(
         has_leather_boots(player),
         player.fall_distance,
     );
+    player.last_travel_observation.bbox_before = Some(aabb);
+    player.last_travel_observation.support_before = player.main_supporting_block_pos;
+    player.last_travel_observation.pose_at_move = Some(player.pose);
+    player.last_travel_observation.step_height = Some(step_height);
+    player.last_travel_observation.descending = context.0;
+    player.last_travel_observation.leather_boots = context.1;
+    player.last_travel_observation.fall_distance = context.2;
+    player.last_travel_observation.entity_collider_count = entity_aabbs.len();
+    if player.observe_collision_shapes {
+        player.last_travel_observation.entity_shapes_captured = true;
+        for (slot, aabb) in player
+            .last_travel_observation
+            .entity_shapes
+            .iter_mut()
+            .zip(entity_aabbs)
+        {
+            *slot = Some(*aabb);
+        }
+    }
+    player.last_travel_observation.border_bounds = border_bounds;
     delta = back_off_from_edge(
         chunk_store,
         player,
@@ -747,6 +801,9 @@ fn apply_collision_with_context(
     player.on_ground = on_ground;
     player.horizontal_collision = horizontal_collision;
     check_supporting_block(player, chunk_store, resolved, context);
+    player.last_travel_observation.ground_decision = Some(on_ground);
+    player.last_travel_observation.bbox_after = Some(player.bounding_box());
+    player.last_travel_observation.support_after = player.main_supporting_block_pos;
     update_fall_distance(
         &mut player.fall_distance,
         resolved.y,
@@ -803,6 +860,7 @@ fn apply_collision_with_context(
     }
 
     let speed_factor = f64::from(block_movement_factor(player, chunk_store, false));
+    player.last_travel_observation.block_speed_factor = Some(speed_factor as f32);
     player.velocity.x *= speed_factor;
     player.velocity.z *= speed_factor;
 
@@ -842,7 +900,7 @@ fn reset_fall_distance_for_tick(player: &mut LocalPlayer) {
     }
 }
 
-fn has_leather_boots(player: &LocalPlayer) -> bool {
+pub(crate) fn has_leather_boots(player: &LocalPlayer) -> bool {
     matches!(
         player.inventory.slot(8),
         azalea_inventory::ItemStack::Present(stack)
@@ -1281,11 +1339,17 @@ fn can_fall_at_least(
     )
 }
 
-fn player_block_friction(chunks: &ChunkStore, player: &LocalPlayer) -> f32 {
+fn player_block_friction(
+    chunks: &ChunkStore,
+    player: &LocalPlayer,
+) -> (f32, azalea_core::position::BlockPos) {
     let pos = player.on_pos(chunks, 0.500_001_f32);
-    friction_for_block_id(crate::world::block::block_id(
-        chunks.get_block_state(pos.x, pos.y, pos.z),
-    ))
+    (
+        friction_for_block_id(crate::world::block::block_id(
+            chunks.get_block_state(pos.x, pos.y, pos.z),
+        )),
+        pos,
+    )
 }
 
 fn block_movement_factor(player: &LocalPlayer, chunks: &ChunkStore, jump: bool) -> f32 {
@@ -1586,6 +1650,37 @@ mod tests {
     }
 
     #[test]
+    fn bounded_entity_observation_is_opt_in_and_preserves_numeric_outcome() {
+        let chunks = sparse_world(&[]);
+        let entities = [Aabb::block(0, 60, 0); 10];
+        for active in [false, true] {
+            let mut player = LocalPlayer::new();
+            player.position = dvec3(0.5, 61.0, 0.5).into();
+            player.velocity.y = -0.08;
+            player.observe_collision_shapes = active;
+            tick_with_context(
+                &mut player,
+                &InputState::released(),
+                &chunks,
+                &entities,
+                None,
+                1.0,
+                false,
+            );
+            assert_eq!(*player.position, dvec3(0.5, 61.0, 0.5));
+            assert_eq!(player.velocity.y, -0.08 * f64::from(VERTICAL_DRAG));
+            assert!(player.on_ground);
+            let o = player.last_travel_observation;
+            assert_eq!(o.entity_collider_count, 10);
+            assert_eq!(o.entity_shapes_captured, active);
+            assert_eq!(
+                o.entity_shapes.iter().flatten().count(),
+                if active { 8 } else { 0 }
+            );
+        }
+    }
+
+    #[test]
     fn full_tick_pose_uses_block_entity_and_border_clearance_and_swimming_fallback() {
         let chunks = flat_floor();
         let neutral = InputState::released();
@@ -1752,13 +1847,23 @@ mod tests {
                     player.main_supporting_block_pos,
                     Some(azalea_core::position::BlockPos::new(bx, 60, 0))
                 );
-                assert_eq!(player_block_friction(&chunks, &player), friction);
+                assert_eq!(player_block_friction(&chunks, &player).0, friction);
                 player.velocity.x = 0.1;
                 tick(&mut player, &neutral, &chunks, 1.0, false);
                 assert_eq!(
                     player.velocity.x,
                     0.1 * f64::from(friction * HORIZONTAL_DRAG)
                 );
+                let o = player.last_travel_observation;
+                assert_eq!(o.friction, Some(friction));
+                assert_eq!(o.ground_drag, Some(friction * HORIZONTAL_DRAG));
+                assert_eq!(
+                    o.friction_pos,
+                    Some(azalea_core::position::BlockPos::new(bx, 60, 0))
+                );
+                assert_eq!(block_friction(&chunks, player.prev_position), 0.6);
+                assert_eq!(o.ground_decision, Some(player.on_ground));
+                assert_eq!(o.bbox_after.unwrap().min, player.bounding_box().min);
             }
         }
     }
@@ -1776,7 +1881,7 @@ mod tests {
             player.main_supporting_block_pos,
             Some(azalea_core::position::BlockPos::new(0, 60, 0))
         );
-        assert_eq!(player_block_friction(&chunks, &player), 0.98);
+        assert_eq!(player_block_friction(&chunks, &player).0, 0.98);
         tick(&mut player, &neutral, &chunks, 1.0, false);
         assert!(!player.on_ground);
         assert_eq!(player.main_supporting_block_pos, None);
@@ -1823,7 +1928,7 @@ mod tests {
         player.velocity.y = -0.08;
         tick(&mut player, &InputState::released(), &chunks, 1.0, false);
         assert!(player.main_supporting_block_pos.is_some());
-        assert_eq!(player_block_friction(&chunks, &player), 0.6);
+        assert_eq!(player_block_friction(&chunks, &player).0, 0.6);
         assert_eq!(block_movement_factor(&player, &chunks, false), 0.4);
         player.velocity.x = 0.02;
         tick(&mut player, &InputState::released(), &chunks, 1.0, false);
@@ -2064,6 +2169,11 @@ mod tests {
         input.set_test_key(KeyCode::Space, true);
         tick(&mut player, &input, &chunks, 1.0, false);
         assert_eq!(player.collision_delta[0].y, f64::from(0.42_f32 + 0.1_f32));
+        assert_eq!(
+            player.last_travel_observation.jump_power,
+            Some(0.42_f32 + 0.1_f32)
+        );
+        assert_eq!(player.last_travel_observation.block_jump_factor, Some(1.0));
         player.position = dvec3(4.5, 61.0, 4.5).into();
         let honey = crate::world::block::first_state_of("honey_block").unwrap();
         for y in [60, 61] {
@@ -2071,6 +2181,11 @@ mod tests {
             player.velocity = crate::entity::components::Velocity::default();
             jump_from_ground(&mut player, &chunks, 0.0, 1.0);
             assert_eq!(player.velocity.y, f64::from(0.42_f32 * 0.5_f32 + 0.1_f32));
+            assert_eq!(player.last_travel_observation.block_jump_factor, Some(0.5));
+            assert_eq!(
+                f64::from(player.last_travel_observation.jump_power.unwrap()),
+                player.velocity.y
+            );
         }
         player.effects.clear();
         let stone = crate::world::block::first_state_of("stone").unwrap();

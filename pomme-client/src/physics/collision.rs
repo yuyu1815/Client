@@ -52,6 +52,16 @@ fn collect_block_aabbs_with(
 fn visit_block_aabbs_with(
     region: &Aabb,
     player: Option<(f64, bool, bool, f64)>,
+    cell: impl FnMut(i32, i32, i32) -> (BlockState, Option<(BlockState, DVec3)>),
+    visit: impl FnMut(BlockPos, Aabb),
+) {
+    visit_block_aabbs_bounded(region, player, usize::MAX, cell, visit);
+}
+
+fn visit_block_aabbs_bounded(
+    region: &Aabb,
+    player: Option<(f64, bool, bool, f64)>,
+    max_cells: usize,
     mut cell: impl FnMut(i32, i32, i32) -> (BlockState, Option<(BlockState, DVec3)>),
     mut visit: impl FnMut(BlockPos, Aabb),
 ) {
@@ -63,9 +73,14 @@ fn visit_block_aabbs_with(
     let max_y = region.max.y.ceil() as i32;
     let max_z = region.max.z.ceil() as i32;
 
+    let mut visited = 0usize;
     for by in min_y..max_y {
         for bz in min_z..max_z {
             for bx in min_x..max_x {
+                if visited == max_cells {
+                    return;
+                }
+                visited += 1;
                 let (state, piston) = cell(bx, by, bz);
                 let mut push = |aabb| visit(BlockPos::new(bx, by, bz), aabb);
                 if crate::world::block::block_id(state) == "moving_piston" {
@@ -137,6 +152,52 @@ fn visit_block_aabbs_with(
             }
         }
     }
+}
+
+/// Active-recorder requery of the same shape visitor, not resolver evidence.
+/// ponytail: first 32 cells / 128 boxes; actual resolver tracing if this
+/// ceiling hides the contact.
+pub(crate) fn diagnostic_block_shapes(
+    chunks: &ChunkStore,
+    region: &Aabb,
+    context: (f64, bool, bool, f64),
+) -> (
+    Vec<(BlockPos, BlockState)>,
+    Vec<(BlockPos, Aabb)>,
+    u64,
+    usize,
+) {
+    let mut cells = Vec::new();
+    let mut boxes = Vec::new();
+    let mut omitted_boxes = 0;
+    visit_block_aabbs_bounded(
+        region,
+        Some(context),
+        32,
+        |x, y, z| {
+            let result = collision_cell(chunks, x, y, z);
+            cells.push((BlockPos::new(x, y, z), result.0));
+            result
+        },
+        |pos, shape| {
+            if boxes.len() < 128 {
+                boxes.push((pos, shape));
+            } else {
+                omitted_boxes += 1;
+            }
+        },
+    );
+    let extent = |min: f64, max: f64, extra: i64| {
+        ((max.ceil() as i64)
+            .saturating_sub(min.floor() as i64)
+            .saturating_add(extra))
+        .max(0) as u64
+    };
+    let total = extent(region.min.x, region.max.x, 0)
+        .saturating_mul(extent(region.min.y, region.max.y, 1))
+        .saturating_mul(extent(region.min.z, region.max.z, 0));
+    let omitted_cells = total.saturating_sub(cells.len() as u64);
+    (cells, boxes, omitted_cells, omitted_boxes)
 }
 
 pub fn find_supporting_block(
@@ -466,6 +527,58 @@ pub fn resolve_collision_for_player(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_bounds_and_requery_do_not_change_collision() {
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        chunks.partial_storage.set(
+            &azalea_core::position::ChunkPos::new(0, 0),
+            Some(azalea_world::chunk::Chunk::default()),
+            &mut chunks.chunk_storage,
+        );
+        let scaffold = crate::world::block::find_state("scaffolding", &[]);
+        for x in 0..4 {
+            for z in 0..2 {
+                for y in 0..4 {
+                    chunks.set_block_state(x, y, z, scaffold);
+                }
+            }
+        }
+        let region = Aabb::new(dvec3(0.0, 1.0, 0.0), dvec3(4.0, 4.0, 2.0));
+        let (cells, boxes, omitted_cells, omitted_boxes) =
+            diagnostic_block_shapes(&chunks, &region, (10.0, false, false, 0.0));
+        assert_eq!(cells.len(), 32);
+        assert_eq!(boxes.len(), 128);
+        assert_eq!(omitted_cells, 0);
+        assert_eq!(omitted_boxes, 32);
+        let huge = Aabb::new(DVec3::ZERO, dvec3(100.0, 100.0, 100.0));
+        let (cells, _, omitted_cells, _) =
+            diagnostic_block_shapes(&chunks, &huge, (10.0, false, false, 0.0));
+        assert_eq!(cells.len(), 32);
+        assert_eq!(omitted_cells, 1_010_000 - 32);
+        let player = Aabb::from_center(dvec3(0.5, 5.0, 0.5), 0.3, 0.9);
+        let resolve = || {
+            resolve_collision_for_player(
+                &chunks,
+                player,
+                Velocity::new(0.0, -2.0, 0.0),
+                0.6,
+                false,
+                &[],
+                None,
+                Some((false, false, 0.0)),
+            )
+        };
+        let old = resolve();
+        diagnostic_block_shapes(
+            &chunks,
+            &player.expand(dvec3(0.0, -2.0, 0.0)),
+            (5.0, false, false, 0.0),
+        );
+        assert_eq!(resolve(), old);
+        assert_eq!(old, (dvec3(0.0, -1.0, 0.0), true));
+    }
 
     #[test]
     fn explicit_wall_hanging_crossbar_collides_even_when_has_collision_is_false() {

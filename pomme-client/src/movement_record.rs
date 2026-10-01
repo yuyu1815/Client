@@ -1,5 +1,5 @@
 //! Opt-in client observations, not proof of server acceptance/internal state.
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -145,7 +145,7 @@ impl Recorder {
         let start = self.state.lock().session.as_ref().unwrap().wall;
         write_row(
             &mut out,
-            &json!({"type":"header","schema":1,"utc_start_unix_ms":start,"wire_protocol":protocol,"queue_capacity":QUEUE,"size_limit_bytes":limit,"max_row_bytes":MAX_ROW,"semantics":"client observations only; queued != transport_write_success != server acceptance; normalized packet IDs are native; seq gaps/dropped mean incomplete evidence"}),
+            &json!({"type":"header","schema":1,"utc_start_unix_ms":start,"wire_protocol":protocol,"executable":executable_identity(),"package_version":env!("CARGO_PKG_VERSION"),"source_build_revision":null,"queue_capacity":QUEUE,"size_limit_bytes":limit,"max_row_bytes":MAX_ROW,"semantics":"client observations only; queued != transport_write_success != server acceptance; normalized packet IDs are native; seq gaps/dropped mean incomplete evidence"}),
         )?;
         let mut bytes = 0;
         let mut omitted = 0;
@@ -198,6 +198,40 @@ impl Recorder {
             })
         });
     }
+}
+// Called only by the blocking writer, never by a UI/game-thread producer.
+fn executable_identity() -> Value {
+    match std::env::current_exe() {
+        Ok(path) => file_identity(&path),
+        Err(error) => json!({"error":error.to_string()}),
+    }
+}
+fn file_identity(path: &Path) -> Value {
+    use sha2::{Digest, Sha256};
+    let result = (|| -> io::Result<Value> {
+        let mut file = std::fs::File::open(path)?;
+        let before = file.metadata()?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        let mut read_bytes = 0u64;
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hash.update(&buffer[..n]);
+            read_bytes += n as u64;
+        }
+        let after = file.metadata()?;
+        let unchanged = before.len() == after.len()
+            && before.modified().ok() == after.modified().ok()
+            && read_bytes == before.len();
+        Ok(json!({"path":path,"size_bytes":before.len(),
+            "mtime_unix_ms":before.modified().ok().and_then(|t|t.duration_since(UNIX_EPOCH).ok()).map(|t|t.as_millis() as u64),
+            "sha256":hash.finalize().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"metadata_unchanged_during_read":unchanged,
+            "semantics":"current_exe file at writer start, not an attestation of mapped memory or source revision"}))
+    })();
+    result.unwrap_or_else(|error| json!({"path":path,"error":error.to_string()}))
 }
 fn wall_ms() -> u64 {
     SystemTime::now()
@@ -328,7 +362,22 @@ pub(crate) fn own_attributes(p: &crate::player::LocalPlayer) -> Value {
     }).collect())
 }
 
+fn bbox(b: crate::physics::aabb::Aabb) -> Value {
+    json!([b.min.to_array(), b.max.to_array()])
+}
 pub fn player(game: &crate::app::phases::in_game::GameState) -> Value {
+    player_observation(game, false)
+}
+pub fn event_player(game: &crate::app::phases::in_game::GameState, event: &Value) -> Value {
+    player_observation(
+        game,
+        matches!(
+            event["event"].as_str(),
+            Some("player_position" | "player_rotation" | "entity_teleport")
+        ),
+    )
+}
+fn player_observation(game: &crate::app::phases::in_game::GameState, correction: bool) -> Value {
     let p = &game.player;
     let attributes = own_attributes(p);
     let floor = game.chunk_store.get_block_state(
@@ -336,7 +385,29 @@ pub fn player(game: &crate::app::phases::in_game::GameState) -> Value {
         (p.prev_position.y - f64::from(0.500_001_f32)).floor() as i32,
         p.prev_position.z.floor() as i32,
     );
-    json!({"own_attributes":attributes,
+    let o = &p.last_travel_observation;
+    json!({"pose":format!("{:?}",p.pose),"main_supporting_block_pos":p.main_supporting_block_pos.as_ref().map(block),
+        "legacy_floor_semantics":"prev-position center fallback, NOT used travel friction",
+        "shape_snapshot":if correction {
+            Some(shape_snapshot(game,p.bounding_box(),(p.bounding_box().min.y,p.crouching,crate::physics::movement::has_leather_boots(p),p.fall_distance),"correction current-bbox requery; NOT actual collision inputs"))
+        } else if game.riding_vehicle_id.is_none() && p.collision_delta[0] != p.collision_delta[1] {
+            o.bbox_before.map(|bb|shape_snapshot(game,bb.expand(p.collision_delta[0]).expand(glam::dvec3(0.0,o.step_height.unwrap_or(0.0),0.0)),(bb.min.y,o.descending,o.leather_boots,o.fall_distance),"post-tick requested sweep + step-height envelope requery; NOT actual collision inputs"))
+        } else {None},
+        "travel_observation":if game.riding_vehicle_id.is_none() {Some(json!({
+            "used_friction_f32":o.friction,"friction_source_pos":o.friction_pos.as_ref().map(block),
+            "used_ground_drag_f32":o.ground_drag,"on_ground_at_land_start":o.friction.map(|_|o.on_ground_at_start),
+            "used_block_speed_factor_f32":o.block_speed_factor,"used_block_jump_factor_f32":o.block_jump_factor,"jump_power_f32":o.jump_power,
+            "used_step_height":o.step_height,"pose_at_move":o.pose_at_move.map(|v|format!("{v:?}")),
+            "bbox_before":o.bbox_before.map(bbox),"bbox_after":o.bbox_after.map(bbox),
+            "support_before":o.support_before.as_ref().map(block),"support_after":o.support_after.as_ref().map(block),
+            "requested_delta":o.bbox_before.map(|_|p.collision_delta[0].to_array()),"clipped_delta":o.bbox_before.map(|_|p.collision_delta[1].to_array()),
+            "original_requested_y_negative":o.bbox_before.map(|_|p.collision_delta[0].y < 0.0),
+            "final_y_clipped":o.bbox_before.map(|_|p.collision_delta[0].y != p.collision_delta[1].y),"ground_decision":o.ground_decision,
+            "entity_shapes":o.entity_shapes_captured.then(||o.entity_shapes.iter().flatten().copied().map(bbox).collect::<Vec<_>>()),
+            "entity_shapes_max":8,"entity_shapes_truncated":o.entity_shapes_captured && o.entity_collider_count>8,
+            "entity_shapes_omitted":o.entity_shapes_captured.then(||o.entity_collider_count.saturating_sub(8)),
+            "context":{"descending":o.descending,"leather_boots":o.leather_boots,"fall_distance":o.fall_distance,"entity_collider_count":o.entity_collider_count,"border_bounds":o.border_bounds}
+        }))} else {None},"own_attributes":attributes,
         "effective_movement_speed_f32":crate::physics::movement::movement_speed(p),
         "effective_jump_strength_f32":p.attribute_value("minecraft:jump_strength", f64::from(0.42_f32)) as f32,
         "effective_gravity":crate::physics::movement::effective_gravity(p),
@@ -348,6 +419,20 @@ pub fn player(game: &crate::app::phases::in_game::GameState) -> Value {
         "pre_collision_delta":game.riding_vehicle_id.is_none().then(||p.collision_delta[0].to_array()),"post_collision_delta":game.riding_vehicle_id.is_none().then(||p.collision_delta[1].to_array()),
         "tick_position_delta":[p.position.x-p.prev_position.x,p.position.y-p.prev_position.y,p.position.z-p.prev_position.z],
         "tick":game.tick_count,"entity_id":p.entity_id,"position":[p.position.x,p.position.y,p.position.z],"velocity":[p.velocity.x,p.velocity.y,p.velocity.z],"on_ground":p.on_ground,"yaw_pitch":[p.look_dir.y_rot_deg(),p.look_dir.x_rot_deg()],"riding":game.riding_vehicle_id,"vehicle":game.controlled_vehicle_id.and_then(|id| game.entity_store.living.get(&id)).map(|v|json!({"position":[v.position.x,v.position.y,v.position.z],"velocity":[v.velocity.x,v.velocity.y,v.velocity.z]}))})
+}
+fn shape_snapshot(
+    game: &crate::app::phases::in_game::GameState,
+    region: crate::physics::aabb::Aabb,
+    context: (f64, bool, bool, f64),
+    semantics: &str,
+) -> Value {
+    let (cells, boxes, omitted_cells, omitted_boxes) =
+        crate::physics::collision::diagnostic_block_shapes(&game.chunk_store, &region, context);
+    json!({"semantics":semantics,"region":bbox(region),"player_context":{"feet_y":context.0,"descending":context.1,"leather_boots":context.2,"fall_distance":context.3},
+        "block_cells":cells.into_iter().map(|(pos,state)|json!({"pos":block(&pos),"state_id":state.id(),"name":crate::world::block::block_id(state),"properties":crate::world::block::block_properties(state).entries().collect::<std::collections::BTreeMap<_,_>>()})).collect::<Vec<_>>(),
+        "shape_aabbs":boxes.into_iter().map(|(pos,bb)|json!({"block":block(&pos),"aabb":bbox(bb)})).collect::<Vec<_>>(),
+        "max_block_cells":32,"max_boxes":128,"truncated":omitted_cells>0 || omitted_boxes>0,"omitted_block_cells":omitted_cells,"omitted_boxes_in_visited_cells":omitted_boxes,"boxes_in_unvisited_cells":null,
+        "entity_shapes":null,"entity_shapes_semantics":"not requeried; bounded actual travel inputs are in travel_observation.entity_shapes", "current_border_bounds":game.world_border.bounds_at(0.0)})
 }
 pub fn applied(mut data: Value, game: &crate::app::phases::in_game::GameState) -> Value {
     fn after(data: &mut Value, game: &crate::app::phases::in_game::GameState) {
@@ -365,7 +450,7 @@ pub fn applied(mut data: Value, game: &crate::app::phases::in_game::GameState) -
             after(update, game);
         }
     }
-    json!({"event":data,"player":player(game)})
+    json!({"event":data,"player":event_player(game,&data)})
 }
 pub fn event(
     event: &crate::net::NetworkEvent,
@@ -428,6 +513,23 @@ mod tests {
             .lines()
             .map(|s| serde_json::from_str(s).unwrap())
             .collect()
+    }
+    #[test]
+    fn executable_fixture_hash_and_metadata() {
+        let dir = crate::test_util::test_temp_dir("movement-exe-identity");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fixture");
+        std::fs::write(&path, b"abc").unwrap();
+        let identity = file_identity(&path);
+        assert_eq!(identity["size_bytes"], 3);
+        assert_eq!(
+            identity["sha256"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(identity["mtime_unix_ms"].is_u64());
+        assert_eq!(identity["metadata_unchanged_during_read"], true);
+        assert!(file_identity(&dir.join("missing"))["error"].is_string());
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn ordered_stages_drain_gaps_and_limit() {

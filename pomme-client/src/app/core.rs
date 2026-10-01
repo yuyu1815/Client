@@ -1985,7 +1985,7 @@ impl AppCore {
                 None
             };
             if let Some(data) = &observation {
-                connection.packet_tx.recorder.record("local", "before_apply", || Some(serde_json::json!({"event":data,"player":crate::movement_record::player(game)})));
+                connection.packet_tx.recorder.record("local", "before_apply", || Some(serde_json::json!({"event":data,"player":crate::movement_record::event_player(game,data)})));
             }
             match event {
                 NetworkEvent::Connected { profile_name } => {
@@ -4209,6 +4209,7 @@ impl AppCore {
         window: &Window,
         game: &mut GameState,
     ) {
+        game.player.observe_collision_shapes = connection.packet_tx.recorder.active();
         if game.death_screen_open {
             if game.death_confirm {
                 game.death_confirm_ticks = game.death_confirm_ticks.saturating_add(1);
