@@ -146,8 +146,10 @@ const SKULL_TEXTURES: &[&[&str]] = &[
     &["minecraft/textures/entity/creeper/creeper.png"],
     &["minecraft/textures/entity/player/slim/steve.png"],
     &["minecraft/textures/entity/player/slim/steve.png"],
-    // Dragon and piglin heads have unique geometry; their intentionally empty
-    // models below prevent a misleading Steve/standard-skull substitute.
+    &["minecraft/textures/entity/enderdragon/dragon.png"],
+    &["minecraft/textures/entity/enderdragon/dragon.png"],
+    &["minecraft/textures/entity/piglin/piglin.png"],
+    &["minecraft/textures/entity/piglin/piglin.png"],
     &["minecraft/textures/entity/skeleton/skeleton.png"],
     &["minecraft/textures/entity/skeleton/skeleton.png"],
 ];
@@ -419,10 +421,14 @@ fn skull_variant(name: &str) -> u32 {
         "creeper_wall_head" => (3, true),
         "player_head" => (4, false),
         "player_wall_head" => (4, true),
-        // Dragon, piglin, and unknown skull meshes are intentionally not
-        // approximated with the standard cube or a player skin.
+        "dragon_head" => (5, false),
+        "dragon_wall_head" => (5, true),
+        "piglin_head" => (6, false),
+        "piglin_wall_head" => (6, true),
+        // Unknown variants retain the hidden fallback instead of borrowing a
+        // visually unrelated skull model.
         _ => (
-            5,
+            7,
             name.ends_with("_wall_head") || name.ends_with("_wall_skull"),
         ),
     };
@@ -433,6 +439,8 @@ fn skull_models() -> Vec<BakedEntityModel> {
     let standard = block_entity_model::bake_skull_model(32);
     let zombie = block_entity_model::bake_skull_model(64);
     let player = block_entity_model::bake_player_head_model();
+    let dragon = block_entity_model::bake_dragon_head_model();
+    let piglin = block_entity_model::bake_piglin_head_model();
     let unsupported = block_entity_model::bake_unsupported_skull_model();
     vec![
         standard.clone(), // skeleton
@@ -440,6 +448,8 @@ fn skull_models() -> Vec<BakedEntityModel> {
         zombie,                                   // zombie heads use the 64x64 skin layout
         block_entity_model::bake_skull_model(32), // creeper
         player,
+        dragon,
+        piglin,
         unsupported,
     ]
 }
@@ -2440,6 +2450,26 @@ mod sign_text_tests {
                 9,
                 "minecraft/textures/entity/player/slim/steve.png",
             ),
+            (
+                "dragon_head",
+                10,
+                "minecraft/textures/entity/enderdragon/dragon.png",
+            ),
+            (
+                "dragon_wall_head",
+                11,
+                "minecraft/textures/entity/enderdragon/dragon.png",
+            ),
+            (
+                "piglin_head",
+                12,
+                "minecraft/textures/entity/piglin/piglin.png",
+            ),
+            (
+                "piglin_wall_head",
+                13,
+                "minecraft/textures/entity/piglin/piglin.png",
+            ),
         ];
         crate::world::block::init("26.2");
         let props =
@@ -2448,22 +2478,24 @@ mod sign_text_tests {
             .into_iter()
             .find(|d| d.kind == BlockEntityKind::Skull)
             .unwrap();
-        assert_eq!(def.models.len(), 6);
-        assert_eq!(def.tex_variants.len(), 12);
+        assert_eq!(def.models.len(), 8);
+        assert_eq!(def.tex_variants.len(), 16);
         for (name, expected, texture) in cases {
             let variant = variant_for_block(BlockEntityKind::Skull, name, props) as usize;
             assert_eq!(variant, expected, "{name}");
             assert_eq!(def.tex_variants[variant][0], texture, "{name}");
             assert_eq!(is_wall_skull_variant(variant as u32), expected % 2 == 1);
             let model_index = variant / 2;
-            if expected < 8 {
+            if expected < 14 {
                 assert!(!def.models[model_index].vertices.is_empty(), "{name}");
             }
         }
         assert_eq!(def.models[4].vertices.len(), 72); // player head retains its hat
-        assert_eq!(def.models[5].vertices.len(), 0); // dragon/piglin not faked
+        assert!(!def.models[5].vertices.is_empty()); // dragon
+        assert!(!def.models[6].vertices.is_empty()); // piglin
+        assert_eq!(def.models[7].vertices.len(), 0); // unknown only
         assert_eq!(skull_variant("dragon_head"), 10);
-        assert_eq!(skull_variant("piglin_wall_head"), 11);
+        assert_eq!(skull_variant("piglin_wall_head"), 13);
     }
 
     #[test]

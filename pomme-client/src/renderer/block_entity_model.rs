@@ -89,8 +89,146 @@ pub fn bake_skull_model(texture_height: u32) -> BakedEntityModel {
     )
 }
 
-/// No faithful block-head mesh is implemented for dragon or piglin yet. An
-/// empty model keeps those variants from silently rendering as a Steve head.
+/// 26.2 DragonHeadModel: scaled head with the upper lip, skull, horns and
+/// nostrils, plus its hinged 12x4x16 jaw. Texture sheet is 256x256.
+pub fn bake_dragon_head_model() -> BakedEntityModel {
+    let head = EntityPart {
+        name: "head".into(),
+        offset: Vec3::new(0.0, -7.986_666, 0.0),
+        default_rotation: Vec3::ZERO,
+        cubes: vec![
+            ModelCube {
+                origin: Vec3::new(-6.0, -1.0, -24.0),
+                size: Vec3::new(12.0, 5.0, 16.0),
+                tex_offset: (176, 44),
+                deformation: 0.0,
+                mirror: false,
+            },
+            ModelCube {
+                origin: Vec3::new(-8.0, -8.0, -10.0),
+                size: Vec3::splat(16.0),
+                tex_offset: (112, 30),
+                deformation: 0.0,
+                mirror: true,
+            },
+            ModelCube {
+                origin: Vec3::new(-5.0, -12.0, -4.0),
+                size: Vec3::new(2.0, 4.0, 6.0),
+                tex_offset: (0, 0),
+                deformation: 0.0,
+                mirror: false,
+            },
+            ModelCube {
+                origin: Vec3::new(3.0, -12.0, -4.0),
+                size: Vec3::new(2.0, 4.0, 6.0),
+                tex_offset: (0, 0),
+                deformation: 0.0,
+                mirror: true,
+            },
+            ModelCube {
+                origin: Vec3::new(-5.0, -3.0, -22.0),
+                size: Vec3::new(2.0, 2.0, 4.0),
+                tex_offset: (112, 0),
+                deformation: 0.0,
+                mirror: false,
+            },
+            ModelCube {
+                origin: Vec3::new(3.0, -3.0, -22.0),
+                size: Vec3::new(2.0, 2.0, 4.0),
+                tex_offset: (112, 0),
+                deformation: 0.0,
+                mirror: false,
+            },
+        ],
+        parent: None,
+    };
+    let jaw = EntityPart {
+        name: "jaw".into(),
+        offset: Vec3::new(0.0, 4.0, -8.0),
+        default_rotation: Vec3::ZERO,
+        cubes: vec![ModelCube {
+            origin: Vec3::new(-6.0, 0.0, -16.0),
+            size: Vec3::new(12.0, 4.0, 16.0),
+            tex_offset: (176, 65),
+            deformation: 0.0,
+            mirror: false,
+        }],
+        parent: Some(0),
+    };
+    let mut model = bake_model(vec![head, jaw], 256, 256);
+    model.part_scales[0] = 0.75;
+    model
+}
+
+/// 26.2 PiglinHeadModel / AbstractPiglinModel.addHead: broad 10x8x8 head,
+/// snout and nostrils, with separately posed 1x5x4 ears on the 64x64 skin.
+pub fn bake_piglin_head_model() -> BakedEntityModel {
+    let head = EntityPart {
+        name: "head".into(),
+        offset: Vec3::ZERO,
+        default_rotation: Vec3::ZERO,
+        cubes: vec![
+            ModelCube {
+                origin: Vec3::new(-5.0, -8.0, -4.0),
+                size: Vec3::new(10.0, 8.0, 8.0),
+                tex_offset: (0, 0),
+                deformation: 0.0,
+                mirror: false,
+            },
+            ModelCube {
+                origin: Vec3::new(-2.0, -4.0, -5.0),
+                size: Vec3::new(4.0, 4.0, 1.0),
+                tex_offset: (31, 1),
+                deformation: 0.0,
+                mirror: false,
+            },
+            ModelCube {
+                origin: Vec3::new(2.0, -2.0, -5.0),
+                size: Vec3::new(1.0, 2.0, 1.0),
+                tex_offset: (2, 4),
+                deformation: 0.0,
+                mirror: false,
+            },
+            ModelCube {
+                origin: Vec3::new(-3.0, -2.0, -5.0),
+                size: Vec3::new(1.0, 2.0, 1.0),
+                tex_offset: (2, 0),
+                deformation: 0.0,
+                mirror: false,
+            },
+        ],
+        parent: None,
+    };
+    let left_ear = EntityPart {
+        name: "left_ear".into(),
+        offset: Vec3::new(4.5, -6.0, 0.0),
+        default_rotation: Vec3::new(0.0, 0.0, -30.0_f32.to_radians()),
+        cubes: vec![ModelCube {
+            origin: Vec3::new(0.0, 0.0, -2.0),
+            size: Vec3::new(1.0, 5.0, 4.0),
+            tex_offset: (51, 6),
+            deformation: 0.0,
+            mirror: false,
+        }],
+        parent: Some(0),
+    };
+    let right_ear = EntityPart {
+        name: "right_ear".into(),
+        offset: Vec3::new(-4.5, -6.0, 0.0),
+        default_rotation: Vec3::new(0.0, 0.0, 30.0_f32.to_radians()),
+        cubes: vec![ModelCube {
+            origin: Vec3::new(-1.0, 0.0, -2.0),
+            size: Vec3::new(1.0, 5.0, 4.0),
+            tex_offset: (39, 6),
+            deformation: 0.0,
+            mirror: false,
+        }],
+        parent: Some(0),
+    };
+    bake_model(vec![head, left_ear, right_ear], 64, 64)
+}
+
+/// Unknown skull blocks stay hidden rather than borrowing another type's mesh.
 pub fn bake_unsupported_skull_model() -> BakedEntityModel {
     BakedEntityModel::new(Vec::new(), Vec::new(), Vec::new())
 }
@@ -326,6 +464,46 @@ mod conduit_tests {
         assert_eq!(model.part_ranges, [(0, 72)]);
         assert_eq!(model.convention, ModelConvention::EntityYDown);
         assert!(model.vertices.iter().all(|v| {
+            (0.0..=1.0).contains(&v.tex_coords[0]) && (0.0..=1.0).contains(&v.tex_coords[1])
+        }));
+    }
+
+    #[test]
+    fn dragon_and_piglin_heads_keep_their_vanilla_parts_uvs_and_bounds() {
+        let dragon = bake_dragon_head_model();
+        assert_eq!(
+            dragon
+                .parts
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["head", "jaw"]
+        );
+        assert_eq!(dragon.parts[1].parent, Some(0));
+        assert_eq!(dragon.parts[1].cubes[0].size, Vec3::new(12.0, 4.0, 16.0));
+        assert_eq!(dragon.parts[1].cubes[0].tex_offset, (176, 65));
+        assert_eq!(dragon.part_scales[0], 0.75);
+        assert_eq!(dragon.part_ranges, [(0, 216), (216, 36)]);
+        assert!(dragon.vertices.iter().all(|v| {
+            (0.0..=1.0).contains(&v.tex_coords[0]) && (0.0..=1.0).contains(&v.tex_coords[1])
+        }));
+
+        let piglin = bake_piglin_head_model();
+        assert_eq!(
+            piglin
+                .parts
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["head", "left_ear", "right_ear"]
+        );
+        assert_eq!(piglin.parts[0].cubes[0].size, Vec3::new(10.0, 8.0, 8.0));
+        assert_eq!(piglin.parts[1].cubes[0].size, Vec3::new(1.0, 5.0, 4.0));
+        assert_eq!(piglin.parts[2].cubes[0].size, Vec3::new(1.0, 5.0, 4.0));
+        assert_eq!(piglin.parts[1].parent, Some(0));
+        assert_eq!(piglin.parts[2].parent, Some(0));
+        assert_eq!(piglin.part_ranges, [(0, 144), (144, 36), (180, 36)]);
+        assert!(piglin.vertices.iter().all(|v| {
             (0.0..=1.0).contains(&v.tex_coords[0]) && (0.0..=1.0).contains(&v.tex_coords[1])
         }));
     }
