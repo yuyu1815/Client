@@ -1949,6 +1949,10 @@ impl EntityStore {
                     _ => 0,
                 }
             }
+            // Axolotl.DATA_VARIANT: legacy enum order Lucy, Wild, Gold, Cyan, Blue.
+            (EntityKind::Axolotl, 18, Int(v)) => {
+                entity.variant = if (0..=4).contains(&v) { v as u32 } else { 0 }
+            }
             // Equine flags byte: bit 0x10 = eating, 0x20 = standing (rear),
             // 0x40 = open mouth.
             (k, 18, Byte(f)) if is_equine(&k) => {

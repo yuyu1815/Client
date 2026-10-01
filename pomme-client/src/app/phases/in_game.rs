@@ -6371,7 +6371,7 @@ fn entity_extras(
     game_time: i64,
 ) -> EntityExtras {
     match e.entity_type {
-        EntityKind::Cow => EntityExtras {
+        EntityKind::Cow | EntityKind::Pig | EntityKind::Axolotl => EntityExtras {
             variant_index: e.variant,
             ..Default::default()
         },
@@ -6820,6 +6820,27 @@ mod tests {
         show_death_screen_param, sign_has_text, sign_text_in_range,
     };
     use crate::renderer::SkyState;
+
+    #[test]
+    fn pig_variant_store_value_reaches_renderer_extras() {
+        use azalea_registry::builtin::EntityKind;
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::{LookDirection, Position};
+
+        let mut store = EntityStore::new();
+        store.spawn_living(
+            7,
+            EntityKind::Pig,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        store.set_variant(7, EntityKind::Pig, 1); // cold, pool order temperate/cold/warm
+        let extras = super::entity_extras(7, &store.living[&7], 1.0, 0);
+        assert_eq!(extras.variant_index, 1);
+    }
 
     #[test]
     fn hopper_ui_targets_all_41_native_slots() {

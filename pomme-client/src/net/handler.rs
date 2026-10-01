@@ -1573,6 +1573,17 @@ pub(super) async fn handle_game_packet_with_display_text(
                     )
                     .await?;
                 }
+                // Pig DATA_VARIANT_ID is index 19 in 26.2: pig boost time
+                // occupies 18, then the PigVariant holder uses serializer 28.
+                if item.index == 19
+                    && let azalea_entity::EntityDataValue::PigVariant(variant) = &item.value
+                {
+                    send_event(
+                        event_tx,
+                        variant_event(registry_holder, p.id.0, EntityKind::Pig, variant),
+                    )
+                    .await?;
+                }
                 // Cat / wolf variant Holders: 20 / 23 on 26.x, one lower on
                 // 1.21.9-1.21.11 (no AgeableMob age-locked slot).
                 if (item.index == 19 || item.index == 20)
@@ -2078,6 +2089,12 @@ fn variant_index(registry_holder: &RegistryHolder, kind: EntityKind, protocol_id
             "minecraft:chicken_variant",
             CHICKEN_VARIANT_ORDER,
             "entity/chicken/chicken_",
+            "temperate",
+        ),
+        EntityKind::Pig => (
+            "minecraft:pig_variant",
+            crate::renderer::pipelines::entity_renderer::PIG_VARIANT_ORDER,
+            "entity/pig/pig_",
             "temperate",
         ),
         EntityKind::Cat => (
