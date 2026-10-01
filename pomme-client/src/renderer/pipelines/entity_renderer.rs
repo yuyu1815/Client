@@ -3817,6 +3817,8 @@ mod tests {
 
     #[test]
     fn pig_variant_pool_uses_cold_geometry_and_matching_baby_textures() {
+        use azalea_registry::builtin::EntityKind;
+
         let defs = super::mob_definitions();
         let pig = defs.iter().find(|d| d.kind == EntityKind::Pig).unwrap();
         assert_eq!(pig.adult.len(), 3);

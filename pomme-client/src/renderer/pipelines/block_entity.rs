@@ -2029,7 +2029,7 @@ mod sign_text_tests {
                 variant_for_block(
                     BlockEntityKind::Banner,
                     &format!("{color}_banner"),
-                    &Default::default()
+                    crate::world::block::block_properties(azalea_block::BlockState::AIR)
                 ),
                 (i as u32) * 2
             );
@@ -2037,7 +2037,7 @@ mod sign_text_tests {
                 variant_for_block(
                     BlockEntityKind::Banner,
                     &format!("{color}_wall_banner"),
-                    &Default::default()
+                    crate::world::block::block_properties(azalea_block::BlockState::AIR)
                 ),
                 (i as u32) * 2 + 1
             );

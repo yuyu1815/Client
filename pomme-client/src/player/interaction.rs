@@ -108,7 +108,7 @@ struct PlacementUse {
 
 /// A locally tracked active use or physical-button latch. Consumable effects
 /// and the special hold-use lifecycles remain server-authoritative.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActiveUseKind {
     Consumable,
     Bow,
@@ -4546,11 +4546,15 @@ mod tests {
         // A press and release before the tick still starts use once; the next
         // tick releases it, with custom UseEffects applied to the active item.
         let mut trident = ItemStackData::new(ItemKind::Trident, 1);
+        let mut effects = UseEffects::new();
+        effects.can_sprint = true;
+        effects.interact_vibrations = false;
+        effects.speed_multiplier = 0.65;
         // SAFETY: union value matches UseEffects.
         unsafe {
             trident.component_patch.unchecked_insert_component(
                 DataComponentKind::UseEffects,
-                Some(DataComponentUnion::from(UseEffects::new(true, false, 0.65))),
+                Some(DataComponentUnion::from(effects)),
             );
         }
         state = InteractionState::new();

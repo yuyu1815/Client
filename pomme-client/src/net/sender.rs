@@ -310,7 +310,7 @@ mod tests {
     use azalea_protocol::packets::game::ServerboundGamePacket;
     use tokio::sync::mpsc;
 
-    use super::{Outbound, PacketSender};
+    use super::{Outbound, PacketSender, encode_set_command_block};
 
     #[test]
     fn edit_book_validates_before_queueing_and_keeps_typed_wire_layout() {
