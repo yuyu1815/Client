@@ -39,6 +39,11 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
         kind,
         EntityKind::Pig
             | EntityKind::Cow
+            | EntityKind::Mooshroom
+            | EntityKind::Bee
+            | EntityKind::HappyGhast
+            | EntityKind::MagmaCube
+            | EntityKind::SulfurCube
             | EntityKind::Sheep
             | EntityKind::Chicken
             | EntityKind::Villager
@@ -246,6 +251,15 @@ pub struct LivingEntity {
     /// are pre-resolved to pool indices by the net handler; raw-int kinds are
     /// normalized in `EntityStore::apply_entity_data`.
     pub variant: u32,
+    /// Species metadata, exact field meanings are resolved below from 26.2
+    /// indices.
+    pub bee_flags: u8,
+    pub ghast_charging: bool,
+    pub vex_charging: bool,
+    pub phantom_size: i32,
+    pub shulker_peek: u8,
+    pub sulfur_cube_size: i32,
+    pub wither_invulnerability: i32,
     /// Chicken wing-flap state (vanilla `Chicken.aiStep`): `flap` is the
     /// unbounded wing-cycle phase, `flap_speed` the 0..1 amplitude.
     pub flap: f32,
@@ -412,6 +426,13 @@ impl LivingEntity {
             is_sheared: false,
             // Vanilla salmon default is MEDIUM (id 1); non-default-only
             // metadata means the size may never be synced.
+            bee_flags: 0,
+            ghast_charging: false,
+            vex_charging: false,
+            phantom_size: 0,
+            shulker_peek: 0,
+            sulfur_cube_size: 1,
+            wither_invulnerability: 0,
             variant: if entity_type == EntityKind::Salmon {
                 1
             } else {
@@ -1927,7 +1948,22 @@ impl EntityStore {
             (EntityKind::Bogged, 16, Bool(b)) => entity.is_sheared = b,
             // Slime size: 16 on 1.21.9-26.1.x, 18 since Slime joined
             // AgeableMob in 26.2.
-            (EntityKind::Slime, 16 | 18, Int(s)) => entity.slime_size = s.clamp(1, 127) as u8,
+            (EntityKind::Slime | EntityKind::MagmaCube, 16 | 18, Int(s)) => {
+                entity.slime_size = s.clamp(1, 127) as u8
+            }
+            (EntityKind::SulfurCube, 18, Int(s)) => {
+                entity.slime_size = s.clamp(1, 127) as u8;
+                entity.sulfur_cube_size = s.max(1);
+            }
+            (EntityKind::Mooshroom, 18, Int(t)) => entity.variant = t.clamp(0, 1) as u32,
+            (EntityKind::Bee, 18, Byte(f)) => entity.bee_flags = f,
+            (EntityKind::Bee, 19, Long(t)) => entity.anger_end_time = t,
+            (EntityKind::Ghast, 16, Bool(b)) => entity.ghast_charging = b,
+            (EntityKind::Vex, 16, Byte(f)) => entity.vex_charging = f & 0x01 != 0,
+            (EntityKind::Phantom, 16, Int(s)) => entity.phantom_size = s.max(0),
+            (EntityKind::Shulker, 17, Byte(p)) => entity.shulker_peek = p,
+            (EntityKind::Shulker, 18, Byte(c)) => entity.variant = (c & 0xFF) as u32,
+            (EntityKind::Wither, 19, Int(t)) => entity.wither_invulnerability = t.max(0),
             // Sheep wool byte: low nibble = DyeColor, bit 0x10 = sheared.
             (EntityKind::Sheep, 18, Byte(w)) => {
                 entity.wool_color = Some(w & 0x0F);
@@ -3139,6 +3175,57 @@ mod tests {
         let p = store.vehicles[&1].projectile.as_ref().unwrap();
         assert!((p.current.x - (11.466175068104723 + p.velocity.x)).abs() < 1e-10);
         assert_eq!(store.vehicles[&1].position, Position::new(2.0, 70.0, 2.0));
+    }
+
+    #[test]
+    fn remaining_living_species_metadata_uses_26_2_indices() {
+        let mut store = EntityStore::new();
+        for (id, kind) in [
+            EntityKind::Bee,
+            EntityKind::Ghast,
+            EntityKind::MagmaCube,
+            EntityKind::Mooshroom,
+            EntityKind::Phantom,
+            EntityKind::Shulker,
+            EntityKind::SulfurCube,
+            EntityKind::Vex,
+            EntityKind::Wither,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            store.spawn_living(
+                id as i32,
+                kind,
+                Position::default(),
+                LookDirection::default(),
+                0.0,
+                None,
+            );
+        }
+        store.apply_entity_data(0, 18, MetaValue::Byte(0x08));
+        store.apply_entity_data(0, 19, MetaValue::Long(120));
+        store.apply_entity_data(1, 16, MetaValue::Bool(true));
+        store.apply_entity_data(2, 18, MetaValue::Int(4));
+        store.apply_entity_data(3, 18, MetaValue::Int(1));
+        store.apply_entity_data(4, 16, MetaValue::Int(3));
+        store.apply_entity_data(5, 17, MetaValue::Byte(127));
+        store.apply_entity_data(5, 18, MetaValue::Byte(16));
+        store.apply_entity_data(6, 18, MetaValue::Int(2));
+        store.apply_entity_data(7, 16, MetaValue::Byte(1));
+        store.apply_entity_data(8, 19, MetaValue::Int(40));
+
+        assert_eq!(store.living[&0].bee_flags, 0x08);
+        assert_eq!(store.living[&0].anger_end_time, 120);
+        assert!(store.living[&1].ghast_charging);
+        assert_eq!(store.living[&2].slime_size, 4);
+        assert_eq!(store.living[&3].variant, 1);
+        assert_eq!(store.living[&4].phantom_size, 3);
+        assert_eq!(store.living[&5].shulker_peek, 127);
+        assert_eq!(store.living[&5].variant, 16);
+        assert_eq!(store.living[&6].sulfur_cube_size, 2);
+        assert!(store.living[&7].vex_charging);
+        assert_eq!(store.living[&8].wither_invulnerability, 40);
     }
 
     #[test]

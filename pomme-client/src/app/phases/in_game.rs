@@ -4978,6 +4978,7 @@ pub fn update_game(
         game.probe_actor_diag_tick = game.tick_count;
         let camera = gfx.renderer.camera_render_position();
         let actors: Vec<String> = game
+                    vex_charging: extras.vex_charging,
             .entity_store
             .living
             .iter()
@@ -6431,6 +6432,7 @@ fn slot0_overlay(id: u32) -> ([Option<[f32; 4]>; MAX_OVERLAYS], [u32; MAX_OVERLA
 fn entity_extras(
     entity_id: i32,
     e: &crate::entity::LivingEntity,
+    vex_charging: bool,
     alpha: f32,
     game_time: i64,
 ) -> EntityExtras {
@@ -6462,6 +6464,59 @@ fn entity_extras(
             overlay_tints: SLOT0_TINTS,
             // Vanilla `EndermanRenderer.getRenderOffset`: per-frame gaussian
             // x/z shake while screaming.
+        EntityKind::Bee => EntityExtras {
+            variant_index: (if e.anger_end_time > game_time { 1 } else { 0 })
+                + (if e.bee_flags & 0x08 != 0 { 2 } else { 0 }),
+            ..Default::default()
+        },
+        EntityKind::Ghast => EntityExtras {
+            variant_index: e.ghast_charging as u32,
+            ..Default::default()
+        },
+        EntityKind::Vex => EntityExtras {
+            variant_index: e.vex_charging as u32,
+            vex_charging: e.vex_charging,
+            ..Default::default()
+        },
+        EntityKind::Mooshroom | EntityKind::Shulker => EntityExtras {
+            variant_index: e.variant,
+            ..Default::default()
+        },
+        EntityKind::MagmaCube => EntityExtras {
+            body_transform: Some(slime_body_transform(e, alpha)),
+            ..Default::default()
+        },
+        EntityKind::Phantom => EntityExtras {
+            overlay_tints: SLOT0_TINTS,
+            body_transform: Some(glam::Mat4::from_scale(glam::Vec3::splat(
+                1.0 + e.phantom_size as f32 * 0.15,
+            ))),
+            ..Default::default()
+        },
+        EntityKind::Breeze => EntityExtras {
+            overlay_tints: [Some(WHITE_TINT), Some(WHITE_TINT), None, None],
+            ..Default::default()
+        },
+        EntityKind::SulfurCube => {
+            let small = e.sulfur_cube_size <= 1;
+            let mut overlay_tints = [None; MAX_OVERLAYS];
+            overlay_tints[usize::from(small)] = Some(WHITE_TINT);
+            EntityExtras {
+                variant_index: u32::from(small),
+                overlay_tints,
+                body_transform: Some(slime_body_transform(e, alpha)),
+                ..Default::default()
+            }
+        }
+        EntityKind::Wither => EntityExtras {
+            variant_index: u32::from(e.wither_invulnerability > 0),
+            overlay_tints: if e.wither_invulnerability > 0 {
+                SLOT0_TINTS
+            } else {
+                [None; MAX_OVERLAYS]
+            },
+            ..Default::default()
+        },
             render_offset: if e.is_creepy {
                 glam::DVec3::new(
                     crate::particle::next_gaussian() * 0.02,

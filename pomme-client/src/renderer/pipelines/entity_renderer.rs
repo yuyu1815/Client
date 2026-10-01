@@ -142,6 +142,7 @@ pub struct EntityRenderInfo {
     pub age_in_ticks: f32,
     /// Arm-swing progress 0..1; drives the zombie attack swing.
     pub attack_time: f32,
+    pub vex_charging: bool,
     /// Skip frustum/distance culling (the 3rd-person self entity, which sits at
     /// the camera and must never blink out).
     pub skip_cull: bool,
@@ -204,6 +205,7 @@ impl Default for EntityRenderInfo {
             body_transform: None,
             age_in_ticks: 0.0,
             attack_time: 0.0,
+            vex_charging: false,
             skip_cull: false,
         }
     }
@@ -220,6 +222,8 @@ enum OverlayKind {
     /// Translucent, depth-writing — the slime shell (vanilla
     /// `entityTranslucent`; the alpha lives in the texture).
     BodyTranslucent,
+    /// Breeze wind texture scrolls horizontally at 0.02 UV/tick.
+    WindScroll,
     /// Translucent, full-bright, depth-write off — spider glowing eyes.
     EyesTranslucent,
     /// Additive, full-bright, depth-writing, scrolling UV — charged creeper
@@ -468,6 +472,8 @@ enum AnimationType {
     /// Cod, salmon, tropical fish, pufferfish.
     Fish,
     Golem,
+    Blaze,
+    Vex,
     /// No part animation (slime — size/squish live in the body transform).
     Static,
 }
@@ -1946,6 +1952,218 @@ fn mob_definitions() -> Vec<MobDef> {
             )],
             baby_overlays: vec![],
         },
+        MobDef {
+            kind: EntityKind::Allay,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::flying::bake_allay_model(),
+                tex_table!("allay" => "allay"),
+                32,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Bee,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::flying::bake_bee_model(),
+                tex_table!("bee" => "bee", "bee_angry", "bee_nectar", "bee_angry_nectar"),
+                64,
+            )],
+            baby: Some(opaque(
+                entity_models::flying::bake_baby_bee_model(),
+                tex_table!("bee" => "bee_baby", "bee_angry_baby", "bee_nectar_baby", "bee_angry_nectar_baby"),
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Blaze,
+            anim: AnimationType::Blaze,
+            adult: vec![opaque(
+                entity_models::flying::bake_blaze_model(),
+                tex_table!("blaze" => "blaze"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Breeze,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::flying::bake_breeze_model(),
+                tex_table!("breeze" => "breeze"),
+                32,
+            )],
+            baby: None,
+            adult_overlays: vec![
+                opaque(
+                    entity_models::flying::bake_breeze_eyes_model(),
+                    tex_table!("breeze" => "breeze_eyes"),
+                    32,
+                ),
+                VariantDef {
+                    model: entity_models::flying::bake_breeze_wind_model(),
+                    tex_variants: tex_table!("breeze" => "breeze_wind"),
+                    tex_size: 128,
+                    overlay_kind: OverlayKind::WindScroll,
+                },
+            ],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Ghast,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::flying::bake_ghast_model(),
+                tex_table!("ghast" => "ghast", "ghast_shooting"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::HappyGhast,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::flying::bake_happy_ghast_model(),
+                tex_table!("ghast" => "happy_ghast"),
+                128,
+            )],
+            baby: Some(opaque(
+                entity_models::flying::bake_baby_happy_ghast_model(),
+                tex_table!("ghast" => "happy_ghast_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::MagmaCube,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_magma_cube_model(),
+                tex_table!("slime" => "magmacube"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Mooshroom,
+            anim: AnimationType::Quadruped,
+            adult: vec![opaque(
+                entity_model::bake_cow_model(),
+                tex_table!("cow" => "mooshroom_red", "mooshroom_brown"),
+                64,
+            )],
+            baby: Some(opaque(
+                entity_model::bake_baby_cow_model(),
+                tex_table!("cow" => "mooshroom_red_baby", "mooshroom_brown_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Phantom,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::flying::bake_phantom_model(),
+                tex_table!("phantom" => "phantom"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![VariantDef {
+                model: entity_models::flying::bake_phantom_model(),
+                tex_variants: tex_table!("phantom" => "phantom_eyes"),
+                tex_size: 64,
+                overlay_kind: OverlayKind::EyesTranslucent,
+            }],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Shulker,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_shulker_model(),
+                tex_table!("shulker" => "shulker_white", "shulker_orange", "shulker_magenta", "shulker_light_blue", "shulker_yellow", "shulker_lime", "shulker_pink", "shulker_gray", "shulker_light_gray", "shulker_cyan", "shulker_purple", "shulker_blue", "shulker_brown", "shulker_green", "shulker_red", "shulker_black", "shulker"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::SulfurCube,
+            anim: AnimationType::Static,
+            adult: vec![
+                VariantDef {
+                    model: entity_models::humanoid::bake_sulfur_cube_outer_model(),
+                    tex_variants: tex_table!("sulfur_cube" => "sulfur_cube_outer"),
+                    tex_size: 128,
+                    overlay_kind: OverlayKind::BodyTranslucent,
+                },
+                VariantDef {
+                    model: entity_models::humanoid::bake_sulfur_cube_small_outer_model(),
+                    tex_variants: tex_table!("sulfur_cube" => "sulfur_cube_outer_small"),
+                    tex_size: 64,
+                    overlay_kind: OverlayKind::BodyTranslucent,
+                },
+            ],
+            baby: None,
+            adult_overlays: vec![
+                VariantDef {
+                    model: entity_models::humanoid::bake_sulfur_cube_inner_model(),
+                    tex_variants: tex_table!("sulfur_cube" => "sulfur_cube_inner"),
+                    tex_size: 128,
+                    overlay_kind: OverlayKind::BodyTranslucent,
+                },
+                VariantDef {
+                    model: entity_models::humanoid::bake_sulfur_cube_small_inner_model(),
+                    tex_variants: tex_table!("sulfur_cube" => "sulfur_cube_inner_small"),
+                    tex_size: 64,
+                    overlay_kind: OverlayKind::BodyTranslucent,
+                },
+            ],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Vex,
+            anim: AnimationType::Vex,
+            adult: vec![opaque(
+                entity_models::flying::bake_vex_model(),
+                tex_table!("illager" => "vex", "vex_charging"),
+                32,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Wither,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::flying::bake_wither_model(),
+                tex_table!("wither" => "wither", "wither_invulnerable"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![VariantDef {
+                model: entity_models::flying::bake_wither_model(),
+                tex_variants: tex_table!("wither" => "wither_armor"),
+                tex_size: 64,
+                overlay_kind: OverlayKind::BodyTranslucent,
+            }],
+            baby_overlays: vec![],
+        },
     ]
 }
 
@@ -2418,6 +2636,79 @@ impl EntityRenderer {
                 info.golem_attack_ticks,
                 info.golem_offer_flower_ticks,
             ),
+            AnimationType::Vex => {
+                let wave = (info.age_in_ticks * 5.5_f32.to_radians()).cos() * 0.1;
+                let mut pose = entity_model::PartAnim::default();
+                let head_x = info.head_x_rot_deg.to_radians();
+                let head_y = local_head_y.to_radians();
+                pose.rotation
+                    .push((1, glam::Vec3::new(head_x, head_y, 0.0)));
+                pose.rotation.push((
+                    2,
+                    glam::Vec3::new(if info.vex_charging { 0.0 } else { 0.15707964 }, 0.0, 0.0),
+                ));
+                let wing_y = 1.0995574
+                    + (info.age_in_ticks * 45.836624_f32.to_radians()).cos()
+                        * 16.2_f32.to_radians();
+                pose.rotation
+                    .push((5, glam::Vec3::new(0.47123888, wing_y, -0.47123888)));
+                pose.rotation
+                    .push((6, glam::Vec3::new(0.47123888, -wing_y, 0.47123888)));
+                if info.vex_charging {
+                    pose.rotation.push((
+                        3,
+                        glam::Vec3::new(-1.2217305, 0.2617994, -0.47123888 - wave),
+                    ));
+                    pose.rotation.push((
+                        4,
+                        glam::Vec3::new(-1.2217305, -0.2617994, 0.47123888 + wave),
+                    ));
+                }
+                pose
+            }
+            AnimationType::Blaze => {
+                let mut pose = entity_model::PartAnim::default();
+                let age = info.age_in_ticks;
+                for i in 0..12 {
+                    let (radius, y, phase) = if i < 4 {
+                        (
+                            9.0,
+                            -2.0 + ((age + (i * 2) as f32) * 0.25).cos(),
+                            -age * std::f32::consts::PI * 0.1
+                                + i as f32 * std::f32::consts::FRAC_PI_2,
+                        )
+                    } else if i < 8 {
+                        let j = i - 4;
+                        (
+                            7.0,
+                            2.0 + ((age + (i * 2) as f32) * 0.25).cos(),
+                            0.7853982
+                                + age * std::f32::consts::PI * 0.03
+                                + j as f32 * std::f32::consts::FRAC_PI_2,
+                        )
+                    } else {
+                        let j = i - 8;
+                        (
+                            5.0,
+                            11.0 + ((age + i as f32 * 1.5) * 0.5).cos(),
+                            0.47123894 - age * std::f32::consts::PI * 0.05
+                                + j as f32 * std::f32::consts::FRAC_PI_2,
+                        )
+                    };
+                    let part = &model.parts[i + 1];
+                    let target = glam::Vec3::new(radius * phase.cos(), y, radius * phase.sin());
+                    pose.translation.push((i + 1, target - part.offset));
+                }
+                pose.rotation.push((
+                    0,
+                    glam::Vec3::new(
+                        info.head_x_rot_deg.to_radians(),
+                        local_head_y.to_radians(),
+                        0.0,
+                    ),
+                ));
+                pose
+            }
             AnimationType::Static => entity_model::PartAnim::default(),
         }
     }
@@ -2879,31 +3170,32 @@ impl<'a> VariantGroups<'a> {
     }
 }
 
-/// Group the non-opaque overlays of one kind (body / eyes / swirl) by variant.
+/// Group translucent/emissive overlays by pipeline-compatible material.
 fn collect_overlays<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGroups<'a> {
     let mut groups = VariantGroups::default();
     for (vi, v) in vis.iter().enumerate() {
-        // Energy swirl scrolls its UVs over time (vanilla `EnergySwirlLayer`).
-        let uv = if kind == OverlayKind::SwirlAdditive {
-            let o = (v.info.age_in_ticks * 0.01).rem_euclid(1.0);
-            [o, o]
-        } else {
-            [0.0, 0.0]
-        };
-        // The body layer flashes red with the entity (vanilla passes the hurt
-        // overlay coords); the emissive eyes/swirl layers never do.
-        let overlay_color = if kind == OverlayKind::BodyTranslucent {
-            hurt_color(v.info)
-        } else {
-            NO_OVERLAY
-        };
         for slot in 0..v.entry.overlays(v.info.is_baby).len() {
             let overlay =
                 v.entry
                     .overlay_variant(v.info.is_baby, slot, v.info.overlay_variants[slot]);
-            if overlay.overlay_kind != kind {
+            let wind_in_body_pass = kind == OverlayKind::BodyTranslucent
+                && overlay.overlay_kind == OverlayKind::WindScroll;
+            if overlay.overlay_kind != kind && !wind_in_body_pass {
                 continue;
             }
+            let uv = match overlay.overlay_kind {
+                OverlayKind::SwirlAdditive => {
+                    let o = (v.info.age_in_ticks * 0.01).rem_euclid(1.0);
+                    [o, o]
+                }
+                OverlayKind::WindScroll => [(v.info.age_in_ticks * 0.02).rem_euclid(1.0), 0.0],
+                _ => [0.0, 0.0],
+            };
+            let overlay_color = if overlay.overlay_kind == OverlayKind::BodyTranslucent {
+                hurt_color(v.info)
+            } else {
+                NO_OVERLAY
+            };
             if let Some(tint) = v.info.overlay_tints[slot] {
                 groups.add(overlay, overlay.texture_set, (vi, tint, overlay_color, uv));
             }
@@ -3103,7 +3395,7 @@ fn build_variants(
     } = variant;
     // The scrolling swirl needs REPEAT wrapping; everything else clamps.
     let sampler = match overlay_kind {
-        OverlayKind::SwirlAdditive => texture_sampler_repeat,
+        OverlayKind::SwirlAdditive | OverlayKind::WindScroll => texture_sampler_repeat,
         _ => texture_sampler,
     };
     let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&model.vertices);
@@ -3813,6 +4105,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn remaining_thirteen_living_bodies_are_registered_with_nonempty_geometry() {
+        use azalea_registry::builtin::EntityKind as K;
+
+        let defs = super::mob_definitions();
+        for kind in [
+            K::Allay,
+            K::Bee,
+            K::Blaze,
+            K::Breeze,
+            K::Ghast,
+            K::HappyGhast,
+            K::MagmaCube,
+            K::Mooshroom,
+            K::Phantom,
+            K::Shulker,
+            K::SulfurCube,
+            K::Vex,
+            K::Wither,
+        ] {
+            let def = defs
+                .iter()
+                .find(|def| def.kind == kind)
+                .unwrap_or_else(|| panic!("missing {kind:?}"));
+            assert!(!def.adult.is_empty());
+            assert!(
+                def.adult
+                    .iter()
+                    .all(|variant| !variant.model.vertices.is_empty())
+            );
+            assert!(
+                def.adult
+                    .iter()
+                    .all(|variant| !variant.tex_variants.is_empty())
+            );
+        }
+        let ghast = defs.iter().find(|def| def.kind == K::Ghast).unwrap();
+        assert_eq!(ghast.adult[0].model.part_scales[0], 4.5);
+        let happy = defs.iter().find(|def| def.kind == K::HappyGhast).unwrap();
+        assert_eq!(happy.adult[0].model.part_scales[0], 4.0);
+        assert_eq!(happy.baby.as_ref().unwrap().model.part_scales[0], 0.95);
+        let shulker = defs.iter().find(|def| def.kind == K::Shulker).unwrap();
+        assert_eq!(shulker.adult[0].tex_variants.len(), 17);
+        let sulfur = defs.iter().find(|def| def.kind == K::SulfurCube).unwrap();
+        assert_eq!(sulfur.adult.len(), 2);
+        assert_eq!(sulfur.adult_overlays.len(), 2);
+        let mooshroom = defs.iter().find(|def| def.kind == K::Mooshroom).unwrap();
+        assert!(mooshroom.baby.is_some());
+        assert!(mooshroom.adult[0].tex_variants[0][0].ends_with("cow/mooshroom_red.png"));
+        assert!(mooshroom.adult[0].tex_variants[1][0].ends_with("cow/mooshroom_brown.png"));
     }
 
     #[test]
