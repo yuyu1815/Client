@@ -1278,16 +1278,16 @@ impl ChunkBufferStore {
                     let hash = Sha256::digest(payload);
                     let index_base = record["indexStartFinal"].as_u64().unwrap_or(0) as usize;
                     let index_count = record["indexCount"].as_u64().unwrap_or(0) as usize;
-                    let full_indices = if record["indexList"].as_str() == Some("cutout") {
-                        let mut values =
-                            Vec::with_capacity(plan.indices.len() + plan.water_indices.len());
-                        values.extend_from_slice(plan.indices);
-                        values
-                    } else {
-                        plan.indices.to_vec()
-                    };
+                    let mut uploaded_indices = Vec::with_capacity(
+                        plan.indices.len()
+                            + plan.water_indices.len()
+                            + plan.translucent_indices.len(),
+                    );
+                    uploaded_indices.extend_from_slice(plan.indices);
+                    uploaded_indices.extend_from_slice(plan.water_indices);
+                    uploaded_indices.extend_from_slice(plan.translucent_indices);
                     let index_bytes: &[u8] = bytemuck::cast_slice(
-                        full_indices
+                        uploaded_indices
                             .get(index_base..index_base.saturating_add(index_count))
                             .unwrap_or(&[]),
                     );
@@ -1302,17 +1302,28 @@ impl ChunkBufferStore {
                     );
                     upload["actualIndexByteOffset"] =
                         json!((plan.idx_off as u64 + index_base as u64) * INDEX_SIZE);
-                    let draw_first_index = if record["indexList"].as_str() == Some("cutout") {
-                        plan.idx_off + plan.solid_index_count
-                    } else {
-                        plan.idx_off
-                    };
-                    let draw_index_count = if record["indexList"].as_str() == Some("cutout") {
-                        plan.indices.len() as u32 - plan.solid_index_count
-                    } else {
-                        plan.solid_index_count
-                    };
+                    let (draw_first_index, draw_index_count, render_pass) =
+                        match record["indexList"].as_str() {
+                            Some("cutout") => (
+                                plan.idx_off + plan.solid_index_count,
+                                plan.indices.len() as u32 - plan.solid_index_count,
+                                "cutout",
+                            ),
+                            Some("water") => (
+                                plan.idx_off + plan.indices.len() as u32,
+                                plan.water_indices.len() as u32,
+                                "water",
+                            ),
+                            Some("translucent") => (
+                                plan.idx_off
+                                    + (plan.indices.len() + plan.water_indices.len()) as u32,
+                                plan.translucent_indices.len() as u32,
+                                "translucent",
+                            ),
+                            _ => (plan.idx_off, plan.solid_index_count, "solid"),
+                        };
                     upload["drawIndirectSection"] = json!({
+                        "renderPass": render_pass,
                         "firstIndex": draw_first_index,
                         "indexCount": draw_index_count,
                         "vertexOffset": plan.vtx_off as i32,
@@ -2190,6 +2201,21 @@ mod staging_tests {
             epoch,
             emitted_chests: vec![EmittedChest { pos, open }],
         }
+    }
+
+    #[test]
+    fn translucent_trace_hash_matches_the_uploaded_index_slice() {
+        use sha2::{Digest, Sha256};
+
+        let mut uploaded = vec![1_u32, 2, 3]; // regular indices
+        uploaded.extend([4, 5]); // water
+        uploaded.extend([6, 7, 8]); // translucent
+        let upload_bytes: &[u8] = bytemuck::cast_slice(&uploaded);
+        let offset = 5 * INDEX_SIZE as usize;
+        let length = 3 * INDEX_SIZE as usize;
+        let traced = &upload_bytes[offset..offset + length];
+        let expected: &[u8] = bytemuck::cast_slice(&[6_u32, 7, 8]);
+        assert_eq!(Sha256::digest(traced), Sha256::digest(expected));
     }
 
     #[test]

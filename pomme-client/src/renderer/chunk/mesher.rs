@@ -1082,7 +1082,7 @@ impl MeshDispatcher {
     /// Fail closed: source-voxel inference is only proven for unit-cube faces.
     /// Never substitute a cube for a fluid, partial model or block entity.
     pub fn supports_immediate_edit(&self, state: BlockState, pos: BlockPos) -> bool {
-        edit_state_supported(&self.registry, state, pos)
+        edit_state_supported(&self.registry, &self.uv_map, state, pos)
     }
 
     /// Mesh ONLY the supplied cells, with the normal world emitters and atlas.
@@ -2341,11 +2341,14 @@ fn mesh_chunk_snapshot(
             record["finalPackBytesDecoded"] = json!(decoded);
             record["vertexStride"] = json!(size_of::<PackedVertex>());
             record["sectionIndex"] = json!(i);
-            record["indexStartFinal"] = json!(if record["indexList"].as_str() == Some("cutout") {
-                solid_index_count as u64 + record["indexStart"].as_u64().unwrap_or(0)
-            } else {
-                record["indexStart"].as_u64().unwrap_or(0)
-            });
+            let index_start_final = trace_index_start(
+                record["indexList"].as_str(),
+                record["indexStart"].as_u64().unwrap_or(0) as usize,
+                solid_index_count as usize,
+                sink.solid.len(),
+                sink.water.len(),
+            );
+            record["indexStartFinal"] = json!(index_start_final);
         }
         pool.recycle_scratch(sink.vertices);
         sections.push(SectionMesh {
@@ -2376,7 +2379,12 @@ fn mesh_chunk_snapshot(
     }
 }
 
-fn edit_state_supported(registry: &BlockRegistry, state: BlockState, pos: BlockPos) -> bool {
+fn edit_state_supported(
+    registry: &BlockRegistry,
+    atlas: &AtlasUVMap,
+    state: BlockState,
+    pos: BlockPos,
+) -> bool {
     if is_air(state) {
         return true;
     }
@@ -2385,11 +2393,8 @@ fn edit_state_supported(registry: &BlockRegistry, state: BlockState, pos: BlockP
     {
         return false;
     }
-    // ponytail: full-cube boundary quads only; add explicit per-vertex source
-    // ownership before supporting partial/out-of-cell models and fluids.
-    let valid = |quads: &[BakedQuad]| {
-        !quads.is_empty() && quads.iter().all(|quad| unit_cube_face(&quad.positions))
-    };
+    // Edit meshes have no translucent pass. Keep those states on regular remesh.
+    let valid = |quads: &[BakedQuad]| edit_model_quads_supported(quads, atlas);
     if let Some(model) = registry.get_baked_model_at(state, pos.x, pos.y, pos.z) {
         valid(&model.quads)
     } else if let Some(quads) = registry.get_multipart_quads_at(state, pos.x, pos.y, pos.z) {
@@ -2397,6 +2402,30 @@ fn edit_state_supported(registry: &BlockRegistry, state: BlockState, pos: BlockP
     } else {
         registry.is_opaque_full_cube(state) && registry.get_textures(state).is_some()
     }
+}
+
+fn trace_index_start(
+    list: Option<&str>,
+    start: usize,
+    solid_index_count: usize,
+    regular_len: usize,
+    water_len: usize,
+) -> u64 {
+    match list {
+        Some("cutout") => (solid_index_count + start) as u64,
+        Some("water") => (regular_len + start) as u64,
+        Some("translucent") => (regular_len + water_len + start) as u64,
+        _ => start as u64,
+    }
+}
+
+fn edit_model_quads_supported(quads: &[BakedQuad], atlas: &AtlasUVMap) -> bool {
+    !quads.is_empty()
+        && quads.iter().all(|quad| {
+            atlas.has_region(&quad.texture)
+                && !atlas.get_region(&quad.texture).translucent
+                && unit_cube_face(&quad.positions)
+        })
 }
 
 fn unit_cube_face(positions: &[[f32; 3]; 4]) -> bool {
@@ -2608,6 +2637,8 @@ fn emit_baked_model(
         let vertex_start = sink.vertices.len();
         let solid_start = sink.solid.len();
         let cutout_start = sink.cutout.len();
+        let water_start = sink.water.len();
+        let translucent_start = sink.translucent.len();
         let lights = model_quad_lights(
             snapshot,
             registry,
@@ -2628,8 +2659,16 @@ fn emit_baked_model(
         if trace_target.is_some() {
             let (index_list, index_start, index_count) = if sink.solid.len() > solid_start {
                 ("solid", solid_start, sink.solid.len() - solid_start)
-            } else {
+            } else if sink.cutout.len() > cutout_start {
                 ("cutout", cutout_start, sink.cutout.len() - cutout_start)
+            } else if sink.water.len() > water_start {
+                ("water", water_start, sink.water.len() - water_start)
+            } else {
+                (
+                    "translucent",
+                    translucent_start,
+                    sink.translucent.len() - translucent_start,
+                )
             };
             trace_output.push(json!({
                 "target": {"x": bx, "y": by, "z": bz, "block": crate::world::block::block_id(state)},
@@ -3298,6 +3337,8 @@ fn emit_multipart(
         let vertex_start = sink.vertices.len();
         let solid_start = sink.solid.len();
         let cutout_start = sink.cutout.len();
+        let water_start = sink.water.len();
+        let translucent_start = sink.translucent.len();
         emit_face(
             sink,
             block_pos,
@@ -3317,8 +3358,16 @@ fn emit_multipart(
         if trace_target.is_some() {
             let (index_list, index_start, index_count) = if sink.solid.len() > solid_start {
                 ("solid", solid_start, sink.solid.len() - solid_start)
-            } else {
+            } else if sink.cutout.len() > cutout_start {
                 ("cutout", cutout_start, sink.cutout.len() - cutout_start)
+            } else if sink.water.len() > water_start {
+                ("water", water_start, sink.water.len() - water_start)
+            } else {
+                (
+                    "translucent",
+                    translucent_start,
+                    sink.translucent.len() - translucent_start,
+                )
             };
             trace_output.push(json!({
                 "target": {"x": bx, "y": by, "z": bz, "block": crate::world::block::block_id(state)},
@@ -4535,6 +4584,14 @@ mod terrain_uv_tests {
     }
 
     #[test]
+    fn trace_indices_follow_regular_water_translucent_upload_order() {
+        assert_eq!(trace_index_start(Some("solid"), 3, 12, 24, 6), 3);
+        assert_eq!(trace_index_start(Some("cutout"), 3, 12, 24, 6), 15);
+        assert_eq!(trace_index_start(Some("water"), 3, 12, 24, 6), 27);
+        assert_eq!(trace_index_start(Some("translucent"), 3, 12, 24, 6), 33);
+    }
+
+    #[test]
     fn immediate_edit_small_mesh_exposure_culling_and_latest_state() {
         use std::collections::HashSet;
 
@@ -4573,15 +4630,36 @@ mod terrain_uv_tests {
         let registry = BlockRegistry::load(&root, &None, &root, None);
         let stone = crate::world::block::first_state_of("stone").unwrap();
         let p = BlockPos::new(-1, -49, -1);
-        assert!(edit_state_supported(&registry, stone, p));
+        let mut atlas = AtlasUVMap::test_empty();
+        let region = |opaque, translucent| AtlasRegion {
+            u_min: 0.0,
+            v_min: 0.0,
+            u_max: 1.0,
+            v_max: 1.0,
+            pixel_rect: [0; 4],
+            sprite: 1,
+            opaque,
+            translucent,
+            alpha_counts: [0; 3],
+        };
+        assert!(!edit_state_supported(&registry, &atlas, stone, p)); // unresolved atlas texture
+        atlas.test_insert_region("minecraft:block/stone", region(true, false));
+        assert!(edit_state_supported(&registry, &atlas, stone, p));
+        atlas.test_insert_region("minecraft:block/stone", region(false, false));
+        assert!(edit_state_supported(&registry, &atlas, stone, p)); // binary-alpha cutout
+        atlas.test_insert_region("minecraft:block/stone", region(false, true));
+        assert!(!edit_state_supported(&registry, &atlas, stone, p));
+        let baked = registry.get_baked_model_at(stone, p.x, p.y, p.z).unwrap();
+        assert!(!edit_model_quads_supported(&baked.quads, &atlas)); // same gate used by multipart
         assert!(!unit_cube_face(&face_positions(
             Direction::Up,
             [0.0; 3],
             [0.5; 3]
         )));
+        atlas.test_insert_region("minecraft:block/stone", region(false, false));
         let dispatcher = MeshDispatcher::new(
             registry,
-            AtlasUVMap::test_empty(),
+            atlas,
             Colormap::test_empty(),
             Colormap::test_empty(),
             Colormap::test_empty(),
