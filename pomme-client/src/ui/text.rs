@@ -106,8 +106,8 @@ pub struct TextSpan {
     pub font: Option<String>,
     /// Object glyph drawn for this span's U+FFFC.
     pub inline_object: Option<InlineObject>,
-    /// Resolved component style (click, hover, insertion) of native chat
-    /// text; `None` for azalea-decoded text.
+    /// Resolved component style and explicit-color provenance. Azalea spans
+    /// retain color provenance; native spans also retain interactions.
     pub component_style: Option<Arc<ResolvedStyle>>,
 }
 
@@ -161,6 +161,26 @@ pub fn format_component_spans_with_parent(
     parent: &ResolvedStyle,
     base_color: [f32; 4],
 ) -> Vec<TextSpan> {
+    legacy_format_spans(
+        &component_spans_unformatted(component, parent, base_color),
+        true,
+    )
+}
+
+/// Chat retains codes until wrapping so Chat Colors off can keep each run's
+/// base style.
+pub(crate) fn format_chat_component_spans(
+    component: &Component,
+    base_color: [f32; 4],
+) -> Vec<TextSpan> {
+    component_spans_unformatted(component, &ResolvedStyle::default(), base_color)
+}
+
+fn component_spans_unformatted(
+    component: &Component,
+    parent: &ResolvedStyle,
+    base_color: [f32; 4],
+) -> Vec<TextSpan> {
     let mut spans = Vec::new();
     component.visit_text(parent, &mut |text, style| {
         let color = style.color.map(rgb24).unwrap_or(base_color);
@@ -183,6 +203,102 @@ pub fn format_component_spans_with_parent(
         });
     });
     spans
+}
+
+fn legacy_color(code: char) -> Option<u32> {
+    Some(match code.to_ascii_lowercase() {
+        '0' => 0x000000,
+        '1' => 0x0000aa,
+        '2' => 0x00aa00,
+        '3' => 0x00aaaa,
+        '4' => 0xaa0000,
+        '5' => 0xaa00aa,
+        '6' => 0xffaa00,
+        '7' => 0xaaaaaa,
+        '8' => 0x555555,
+        '9' => 0x5555ff,
+        'a' => 0x55ff55,
+        'b' => 0x55ffff,
+        'c' => 0xff5555,
+        'd' => 0xff55ff,
+        'e' => 0xffff55,
+        'f' => 0xffffff,
+        _ => return None,
+    })
+}
+
+/// StringDecomposer.iterateFormatted: reset is the original component-run
+/// style, never the preceding run. Unknown pairs and a trailing section sign
+/// are consumed.
+pub(crate) fn legacy_format_spans(spans: &[TextSpan], colors_enabled: bool) -> Vec<TextSpan> {
+    let mut out = Vec::new();
+    for base in spans {
+        if !base.text.contains('§') {
+            out.push(base.clone());
+            continue;
+        }
+        let mut current = base.with_text(String::new());
+        let mut buffer = String::new();
+        let flush = |out: &mut Vec<TextSpan>, current: &TextSpan, buffer: &mut String| {
+            if !buffer.is_empty() {
+                out.push(current.with_text(std::mem::take(buffer)));
+            }
+        };
+        let mut chars = base.text.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '§' {
+                buffer.push(ch);
+                continue;
+            }
+            let Some(code) = chars.next() else {
+                break;
+            };
+            let code = code.to_ascii_lowercase();
+            let color = legacy_color(code);
+            if color.is_none() && !matches!(code, 'k' | 'l' | 'm' | 'n' | 'o' | 'r') {
+                continue;
+            }
+            if !colors_enabled {
+                continue;
+            }
+            flush(&mut out, &current, &mut buffer);
+            if let Some(color) = color {
+                current.color = rgb24(color);
+                current.bold = false;
+                current.italic = false;
+                current.strikethrough = false;
+                current.underline = false;
+                current.obfuscated = false;
+                // Preserve explicit-color provenance, including §f, for team fallback.
+                let style = Arc::make_mut(
+                    current
+                        .component_style
+                        .get_or_insert_with(|| Arc::new(ResolvedStyle::default())),
+                );
+                style.color = Some(color);
+            } else {
+                match code {
+                    'k' => current.obfuscated = true,
+                    'l' => current.bold = true,
+                    'm' => current.strikethrough = true,
+                    'n' => current.underline = true,
+                    'o' => current.italic = true,
+                    'r' => current = base.with_text(String::new()),
+                    _ => unreachable!(),
+                }
+            }
+            if let Some(style) = &mut current.component_style {
+                let style = Arc::make_mut(style);
+                style.bold = current.bold;
+                style.italic = current.italic;
+                style.strikethrough = current.strikethrough;
+                style.underlined = current.underline;
+                style.obfuscated = current.obfuscated;
+            }
+        }
+        flush(&mut out, &current, &mut buffer);
+    }
+    out
 }
 
 /// Flatten an azalea `FormattedText` component into styled spans for rendering.
@@ -241,7 +357,7 @@ pub(crate) fn format_book_text_spans(text: &FormattedText, base_color: [f32; 4])
         |_| String::new(),
         &Style::default(),
     );
-    spans.into_inner()
+    legacy_format_spans(&spans.into_inner(), true)
 }
 
 pub fn format_text_spans(text: &FormattedText, base_color: [f32; 4]) -> Vec<TextSpan> {
@@ -277,7 +393,19 @@ pub fn format_text_spans(text: &FormattedText, base_color: [f32; 4]) -> Vec<Text
                     shadow_color: s.and_then(|s| s.shadow_color).map(argb32),
                     font: s.and_then(|s| s.font.as_deref()).map(font_id),
                     inline_object: None,
-                    component_style: None,
+                    component_style: Some(Arc::new(ResolvedStyle {
+                        color: s.and_then(|s| s.color.as_ref()).map(|c| c.value),
+                        shadow_color: s.and_then(|s| s.shadow_color),
+                        bold,
+                        italic,
+                        strikethrough,
+                        underlined: underline,
+                        obfuscated,
+                        font: s
+                            .and_then(|s| s.font.as_ref())
+                            .map(|font| serde_json::Value::String(font.clone())),
+                        ..ResolvedStyle::default()
+                    })),
                 });
             }
             String::new()
@@ -290,11 +418,11 @@ pub fn format_text_spans(text: &FormattedText, base_color: [f32; 4]) -> Vec<Text
     if result.is_empty() {
         let plain = format!("{text}");
         if !plain.is_empty() {
-            return vec![TextSpan::new(plain, base_color)];
+            return legacy_format_spans(&[TextSpan::new(plain, base_color)], true);
         }
     }
 
-    result
+    legacy_format_spans(&result, true)
 }
 
 fn parse_inline_object(value: &serde_json::Value) -> Option<InlineObject> {
@@ -423,6 +551,53 @@ mod tests {
 
     use super::*;
     use crate::chat_component::{ClickEvent, HoverEvent};
+
+    #[test]
+    fn legacy_runs_reset_original_style_before_measurement_and_keep_provenance() {
+        let component = Component::from_value(&serde_json::json!({
+            "text": "", "color": "blue", "bold": true, "italic": true,
+            "underlined": true, "strikethrough": true, "obfuscated": true,
+            "extra": [{"text": "§cR§rB\n§aG§BC§fW§z?§"}, {"text": "next"}]
+        }))
+        .unwrap();
+        let raw = format_chat_component_spans(&component, [1.0; 4]);
+        let spans = format_component_spans(&component, [1.0; 4]);
+        assert_eq!(
+            spans.iter().map(|s| s.text.as_str()).collect::<String>(),
+            "RB\nGCW?next"
+        );
+        assert_eq!(spans[0].color, rgb24(0xff5555));
+        assert!(!spans[0].bold && !spans[0].italic);
+        assert!(!spans[0].underline && !spans[0].strikethrough && !spans[0].obfuscated);
+        assert_eq!(spans[1].text, "B\n");
+        assert_eq!(spans[1].color, rgb24(0x5555ff));
+        assert!(spans[1].bold && spans[1].italic);
+        assert_eq!(spans[2].color, rgb24(0x55ff55));
+        assert_eq!(spans[3].color, rgb24(0x55ffff));
+        assert_eq!(
+            spans[4].component_style.as_ref().unwrap().color,
+            Some(0xffffff)
+        );
+        assert!(spans.last().unwrap().bold); // adjacent component cannot inherit §f
+        let disabled = legacy_format_spans(&raw, false);
+        assert!(
+            disabled
+                .iter()
+                .all(|s| s.bold && s.italic && s.color == rgb24(0x5555ff))
+        );
+        assert_eq!(
+            disabled.iter().map(|s| s.text.as_str()).collect::<String>(),
+            "RB\nGCW?next"
+        );
+        let lines = crate::ui::chat::wrap_spans(&spans, 3.0, &|spans| {
+            spans.iter().map(|s| s.text.chars().count() as f32).sum()
+        });
+        assert!(lines.len() >= 3);
+        assert!(lines.iter().flatten().all(|s| !s.text.contains('§')));
+        assert_eq!(component.plain_text(), "§cR§rB\n§aG§BC§fW§z?§next");
+        let hex = format_component_spans(&Component::text("§xQ"), [1.0; 4]);
+        assert_eq!(hex[0].text, "Q"); // no non-vanilla §x extension
+    }
 
     #[test]
     fn head_atlas_keys_carry_the_whole_profile() {

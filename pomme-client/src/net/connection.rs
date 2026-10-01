@@ -17,7 +17,7 @@ use super::NetworkEvent;
 use super::chat::ChatPacketError;
 use super::chat_security::{ChatSender, ProfileKeyPair};
 use super::conn::{Conn, MemoryEnd, RawWriter};
-use super::handler::{handle_game_packet, handle_raw_game_packet};
+use super::handler::{handle_game_packet_with_display_text, handle_raw_game_packet};
 use super::sender::{Outbound, PacketSender};
 use crate::ui::server_dialog::DialogRegistry;
 
@@ -43,6 +43,9 @@ pub enum ConnectionError {
 
     #[error("server requested transfer")]
     Transferred,
+
+    #[error("network event receiver closed")]
+    EventReceiverGone,
 
     #[error("encryption failed: {0}")]
     Encryption(String),
@@ -123,12 +126,15 @@ pub fn spawn_connection(rt: &tokio::runtime::Runtime, args: ConnectArgs) -> Conn
         .await;
         recorder.stop("disconnect");
         if let Err(e) = result {
-            if matches!(e, ConnectionError::Transferred) {
+            if matches!(
+                e,
+                ConnectionError::Transferred | ConnectionError::EventReceiverGone
+            ) {
                 return;
             }
             tracing::error!("Network error: {e}");
             let reason = friendly_error_reason(&e);
-            send_terminal_event(&event_tx, NetworkEvent::Disconnected { reason }).await;
+            let _ = send_event(&event_tx, NetworkEvent::Disconnected { reason }).await;
         }
     });
     ConnectionHandle {
@@ -152,6 +158,10 @@ pub async fn connect_to_server(
         Default::default(),
     )
     .await
+    .or_else(|error| match error {
+        ConnectionError::EventReceiverGone => Ok(()),
+        error => Err(error),
+    })
 }
 
 async fn connect_recorded(
@@ -257,16 +267,11 @@ async fn connect_recorded(
 
     tracing::info!("Entering game state");
     let (key_pair_tx, key_pair_rx) = mpsc::unbounded_channel();
-    let biome_colors = extract_biome_climate(&joined.configured.registries);
-    let _ = event_tx.try_send(NetworkEvent::BiomeColors {
-        colors: biome_colors,
-    });
-    let _ = event_tx.try_send(NetworkEvent::Connected { profile_name });
-
     game_loop(
         conn,
         &event_tx,
         GameLoopArgs {
+            connected_profile: Some(profile_name),
             recorder,
             outbound_tx: game_packet_tx,
             outbound_rx: game_packet_rx,
@@ -587,6 +592,31 @@ async fn config_sequence(
     // registry_data fans out into several frames, hence the queue).
     let mut pending = std::collections::VecDeque::new();
     loop {
+        if finish_configuration_pending && (!code_of_conduct_seen || code_of_conduct_accepted) {
+            write_config_packet(
+                conn,
+                ServerboundConfigPacket::FinishConfiguration(
+                    s_finish_configuration::ServerboundFinishConfiguration {},
+                ),
+            )
+            .await?;
+            return Ok(match previous {
+                Some(previous) if !received_registry_data => Configured {
+                    registries: previous.registries.clone(),
+                    dialogs: match received_dialog_tags {
+                        Some(tags) => std::sync::Arc::new(previous.dialogs.with_tags(tags)),
+                        None => previous.dialogs.clone(),
+                    },
+                },
+                _ => Configured {
+                    dialogs: std::sync::Arc::new(dialog_registry(
+                        &registry_holder,
+                        received_dialog_tags.unwrap_or_default(),
+                    )),
+                    registries: std::sync::Arc::new(registry_holder),
+                },
+            });
+        }
         let packet = if let Some(packet) = pending.pop_front() {
             packet
         } else {
@@ -605,11 +635,10 @@ async fn config_sequence(
                         None => vec![raw],
                     };
                     for frame in frames {
-                        if super::dialog::handle_raw_dialog_packet(
-                            Phase::Configuration,
-                            &frame,
-                            event_tx,
-                        ) {
+                        if pump_config_future(
+                            super::dialog::handle_raw_dialog_packet(Phase::Configuration, &frame, event_tx),
+                            conn, outbound_rx, code_of_conduct_seen, &mut code_of_conduct_accepted,
+                        ).await?? {
                             continue;
                         }
                         match deserialize_packet::<ClientboundConfigPacket>(
@@ -624,63 +653,7 @@ async fn config_sequence(
                 // `Some(..)` disables the branch when the channel closes instead
                 // of busy-looping on a closed receiver.
                 Some(outbound) = outbound_rx.recv() => {
-                    if let Outbound::CustomClick { id, payload } = &outbound {
-                        if let Some(frame) =
-                            custom_click_frame(Phase::Configuration, id, payload.as_ref())
-                        {
-                            write_config_frame(conn, frame).await?;
-                        }
-                    } else if let Outbound::CodeOfConductDecision(accepted) = outbound {
-                        if !code_of_conduct_seen || code_of_conduct_accepted {
-                            return Err(ConnectionError::Disconnected(
-                                "Code-of-conduct decision arrived without a pending notice".into(),
-                            ));
-                        }
-                        if !accepted {
-                            return Err(ConnectionError::Disconnected(
-                                "Code of conduct declined by user".into(),
-                            ));
-                        }
-                        write_config_packet(conn, ServerboundConfigPacket::AcceptCodeOfConduct(
-                            azalea_protocol::packets::config::s_accept_code_of_conduct::ServerboundAcceptCodeOfConduct {},
-                        )).await?;
-                        code_of_conduct_accepted = true;
-                        if finish_configuration_pending {
-                            write_config_packet(conn, ServerboundConfigPacket::FinishConfiguration(
-                                s_finish_configuration::ServerboundFinishConfiguration {},
-                            )).await?;
-                            return Ok(match previous {
-                                Some(previous) if !received_registry_data => Configured {
-                                    registries: previous.registries.clone(),
-                                    dialogs: match received_dialog_tags {
-                                        Some(tags) => std::sync::Arc::new(previous.dialogs.with_tags(tags)),
-                                        None => previous.dialogs.clone(),
-                                    },
-                                },
-                                _ => Configured {
-                                    dialogs: std::sync::Arc::new(dialog_registry(&registry_holder, received_dialog_tags.unwrap_or_default())),
-                                    registries: std::sync::Arc::new(registry_holder),
-                                },
-                            });
-                        }
-                    } else if let Outbound::Packet(packet) = outbound
-                        && let ServerboundGamePacket::ResourcePack(p) = *packet
-                    {
-                        use azalea_protocol::packets::config::s_resource_pack as config_pack;
-                        use azalea_protocol::packets::game::s_resource_pack as game_pack;
-                        let action = match p.action {
-                            game_pack::Action::SuccessfullyLoaded => config_pack::Action::SuccessfullyLoaded,
-                            game_pack::Action::Declined => config_pack::Action::Declined,
-                            game_pack::Action::FailedDownload => config_pack::Action::FailedDownload,
-                            game_pack::Action::Accepted => config_pack::Action::Accepted,
-                            game_pack::Action::InvalidUrl => config_pack::Action::InvalidUrl,
-                            game_pack::Action::FailedReload => config_pack::Action::FailedReload,
-                            game_pack::Action::Discarded => config_pack::Action::Discarded,
-                        };
-                        write_config_packet(conn, ServerboundConfigPacket::ResourcePack(
-                            config_pack::ServerboundResourcePack { id: p.id, action },
-                        )).await?;
-                    }
+                    write_config_outbound(conn, outbound, code_of_conduct_seen, &mut code_of_conduct_accepted).await?;
                     // Anything else is discarded: vanilla defers its outbound
                     // queue, but pomme's game keeps ticking through a
                     // reconfiguration, so stale movement/actions are best dropped.
@@ -743,34 +716,9 @@ async fn config_sequence(
                 .await?;
             }
             ClientboundConfigPacket::FinishConfiguration(_) => {
-                if code_of_conduct_seen && !code_of_conduct_accepted {
-                    finish_configuration_pending = true;
-                    continue;
-                }
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::FinishConfiguration(
-                        s_finish_configuration::ServerboundFinishConfiguration {},
-                    ),
-                )
-                .await?;
-                return Ok(match previous {
-                    Some(previous) if !received_registry_data => Configured {
-                        registries: previous.registries.clone(),
-                        dialogs: match received_dialog_tags {
-                            Some(tags) => std::sync::Arc::new(previous.dialogs.with_tags(tags)),
-                            None => previous.dialogs.clone(),
-                        },
-                    },
-                    _ => Configured {
-                        dialogs: std::sync::Arc::new(dialog_registry(
-                            &registry_holder,
-                            received_dialog_tags.unwrap_or_default(),
-                        )),
-                        registries: std::sync::Arc::new(registry_holder),
-                    },
-                });
+                finish_configuration_pending = true;
             }
+
             ClientboundConfigPacket::Disconnect(p) => {
                 return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
             }
@@ -804,30 +752,38 @@ async fn config_sequence(
                     ));
                 }
                 code_of_conduct_seen = true;
-                event_tx
-                    .try_send(NetworkEvent::CodeOfConduct {
-                        text: p.code_of_conduct,
-                    })
-                    .map_err(|e| {
-                        ConnectionError::Disconnected(format!(
-                            "Could not deliver code of conduct to UI: {e}"
-                        ))
-                    })?;
+                pump_config_future(
+                    send_event(
+                        event_tx,
+                        NetworkEvent::CodeOfConduct {
+                            text: p.code_of_conduct,
+                        },
+                    ),
+                    conn,
+                    outbound_rx,
+                    code_of_conduct_seen,
+                    &mut code_of_conduct_accepted,
+                )
+                .await??;
                 // Return to the outer select so inbound configuration packets
                 // remain live while the user considers the notice.
             }
             ClientboundConfigPacket::Transfer(p) => {
-                event_tx
-                    .try_send(NetworkEvent::ServerTransfer(super::ServerTransfer {
-                        host: p.host,
-                        port: p.port,
-                        cookies: server_cookies.clone(),
-                    }))
-                    .map_err(|e| {
-                        ConnectionError::Disconnected(format!(
-                            "Could not deliver server transfer to app: {e}"
-                        ))
-                    })?;
+                pump_config_future(
+                    send_event(
+                        event_tx,
+                        NetworkEvent::ServerTransfer(super::ServerTransfer {
+                            host: p.host,
+                            port: p.port,
+                            cookies: server_cookies.clone(),
+                        }),
+                    ),
+                    conn,
+                    outbound_rx,
+                    code_of_conduct_seen,
+                    &mut code_of_conduct_accepted,
+                )
+                .await??;
                 return Err(ConnectionError::Transferred);
             }
             ClientboundConfigPacket::ResourcePackPush(p) => {
@@ -836,18 +792,22 @@ async fn config_sequence(
                     p.id,
                     p.required
                 );
-                event_tx
-                    .try_send(NetworkEvent::ResourcePackPush {
-                        id: p.id,
-                        url: p.url.clone(),
-                        hash: p.hash.clone(),
-                        required: p.required,
-                    })
-                    .map_err(|e| {
-                        ConnectionError::Disconnected(format!(
-                            "Could not deliver resource-pack push to app: {e}"
-                        ))
-                    })?;
+                pump_config_future(
+                    send_event(
+                        event_tx,
+                        NetworkEvent::ResourcePackPush {
+                            id: p.id,
+                            url: p.url.clone(),
+                            hash: p.hash.clone(),
+                            required: p.required,
+                        },
+                    ),
+                    conn,
+                    outbound_rx,
+                    code_of_conduct_seen,
+                    &mut code_of_conduct_accepted,
+                )
+                .await??;
                 write_config_packet(
                     conn,
                     ServerboundConfigPacket::ResourcePack(
@@ -861,19 +821,99 @@ async fn config_sequence(
             }
             ClientboundConfigPacket::ResourcePackPop(p) => {
                 tracing::info!("Server popping resource pack {:?}", p.id);
-                event_tx
-                    .try_send(NetworkEvent::ResourcePackPop { id: p.id })
-                    .map_err(|e| {
-                        ConnectionError::Disconnected(format!(
-                            "Could not deliver resource-pack pop to app: {e}"
-                        ))
-                    })?;
+                pump_config_future(
+                    send_event(event_tx, NetworkEvent::ResourcePackPop { id: p.id }),
+                    conn,
+                    outbound_rx,
+                    code_of_conduct_seen,
+                    &mut code_of_conduct_accepted,
+                )
+                .await??;
             }
             _ => {
                 tracing::debug!("Config packet: {:?}", std::mem::discriminant(&packet));
             }
         }
     }
+}
+
+async fn pump_config_future<F: std::future::Future>(
+    future: F,
+    conn: &mut Conn,
+    outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
+    conduct_seen: bool,
+    conduct_accepted: &mut bool,
+) -> Result<F::Output, ConnectionError> {
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return Ok(result),
+            Some(out) = outbound_rx.recv() => {
+                write_config_outbound(conn, out, conduct_seen, conduct_accepted).await?;
+            }
+        }
+    }
+}
+
+async fn write_config_outbound(
+    conn: &mut Conn,
+    outbound: Outbound,
+    conduct_seen: bool,
+    conduct_accepted: &mut bool,
+) -> Result<(), ConnectionError> {
+    use azalea_protocol::packets::config::*;
+    match outbound {
+        Outbound::CustomClick { id, payload } => {
+            if let Some(frame) = custom_click_frame(Phase::Configuration, &id, payload.as_ref()) {
+                write_config_frame(conn, frame).await?;
+            }
+        }
+        Outbound::CodeOfConductDecision(accepted) => {
+            if !conduct_seen || *conduct_accepted {
+                return Err(ConnectionError::Disconnected(
+                    "Code-of-conduct decision arrived without a pending notice".into(),
+                ));
+            }
+            if !accepted {
+                return Err(ConnectionError::Disconnected(
+                    "Code of conduct declined by user".into(),
+                ));
+            }
+            write_config_packet(
+                conn,
+                ServerboundConfigPacket::AcceptCodeOfConduct(
+                    s_accept_code_of_conduct::ServerboundAcceptCodeOfConduct {},
+                ),
+            )
+            .await?;
+            *conduct_accepted = true;
+        }
+        Outbound::Packet(packet) => {
+            if let ServerboundGamePacket::ResourcePack(p) = *packet {
+                use azalea_protocol::packets::game::s_resource_pack::Action as GameAction;
+                use s_resource_pack::Action;
+                let action = match p.action {
+                    GameAction::SuccessfullyLoaded => Action::SuccessfullyLoaded,
+                    GameAction::Declined => Action::Declined,
+                    GameAction::FailedDownload => Action::FailedDownload,
+                    GameAction::Accepted => Action::Accepted,
+                    GameAction::InvalidUrl => Action::InvalidUrl,
+                    GameAction::FailedReload => Action::FailedReload,
+                    GameAction::Discarded => Action::Discarded,
+                };
+                write_config_packet(
+                    conn,
+                    ServerboundConfigPacket::ResourcePack(
+                        s_resource_pack::ServerboundResourcePack { id: p.id, action },
+                    ),
+                )
+                .await?;
+            }
+        }
+        // Movement/actions queued during reconfiguration are stale.
+        _ => {}
+    }
+    Ok(())
 }
 
 fn phase_read_timeout() -> ConnectionError {
@@ -883,15 +923,29 @@ fn phase_read_timeout() -> ConnectionError {
     ))
 }
 
-async fn send_terminal_event(event_tx: &Sender<NetworkEvent>, mut event: NetworkEvent) {
+/// One owned pending event, retried inline: dropping this future cancels
+/// delivery. No detached workers; callers await in wire order.
+pub(super) async fn send_event(
+    event_tx: &Sender<NetworkEvent>,
+    mut event: NetworkEvent,
+) -> Result<(), crossbeam_channel::SendError<NetworkEvent>> {
     loop {
         match event_tx.try_send(event) {
-            Ok(()) | Err(crossbeam_channel::TrySendError::Disconnected(_)) => return,
+            Ok(()) => return Ok(()),
+            Err(crossbeam_channel::TrySendError::Disconnected(event)) => {
+                return Err(crossbeam_channel::SendError(event));
+            }
             Err(crossbeam_channel::TrySendError::Full(returned)) => {
                 event = returned;
-                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
         }
+    }
+}
+
+impl From<crossbeam_channel::SendError<NetworkEvent>> for ConnectionError {
+    fn from(_: crossbeam_channel::SendError<NetworkEvent>) -> Self {
+        Self::EventReceiverGone
     }
 }
 
@@ -1047,6 +1101,7 @@ fn nbt_string_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -
 }
 
 struct GameLoopArgs {
+    connected_profile: Option<String>,
     recorder: std::sync::Arc<crate::movement_record::Recorder>,
     outbound_tx: mpsc::UnboundedSender<Outbound>,
     outbound_rx: mpsc::UnboundedReceiver<Outbound>,
@@ -1064,6 +1119,7 @@ async fn game_loop(
     args: GameLoopArgs,
 ) -> Result<(), ConnectionError> {
     let GameLoopArgs {
+        connected_profile,
         recorder,
         outbound_tx,
         mut outbound_rx,
@@ -1086,15 +1142,47 @@ async fn game_loop(
     let shared_tree: crate::net::commands::SharedCommandTree =
         std::sync::Arc::new(parking_lot::Mutex::new(None));
 
-    // Share the registries with the game loop for hashing predicted container
-    // clicks.
-    let _ = event_tx.try_send(NetworkEvent::Registries(configured.registries.clone()));
-    let _ = event_tx.try_send(NetworkEvent::DialogRegistry(configured.dialogs.clone()));
-
     let translation = super::translate::active();
     let mut inbound_chat = super::chat::InboundChat::new(crate::version::session_protocol() >= 770);
     let mut chat_tick = tokio::time::interval(std::time::Duration::from_millis(50));
     chat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    macro_rules! pump {
+        ($future:expr) => {
+            pump_game_future(
+                $future,
+                &mut conn.writer,
+                &mut outbound_rx,
+                &mut key_pair_rx,
+                &mut chat,
+                &mut chat_tick,
+                translation,
+                &shared_tree,
+                &recorder,
+            )
+            .await?
+        };
+    }
+    if let Some(profile_name) = connected_profile {
+        pump!(send_event(
+            event_tx,
+            NetworkEvent::BiomeColors {
+                colors: extract_biome_climate(&configured.registries),
+            }
+        ))?;
+        pump!(send_event(
+            event_tx,
+            NetworkEvent::Connected { profile_name }
+        ))?;
+    }
+    // Registries must arrive before any login or predicted container clicks.
+    pump!(send_event(
+        event_tx,
+        NetworkEvent::Registries(configured.registries.clone())
+    ))?;
+    pump!(send_event(
+        event_tx,
+        NetworkEvent::DialogRegistry(configured.dialogs.clone())
+    ))?;
     if deferred_login.is_some() {
         // 1.20.1 sends both from its login handler, where later versions send
         // them in the configuration phase (ClientPacketListener.handleLogin).
@@ -1132,25 +1220,7 @@ async fn game_loop(
             // TODO: reads and writes share this task, so a blocked write stops
             // the client reading. Harmless against a socket, but an integrated
             // server on a bounded pipe can deadlock; split the writer out.
-            tokio::select! {
-                Some(out) = outbound_rx.recv() => {
-                    if let Some(frame) = recorded_outbound_frame(out, translation, &mut chat, &shared_tree, &recorder)? {
-                        write_game_frame(&mut conn.writer, translation, frame, &recorder).await?;
-                    }
-                    continue;
-                }
-                Some(key_pair) = key_pair_rx.recv() => {
-                    if let Some(frame) = chat.key_pair_ready(key_pair) {
-                        write_game_frame(&mut conn.writer, translation, frame, &recorder).await?;
-                    }
-                    continue;
-                }
-                _ = chat_tick.tick() => {
-                    chat.tick();
-                    continue;
-                }
-                raw = conn.reader.read() => raw,
-            }
+            pump!(conn.reader.read())
         };
         let raw = match raw {
             Ok(raw) => raw,
@@ -1164,7 +1234,7 @@ async fn game_loop(
         {
             match super::native_codecs::decode_native_explosion(&raw) {
                 Ok(Some(explosion)) => {
-                    let _ = event_tx.try_send(NetworkEvent::Explosion(explosion));
+                    pump!(send_event(event_tx, NetworkEvent::Explosion(explosion)))?;
                     continue;
                 }
                 Ok(None) => {}
@@ -1199,7 +1269,12 @@ async fn game_loop(
             }
             None => raw,
         };
-        match super::chat::handle_raw_chat_packet(&raw, event_tx, &chat_types, &mut inbound_chat) {
+        match pump!(super::chat::handle_raw_chat_packet(
+            &raw,
+            event_tx,
+            &chat_types,
+            &mut inbound_chat
+        )) {
             Some(Err(ChatPacketError::Malformed(error))) => {
                 tracing::warn!("Skipping malformed chat packet: {error}");
                 continue;
@@ -1207,17 +1282,44 @@ async fn game_loop(
             Some(Err(ChatPacketError::Disconnect(key))) => {
                 return Err(ConnectionError::ClientDisconnect(key));
             }
+            Some(Err(ChatPacketError::ReceiverGone)) => {
+                return Err(ConnectionError::EventReceiverGone);
+            }
             Some(Ok(())) => continue,
             None => {}
         }
-        if super::dialog::handle_raw_dialog_packet(Phase::Game, &raw, event_tx)
-            || handle_raw_game_packet(&raw, event_tx)
+        if pump!(super::dialog::handle_raw_dialog_packet(
+            Phase::Game,
+            &raw,
+            event_tx
+        ))? || pump!(handle_raw_game_packet(&raw, event_tx))?
         {
             continue;
         }
+        let mut recorded_metadata = None;
+        let mut display_text = std::collections::VecDeque::new();
+        let raw = match super::handler::preserve_legacy_display_text(&raw) {
+            Ok(Some((remaining, events))) => {
+                if recorder.active() {
+                    // Keep recording the original metadata packet, not the UI-only
+                    // remainder. Extra typed decode is restricted to active recording.
+                    recorded_metadata = deserialize_packet::<ClientboundGamePacket>(
+                        &mut std::io::Cursor::new(raw.as_ref()),
+                    )
+                    .ok();
+                }
+                display_text = events.into();
+                remaining.into_boxed_slice()
+            }
+            Ok(None) => raw,
+            Err(error) => {
+                tracing::warn!(%error, "Skipping malformed legacy text display metadata");
+                continue;
+            }
+        };
         match deserialize_packet::<ClientboundGamePacket>(&mut std::io::Cursor::new(&raw)) {
             Ok(mut packet) => {
-                recorder.inbound(&packet, wire_id);
+                recorder.inbound(recorded_metadata.as_ref().unwrap_or(&packet), wire_id);
                 if matches!(packet, ClientboundGamePacket::StartConfiguration(_)) {
                     // Vanilla clears the client level before acknowledging
                     // (ClientPacketListener.handleConfigurationStart); chat
@@ -1225,7 +1327,7 @@ async fn game_loop(
                     // first, then the pending chat acknowledgement.
                     // TODO: chat events still in flight to the game thread
                     // miss this ack; the next login resets the tracker anyway.
-                    let _ = event_tx.try_send(NetworkEvent::Reconfiguring);
+                    pump!(send_event(event_tx, NetworkEvent::Reconfiguring))?;
                     while let Ok(out) = outbound_rx.try_recv() {
                         if let Some(frame) = recorded_outbound_frame(
                             out,
@@ -1263,15 +1365,22 @@ async fn game_loop(
                     .await?;
                     if !std::sync::Arc::ptr_eq(&next.registries, &configured.registries) {
                         chat_types = chat_types_from_registry_holder(&next.registries);
-                        let _ =
-                            event_tx.try_send(NetworkEvent::Registries(next.registries.clone()));
-                        let _ = event_tx.try_send(NetworkEvent::BiomeColors {
-                            colors: extract_biome_climate(&next.registries),
-                        });
+                        pump!(send_event(
+                            event_tx,
+                            NetworkEvent::Registries(next.registries.clone())
+                        ))?;
+                        pump!(send_event(
+                            event_tx,
+                            NetworkEvent::BiomeColors {
+                                colors: extract_biome_climate(&next.registries),
+                            }
+                        ))?;
                     }
                     if !std::sync::Arc::ptr_eq(&next.dialogs, &configured.dialogs) {
-                        let _ =
-                            event_tx.try_send(NetworkEvent::DialogRegistry(next.dialogs.clone()));
+                        pump!(send_event(
+                            event_tx,
+                            NetworkEvent::DialogRegistry(next.dialogs.clone())
+                        ))?;
                     }
                     configured = next;
                     continue;
@@ -1285,8 +1394,10 @@ async fn game_loop(
                     && let Some(tags) = dialog_tags(&p.tags)
                 {
                     configured.dialogs = std::sync::Arc::new(configured.dialogs.with_tags(tags));
-                    let _ =
-                        event_tx.try_send(NetworkEvent::DialogRegistry(configured.dialogs.clone()));
+                    pump!(send_event(
+                        event_tx,
+                        NetworkEvent::DialogRegistry(configured.dialogs.clone())
+                    ))?;
                 }
                 if let ClientboundGamePacket::Login(login) = &mut packet {
                     inbound_chat.reset();
@@ -1295,20 +1406,17 @@ async fn game_loop(
                     }
                 }
                 if let ClientboundGamePacket::Transfer(p) = &packet {
-                    event_tx
-                        .try_send(NetworkEvent::ServerTransfer(super::ServerTransfer {
+                    pump!(send_event(
+                        event_tx,
+                        NetworkEvent::ServerTransfer(super::ServerTransfer {
                             host: p.host.clone(),
                             port: p.port,
                             cookies: server_cookies.clone(),
-                        }))
-                        .map_err(|e| {
-                            ConnectionError::Disconnected(format!(
-                                "Could not deliver server transfer to app: {e}"
-                            ))
-                        })?;
+                        })
+                    ))?;
                     return Err(ConnectionError::Transferred);
                 }
-                let handler = handle_game_packet(
+                let handler = handle_game_packet_with_display_text(
                     &packet,
                     &sender,
                     event_tx,
@@ -1317,33 +1425,48 @@ async fn game_loop(
                     &mut batch_size_calculator,
                     &mut current_dimension,
                     &mut server_cookies,
+                    &mut display_text,
                 );
-                tokio::pin!(handler);
-                // Keep outbound (including app-generated keepalives) flowing while
-                // decoding; inbound is still serialized until the chunk is queued.
-                loop {
-                    tokio::select! {
-                        result = &mut handler => {
-                            result.map_err(|error| ConnectionError::Disconnected(format!(
-                                "Failed to queue mandatory world event: {error}"
-                            )))?;
-                            break;
-                        }
-                        Some(out) = outbound_rx.recv() => {
-                            if let Some(frame) = recorded_outbound_frame(out, translation, &mut chat, &shared_tree, &recorder)? {
-                                write_game_frame(&mut conn.writer, translation, frame, &recorder).await?;
-                            }
-                        }
-                        Some(key_pair) = key_pair_rx.recv() => {
-                            if let Some(frame) = chat.key_pair_ready(key_pair) {
-                                write_game_frame(&mut conn.writer, translation, frame, &recorder).await?;
-                            }
-                        }
-                        _ = chat_tick.tick() => chat.tick(),
-                    }
+                pump!(handler)?;
+                if matches!(packet, ClientboundGamePacket::Disconnect(_)) {
+                    return Ok(());
                 }
             }
             Err(e) => skip_malformed_packet(e)?,
+        }
+    }
+}
+
+/// Poll the ordered inbound work without starving already-queued outbound
+/// traffic. ponytail: inbound stays serialized; an unread socket keepalive has
+/// no deadline guarantee while the UI stalls. Use a bounded ordered reader if
+/// that matters.
+async fn pump_game_future<F: std::future::Future>(
+    future: F,
+    writer: &mut RawWriter,
+    outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
+    key_pair_rx: &mut mpsc::UnboundedReceiver<Option<std::sync::Arc<ProfileKeyPair>>>,
+    chat: &mut ChatSender,
+    chat_tick: &mut tokio::time::Interval,
+    translation: Option<&super::translate::Translation>,
+    tree: &crate::net::commands::SharedCommandTree,
+    recorder: &crate::movement_record::Recorder,
+) -> Result<F::Output, ConnectionError> {
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return Ok(result),
+            Some(out) = outbound_rx.recv() => {
+                if let Some(frame) = recorded_outbound_frame(out, translation, chat, tree, recorder)? {
+                    write_game_frame(writer, translation, frame, recorder).await?;
+                }
+            }
+            Some(key_pair) = key_pair_rx.recv() => {
+                if let Some(frame) = chat.key_pair_ready(key_pair) {
+                    write_game_frame(writer, translation, frame, recorder).await?;
+                }
+            }
+            _ = chat_tick.tick() => chat.tick(),
         }
     }
 }
@@ -1662,7 +1785,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_world_queue_disconnects_game_loop_without_partial_chunk() {
+    async fn full_world_queue_waits_and_pumps_outbound_without_partial_chunk() {
         use std::sync::Arc;
         use std::time::Duration;
 
@@ -1674,13 +1797,10 @@ mod tests {
 
         let (client_end, server_end) = super::super::conn::memory_pipes();
         let mut peer = Conn::from_memory(server_end);
-        let (event_tx, event_rx) = crossbeam_channel::bounded(4096);
-        // The game loop publishes two registry events before reading packets.
-        for _ in 0..4094 {
-            event_tx
-                .try_send(NetworkEvent::LevelChunksLoadStart)
-                .unwrap();
-        }
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        event_tx
+            .try_send(NetworkEvent::LevelChunksLoadStart)
+            .unwrap();
         let mut sections = Vec::new();
         for _ in 0..24 {
             azalea_world::chunk::Section::default()
@@ -1706,12 +1826,14 @@ mod tests {
         .unwrap();
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (key_tx, key_pair_rx) = mpsc::unbounded_channel();
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
+        let outbound = outbound_tx.clone();
+        let fill = event_tx.clone();
+        let client = tokio::spawn(async move {
             game_loop(
                 Conn::from_memory(client_end),
                 &event_tx,
                 GameLoopArgs {
+                    connected_profile: None,
                     recorder: Default::default(),
                     outbound_tx,
                     outbound_rx,
@@ -1728,28 +1850,101 @@ mod tests {
                     key_pair_rx,
                     server_cookies: Default::default(),
                 },
-            ),
-        )
-        .await
-        .expect("world enqueue failure must end the game loop");
-        assert!(matches!(result, Err(ConnectionError::Disconnected(reason))
-            if reason.contains("Failed to queue mandatory world event")));
-        assert_eq!(event_rx.len(), 4096);
-        for _ in 0..4094 {
-            assert!(matches!(
-                event_rx.try_recv().unwrap(),
-                NetworkEvent::LevelChunksLoadStart
-            ));
-        }
+            )
+            .await
+        });
+        outbound
+            .send(Outbound::Packet(Box::new(
+                ServerboundGamePacket::KeepAlive(
+                    azalea_protocol::packets::game::s_keep_alive::ServerboundKeepAlive { id: 123 },
+                ),
+            )))
+            .unwrap();
+        assert!(
+            matches!(read_test_packet::<ServerboundGamePacket>(&mut peer).await,
+            ServerboundGamePacket::KeepAlive(p) if p.id == 123)
+        );
+        assert!(!client.is_finished());
+        assert_eq!(event_rx.len(), 1);
         assert!(matches!(
-            event_rx.try_recv().unwrap(),
+            recv_event(&event_rx).await,
+            NetworkEvent::LevelChunksLoadStart
+        ));
+        assert!(matches!(
+            recv_event(&event_rx).await,
             NetworkEvent::Registries(_)
         ));
         assert!(matches!(
-            event_rx.try_recv().unwrap(),
+            recv_event(&event_rx).await,
             NetworkEvent::DialogRegistry(_)
         ));
+        let NetworkEvent::ChunkLoaded {
+            chunk,
+            block_entities,
+            ..
+        } = recv_event(&event_rx).await
+        else {
+            panic!("expected one atomic chunk snapshot");
+        };
+        assert_eq!(chunk.sections.len(), 24);
+        assert_eq!(block_entities.len(), 1);
+        assert!(block_entities[0].2.is_empty());
         assert!(event_rx.is_empty());
+        // Both raw chat and raw dialog delivery use the same live writer pump.
+        for name in ["system_chat", "server_links"] {
+            fill.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+            let mut raw = Vec::new();
+            pomme_protocol::wire::write_varint(
+                &mut raw,
+                PacketTable::native()
+                    .id(Phase::Game, Direction::Clientbound, name)
+                    .unwrap(),
+            );
+            if name == "system_chat" {
+                simdnbt::owned::NbtTag::String("waiting".into()).write(&mut raw);
+                raw.push(0);
+            } else {
+                pomme_protocol::wire::write_varint(&mut raw, 0);
+            }
+            peer.writer.write(&raw).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            outbound
+                .send(Outbound::Raw(super::super::chat::encode_chat_ack(37)))
+                .unwrap();
+            let frame = tokio::time::timeout(Duration::from_secs(2), peer.reader.read())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                frame.as_ref(),
+                super::super::chat::encode_chat_ack(37).as_slice()
+            );
+            assert!(!client.is_finished());
+            assert_eq!(event_rx.len(), 1);
+            assert!(matches!(
+                recv_event(&event_rx).await,
+                NetworkEvent::LevelChunksLoadStart
+            ));
+            match (name, recv_event(&event_rx).await) {
+                ("system_chat", NetworkEvent::ChatMessage { .. })
+                | ("server_links", NetworkEvent::ServerLinks { .. }) => {}
+                _ => panic!("raw delivery missing or reordered"),
+            }
+            assert!(event_rx.is_empty());
+        }
+        drop(event_rx);
+        peer.write_packet(
+            azalea_protocol::packets::game::c_set_held_slot::ClientboundSetHeldSlot { slot: 2 },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), client)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(ConnectionError::EventReceiverGone)
+        ));
     }
 
     #[tokio::test]
@@ -1757,13 +1952,14 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(1);
         tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
         let terminal = tokio::spawn(async move {
-            send_terminal_event(
+            send_event(
                 &tx,
                 NetworkEvent::Disconnected {
                     reason: "full".into(),
                 },
             )
-            .await;
+            .await
+            .unwrap();
         });
         tokio::task::yield_now().await;
         assert!(!terminal.is_finished());
@@ -1778,6 +1974,150 @@ mod tests {
         assert!(
             matches!(rx.try_recv().unwrap(), NetworkEvent::Disconnected { reason } if reason == "full")
         );
+    }
+
+    #[tokio::test]
+    async fn pending_delivery_is_fifo_exactly_once_and_cancelled_inline() {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+        let send = async {
+            send_event(&tx, NetworkEvent::HeldSlot { slot: 1 })
+                .await
+                .unwrap();
+            send_event(&tx, NetworkEvent::HeldSlot { slot: 2 })
+                .await
+                .unwrap();
+        };
+        tokio::pin!(send);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut send)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::LevelChunksLoadStart
+        ));
+        tokio::join!(send, async {
+            assert!(matches!(
+                recv_event(&rx).await,
+                NetworkEvent::HeldSlot { slot: 1 }
+            ));
+            assert!(matches!(
+                recv_event(&rx).await,
+                NetworkEvent::HeldSlot { slot: 2 }
+            ));
+        });
+        assert!(rx.is_empty());
+        tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+        let pending_tx = tx.clone();
+        let pending =
+            tokio::spawn(async move { send_event(&pending_tx, NetworkEvent::ClearDialog).await });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(!pending.is_finished());
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        rx.try_recv().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(
+            rx.is_empty(),
+            "cancelled delivery must not leave a detached worker"
+        );
+        drop(rx);
+        assert!(matches!(
+            send_event(&tx, NetworkEvent::ClearDialog).await,
+            Err(crossbeam_channel::SendError(NetworkEvent::ClearDialog))
+        ));
+    }
+
+    #[tokio::test]
+    async fn full_config_delivery_pumps_pack_status_conduct_and_custom_click() {
+        use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
+        use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
+        use azalea_protocol::packets::game::s_resource_pack::{Action, ServerboundResourcePack};
+        let (client_end, peer_end) = super::super::conn::memory_pipes();
+        let mut peer = Conn::from_memory(peer_end);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let client = tokio::spawn(async move {
+            config_sequence(
+                &mut Conn::from_memory(client_end),
+                8,
+                Default::default(),
+                &tx,
+                &mut out_rx,
+                &mut Default::default(),
+                None,
+            )
+            .await
+        });
+        let _: ServerboundConfigPacket = read_test_packet(&mut peer).await;
+        let _: ServerboundConfigPacket = read_test_packet(&mut peer).await;
+        peer.write_packet(ClientboundCodeOfConduct {
+            code_of_conduct: "Rules".into(),
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!client.is_finished());
+        let id = uuid::Uuid::nil();
+        out_tx
+            .send(Outbound::Packet(Box::new(
+                ServerboundGamePacket::ResourcePack(ServerboundResourcePack {
+                    id,
+                    action: Action::SuccessfullyLoaded,
+                }),
+            )))
+            .unwrap();
+        assert!(
+            matches!(read_test_packet::<ServerboundConfigPacket>(&mut peer).await, ServerboundConfigPacket::ResourcePack(p) if p.id == id && matches!(p.action, azalea_protocol::packets::config::s_resource_pack::Action::SuccessfullyLoaded))
+        );
+        out_tx
+            .send(Outbound::CustomClick {
+                id: "test:click".into(),
+                payload: None,
+            })
+            .unwrap();
+        let raw = tokio::time::timeout(std::time::Duration::from_secs(2), peer.reader.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut pos = 0;
+        assert_eq!(
+            pomme_protocol::wire::read_varint(&raw, &mut pos),
+            PacketTable::native().id(
+                Phase::Configuration,
+                Direction::Serverbound,
+                "custom_click_action"
+            )
+        );
+        out_tx.send(Outbound::CodeOfConductDecision(true)).unwrap();
+        assert!(matches!(
+            read_test_packet::<ServerboundConfigPacket>(&mut peer).await,
+            ServerboundConfigPacket::AcceptCodeOfConduct(_)
+        ));
+        assert_eq!(rx.len(), 1);
+        assert!(matches!(
+            recv_event(&rx).await,
+            NetworkEvent::LevelChunksLoadStart
+        ));
+        assert!(
+            matches!(recv_event(&rx).await, NetworkEvent::CodeOfConduct { text } if text == "Rules")
+        );
+        peer.write_packet(ClientboundFinishConfiguration)
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_test_packet::<ServerboundConfigPacket>(&mut peer).await,
+            ServerboundConfigPacket::FinishConfiguration(_)
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), client)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(rx.is_empty());
     }
 
     #[test]
@@ -1903,12 +2243,20 @@ mod tests {
     }
 
     async fn recv_event(receiver: &crossbeam_channel::Receiver<NetworkEvent>) -> NetworkEvent {
-        let receiver = receiver.clone();
-        tokio::task::spawn_blocking(move || {
-            receiver.recv_timeout(std::time::Duration::from_secs(2))
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => return event,
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        panic!("event receiver closed")
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await
+                    }
+                }
+            }
         })
         .await
-        .expect("event receiver task panicked")
         .expect("timed out waiting for network event")
     }
 

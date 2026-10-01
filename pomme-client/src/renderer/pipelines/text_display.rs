@@ -406,6 +406,44 @@ mod tests {
     }
 
     #[test]
+    fn legacy_wire_text_colors_and_reset_reach_world_vertices() {
+        let raw = crate::net::handler::legacy_display_wire_fixture();
+        let (_, events) = crate::net::handler::preserve_legacy_display_text(&raw)
+            .unwrap()
+            .unwrap();
+        let mut store = store();
+        let e = store.vehicles.get_mut(&7).unwrap();
+        e.text_display_opacity = 255;
+        e.text_display_flags = 0;
+        e.text_display_line_width = 8;
+        for event in events {
+            let crate::net::NetworkEvent::TextDisplayText { id, text } = event else {
+                panic!("text event");
+            };
+            assert_eq!(id, 7);
+            e.text_display_text = Some(text);
+        }
+        let draws = extract_text_displays(&store, DVec3::ZERO, 0.0, 0.0, &font());
+        assert_eq!(draws.len(), 1);
+        // Four glyphs, with original blue/bold restored on the second glyph.
+        assert_eq!(draws[0].vertices.len(), 5 * 6);
+        for color in [0xff5555, 0x5555ff, 0x55ff55, 0x55ffff] {
+            assert!(
+                draws[0]
+                    .vertices
+                    .iter()
+                    .any(|v| v.color == crate::ui::common::rgb(color))
+            );
+        }
+        assert!(
+            draws[0]
+                .vertices
+                .iter()
+                .all(|v| v.position.iter().all(|p| p.is_finite()))
+        );
+    }
+
+    #[test]
     fn text_display_range_uses_wire_metadata_before_glyph_extraction() {
         use crate::entity::MetaValue;
 

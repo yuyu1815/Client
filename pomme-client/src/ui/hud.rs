@@ -387,20 +387,22 @@ impl Scoreboard {
         let mut line = team.map_or_else(Vec::new, |team| team.prefix.clone());
         line.extend(display.map_or_else(
             || {
-                vec![TextSpan::new(
-                    owner.into(),
+                crate::ui::text::format_component_spans(
+                    &Component::text(owner),
                     team.map_or(WHITE, |team| team.color),
-                )]
+                )
             },
             |display| {
                 let mut display = display.to_owned();
-                // Vanilla's team color is the root style over the display
-                // component too; spans were formatted with a white base, so
-                // recolor the base-white ones (an explicitly white-styled
-                // span is indistinguishable and rare).
+                // Team color is only the fallback; explicit white (including §f)
+                // is not an absent component color.
                 if let Some(team) = team {
                     for span in &mut display {
-                        if span.color == WHITE {
+                        if span
+                            .component_style
+                            .as_ref()
+                            .is_none_or(|style| style.color.is_none())
+                        {
                             span.color = team.color;
                         }
                     }
@@ -1825,7 +1827,7 @@ fn facing_name(y_rot_deg: f32) -> &'static str {
 mod scoreboard_display_slot_tests {
     use azalea_protocol::packets::game::c_set_display_objective::DisplaySlot as Slot;
 
-    use super::Scoreboard;
+    use super::{Component, Scoreboard, WHITE};
 
     fn objective(sb: &mut Scoreboard, name: &str) {
         sb.set_objective(name.to_owned(), Some(Vec::new()), None);
@@ -1888,6 +1890,116 @@ mod scoreboard_display_slot_tests {
             true,
             Some(members.into_iter().map(str::to_owned).collect()),
         );
+    }
+
+    #[tokio::test]
+    async fn raw_team_and_score_legacy_colors_reach_hud_without_white_retint() {
+        use azalea_buf::AzBuf;
+        use pomme_protocol::{Direction, PacketTable, Phase, wire};
+        use simdnbt::owned::{NbtCompound, NbtTag};
+
+        use crate::net::NetworkEvent;
+        use crate::net::handler::{handle_raw_game_packet, legacy_text_nbt};
+        let owner = "multi §cR§rword";
+        let mut raw = Vec::new();
+        wire::write_varint(
+            &mut raw,
+            PacketTable::native()
+                .id(Phase::Game, Direction::Clientbound, "set_player_team")
+                .unwrap(),
+        );
+        "team".to_owned().azalea_write(&mut raw).unwrap();
+        raw.push(0);
+        NbtTag::String("§ATitle".into()).write(&mut raw);
+        legacy_text_nbt("§cP§rQ").write(&mut raw);
+        NbtTag::String("S".into()).write(&mut raw);
+        raw.extend_from_slice(&[0, 0, 1, 10, 3]); // visibility, collision, Some(GREEN), options
+        vec![owner.to_owned()].azalea_write(&mut raw).unwrap();
+        let normalized = crate::net::handler::normalize_team_wire_fixture(&raw);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        assert!(handle_raw_game_packet(&normalized, &tx).await.unwrap());
+        let NetworkEvent::ScoreboardTeam {
+            name,
+            display_name,
+            prefix,
+            suffix,
+            color,
+            fill_color,
+            sidebar_slot,
+            nametag_visibility,
+            collision_rule,
+            friendly_fire,
+            see_friendly_invisibles,
+            members,
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("team");
+        };
+        let mut sb = Scoreboard::default();
+        sb.set_team(
+            name,
+            display_name,
+            prefix,
+            suffix,
+            color,
+            fill_color,
+            sidebar_slot,
+            nametag_visibility,
+            collision_rule,
+            friendly_fire,
+            see_friendly_invisibles,
+            members,
+        );
+        let line = sb.line(owner, None);
+        assert_eq!(
+            line.iter().map(|s| s.text.as_str()).collect::<String>(),
+            "PQmulti RwordS"
+        );
+        assert_eq!(line[0].color, super::super::common::rgb(0xff5555));
+        assert_eq!(line[1].color, super::super::common::rgb(0x5555ff));
+        assert!(line[1].bold);
+        assert!(line.iter().any(|s| s.text == "word" && s.color == color));
+
+        // Raw score display with both explicit JSON white and legacy §f white.
+        let mut display = NbtCompound::new();
+        display.insert("text", NbtTag::String("§fW§rF".into()));
+        raw.clear();
+        wire::write_varint(
+            &mut raw,
+            PacketTable::native()
+                .id(Phase::Game, Direction::Clientbound, "set_score")
+                .unwrap(),
+        );
+        owner.to_owned().azalea_write(&mut raw).unwrap();
+        "objective".to_owned().azalea_write(&mut raw).unwrap();
+        wire::write_varint(&mut raw, 5);
+        raw.push(1);
+        NbtTag::Compound(display).write(&mut raw);
+        raw.push(0);
+        assert!(handle_raw_game_packet(&raw, &tx).await.unwrap());
+        let NetworkEvent::ScoreboardScore {
+            display: Some(display),
+            ..
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("score");
+        };
+        let line = sb.line(owner, Some(&display));
+        assert!(line.iter().any(|s| s.text == "W" && s.color == WHITE));
+        assert!(line.iter().any(|s| s.text == "F" && s.color == color));
+        let explicit = crate::ui::text::format_component_spans(
+            &Component::from_value(&serde_json::json!({"text":"white", "color":"white"})).unwrap(),
+            WHITE,
+        );
+        assert!(
+            sb.line(owner, Some(&explicit))
+                .iter()
+                .any(|s| s.text == "white" && s.color == WHITE)
+        );
+        for end in raw.len() - 3..raw.len() {
+            assert!(handle_raw_game_packet(&raw[..end], &tx).await.unwrap());
+            assert!(rx.try_recv().is_err());
+        }
     }
 
     #[test]

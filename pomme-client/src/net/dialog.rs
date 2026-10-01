@@ -3,7 +3,7 @@
 //! either phase before azalea's typed decode, which rejects object
 //! components.
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{SendError, Sender};
 use pomme_protocol::wire::read_varint;
 use pomme_protocol::{Direction, PacketTable, Phase};
 use simdnbt::owned::NbtTag;
@@ -12,6 +12,7 @@ use super::NetworkEvent;
 use super::chat::{
     ensure_end, read_bool, read_component, read_nbt_tag, read_string, read_varint_req,
 };
+use super::connection::send_event;
 use crate::chat_component::Component;
 use crate::ui::server_dialog::{DialogReference, ServerLink};
 
@@ -32,13 +33,17 @@ const KNOWN_LINK_TYPES: [&str; 10] = [
 /// Decodes the dialog packets pomme reads itself; `false` when `raw` is none
 /// of them. A malformed one is consumed with a warning. Play's
 /// `show_dialog`/`clear_dialog` are left to azalea.
-pub fn handle_raw_dialog_packet(phase: Phase, raw: &[u8], event_tx: &Sender<NetworkEvent>) -> bool {
+pub async fn handle_raw_dialog_packet(
+    phase: Phase,
+    raw: &[u8],
+    event_tx: &Sender<NetworkEvent>,
+) -> Result<bool, SendError<NetworkEvent>> {
     let mut pos = 0;
     let Some(id) = read_varint(raw, &mut pos) else {
-        return false;
+        return Ok(false);
     };
     let Some(name) = PacketTable::native().name_of(phase, Direction::Clientbound, id) else {
-        return false;
+        return Ok(false);
     };
     let configuration = phase == Phase::Configuration;
     let event = match name {
@@ -49,15 +54,15 @@ pub fn handle_raw_dialog_packet(phase: Phase, raw: &[u8], event_tx: &Sender<Netw
             parse_inline_dialog(raw, &mut pos).map(|dialog| NetworkEvent::ShowDialog { dialog })
         }
         "clear_dialog" if configuration => Ok(NetworkEvent::ClearDialog),
-        _ => return false,
+        _ => return Ok(false),
     };
     match event.and_then(|event| ensure_end(raw, pos, name).map(|()| event)) {
         Ok(event) => {
-            let _ = event_tx.try_send(event);
+            send_event(event_tx, event).await?;
         }
         Err(error) => tracing::warn!("Skipping malformed {name} packet: {error}"),
     }
-    true
+    Ok(true)
 }
 
 /// `ClientboundServerLinksPacket` (`ServerLinks.UNTRUSTED_LINKS_STREAM_CODEC`),
@@ -104,6 +109,13 @@ mod tests {
     use simdnbt::owned::NbtCompound;
 
     use super::*;
+
+    fn handle_raw_dialog_packet(phase: Phase, raw: &[u8], tx: &Sender<NetworkEvent>) -> bool {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(super::handle_raw_dialog_packet(phase, raw, tx))
+            .unwrap()
+    }
     use crate::chat_component::Content;
 
     fn packet_id(phase: Phase, name: &str) -> u32 {
@@ -151,6 +163,51 @@ mod tests {
         write_varint(&mut raw, 0);
         write_string(&mut raw, "javascript:alert(1)");
         raw
+    }
+
+    #[tokio::test]
+    async fn raw_dialog_waits_on_full_in_both_phases_and_ends_on_receiver_drop() {
+        for phase in [Phase::Configuration, Phase::Game] {
+            let raw = links_packet(phase);
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+            {
+                let route = super::handle_raw_dialog_packet(phase, &raw, &tx);
+                tokio::pin!(route);
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(10), &mut route)
+                        .await
+                        .is_err()
+                );
+                assert!(matches!(
+                    rx.try_recv().unwrap(),
+                    NetworkEvent::LevelChunksLoadStart
+                ));
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_secs(2), route)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                );
+            }
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                NetworkEvent::ServerLinks { .. }
+            ));
+            assert!(rx.is_empty());
+            drop(rx);
+            assert!(
+                super::handle_raw_dialog_packet(phase, &raw, &tx)
+                    .await
+                    .is_err()
+            );
+            // Malformed payload remains a consumed warning, not a delivery failure.
+            assert!(
+                super::handle_raw_dialog_packet(phase, &raw[..raw.len() - 1], &tx)
+                    .await
+                    .unwrap()
+            );
+        }
     }
 
     #[test]

@@ -13,12 +13,13 @@ use simdnbt::owned::{NbtCompound, NbtTag};
 use uuid::Uuid;
 
 use super::NetworkEvent;
+use super::connection::send_event;
 use crate::chat_component::{
     Argument, Component, HoverEvent, Style, nbt_to_value, normalize_identifier,
 };
 use crate::net::chat_security::{LastSeenUpdate, SignedChatBody};
 use crate::ui::chat::{ChatMessageSource, ChatMessageTag};
-use crate::ui::text::format_component_spans;
+use crate::ui::text::{format_chat_component_spans, format_component_spans};
 
 const BAD_CHAT_INDEX: &str = "multiplayer.disconnect.bad_chat_index";
 const INVALID_PACKET: &str = "multiplayer.disconnect.invalid_packet";
@@ -103,6 +104,14 @@ pub enum ChatPacketError {
     Malformed(String),
     /// Vanilla disconnects with this translation key.
     Disconnect(&'static str),
+    /// The application ended the session, not a malformed server packet.
+    ReceiverGone,
+}
+
+impl From<crossbeam_channel::SendError<NetworkEvent>> for ChatPacketError {
+    fn from(_: crossbeam_channel::SendError<NetworkEvent>) -> Self {
+        Self::ReceiverGone
+    }
 }
 
 impl From<String> for ChatPacketError {
@@ -265,7 +274,7 @@ pub fn encode_outbound_custom_click_action(
 /// Returns `None` when this is not a chat packet. Chat packets are always
 /// consumed, malformed ones included, so a bad payload never falls through to
 /// azalea's lossy component decoder.
-pub fn handle_raw_chat_packet(
+pub async fn handle_raw_chat_packet(
     raw: &[u8],
     event_tx: &Sender<NetworkEvent>,
     chat_types: &ChatTypeRegistry,
@@ -276,18 +285,18 @@ pub fn handle_raw_chat_packet(
     let name = PacketTable::native().name_of(Phase::Game, Direction::Clientbound, packet_id)?;
 
     let result = match name {
-        "system_chat" => parse_system_chat(raw, &mut pos, event_tx),
-        "set_action_bar_text" => parse_action_bar(raw, &mut pos, event_tx),
-        "disguised_chat" => parse_disguised_chat(raw, &mut pos, event_tx, chat_types),
-        "player_chat" => parse_player_chat(raw, &mut pos, event_tx, chat_types, inbound),
-        "delete_chat" => parse_delete_chat(raw, &mut pos, event_tx, inbound),
-        "command_suggestions" => parse_command_suggestions(raw, &mut pos, event_tx),
+        "system_chat" => parse_system_chat(raw, &mut pos, event_tx).await,
+        "set_action_bar_text" => parse_action_bar(raw, &mut pos, event_tx).await,
+        "disguised_chat" => parse_disguised_chat(raw, &mut pos, event_tx, chat_types).await,
+        "player_chat" => parse_player_chat(raw, &mut pos, event_tx, chat_types, inbound).await,
+        "delete_chat" => parse_delete_chat(raw, &mut pos, event_tx, inbound).await,
+        "command_suggestions" => parse_command_suggestions(raw, &mut pos, event_tx).await,
         _ => return None,
     };
     Some(result)
 }
 
-fn parse_system_chat(
+async fn parse_system_chat(
     raw: &[u8],
     pos: &mut usize,
     event_tx: &Sender<NetworkEvent>,
@@ -296,7 +305,7 @@ fn parse_system_chat(
     let overlay = read_bool(raw, pos)?;
     ensure_end(raw, *pos, "system_chat")?;
     if overlay {
-        send_action_bar(event_tx, &component);
+        send_action_bar(event_tx, &component).await?;
     } else {
         send_chat(
             event_tx,
@@ -305,23 +314,24 @@ fn parse_system_chat(
                 ChatMessageSource::SystemServer,
                 ChatMessageTag::SystemSinglePlayer,
             ),
-        );
+        )
+        .await?;
     }
     Ok(())
 }
 
-fn parse_action_bar(
+async fn parse_action_bar(
     raw: &[u8],
     pos: &mut usize,
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<(), ChatPacketError> {
     let component = read_component(raw, pos)?;
     ensure_end(raw, *pos, "set_action_bar_text")?;
-    send_action_bar(event_tx, &component);
+    send_action_bar(event_tx, &component).await?;
     Ok(())
 }
 
-fn parse_disguised_chat(
+async fn parse_disguised_chat(
     raw: &[u8],
     pos: &mut usize,
     event_tx: &Sender<NetworkEvent>,
@@ -338,13 +348,14 @@ fn parse_disguised_chat(
             ChatMessageSource::Player,
             ChatMessageTag::System,
         ),
-    );
+    )
+    .await?;
     Ok(())
 }
 
 /// Decodes the whole packet, then runs vanilla `handlePlayerChat`'s index
 /// check before unpacking the last-seen signatures from the cache.
-fn parse_player_chat(
+async fn parse_player_chat(
     raw: &[u8],
     pos: &mut usize,
     event_tx: &Sender<NetworkEvent>,
@@ -452,11 +463,12 @@ fn parse_player_chat(
             source: ChatMessageSource::Player,
             tag: None,
         },
-    );
+    )
+    .await?;
     Ok(())
 }
 
-fn parse_delete_chat(
+async fn parse_delete_chat(
     raw: &[u8],
     pos: &mut usize,
     event_tx: &Sender<NetworkEvent>,
@@ -467,11 +479,11 @@ fn parse_delete_chat(
     let signature = inbound
         .unpack(packed)
         .ok_or(ChatPacketError::Disconnect(INVALID_PACKET))?;
-    let _ = event_tx.try_send(NetworkEvent::DeleteChatMessage { signature });
+    send_event(event_tx, NetworkEvent::DeleteChatMessage { signature }).await?;
     Ok(())
 }
 
-fn parse_command_suggestions(
+async fn parse_command_suggestions(
     raw: &[u8],
     pos: &mut usize,
     event_tx: &Sender<NetworkEvent>,
@@ -491,7 +503,11 @@ fn parse_command_suggestions(
         });
     }
     ensure_end(raw, *pos, "command_suggestions")?;
-    let _ = event_tx.try_send(NetworkEvent::CommandSuggestions { id, start, options });
+    send_event(
+        event_tx,
+        NetworkEvent::CommandSuggestions { id, start, options },
+    )
+    .await?;
     Ok(())
 }
 
@@ -521,31 +537,43 @@ impl<'a> ChatDelivery<'a> {
     }
 }
 
-fn send_chat(event_tx: &Sender<NetworkEvent>, delivery: ChatDelivery<'_>) {
-    let spans = format_component_spans(delivery.component, [1.0; 4]);
+async fn send_chat(
+    event_tx: &Sender<NetworkEvent>,
+    delivery: ChatDelivery<'_>,
+) -> Result<(), ChatPacketError> {
+    let spans = format_chat_component_spans(delivery.component, [1.0; 4]);
     let secure_spans = delivery
         .secure_component
-        .map(|component| format_component_spans(component, [1.0; 4]));
+        .map(|component| format_chat_component_spans(component, [1.0; 4]));
     let missing_profile_spans = delivery
         .missing_profile_component
-        .map(|component| format_component_spans(component, [1.0; 4]));
+        .map(|component| format_chat_component_spans(component, [1.0; 4]));
     let text: String = spans.iter().map(|span| span.text.as_str()).collect();
     tracing::info!("Chat: {text}");
-    let _ = event_tx.try_send(NetworkEvent::ChatMessage {
-        spans,
-        secure_spans,
-        missing_profile_spans,
-        signature: delivery.signature,
-        sender_uuid: delivery.sender_uuid,
-        signed_body: delivery.signed_body,
-        source: delivery.source,
-        tag: delivery.tag,
-    });
+    send_event(
+        event_tx,
+        NetworkEvent::ChatMessage {
+            spans,
+            secure_spans,
+            missing_profile_spans,
+            signature: delivery.signature,
+            sender_uuid: delivery.sender_uuid,
+            signed_body: delivery.signed_body,
+            source: delivery.source,
+            tag: delivery.tag,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
-fn send_action_bar(event_tx: &Sender<NetworkEvent>, component: &Component) {
+async fn send_action_bar(
+    event_tx: &Sender<NetworkEvent>,
+    component: &Component,
+) -> Result<(), ChatPacketError> {
     let spans = format_component_spans(component, [1.0; 4]);
-    let _ = event_tx.try_send(NetworkEvent::ActionBar { spans });
+    send_event(event_tx, NetworkEvent::ActionBar { spans }).await?;
+    Ok(())
 }
 
 fn decorate(content: Component, bound: &BoundChatType) -> Component {
@@ -819,6 +847,17 @@ mod tests {
 
     use super::super::translate::{Translation, joinable};
     use super::*;
+
+    fn handle_raw_chat_packet(
+        raw: &[u8],
+        tx: &Sender<NetworkEvent>,
+        types: &ChatTypeRegistry,
+        inbound: &mut InboundChat,
+    ) -> Option<Result<(), ChatPacketError>> {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(super::handle_raw_chat_packet(raw, tx, types, inbound))
+    }
     use crate::chat_component::ClickEvent;
     use crate::net::chat_security::LastSeenUpdate;
     use crate::ui::text::TextSpan;
@@ -929,6 +968,51 @@ mod tests {
             .find(|s| s.text == text)
             .and_then(|s| s.component_style.as_deref())
             .unwrap_or_else(|| panic!("no styled span {text:?}"))
+    }
+
+    #[tokio::test]
+    async fn raw_chat_waits_on_full_and_distinguishes_closed_receiver_from_parse_error() {
+        let mut raw = Vec::new();
+        write_varint(&mut raw, native_id("system_chat"));
+        write_component(&mut raw, text_component("backpressure"));
+        raw.push(0);
+        let types = ChatTypeRegistry::default();
+        let mut inbound = InboundChat::new(false);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+        {
+            let route = super::handle_raw_chat_packet(&raw, &tx, &types, &mut inbound);
+            tokio::pin!(route);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), &mut route)
+                    .await
+                    .is_err()
+            );
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                NetworkEvent::LevelChunksLoadStart
+            ));
+            tokio::time::timeout(std::time::Duration::from_secs(2), route)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::ChatMessage { .. }
+        ));
+        assert!(rx.is_empty());
+        drop(rx);
+        assert_eq!(
+            super::handle_raw_chat_packet(&raw, &tx, &types, &mut inbound).await,
+            Some(Err(ChatPacketError::ReceiverGone))
+        );
+        raw.pop();
+        assert!(matches!(
+            super::handle_raw_chat_packet(&raw, &tx, &types, &mut inbound).await,
+            Some(Err(ChatPacketError::Malformed(_)))
+        ));
     }
 
     #[test]
