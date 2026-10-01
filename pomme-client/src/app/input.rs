@@ -591,6 +591,7 @@ impl InputState {
 
     pub fn action_just_pressed(&self, action: Action) -> bool {
         self.recent_actions.get(&action).copied().unwrap_or(false)
+            || (action == Action::Use && self.right_click.just_pressed)
     }
 
     /// Drops a pending action so a handler that already consumed the
@@ -1192,6 +1193,18 @@ mod ime_tests {
     use super::*;
     use crate::ui::chat::{ChatMethod, ChatState};
     use crate::ui::text_edit::TextInputEvent;
+
+    #[test]
+    fn short_right_click_keeps_press_until_tick() {
+        let mut input = InputState::released();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+
+        assert!(!input.performing_action(Action::Use));
+        assert!(input.action_just_pressed(Action::Use));
+        input.clear_just_pressed_actions();
+        assert!(!input.action_just_pressed(Action::Use));
+    }
 
     fn frame(input: &mut InputState, chat: &mut ChatState) -> Option<String> {
         chat.handle_key_input(
