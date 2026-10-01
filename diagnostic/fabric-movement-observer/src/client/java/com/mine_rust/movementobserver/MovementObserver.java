@@ -205,6 +205,7 @@ public final class MovementObserver implements ClientModInitializer {
             MoveCapture c = new MoveCapture(); MOVE.set(c);
             c.data.addProperty("event", "collision_move"); c.data.addProperty("mover_type", type.name());
             c.data.add("move_requested_delta", vec(requested)); c.data.add("bbox_before", box(entity.getBoundingBox()));
+            c.data.addProperty("pose_at_move", entity.getPose().name());
             c.data.add("support_before", blockPos(entity.mainSupportingBlockPos.orElse(null)));
             c.data.addProperty("on_ground_before", entity.onGround());
         } catch (RuntimeException ignored) { MOVE.remove(); }
@@ -232,6 +233,8 @@ public final class MovementObserver implements ClientModInitializer {
             c.data.addProperty("on_ground_after", entity.onGround());
             c.data.addProperty("horizontal_collision", entity.horizontalCollision);
             c.data.addProperty("vertical_collision", entity.verticalCollision);
+            // The vanilla move result has now updated onGround; observe that result rather than infer it from a later snapshot.
+            c.data.addProperty("ground_decision", entity.onGround());
             c.data.addProperty("vertical_collision_below", entity.verticalCollisionBelow);
             mergeTravel(c.data); offer("local", "collision_move", c.data);
         } catch (RuntimeException ignored) { /* read-only diagnostic */ }
@@ -245,7 +248,7 @@ public final class MovementObserver implements ClientModInitializer {
         if (source.has("on_ground_at_land_start")) TICK_TRAVEL.add("on_ground_at_land_start", source.get("on_ground_at_land_start").deepCopy());
         if (source.has("jump_power_f32")) TICK_TRAVEL.add("jump_power_f32", source.get("jump_power_f32").deepCopy());
         if (source.has("used_block_jump_factor_f32")) TICK_TRAVEL.add("used_block_jump_factor_f32", source.get("used_block_jump_factor_f32").deepCopy());
-        for (String key : List.of("used_step_height", "used_block_speed_factor_f32", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped")) {
+        for (String key : List.of("used_step_height", "used_block_speed_factor_f32", "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped", "ground_decision")) {
             if (!source.has(key)) continue;
             JsonElement value = source.get(key);
             if (value != null && !value.isJsonNull()) {
@@ -263,12 +266,33 @@ public final class MovementObserver implements ClientModInitializer {
         if (value == null || value.isJsonNull()) return null;
         JsonObject b = value.getAsJsonObject(); JsonArray a = new JsonArray(); a.add(rustVec(b.get("min"))); a.add(rustVec(b.get("max"))); return a;
     }
+    private static void annotateNullReasons(JsonObject travel) {
+        JsonObject reasons = new JsonObject();
+        for (String key : TRAVEL_OBSERVATION_KEYS) {
+            JsonElement value = travel.get(key);
+            if (value == null || value.isJsonNull()) {
+                String reason = switch (key) {
+                    case "entity_shapes" -> "actual resolver collider inputs are not exposed by the observer";
+                    case "context" -> "collision resolver context is not captured";
+                    case "frame_nanos" -> "runTick frame hook is not implemented";
+                    case "ground_decision" -> "Entity.move result hook was not observed in this tick";
+                    default -> "actual vanilla hook was not observed in this tick or branch";
+                };
+                reasons.addProperty(key, reason);
+            }
+        }
+        travel.add("unavailable_reasons", reasons);
+    }
+    private static final List<String> TRAVEL_OBSERVATION_KEYS = List.of("friction_source_pos", "used_friction_f32", "used_ground_drag_f32", "on_ground_at_land_start", "jump_power_f32", "used_block_jump_factor_f32", "used_block_speed_factor_f32", "used_step_height", "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped", "ground_decision", "entity_shapes", "entity_shapes_truncated", "entity_shapes_omitted", "entity_shapes_max", "context", "frame_nanos");
     private static JsonObject emptyTravel() {
         JsonObject o = new JsonObject();
         for (String key : List.of("friction_source_pos", "used_friction_f32", "used_ground_drag_f32", "on_ground_at_land_start", "jump_power_f32", "used_block_jump_factor_f32", "used_block_speed_factor_f32", "used_step_height", "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped", "ground_decision", "entity_shapes", "entity_shapes_truncated", "entity_shapes_omitted", "context", "frame_nanos")) o.add(key, null);
+        o.addProperty("entity_shapes_max", 8);
+        o.addProperty("entity_shapes_semantics", "null: actual collision resolver collider inputs not captured by this observer");
+        o.addProperty("ground_decision_semantics", "captured entity.onGround immediately after Entity.move returns; represents vanilla-updated result, not an independently inferred decision");
         o.addProperty("semantics", "values captured at actual vanilla hook call sites; null means not observed or unsupported, never snapshot-requeried");
-        o.addProperty("available_fields", "used_friction_f32,friction_source_pos,used_ground_drag_f32,on_ground_at_land_start,jump_power_f32,used_block_jump_factor_f32,used_block_speed_factor_f32,used_step_height,bbox_before,bbox_after,support_before,support_after,requested_delta,clipped_delta,original_requested_y_negative,final_y_clipped");
-        o.addProperty("unsupported_fields", "water/lava/fall-flying, effective gravity, pose-at-move, resolver/block/entity shapes, ground decision, frame timing");
+        o.addProperty("available_fields", "used_friction_f32,friction_source_pos,used_ground_drag_f32,on_ground_at_land_start,jump_power_f32,used_block_jump_factor_f32,used_block_speed_factor_f32,used_step_height,pose_at_move,bbox_before,bbox_after,support_before,support_after,requested_delta,clipped_delta,original_requested_y_negative,final_y_clipped,ground_decision");
+        o.addProperty("unsupported_fields", "water/lava/fall-flying actual travel args, actual gravity, resolver/block/entity shapes, frame timing, correction shape snapshot");
         return o;
     }
     public static void tick(LocalPlayer p, String stage) {
@@ -291,7 +315,11 @@ public final class MovementObserver implements ClientModInitializer {
         d.addProperty("step_height", p.maxUpStep());
         d.addProperty("food_level", p.getFoodData().getFoodLevel());
         d.addProperty("attributes_semantics", "effective values at snapshot; not a per-travel used-value capture");
-        if (stage.equals("after_tick")) d.add("travel_observation", TICK_TRAVEL.deepCopy());
+        if (stage.equals("after_tick")) {
+            JsonObject travel = TICK_TRAVEL.deepCopy();
+            annotateNullReasons(travel);
+            d.add("travel_observation", travel);
+        }
         offer("local", stage, d);
     }
     private static JsonObject vec(Vec3 v) { JsonObject a = new JsonObject(); a.addProperty("x",v.x); a.addProperty("y",v.y); a.addProperty("z",v.z); return a; }

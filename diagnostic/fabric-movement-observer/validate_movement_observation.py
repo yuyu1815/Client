@@ -5,6 +5,14 @@ import sys
 from pathlib import Path
 
 FORBIDDEN = {"chat", "sign_text", "raw_nbt", "raw_bytes", "url", "token", "auth"}
+TRAVEL_KEYS = {
+    "used_friction_f32", "friction_source_pos", "used_ground_drag_f32", "on_ground_at_land_start",
+    "used_block_speed_factor_f32", "used_block_jump_factor_f32", "jump_power_f32", "used_step_height",
+    "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after",
+    "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped",
+    "ground_decision", "entity_shapes", "entity_shapes_max", "entity_shapes_truncated",
+    "entity_shapes_omitted", "context",
+}
 
 def validate(text: str) -> tuple[int, dict]:
     rows = [json.loads(line) for line in text.splitlines() if line.strip()]
@@ -19,6 +27,10 @@ def validate(text: str) -> tuple[int, dict]:
         assert row.get("direction") in {"local", "outbound", "inbound"}
         assert isinstance(row.get("stage"), str) and isinstance(row.get("data"), dict)
         data = row["data"]
+        if row["stage"] == "after_tick" and data.get("event") == "movement_tick":
+            travel = data.get("travel_observation")
+            assert isinstance(travel, dict), "after_tick must contain travel_observation"
+            assert TRAVEL_KEYS <= travel.keys(), f"travel_observation missing keys: {TRAVEL_KEYS - travel.keys()}"
         if "packet" in data:
             assert isinstance(data["packet"], str) and isinstance(data.get("fields"), dict), "packet fields must be explicit typed JSON"
             assert "native_id" in data, "numeric native ID must be explicit (null when unavailable)"
@@ -49,17 +61,18 @@ def self_test():
     rows = [
         {"type":"header", "schema":1, "client_kind":"fabric", "wire_protocol":776},
         {"seq":1,"offset_us":5,"direction":"local","stage":"before_tick","data":{"event":"movement_tick"}},
+        {"seq":2,"offset_us":5,"direction":"local","stage":"after_tick","data":{"event":"movement_tick","travel_observation":{key:None for key in TRAVEL_KEYS}}},
         {"seq":3,"offset_us":5,"direction":"outbound","stage":"transport_write_attempt","data":{"packet":"move_player_rot","native_id":None,"fields":{"position":None,"yaw_pitch":[90.0,10.0],"on_ground":True,"horizontal_collision":False}}},
         {"seq":4,"offset_us":5,"direction":"inbound","stage":"apply_before","data":{"packet":"block_ack","native_id":None,"fields":{"sequence":17},"applied_state":{"prediction_state":None}}},
         {"seq":5,"offset_us":5,"direction":"outbound","stage":"transport_write_failure","data":{"packet":"use_item","native_id":None,"fields":{"hand":0,"sequence":2,"yaw_pitch":[0.0,0.0]},"error_class":"java.io.IOException"}},
-        {"type":"footer","written":4,"dropped":1,"oversize_omitted":0,"last_seq":5,"complete":False},
+        {"type":"footer","written":5,"dropped":1,"oversize_omitted":0,"last_seq":5,"complete":False},
     ]
-    assert validate("\n".join(map(json.dumps, rows)))[0] == 4
+    assert validate("\n".join(map(json.dumps, rows)))[0] == 5
     bad = json.loads(json.dumps(rows)); bad[1]["data"]["raw_bytes"] = "no"
     try: validate("\n".join(map(json.dumps, bad)))
     except AssertionError: pass
     else: raise AssertionError("privacy gate accepted raw_bytes")
-    incomplete = json.loads(json.dumps(rows)); incomplete[2]["data"] = {"packet":"Pos","fields":None,"fields_capture":"class only"}
+    incomplete = json.loads(json.dumps(rows)); incomplete[3]["data"] = {"packet":"Pos","fields":None,"fields_capture":"class only"}
     try: validate("\n".join(map(json.dumps, incomplete)))
     except AssertionError: pass
     else: raise AssertionError("validator accepted class-name-only payload")
