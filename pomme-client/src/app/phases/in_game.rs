@@ -57,6 +57,7 @@ pub enum ContainerScreen {
     Beacon,
     Merchant,
     Horse { columns: u8, entity_id: i32 },
+    Special(crate::ui::special_container::SpecialMenu),
 }
 
 impl ContainerScreen {
@@ -73,6 +74,22 @@ impl ContainerScreen {
             Self::Beacon => ContainerKind::Beacon,
             Self::Merchant => ContainerKind::Merchant,
             Self::Horse { columns, .. } => ContainerKind::Horse { columns },
+            Self::Special(menu) => match menu {
+                crate::ui::special_container::SpecialMenu::Dispenser => ContainerKind::Dispenser,
+                crate::ui::special_container::SpecialMenu::BrewingStand => {
+                    ContainerKind::BrewingStand
+                }
+                crate::ui::special_container::SpecialMenu::Cartography => {
+                    ContainerKind::Cartography
+                }
+                crate::ui::special_container::SpecialMenu::Grindstone => ContainerKind::Grindstone,
+                crate::ui::special_container::SpecialMenu::Smithing => ContainerKind::Smithing,
+                crate::ui::special_container::SpecialMenu::Crafter => ContainerKind::Crafter,
+                crate::ui::special_container::SpecialMenu::Stonecutter => {
+                    ContainerKind::Stonecutter
+                }
+                crate::ui::special_container::SpecialMenu::Loom => ContainerKind::Loom,
+            },
         }
     }
 }
@@ -2957,6 +2974,7 @@ pub fn update_game(
     core.audio.set_subtitles_enabled(core.menu.show_subtitles);
 
     gfx.renderer.set_vsync(core.menu.vsync);
+    core.apply_pending_pack_changes(&mut gfx.renderer);
     game.chat.set_options(core.menu.chat_options);
 
     // Vanilla pauseIfInactive: losing OS focus for more than half a second
@@ -4418,6 +4436,22 @@ pub fn update_game(
                     beacon_effect_selection = result.effects;
                     result.container
                 }
+                ContainerScreen::Special(menu) => crate::ui::special_container::build(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    menu,
+                    &container.slots,
+                    &container.data,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                    game.advanced_item_tooltips,
+                ),
                 ContainerScreen::Enchantment => {
                     let result = crate::ui::enchantment::build_enchantment(
                         &mut elements,

@@ -1956,6 +1956,27 @@ impl AppCore {
         self.menu.reload_assets = false;
     }
 
+    /// Apply the resource-pack screen's deferred actions in every app phase.
+    pub(crate) fn apply_pending_pack_changes(&mut self, renderer: &mut Renderer) {
+        if self.menu.rescan_packs {
+            self.menu.rescan_packs = false;
+            self.resource_packs.scan_local_packs();
+            self.menu.available_packs = self.resource_packs.available_local_packs().to_vec();
+            self.menu.active_packs = self.resource_packs.active_pack_info();
+        }
+        if let Some((name, enable)) = self.menu.pack_toggle.take() {
+            if enable {
+                self.resource_packs.enable_local_pack(&name);
+            } else {
+                self.resource_packs.disable_local_pack(&name);
+            }
+            self.menu.available_packs = self.resource_packs.available_local_packs().to_vec();
+        }
+        if self.menu.reload_assets {
+            self.reload_pack_assets(renderer);
+        }
+    }
+
     pub fn drain_network_events(
         &mut self,
         connection: &ConnectionHandle,
@@ -4789,6 +4810,31 @@ fn container_screen_for_menu(
         MenuKind::Anvil => Some(ContainerScreen::Anvil),
         MenuKind::Enchantment => Some(ContainerScreen::Enchantment),
         MenuKind::Beacon => Some(ContainerScreen::Beacon),
+        // Vanilla shares the generic_3x3 menu type between dispenser and dropper.
+        MenuKind::Generic3x3 => Some(ContainerScreen::Special(
+            crate::ui::special_container::SpecialMenu::Dispenser,
+        )),
+        MenuKind::BrewingStand => Some(ContainerScreen::Special(
+            crate::ui::special_container::SpecialMenu::BrewingStand,
+        )),
+        MenuKind::CartographyTable => Some(ContainerScreen::Special(
+            crate::ui::special_container::SpecialMenu::Cartography,
+        )),
+        MenuKind::Grindstone => Some(ContainerScreen::Special(
+            crate::ui::special_container::SpecialMenu::Grindstone,
+        )),
+        MenuKind::Smithing => Some(ContainerScreen::Special(
+            crate::ui::special_container::SpecialMenu::Smithing,
+        )),
+        MenuKind::Crafter3x3 => Some(ContainerScreen::Special(
+            crate::ui::special_container::SpecialMenu::Crafter,
+        )),
+        MenuKind::Stonecutter => Some(ContainerScreen::Special(
+            crate::ui::special_container::SpecialMenu::Stonecutter,
+        )),
+        MenuKind::Loom => Some(ContainerScreen::Special(
+            crate::ui::special_container::SpecialMenu::Loom,
+        )),
         _ => None,
     }
 }
@@ -5068,7 +5114,24 @@ mod tests {
             super::container_screen_for_menu(MenuKind::Generic9x3)
                 == Some(ContainerScreen::Chest { rows: 3 })
         );
-        assert!(super::container_screen_for_menu(MenuKind::BrewingStand).is_none());
+        use crate::ui::special_container::SpecialMenu as M;
+        for (kind, special, slots, inv, result) in [
+            (MenuKind::Generic3x3, M::Dispenser, 45, 9, None),
+            (MenuKind::BrewingStand, M::BrewingStand, 41, 5, None),
+            (MenuKind::CartographyTable, M::Cartography, 39, 3, Some(2)),
+            (MenuKind::Grindstone, M::Grindstone, 39, 3, Some(2)),
+            (MenuKind::Smithing, M::Smithing, 40, 4, Some(3)),
+            (MenuKind::Crafter3x3, M::Crafter, 45, 9, None),
+            (MenuKind::Stonecutter, M::Stonecutter, 38, 2, Some(1)),
+            (MenuKind::Loom, M::Loom, 40, 4, Some(3)),
+        ] {
+            let screen = super::container_screen_for_menu(kind).unwrap();
+            assert!(screen == ContainerScreen::Special(special));
+            let click = screen.click_kind();
+            assert_eq!(click.slot_count(), slots);
+            assert_eq!(click.inv_start(), inv);
+            assert_eq!(special.result_slot(), result);
+        }
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub mod recipe_book;
 pub mod server_dialog;
 pub mod server_list;
 pub mod sign;
+pub mod special_container;
 pub mod spectator_menu;
 pub mod subtitles;
 pub mod text;

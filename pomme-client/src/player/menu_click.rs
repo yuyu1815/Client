@@ -28,6 +28,14 @@ pub enum ContainerKind {
     Beacon,
     Merchant,
     Horse { columns: u8 },
+    Dispenser,
+    BrewingStand,
+    Cartography,
+    Grindstone,
+    Smithing,
+    Crafter,
+    Stonecutter,
+    Loom,
 }
 
 impl ContainerKind {
@@ -42,6 +50,11 @@ impl ContainerKind {
             Self::Beacon => 37,
             Self::Merchant => 39,
             Self::Horse { columns } => 38 + 3 * columns as usize,
+            Self::Dispenser | Self::Crafter => 45,
+            Self::BrewingStand => 41,
+            Self::Cartography | Self::Grindstone => 39,
+            Self::Smithing | Self::Loom => 40,
+            Self::Stonecutter => 38,
         }
     }
 
@@ -58,6 +71,11 @@ impl ContainerKind {
             Self::Beacon => 1,
             Self::Merchant => 3,
             Self::Horse { columns } => 2 + 3 * columns as usize,
+            Self::Dispenser | Self::Crafter => 9,
+            Self::BrewingStand => 5,
+            Self::Cartography | Self::Grindstone => 3,
+            Self::Smithing | Self::Loom => 4,
+            Self::Stonecutter => 2,
         }
     }
 
@@ -73,7 +91,15 @@ impl ContainerKind {
             | Self::Hopper
             | Self::Enchantment
             | Self::Beacon
-            | Self::Horse { .. } => None,
+            | Self::Horse { .. }
+            | Self::Dispenser
+            | Self::BrewingStand
+            | Self::Cartography
+            | Self::Grindstone
+            | Self::Smithing
+            | Self::Crafter
+            | Self::Stonecutter
+            | Self::Loom => None,
         }
     }
 
@@ -158,7 +184,16 @@ impl ContainerKind {
             Self::Beacon => return None,
             // Azalea has no native merchant or mount menu model. Never predict
             // these by pretending they are a chest or another menu.
-            Self::Merchant | Self::Horse { .. } => return None,
+            Self::Merchant
+            | Self::Horse { .. }
+            | Self::Dispenser
+            | Self::BrewingStand
+            | Self::Cartography
+            | Self::Grindstone
+            | Self::Smithing
+            | Self::Crafter
+            | Self::Stonecutter
+            | Self::Loom => return None,
         };
         for (i, item) in slots.iter().enumerate() {
             if let Some(s) = menu.slot_mut(i) {
@@ -211,7 +246,17 @@ pub fn apply_click(
 ) -> Vec<(u16, ItemStack)> {
     if matches!(
         kind,
-        ContainerKind::Beacon | ContainerKind::Merchant | ContainerKind::Horse { .. }
+        ContainerKind::Beacon
+            | ContainerKind::Merchant
+            | ContainerKind::Horse { .. }
+            | ContainerKind::Dispenser
+            | ContainerKind::BrewingStand
+            | ContainerKind::Cartography
+            | ContainerKind::Grindstone
+            | ContainerKind::Smithing
+            | ContainerKind::Crafter
+            | ContainerKind::Stonecutter
+            | ContainerKind::Loom
     ) {
         return Vec::new();
     }
@@ -256,7 +301,17 @@ pub fn drag_distribution(
 ) -> (Vec<(u16, ItemStack)>, ItemStack) {
     if matches!(
         container,
-        ContainerKind::Beacon | ContainerKind::Merchant | ContainerKind::Horse { .. }
+        ContainerKind::Beacon
+            | ContainerKind::Merchant
+            | ContainerKind::Horse { .. }
+            | ContainerKind::Dispenser
+            | ContainerKind::BrewingStand
+            | ContainerKind::Cartography
+            | ContainerKind::Grindstone
+            | ContainerKind::Smithing
+            | ContainerKind::Crafter
+            | ContainerKind::Stonecutter
+            | ContainerKind::Loom
     ) {
         return (Vec::new(), cursor.clone());
     }
@@ -304,6 +359,17 @@ pub fn drag_slot_eligible(
         ContainerKind::Merchant => slot_index != 2 && slot_index < container.slot_count(),
         ContainerKind::Beacon => false,
         ContainerKind::Horse { .. } => slot_index >= 2 && slot_index < container.slot_count(),
+        ContainerKind::Dispenser
+        | ContainerKind::BrewingStand
+        | ContainerKind::Cartography
+        | ContainerKind::Grindstone
+        | ContainerKind::Smithing
+        | ContainerKind::Crafter
+        | ContainerKind::Stonecutter
+        | ContainerKind::Loom => {
+            slot_index < container.slot_count()
+                && Some(slot_index) != container.crafting_result_slot()
+        }
         _ => true,
     };
     if !drag_allowed {
