@@ -681,8 +681,13 @@ impl MainMenu {
         } else {
             format!("Sensitivity: {}%", (self.sensitivity * 200.0) as u32)
         };
+        let invert = if self.invert_mouse {
+            "Invert Mouse: ON"
+        } else {
+            "Invert Mouse: OFF"
+        };
         let rows: Vec<OptRow> = vec![
-            OptRow::Pair(&sensitivity_label, "Invert Mouse: OFF"),
+            OptRow::Pair(&sensitivity_label, invert),
             OptRow::Pair("Auto-Jump: ON", "Operator Items Tab: OFF"),
             OptRow::Pair("Key Binds...", "Mouse Settings..."),
             OptRow::Pair("Sneak: Toggle", "Sprint: Hold"),
@@ -690,7 +695,6 @@ impl MainMenu {
         let nav: &[(&str, Screen)] = &[("Key Binds...", Screen::OptionsKeybinds)];
         let sliders: &[(&str, f32)] = &[("Sensitivity:", self.sensitivity)];
         let disabled = &[
-            "Invert Mouse:",
             "Auto-Jump:",
             "Operator Items Tab:",
             "Key Binds...",
@@ -1396,6 +1400,10 @@ impl MainMenu {
                     }
                     if label.starts_with("Attack Indicator:") {
                         self.attack_indicator = self.attack_indicator.cycle();
+                        self.save_settings();
+                    }
+                    if label.starts_with("Invert Mouse:") {
+                        self.invert_mouse = !self.invert_mouse;
                         self.save_settings();
                     }
                     if label.starts_with("View Bobbing:") {

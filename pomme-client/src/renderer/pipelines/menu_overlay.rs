@@ -2668,6 +2668,7 @@ pub enum SpriteId {
     FriendsReject,
     FriendsCancel,
     NetherPortal,
+    SpyglassScope,
     SpectatorClose,
     SpectatorScrollLeft,
     SpectatorScrollRight,
@@ -4177,6 +4178,13 @@ fn build_sprite_atlas(
             0,
             16,
             16,
+        ),
+        (
+            SpriteId::SpyglassScope,
+            "minecraft/textures/misc/spyglass_scope.png",
+            0,
+            256,
+            256,
         ),
     ] {
         let path = resolve_asset_path(jar_assets_dir, asset_index, path);

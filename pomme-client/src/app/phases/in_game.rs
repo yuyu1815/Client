@@ -3030,8 +3030,12 @@ pub fn update_game(
     game.item_entity_store.advance_age(simulation_ticks);
 
     if game.input_live() && game.chunk_load_bench.is_none() {
-        gfx.renderer
-            .update_camera(&mut core.input, dt, core.menu.sensitivity);
+        gfx.renderer.update_camera(
+            &mut core.input,
+            dt,
+            core.menu.sensitivity,
+            core.menu.invert_mouse,
+        );
     }
 
     // Menus never pause the simulation; tick_physics substitutes neutral input.
@@ -3496,6 +3500,7 @@ pub fn update_game(
             sh,
             core.menu.vignette.then_some(game.vignette_brightness),
             gfx.renderer.is_first_person() && head_is_carved_pumpkin(&game.player),
+            gfx.renderer.is_first_person() && game.interaction.is_using_spyglass(),
             portal_intensity,
         );
         let is_survival = crate::player::is_survival(game.player.game_mode);

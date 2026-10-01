@@ -43,6 +43,10 @@ fn mouse_sensitivity_multiplier(sensitivity: f32) -> f32 {
     scaled * scaled * scaled * 8.0 * 0.15
 }
 
+fn mouse_pitch_delta(dy: f32, sensitivity: f32, invert: bool) -> f32 {
+    dy * sensitivity * if invert { -1.0 } else { 1.0 }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CameraMode {
     FirstPerson,
@@ -228,7 +232,13 @@ impl Camera {
             * Mat4::from_rotation_x(pitch_deg.to_radians())
     }
 
-    pub fn update_look(&mut self, input: &mut InputState, dt: f32, sensitivity: f32) {
+    pub fn update_look(
+        &mut self,
+        input: &mut InputState,
+        dt: f32,
+        sensitivity: f32,
+        invert_mouse: bool,
+    ) {
         if let Some(look_vec) = input.get_gamepad_right_analog() {
             let step = CONTROLLER_SENSITIVITY * dt;
             let y_rot_deg =
@@ -243,7 +253,8 @@ impl Camera {
             let y_rot_deg = ((self.look_dir.y_rot_deg() + dx as f32 * mouse_sensitivity) + 180.0)
                 .rem_euclid(360.0)
                 - 180.0;
-            let x_rot_deg = self.look_dir.x_rot_deg() + dy as f32 * mouse_sensitivity;
+            let x_rot_deg = self.look_dir.x_rot_deg()
+                + mouse_pitch_delta(dy as f32, mouse_sensitivity, invert_mouse);
             self.look_dir = LookDirection::new(y_rot_deg, x_rot_deg);
         }
     }
@@ -600,6 +611,13 @@ impl CameraUniform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invert_mouse_changes_mouse_pitch_only() {
+        let sensitivity = 0.75;
+        assert_eq!(mouse_pitch_delta(2.0, sensitivity, false), 1.5);
+        assert_eq!(mouse_pitch_delta(2.0, sensitivity, true), -1.5);
+    }
 
     fn assert_mat4_close(actual: Mat4, expected: Mat4, context: &str) {
         let actual = actual.to_cols_array();

@@ -4242,7 +4242,11 @@ impl AppCore {
         // Vanilla ticks the camera FOV interpolation even while dead.
         renderer.set_base_fov(self.menu.fov as f32);
         let fov_effect_scale = self.menu.fov_effect();
-        renderer.update_fov_mod(compute_fov_modifier(&game.player, fov_effect_scale));
+        renderer.update_fov_mod(compute_fov_modifier(
+            &game.player,
+            fov_effect_scale,
+            game.interaction.is_using_spyglass(),
+        ));
         // TODO: lava camera fluid (no eyes_in_lava).
         renderer.set_fluid_fov_factor(if game.player.eyes_in_water {
             1.0_f32.lerp(0.857_142_87, fov_effect_scale)
@@ -4925,7 +4929,7 @@ pub(crate) fn chunk_lod(
 
 /// Vanilla `AbstractClientPlayer.getFieldOfViewModifier`. `effect_scale` is the
 /// `fovEffectScale` accessibility value (1.0 = full effect).
-fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
+fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32, spyglass: bool) -> f32 {
     let mut modifier = 1.0;
     if player.flying {
         modifier *= 1.1;
@@ -4934,7 +4938,9 @@ fn compute_fov_modifier(player: &LocalPlayer, effect_scale: f32) -> f32 {
     // client-side speed model that reduces to sprint ? 1.3 : 1.0.
     // TODO: drive from the MOVEMENT_SPEED attribute so Speed/Slowness potions
     // and gear modifiers affect FOV too.
-    // TODO: bow-draw narrowing and spyglass scoping (need item-use-duration state).
+    if spyglass {
+        modifier *= 0.1;
+    }
     let speed_factor: f32 = if player.sprinting { 1.3 } else { 1.0 };
     modifier *= (speed_factor + 1.0) / 2.0;
     1.0_f32.lerp(modifier, effect_scale)

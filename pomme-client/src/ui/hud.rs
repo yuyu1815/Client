@@ -546,14 +546,15 @@ pub fn build_underwater_overlay(
 
 /// Vanilla `Hud.extractCameraOverlays`: vignette, equippable camera overlay
 /// (pumpkin), and nether-portal overlay, drawn under the rest of the HUD.
-/// TODO: powder snow, spyglass, nausea overlays; the portal/nausea projection
-/// spin warp lives in GameRenderer and is also unimplemented.
+/// TODO: powder snow, nausea overlays; the portal/nausea projection spin warp
+/// lives in GameRenderer and is also unimplemented.
 pub fn build_camera_overlays(
     elements: &mut Vec<MenuElement>,
     screen_w: f32,
     screen_h: f32,
     vignette_brightness: Option<f32>,
     pumpkin: bool,
+    spyglass: bool,
     portal_intensity: f32,
 ) {
     if let Some(brightness) = vignette_brightness {
@@ -569,6 +570,16 @@ pub fn build_camera_overlays(
         elements.push(MenuElement::PumpkinOverlay {
             w: screen_w,
             h: screen_h,
+        });
+    }
+    if spyglass {
+        elements.push(MenuElement::Image {
+            x: 0.0,
+            y: 0.0,
+            w: screen_w,
+            h: screen_h,
+            sprite: SpriteId::SpyglassScope,
+            tint: [1.0, 1.0, 1.0, 1.0],
         });
     }
     if portal_intensity > 0.0 {

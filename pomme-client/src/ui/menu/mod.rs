@@ -43,6 +43,8 @@ struct Settings {
     damage_tilt_strength: f32,
     #[serde(default = "default_sensitivity")]
     sensitivity: f32,
+    #[serde(default)]
+    invert_mouse: bool,
     #[serde(default = "default_true")]
     view_bobbing: bool,
     #[serde(default)]
@@ -194,6 +196,7 @@ impl Default for Settings {
             fov_effect_scale: 1.0,
             damage_tilt_strength: 1.0,
             sensitivity: 0.5,
+            invert_mouse: false,
             view_bobbing: true,
             show_subtitles: false,
             show_autosave_indicator: true,
@@ -627,6 +630,7 @@ pub struct MainMenu {
     pub fov_effect_scale: f32,
     pub damage_tilt_strength: f32,
     pub sensitivity: f32,
+    pub invert_mouse: bool,
     pub view_bobbing: bool,
     pub show_subtitles: bool,
     pub show_autosave_indicator: bool,
@@ -766,6 +770,7 @@ impl MainMenu {
             // Cubed by the look curve, so an out-of-range value reaches
             // infinity and leaves the look direction NaN for good.
             sensitivity: unit_range(settings.sensitivity),
+            invert_mouse: settings.invert_mouse,
             view_bobbing: settings.view_bobbing,
             show_subtitles: settings.show_subtitles,
             show_autosave_indicator: settings.show_autosave_indicator,
@@ -892,6 +897,7 @@ impl MainMenu {
                 fov_effect_scale: self.fov_effect_scale,
                 damage_tilt_strength: self.damage_tilt_strength,
                 sensitivity: self.sensitivity,
+                invert_mouse: self.invert_mouse,
                 view_bobbing: self.view_bobbing,
                 show_subtitles: self.show_subtitles,
                 show_autosave_indicator: self.show_autosave_indicator,
@@ -1295,6 +1301,24 @@ impl MainMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invert_mouse_settings_round_trip_and_old_default() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("invert_mouse");
+        assert!(
+            !serde_json::from_value::<Settings>(legacy)
+                .unwrap()
+                .invert_mouse
+        );
+        let mut settings = Settings::default();
+        settings.invert_mouse = true;
+        assert!(
+            serde_json::from_str::<Settings>(&serde_json::to_string(&settings).unwrap())
+                .unwrap()
+                .invert_mouse
+        );
+    }
 
     #[test]
     fn entity_distance_settings_survive_save_and_legacy_load() {
