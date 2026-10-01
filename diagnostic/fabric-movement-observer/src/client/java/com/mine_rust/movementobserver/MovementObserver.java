@@ -53,7 +53,7 @@ public final class MovementObserver implements ClientModInitializer {
     @Override public void onInitializeClient() {
         client = Minecraft.getInstance();
         if (Boolean.getBoolean("movementobserver.classloadSmoke")) {
-            for (String name : List.of("net.minecraft.client.multiplayer.ClientPacketListener", "net.minecraft.world.entity.Entity", "net.minecraft.world.entity.LivingEntity", "net.minecraft.client.player.LocalPlayer", "net.minecraft.network.Connection")) {
+            for (String name : List.of("net.minecraft.client.multiplayer.ClientPacketListener", "net.minecraft.world.entity.Entity", "net.minecraft.world.entity.LivingEntity", "net.minecraft.client.player.LocalPlayer", "net.minecraft.network.Connection", "net.minecraft.client.Minecraft")) {
                 try { Class.forName(name, false, Minecraft.class.getClassLoader()); System.out.println("[movementobserver] classloadSmoke PASS " + name); }
                 catch (ClassNotFoundException e) { throw new IllegalStateException("classloadSmoke FAILED " + name, e); }
             }
@@ -82,6 +82,8 @@ public final class MovementObserver implements ClientModInitializer {
     }
     private static synchronized void stop(String reason) { if (ACTIVE.compareAndSet(true, false)) stopReason = reason; }
 
+    public static void frameStart() { if (ACTIVE.get()) { frameId++; frameStartNanos=System.nanoTime(); framePlayerTicks=0; } }
+    public static void frameEnd(Minecraft mc) { if (!ACTIVE.get()) return; long now=System.nanoTime(); JsonObject d=new JsonObject(); d.addProperty("event","frame_observation"); d.addProperty("frame_id",frameId); d.addProperty("frame_nanos",Math.max(0L,now-frameStartNanos)); d.addProperty("frame_elapsed_sec",Math.max(0L,now-frameStartNanos)/1_000_000_000.0); d.addProperty("frame_player_tick_count",framePlayerTicks); try { d.addProperty("native_partial_ticks_f32",(double)mc.getDeltaTracker().getGameTimeDeltaPartialTick(false)); } catch(RuntimeException ignored) { d.add("native_partial_ticks_f32",null); } d.add("rust_accumulator",null); d.addProperty("rust_accumulator_reason","Minecraft DeltaTracker exposes partial ticks but not Rust simulation accumulator state"); offer("local","frame_observation",d); }
     public static boolean isRecordingFast() { return ACTIVE.get(); }
     public static void packet(Packet<?> p, String direction, String stage, String errorClass) {
         if (!isRecordingFast()) return;
@@ -144,7 +146,10 @@ public final class MovementObserver implements ClientModInitializer {
     private static final ThreadLocal<MoveCapture> MOVE = new ThreadLocal<>();
     private static final ThreadLocal<AirCapture> AIR = new ThreadLocal<>();
     private static final ThreadLocal<JumpCapture> JUMP = new ThreadLocal<>();
+    private static final ThreadLocal<JsonObject> PHYSICS = new ThreadLocal<>();
     private static JsonObject TICK_TRAVEL = new JsonObject();
+    private static long frameId, frameStartNanos;
+    private static int framePlayerTicks;
     private static final class JumpCapture {
         final JsonObject data = new JsonObject();
         boolean powerSeen, factorSeen;
@@ -176,9 +181,19 @@ public final class MovementObserver implements ClientModInitializer {
         if (!c.factorSeen) { c.data.add("used_block_jump_factor_f32", null); c.data.addProperty("block_jump_factor_reason", "call not observed in this jump branch"); }
         c.data.add("velocity_after", vec(entity.getDeltaMovement())); mergeTravel(c.data); offer("local", "jump_observation", c.data);
     }
+    public static void beginPhysics(net.minecraft.world.entity.LivingEntity entity, String branch) {
+        if (!ACTIVE.get() || client == null || entity != client.player) return;
+        JsonObject o = new JsonObject(); o.addProperty("branch", branch); PHYSICS.set(o);
+    }
+    public static void physicsSpeed(net.minecraft.world.entity.LivingEntity entity, float speed) { JsonObject o=PHYSICS.get(); if(o!=null && client!=null && entity==client.player) o.addProperty("native_move_relative_speed_f32", (double)speed); }
+    public static void physicsScale(net.minecraft.world.entity.LivingEntity entity, double scale) { physicsDrag(entity,scale,scale,scale); }
+    public static void physicsDrag(net.minecraft.world.entity.LivingEntity entity, double x, double y, double z) { JsonObject o=PHYSICS.get(); if(o!=null && client!=null && entity==client.player) { JsonArray a=new JsonArray(); a.add(x); a.add(y); a.add(z); o.add("native_axis_drag_f64",a); } }
+    public static void physicsGravity(net.minecraft.world.entity.LivingEntity entity, double gravity) { JsonObject o=PHYSICS.get(); if(o!=null && client!=null && entity==client.player) { o.addProperty("native_effective_gravity_f64",gravity); o.addProperty("actual_gravity_f64",gravity); } }
+    public static void physicsAdjustedGravity(net.minecraft.world.entity.LivingEntity entity, double gravity) { JsonObject o=PHYSICS.get(); if(o!=null && client!=null && entity==client.player) o.addProperty("native_fluid_adjustment_gravity_f64",gravity); }
+    public static void endPhysics(net.minecraft.world.entity.LivingEntity entity) { JsonObject o=PHYSICS.get(); PHYSICS.remove(); if(o!=null && client!=null && entity==client.player) { for(String key:List.of("native_move_relative_speed_f32","native_axis_drag_f64","native_effective_gravity_f64","actual_gravity_f64","native_fluid_adjustment_gravity_f64")) if(!o.has(key)) o.add(key,null); TICK_TRAVEL.add("native_physics",o.deepCopy()); TICK_TRAVEL.add("actual_gravity_f64",o.has("actual_gravity_f64")?o.get("actual_gravity_f64").deepCopy():com.google.gson.JsonNull.INSTANCE); if(o.has("actual_gravity_f64")&&!o.get("actual_gravity_f64").isJsonNull()) TICK_TRAVEL.remove("actual_gravity_reason"); } }
     public static void beginAirTravel(net.minecraft.world.entity.LivingEntity entity) {
         if (!ACTIVE.get() || client == null || entity != client.player) return;
-        try { AirCapture c = new AirCapture(); c.onGround = entity.onGround(); c.data.addProperty("event", "travel_observation"); c.data.addProperty("branch", "air"); c.data.addProperty("on_ground_at_start", c.onGround); c.data.addProperty("on_ground_at_land_start", c.onGround); AIR.set(c); }
+        try { beginPhysics(entity, "air"); AirCapture c = new AirCapture(); c.onGround = entity.onGround(); c.data.addProperty("event", "travel_observation"); c.data.addProperty("branch", "air"); c.data.addProperty("on_ground_at_start", c.onGround); c.data.addProperty("on_ground_at_land_start", c.onGround); AIR.set(c); }
         catch (RuntimeException ignored) { AIR.remove(); }
     }
     public static void airFrictionSource(net.minecraft.world.entity.LivingEntity entity, net.minecraft.core.BlockPos pos) {
@@ -197,7 +212,7 @@ public final class MovementObserver implements ClientModInitializer {
         AirCapture c = AIR.get(); AIR.remove(); if (c == null || client == null || entity != client.player) return;
         if (!c.used) { c.data.add("used_friction_f32", null); c.data.addProperty("used_friction_reason", "friction helper invocation was not observed"); }
         if (!c.onGround) { c.data.add("friction_source_pos", null); c.data.addProperty("friction_source_reason", "airborne branch uses 1.0f; no block friction source is used"); }
-        mergeTravel(c.data); offer("local", "travel_observation", c.data);
+        endPhysics(entity); mergeTravel(c.data); offer("local", "travel_observation", c.data);
     }
     private static JsonArray blockPos(net.minecraft.core.BlockPos p) {
         if (p == null) return null;
@@ -252,6 +267,7 @@ public final class MovementObserver implements ClientModInitializer {
         }
         if (source.has("on_ground_at_land_start")) TICK_TRAVEL.add("on_ground_at_land_start", source.get("on_ground_at_land_start").deepCopy());
         if (source.has("jump_power_f32")) TICK_TRAVEL.add("jump_power_f32", source.get("jump_power_f32").deepCopy());
+        for (String key : List.of("native_physics", "actual_gravity_f64")) if(source.has(key)) TICK_TRAVEL.add(key,source.get(key).deepCopy());
         if (source.has("used_block_jump_factor_f32")) TICK_TRAVEL.add("used_block_jump_factor_f32", source.get("used_block_jump_factor_f32").deepCopy());
         for (String key : List.of("used_step_height", "used_block_speed_factor_f32", "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped", "ground_decision", "shape_snapshot")) {
             if (!source.has(key)) continue;
@@ -279,7 +295,7 @@ public final class MovementObserver implements ClientModInitializer {
                 String reason = switch (key) {
                     case "entity_shapes" -> "actual resolver collider inputs are not exposed by the observer";
                     case "context" -> "collision resolver context is not captured";
-                    case "frame_nanos" -> "runTick frame hook is not implemented";
+                    case "frame_nanos", "frame_elapsed_sec" -> "full runTick duration is recorded in the separate frame_observation after LocalPlayer.tick";
                     case "ground_decision" -> "Entity.move result hook was not observed in this tick";
                     default -> "actual vanilla hook was not observed in this tick or branch";
                 };
@@ -288,21 +304,24 @@ public final class MovementObserver implements ClientModInitializer {
         }
         travel.add("unavailable_reasons", reasons);
     }
-    private static final List<String> TRAVEL_OBSERVATION_KEYS = List.of("friction_source_pos", "used_friction_f32", "used_ground_drag_f32", "on_ground_at_land_start", "jump_power_f32", "used_block_jump_factor_f32", "used_block_speed_factor_f32", "used_step_height", "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped", "ground_decision", "entity_shapes", "entity_shapes_truncated", "entity_shapes_omitted", "entity_shapes_max", "context", "frame_nanos");
+    private static final List<String> TRAVEL_OBSERVATION_KEYS = List.of("friction_source_pos", "used_friction_f32", "used_ground_drag_f32", "on_ground_at_land_start", "jump_power_f32", "used_block_jump_factor_f32", "used_block_speed_factor_f32", "used_step_height", "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped", "ground_decision", "entity_shapes", "entity_shapes_truncated", "entity_shapes_omitted", "entity_shapes_max", "context", "frame_nanos", "frame_elapsed_sec", "frame_id", "frame_player_tick_count", "native_partial_ticks_f32", "native_physics", "actual_gravity_f64");
     private static JsonObject emptyTravel() {
         JsonObject o = new JsonObject();
-        for (String key : List.of("friction_source_pos", "used_friction_f32", "used_ground_drag_f32", "on_ground_at_land_start", "jump_power_f32", "used_block_jump_factor_f32", "used_block_speed_factor_f32", "used_step_height", "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped", "ground_decision", "entity_shapes", "entity_shapes_truncated", "entity_shapes_omitted", "context", "frame_nanos")) o.add(key, null);
+        for (String key : List.of("friction_source_pos", "used_friction_f32", "used_ground_drag_f32", "on_ground_at_land_start", "jump_power_f32", "used_block_jump_factor_f32", "used_block_speed_factor_f32", "used_step_height", "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped", "ground_decision", "entity_shapes", "entity_shapes_truncated", "entity_shapes_omitted", "context", "frame_nanos", "frame_elapsed_sec", "frame_id", "frame_player_tick_count", "native_partial_ticks_f32", "native_physics", "actual_gravity_f64")) o.add(key, null);
         o.addProperty("entity_shapes_max", 8);
         o.addProperty("entity_shapes_semantics", "null: actual collision resolver collider inputs not captured by this observer");
         o.addProperty("ground_decision_semantics", "captured entity.onGround immediately after Entity.move returns; represents vanilla-updated result, not an independently inferred decision");
         o.addProperty("semantics", "values captured at actual vanilla hook call sites; null means not observed or unsupported, never snapshot-requeried");
-        o.addProperty("available_fields", "used_friction_f32,friction_source_pos,used_ground_drag_f32,on_ground_at_land_start,jump_power_f32,used_block_jump_factor_f32,used_block_speed_factor_f32,used_step_height,pose_at_move,bbox_before,bbox_after,support_before,support_after,requested_delta,clipped_delta,original_requested_y_negative,final_y_clipped,ground_decision");
-        o.addProperty("unsupported_fields", "water/lava/fall-flying actual travel args, actual gravity, resolver/block/entity shapes, frame timing, correction shape snapshot");
+        o.addProperty("available_fields", "used_friction_f32,friction_source_pos,used_ground_drag_f32,on_ground_at_land_start,jump_power_f32,used_block_jump_factor_f32,used_block_speed_factor_f32,used_step_height,pose_at_move,bbox_before,bbox_after,support_before,support_after,requested_delta,clipped_delta,original_requested_y_negative,final_y_clipped,ground_decision,actual_gravity_f64,native_physics,frame_id,frame_player_tick_count,native_partial_ticks_f32");
+        o.addProperty("unsupported_fields", "resolver/block/entity shapes, correction shape snapshot, travelFlying alternate branch, true runTick duration at LocalPlayer.tick");
+        o.add("actual_gravity_f64",null); o.addProperty("actual_gravity_reason","effective gravity invocation not observed in this travel branch");
+        o.add("native_physics",null); o.add("frame_nanos",null); o.add("frame_id",null); o.add("frame_elapsed_sec",null); o.add("frame_player_tick_count",null); o.add("native_partial_ticks_f32",null); o.addProperty("frame_accumulator_reason","Minecraft DeltaTracker exposes partial ticks but not Rust simulation accumulator state");
         return o;
     }
     public static void tick(LocalPlayer p, String stage) {
         if (!ACTIVE.get()) return;
         if (stage.equals("before_tick")) TICK_TRAVEL = emptyTravel();
+        if (stage.equals("before_tick") && ACTIVE.get()) framePlayerTicks++;
         JsonObject d = new JsonObject();
         d.addProperty("event", "movement_tick");
         d.addProperty("tick", p.tickCount);
@@ -322,6 +341,7 @@ public final class MovementObserver implements ClientModInitializer {
         d.addProperty("attributes_semantics", "effective values at snapshot; not a per-travel used-value capture");
         playerConditions(d,p);
         if (stage.equals("after_tick")) {
+            if (ACTIVE.get() && frameStartNanos != 0L) { TICK_TRAVEL.addProperty("frame_id",frameId); TICK_TRAVEL.addProperty("frame_player_tick_count",framePlayerTicks); TICK_TRAVEL.addProperty("frame_nanos",(Number)null); TICK_TRAVEL.addProperty("frame_elapsed_sec",(Number)null); try { TICK_TRAVEL.addProperty("native_partial_ticks_f32",(double)client.getDeltaTracker().getGameTimeDeltaPartialTick(false)); } catch(RuntimeException ignored) { TICK_TRAVEL.add("native_partial_ticks_f32",null); } }
             JsonObject travel = TICK_TRAVEL.deepCopy();
             annotateNullReasons(travel);
             d.add("travel_observation", travel);

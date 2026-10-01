@@ -9,4 +9,5 @@ import org.spongepowered.asm.mixin.gen.Invoker;
 public interface LivingEntityInvoker {
     @Invoker("handleRelativeFrictionAndCalculateMovement") Vec3 movementobserver$handleRelativeFrictionAndCalculateMovement(Vec3 input, float friction);
     @Invoker("getJumpPower") float movementobserver$getJumpPower();
+    @Invoker("getEffectiveGravity") double movementobserver$getEffectiveGravity();
 }

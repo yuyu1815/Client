@@ -35,6 +35,36 @@ public abstract class LivingEntityMixin {
     @Inject(method="jumpFromGround", at=@At("RETURN"), require=1)
     private void movementobserver$endJump(CallbackInfo ci) { MovementObserver.endJump((LivingEntity)(Object)this); }
 
+    @Inject(method="travelInFluid", at=@At("HEAD"), require=1)
+    private void movementobserver$beginFluid(Vec3 input, CallbackInfo ci) { MovementObserver.beginPhysics((LivingEntity)(Object)this, ((LivingEntity)(Object)this).isInWater() ? "water" : "lava"); }
+    @Inject(method="travelInFluid", at=@At("RETURN"), require=1)
+    private void movementobserver$endFluid(Vec3 input, CallbackInfo ci) { MovementObserver.endPhysics((LivingEntity)(Object)this); }
+    @Inject(method="travelFallFlying", at=@At("HEAD"), require=1)
+    private void movementobserver$beginFlying(Vec3 input, CallbackInfo ci) { MovementObserver.beginPhysics((LivingEntity)(Object)this, "fall_flying"); }
+    @Inject(method="travelFallFlying", at=@At("RETURN"), require=1)
+    private void movementobserver$endFlying(Vec3 input, CallbackInfo ci) { MovementObserver.endPhysics((LivingEntity)(Object)this); }
+    @Redirect(method="travelInFluid", at=@At(value="INVOKE", target="Lnet/minecraft/world/entity/LivingEntity;getEffectiveGravity()D"), require=1)
+    private double movementobserver$fluidGravity(LivingEntity entity) { double v=((LivingEntityInvoker)(Object)this).movementobserver$getEffectiveGravity(); MovementObserver.physicsGravity((LivingEntity)(Object)this,v); return v; }
+    @Redirect(method="travelInAir", at=@At(value="INVOKE", target="Lnet/minecraft/world/entity/LivingEntity;getEffectiveGravity()D"), require=1)
+    private double movementobserver$airGravity(LivingEntity entity) { double v=((LivingEntityInvoker)(Object)this).movementobserver$getEffectiveGravity(); MovementObserver.physicsGravity((LivingEntity)(Object)this,v); return v; }
+    @Redirect(method="updateFallFlyingMovement", at=@At(value="INVOKE", target="Lnet/minecraft/world/entity/LivingEntity;getEffectiveGravity()D"), require=1)
+    private double movementobserver$flyingGravity(LivingEntity entity) { double v=((LivingEntityInvoker)(Object)this).movementobserver$getEffectiveGravity(); MovementObserver.physicsGravity((LivingEntity)(Object)this,v); return v; }
+    @Redirect(method="travelInWater", at=@At(value="INVOKE", target="Lnet/minecraft/world/entity/LivingEntity;moveRelative(FLnet/minecraft/world/phys/Vec3;)V"), require=1)
+    private void movementobserver$waterSpeed(LivingEntity entity,float speed,Vec3 input) { MovementObserver.physicsSpeed((LivingEntity)(Object)this,speed); ((EntityInvoker)(Object)this).movementobserver$moveRelative(speed,input); }
+    @Redirect(method="travelInLava", at=@At(value="INVOKE", target="Lnet/minecraft/world/entity/LivingEntity;moveRelative(FLnet/minecraft/world/phys/Vec3;)V"), require=1)
+    private void movementobserver$lavaSpeed(LivingEntity entity,float speed,Vec3 input) { MovementObserver.physicsSpeed((LivingEntity)(Object)this,speed); ((EntityInvoker)(Object)this).movementobserver$moveRelative(speed,input); }
+    @Redirect(method="travelInWater", at=@At(value="INVOKE", target="Lnet/minecraft/world/entity/LivingEntity;getFluidFallingAdjustedMovement(DZLnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/Vec3;"), require=1)
+    private Vec3 movementobserver$waterGravity(LivingEntity entity,double gravity,boolean falling,Vec3 movement) { MovementObserver.physicsAdjustedGravity((LivingEntity)(Object)this,gravity); return entity.getFluidFallingAdjustedMovement(gravity,falling,movement); }
+    @Redirect(method="travelInLava", at=@At(value="INVOKE", target="Lnet/minecraft/world/entity/LivingEntity;getFluidFallingAdjustedMovement(DZLnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/Vec3;"), require=1)
+    private Vec3 movementobserver$lavaGravity(LivingEntity entity,double gravity,boolean falling,Vec3 movement) { MovementObserver.physicsAdjustedGravity((LivingEntity)(Object)this,gravity); return entity.getFluidFallingAdjustedMovement(gravity,falling,movement); }
+    @Redirect(method="travelInWater", at=@At(value="INVOKE", target="Lnet/minecraft/world/phys/Vec3;multiply(DDD)Lnet/minecraft/world/phys/Vec3;"), require=1)
+    private Vec3 movementobserver$waterDrag(Vec3 value,double x,double y,double z) { MovementObserver.physicsDrag((LivingEntity)(Object)this,x,y,z); return value.multiply(x,y,z); }
+    @Redirect(method="travelInLava", at=@At(value="INVOKE", target="Lnet/minecraft/world/phys/Vec3;multiply(DDD)Lnet/minecraft/world/phys/Vec3;"), require=1)
+    private Vec3 movementobserver$lavaDrag(Vec3 value,double x,double y,double z) { MovementObserver.physicsDrag((LivingEntity)(Object)this,x,y,z); return value.multiply(x,y,z); }
+    @Redirect(method="travelInLava", at=@At(value="INVOKE", target="Lnet/minecraft/world/phys/Vec3;scale(D)Lnet/minecraft/world/phys/Vec3;"), require=1)
+    private Vec3 movementobserver$lavaScale(Vec3 value,double scale) { MovementObserver.physicsScale((LivingEntity)(Object)this,scale); return value.scale(scale); }
+    @Redirect(method="updateFallFlyingMovement", at=@At(value="INVOKE", target="Lnet/minecraft/world/phys/Vec3;multiply(DDD)Lnet/minecraft/world/phys/Vec3;"), require=1)
+    private Vec3 movementobserver$flyingDrag(Vec3 value,double x,double y,double z) { MovementObserver.physicsDrag((LivingEntity)(Object)this,x,y,z); return value.multiply(x,y,z); }
     @Inject(method="travelInAir", at=@At("HEAD"), require=1)
     private void movementobserver$beginAirTravel(Vec3 input, CallbackInfo ci) { MovementObserver.beginAirTravel((LivingEntity)(Object)this); }
 

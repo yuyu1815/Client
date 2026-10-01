@@ -11,4 +11,5 @@ public interface EntityInvoker {
     @Invoker("getBlockJumpFactor") float movementobserver$getBlockJumpFactor();
     @Invoker("maxUpStep") float movementobserver$maxUpStep();
     @Invoker("getBlockSpeedFactor") float movementobserver$getBlockSpeedFactor();
+    @Invoker("moveRelative") void movementobserver$moveRelative(float speed, Vec3 input);
 }

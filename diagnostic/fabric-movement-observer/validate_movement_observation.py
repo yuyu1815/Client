@@ -11,7 +11,8 @@ TRAVEL_KEYS = {
     "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after",
     "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped",
     "ground_decision", "entity_shapes", "entity_shapes_max", "entity_shapes_truncated",
-    "entity_shapes_omitted", "context",
+    "entity_shapes_omitted", "context", "frame_nanos", "frame_elapsed_sec", "frame_id",
+    "frame_player_tick_count", "native_partial_ticks_f32", "native_physics", "actual_gravity_f64",
 }
 
 def validate(text: str) -> tuple[int, dict]:
