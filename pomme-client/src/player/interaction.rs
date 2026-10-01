@@ -7,8 +7,8 @@ use azalea_core::position::BlockPos;
 use azalea_entity::dimensions::EntityDimensions;
 use azalea_inventory::ItemStackData;
 use azalea_inventory::components::{
-    AttributeModifiers, BlocksAttacks, Consumable, EquipmentSlotGroup, Food, ItemUseAnimation,
-    KineticWeapon, MinimumAttackCharge, Tool, ToolRule, UseEffects,
+    AttributeModifiers, BlocksAttacks, ChargedProjectiles, Consumable, EquipmentSlotGroup, Food,
+    ItemUseAnimation, KineticWeapon, MinimumAttackCharge, Tool, ToolRule, UseEffects,
 };
 use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use azalea_protocol::packets::game::ServerboundGamePacket;
@@ -106,12 +106,23 @@ struct PlacementUse {
     rejected: bool,
 }
 
-/// An in-progress item use (eating/drinking), vanilla
-/// `LivingEntity.useItem` + `useItemRemaining` plus the `Consumable`
-/// component data resolved at start.
+/// A locally tracked active use or physical-button latch. Consumable effects
+/// and the special hold-use lifecycles remain server-authoritative.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveUseKind {
+    Consumable,
+    Bow,
+    CrossbowCharge,
+    CrossbowFire,
+    Trident,
+    Spyglass,
+    Shield,
+}
+
 struct ActiveUse {
     hand: InteractionHand,
     kind: ItemKind,
+    use_kind: ActiveUseKind,
     anim: ItemUseAnimation,
     bow: bool,
     sound: SoundRef,
@@ -145,6 +156,9 @@ pub struct InteractionState {
     use_delay: u32,
     pending_writable_book: Option<InteractionHand>,
     using_item: Option<ActiveUse>,
+    /// Keeps charge/one-shot items from retriggering while the use button stays
+    /// down, even if the server clears its using-item metadata mid-hold.
+    use_latch: Option<(InteractionHand, ItemKind)>,
     using_bow: bool,
     swinging: bool,
     swinging_hand: InteractionHand,
@@ -191,6 +205,7 @@ impl InteractionState {
             use_delay: 0,
             pending_writable_book: None,
             using_item: None,
+            use_latch: None,
             using_bow: false,
             swinging: false,
             swinging_hand: InteractionHand::MainHand,
@@ -534,8 +549,22 @@ impl InteractionState {
         self.update_placement_heights(held_stack, offhand_stack);
 
         self.ensure_has_sent_carried_item(sender, selected_slot);
+        let mut cancelled_use = false;
+        if let Some((latched_hand, latched_kind)) = self.use_latch
+            && stack_for_hand(latched_hand, held_stack, offhand_stack).map(|stack| stack.kind)
+                != Some(latched_kind)
+        {
+            if self.using_item.is_some() || self.using_bow {
+                self.release_using_item(sender);
+                self.use_latch = Some((latched_hand, latched_kind));
+            }
+            // Keep the old-hand latch until the button comes up; otherwise the
+            // replacement stack could be used by the held-input retry next tick.
+            cancelled_use = true;
+        }
         if spectator {
             self.using_item = None;
+            self.use_latch = None;
             self.using_bow = false;
             self.clear_destroying_state();
         }
@@ -570,8 +599,9 @@ impl InteractionState {
         // Vanilla `handleKeybinds` drains attack clicks while an item is in
         // use, and `continueAttack` early-returns on `isUsingItem`.
         let using = self.using_item.is_some() || self.using_bow;
+        let use_latched = self.use_latch.is_some();
 
-        if !using && input.action_just_pressed(input::Action::Destroy) {
+        if !using && !use_latched && input.action_just_pressed(input::Action::Destroy) {
             self.start_attack(
                 chunks,
                 sender,
@@ -595,8 +625,16 @@ impl InteractionState {
             if !input.performing_action(input::Action::Use) {
                 self.release_using_item(sender);
             }
-        } else if input.action_just_pressed(input::Action::Use)
-            || (input.performing_action(input::Action::Use) && self.use_delay == 0)
+        } else if use_latched {
+            // Server metadata can stop an item use before the physical button
+            // is released. Keep the edge latch until that release, but don't
+            // send a second release packet for a server-stopped use.
+            if !input.performing_action(input::Action::Use) {
+                self.use_latch = None;
+            }
+        } else if !cancelled_use
+            && (input.action_just_pressed(input::Action::Use)
+                || (input.performing_action(input::Action::Use) && self.use_delay == 0))
         {
             let sneaking = input.performing_action(input::Action::Sneak);
             let suppress_block_use = sneaking && !hands_empty;
@@ -632,7 +670,7 @@ impl InteractionState {
 
         // Vanilla checks `isUsingItem` once before the attack/use/pick loops,
         // so a use started above does not suppress a pick from the same tick.
-        if !using && input.middle_just_pressed() {
+        if !using && !use_latched && input.middle_just_pressed() {
             self.pick_block_or_entity(sender, input.ctrl_held());
         }
 
@@ -644,7 +682,7 @@ impl InteractionState {
             // Mode changes must not leave an ordinary mining session running;
             // spectator policy does not emit an ordinary abort-dig packet.
             self.clear_destroying_state();
-        } else if self.using_item.is_none() {
+        } else if self.using_item.is_none() && self.use_latch.is_none() {
             if attack_down {
                 self.continue_attack(
                     chunks,
@@ -1093,19 +1131,44 @@ impl InteractionState {
         if stack.kind == ItemKind::Bow && !creative && !has_projectile {
             return ItemUseResult::Fail;
         }
-        self.using_bow = stack.kind == ItemKind::Bow;
-        if self.using_bow {
+
+        let special_use = match stack.kind {
+            ItemKind::Bow => Some((ActiveUseKind::Bow, ItemUseAnimation::Bow, 72_000)),
+            ItemKind::Crossbow => {
+                let charged = stack_component::<ChargedProjectiles>(stack)
+                    .is_some_and(|projectiles| !projectiles.items.is_empty());
+                Some((
+                    if charged {
+                        ActiveUseKind::CrossbowFire
+                    } else {
+                        ActiveUseKind::CrossbowCharge
+                    },
+                    ItemUseAnimation::Crossbow,
+                    if charged { 0 } else { 25 },
+                ))
+            }
+            ItemKind::Trident => Some((ActiveUseKind::Trident, ItemUseAnimation::Spear, 72_000)),
+            ItemKind::Spyglass => {
+                Some((ActiveUseKind::Spyglass, ItemUseAnimation::Spyglass, 72_000))
+            }
+            ItemKind::Shield => Some((ActiveUseKind::Shield, ItemUseAnimation::BlockKind, 72_000)),
+            _ => None,
+        };
+        if let Some((use_kind, anim, duration)) = special_use {
+            self.using_bow = use_kind == ActiveUseKind::Bow;
+            self.use_latch = Some((hand, stack.kind));
             self.using_item = Some(ActiveUse {
                 hand,
                 kind: stack.kind,
-                anim: ItemUseAnimation::Eat,
-                bow: true,
+                use_kind,
+                anim,
+                bow: use_kind == ActiveUseKind::Bow,
                 sound: SoundRef::event("entity.generic.eat"),
                 has_particles: false,
                 texture: String::new(),
                 use_effects: UseEffects::default(),
-                duration: 72_000,
-                remaining: 72_000,
+                duration,
+                remaining: duration,
             });
             return ItemUseResult::Success;
         }
@@ -1133,6 +1196,7 @@ impl InteractionState {
         let active = ActiveUse {
             hand,
             kind: stack.kind,
+            use_kind: ActiveUseKind::Consumable,
             anim: consumable.animation,
             bow: false,
             sound: SoundRef::resolve(&consumable.sound),
@@ -1166,6 +1230,7 @@ impl InteractionState {
     /// longer-lived interaction controller; block prediction/sequences remain.
     pub fn reset_player_transients_for_respawn(&mut self) {
         self.using_item = None;
+        self.use_latch = None;
         self.using_bow = false;
         self.swinging = false;
         self.swing_time = 0;
@@ -1264,7 +1329,10 @@ impl InteractionState {
         // `Consumable.shouldEmitParticlesAndSounds`.
         let elapsed = active.duration - active.remaining;
         let wait = (active.duration as f32 * CONSUME_EFFECTS_START_FRACTION) as i32;
-        if !active.bow && elapsed > wait && active.remaining % CONSUME_EFFECTS_INTERVAL == 0 {
+        if active.use_kind == ActiveUseKind::Consumable
+            && elapsed > wait
+            && active.remaining % CONSUME_EFFECTS_INTERVAL == 0
+        {
             emit_consume_effects(
                 active,
                 5,
@@ -1284,14 +1352,23 @@ impl InteractionState {
     /// Vanilla `MultiPlayerGameMode.releaseUsingItem`: an early release just
     /// cancels a consume; nothing finishes on release for food.
     fn release_using_item(&mut self, sender: &PacketSender) {
-        send_action(
-            sender,
-            Action::ReleaseUseItem,
-            BlockPos { x: 0, y: 0, z: 0 },
-            Direction::Down,
-            0,
-        );
+        // A loaded crossbow fires immediately on UseItem and never enters the
+        // server's item-use lifecycle, so only release the local hold latch.
+        if !self
+            .using_item
+            .as_ref()
+            .is_some_and(|active| active.use_kind == ActiveUseKind::CrossbowFire)
+        {
+            send_action(
+                sender,
+                Action::ReleaseUseItem,
+                BlockPos { x: 0, y: 0, z: 0 },
+                Direction::Down,
+                0,
+            );
+        }
         self.using_item = None;
+        self.use_latch = None;
         self.using_bow = false;
     }
 
@@ -1311,7 +1388,7 @@ impl InteractionState {
         let Some(active) = self.using_item.take() else {
             return;
         };
-        if active.bow {
+        if active.use_kind != ActiveUseKind::Consumable {
             return;
         }
         emit_consume_effects(
@@ -1332,6 +1409,14 @@ impl InteractionState {
         self.using_item
             .as_ref()
             .is_some_and(|a| !a.use_effects.can_sprint)
+    }
+
+    /// Whether a spyglass use is active. FOV/HUD can consume this without
+    /// depending on item packet or inventory prediction details.
+    pub fn is_using_spyglass(&self) -> bool {
+        self.using_item
+            .as_ref()
+            .is_some_and(|active| active.use_kind == ActiveUseKind::Spyglass)
     }
 
     /// First-person use-animation state for the held-item renderer, vanilla
@@ -2593,6 +2678,7 @@ mod tests {
         state.using_item = Some(ActiveUse {
             hand: InteractionHand::OffHand,
             kind: ItemKind::Apple,
+            use_kind: ActiveUseKind::Consumable,
             anim: ItemUseAnimation::Eat,
             bow: false,
             sound: SoundRef::event("entity.generic.eat"),
@@ -2621,6 +2707,7 @@ mod tests {
         state.using_item = Some(ActiveUse {
             hand: InteractionHand::MainHand,
             kind: ItemKind::Apple,
+            use_kind: ActiveUseKind::Consumable,
             anim: ItemUseAnimation::Eat,
             bow: false,
             sound: SoundRef::event("entity.generic.eat"),
@@ -2665,6 +2752,7 @@ mod tests {
         state.using_item = Some(ActiveUse {
             hand: InteractionHand::MainHand,
             kind: ItemKind::Apple,
+            use_kind: ActiveUseKind::Consumable,
             anim: ItemUseAnimation::Eat,
             bow: false,
             sound: SoundRef::event("entity.generic.eat"),
@@ -4235,6 +4323,219 @@ mod tests {
                 );
             });
         }
+    }
+
+    #[test]
+    fn charge_and_latched_item_packets_follow_button_edges() {
+        use azalea_inventory::ItemStack;
+        use azalea_inventory::components::{ChargedProjectiles, DataComponentUnion};
+        use azalea_registry::builtin::DataComponentKind;
+        use winit::event::{ElementState, MouseButton};
+
+        use crate::net::sender::Outbound;
+
+        let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let biome_climate = HashMap::new();
+        let mut effects = BreakEffects {
+            particles: &mut particles,
+            registry: &registry,
+            biome_climate: &biome_climate,
+        };
+        let pos = dvec3(0.5, 64.0, 0.5);
+        let eye = pos + dvec3(0.0, 1.62, 0.0);
+        let mut input = InputState::new();
+        let mut tick =
+            |state: &mut InteractionState, input: &InputState, held: Option<&ItemStackData>| {
+                state.tick(
+                    input,
+                    &chunks,
+                    &sender,
+                    &mut audio,
+                    pos,
+                    Aabb::from_center(pos, 0.3, 0.9),
+                    eye,
+                    LookDirection::default(),
+                    true,
+                    false,
+                    false,
+                    &entities,
+                    InteractionHand::MainHand,
+                    false,
+                    MAX_FOOD_LEVEL,
+                    input.selected_slot(),
+                    held,
+                    None,
+                    false,
+                    None,
+                    None,
+                    false,
+                    true,
+                    &mut effects,
+                );
+            };
+        macro_rules! expect_use {
+            () => {
+                match rx.try_recv().expect("one UseItem packet") {
+                    Outbound::Packet(packet) => {
+                        assert!(matches!(*packet, ServerboundGamePacket::UseItem(_)))
+                    }
+                    _ => panic!("expected a typed UseItem packet"),
+                }
+            };
+        }
+        macro_rules! expect_release {
+            () => {
+                match rx.try_recv().expect("one release packet") {
+                    Outbound::Packet(packet) => match *packet {
+                        ServerboundGamePacket::PlayerAction(packet) => {
+                            assert!(matches!(packet.action, Action::ReleaseUseItem));
+                        }
+                        packet => panic!("expected ReleaseUseItem, got {packet:?}"),
+                    },
+                    _ => panic!("expected a typed ReleaseUseItem packet"),
+                }
+            };
+        }
+
+        // Uncharged crossbow: start once, don't resend while charging, release once.
+        let crossbow = ItemStackData::new(ItemKind::Crossbow, 1);
+        let mut state = InteractionState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        tick(&mut state, &input, Some(&crossbow));
+        expect_use!();
+        assert_eq!(
+            state.using_item.as_ref().map(|active| active.use_kind),
+            Some(ActiveUseKind::CrossbowCharge)
+        );
+        input.clear_just_pressed_actions();
+        for _ in 0..30 {
+            tick(&mut state, &input, Some(&crossbow));
+            assert!(rx.try_recv().is_err(), "held crossbow resent UseItem");
+        }
+        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        tick(&mut state, &input, Some(&crossbow));
+        expect_release!();
+
+        // A server-reported charged projectile makes this press a one-shot fire;
+        // holding cannot retrigger and button-up needs no release action packet.
+        let mut loaded = ItemStackData::new(ItemKind::Crossbow, 1);
+        let charged = ChargedProjectiles {
+            items: vec![ItemStack::from(ItemKind::Arrow)],
+        };
+        // SAFETY: component union value matches ChargedProjectiles.
+        unsafe {
+            loaded.component_patch.unchecked_insert_component(
+                DataComponentKind::ChargedProjectiles,
+                Some(DataComponentUnion::from(charged)),
+            );
+        }
+        state = InteractionState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        tick(&mut state, &input, Some(&loaded));
+        expect_use!();
+        assert_eq!(
+            state.using_item.as_ref().map(|active| active.use_kind),
+            Some(ActiveUseKind::CrossbowFire)
+        );
+        input.clear_just_pressed_actions();
+        for _ in 0..12 {
+            tick(&mut state, &input, Some(&loaded));
+            assert!(rx.try_recv().is_err(), "held charged crossbow fired again");
+        }
+        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        tick(&mut state, &input, Some(&loaded));
+        assert!(
+            rx.try_recv().is_err(),
+            "instant crossbow fire sent release action"
+        );
+
+        // Vanilla accepts the release packet even below the 10-tick throw threshold;
+        // the server decides not to throw on the short hold.
+        let trident = ItemStackData::new(ItemKind::Trident, 1);
+        state = InteractionState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        tick(&mut state, &input, Some(&trident));
+        expect_use!();
+        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        tick(&mut state, &input, Some(&trident));
+        expect_release!();
+
+        // At/above the vanilla threshold the wire sequence is still one start
+        // and one release; server-side releaseUsing decides whether to throw.
+        state = InteractionState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        tick(&mut state, &input, Some(&trident));
+        expect_use!();
+        input.clear_just_pressed_actions();
+        for _ in 0..10 {
+            tick(&mut state, &input, Some(&trident));
+            assert!(rx.try_recv().is_err(), "held trident resent UseItem");
+        }
+        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        tick(&mut state, &input, Some(&trident));
+        expect_release!();
+
+        // Spyglass exposes a readable scope state and releases through the same
+        // server-authoritative use packet lifecycle.
+        let spyglass = ItemStackData::new(ItemKind::Spyglass, 1);
+        state = InteractionState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        tick(&mut state, &input, Some(&spyglass));
+        expect_use!();
+        assert!(state.is_using_spyglass());
+        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        tick(&mut state, &input, Some(&spyglass));
+        expect_release!();
+        assert!(!state.is_using_spyglass());
+
+        // Server cancel clears the scope state, but the physical-button latch
+        // still prevents a held re-use until actual button-up.
+        state = InteractionState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        tick(&mut state, &input, Some(&spyglass));
+        expect_use!();
+        state.sync_using_item_flag(false);
+        assert!(!state.is_using_spyglass());
+        input.clear_just_pressed_actions();
+        for _ in 0..12 {
+            tick(&mut state, &input, Some(&spyglass));
+            assert!(
+                rx.try_recv().is_err(),
+                "server cancel allowed spyglass re-use while held"
+            );
+        }
+        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        tick(&mut state, &input, Some(&spyglass));
+        assert!(
+            rx.try_recv().is_err(),
+            "server-stopped spyglass sent a duplicate release"
+        );
+
+        // Replacing an active item cancels its use once and doesn't use the new stack
+        // in the same tick, even though the button remains held.
+        let mut state = InteractionState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        tick(&mut state, &input, Some(&trident));
+        expect_use!();
+        input.clear_just_pressed_actions();
+        let stone = ItemStackData::new(ItemKind::Stone, 1);
+        tick(&mut state, &input, Some(&stone));
+        expect_release!();
+        for _ in 0..12 {
+            tick(&mut state, &input, Some(&stone));
+            assert!(
+                rx.try_recv().is_err(),
+                "held input used the replacement stack"
+            );
+        }
+        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        tick(&mut state, &input, Some(&stone));
+        assert!(
+            rx.try_recv().is_err(),
+            "item swap emitted an extra use packet"
+        );
     }
 
     #[test]
