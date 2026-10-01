@@ -1,6 +1,7 @@
 package com.mine_rust.movementobserver;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonArray;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -25,7 +26,7 @@ import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HexFormat;
-import java.util.Set;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
@@ -36,8 +37,6 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class MovementObserver implements ClientModInitializer {
     private static final int QUEUE = 128, MAX_ROW = 512 * 1024;
     private static final long LIMIT = 64L * 1024 * 1024;
-    private static final Set<String> OUT = Set.of("Pos", "PosRot", "Rot", "StatusOnly", "MoveVehicle", "ServerboundPlayerInputPacket", "ServerboundPlayerCommandPacket", "ServerboundPlayerActionPacket", "ServerboundUseItemOnPacket", "ServerboundUseItemPacket", "ServerboundSwingPacket", "ServerboundAcceptTeleportationPacket");
-    private static final Set<String> IN = Set.of("ClientboundPlayerPositionPacket", "ClientboundPlayerRotationPacket", "ClientboundMoveVehiclePacket", "ClientboundTeleportEntityPacket", "ClientboundEntityPositionSyncPacket", "ClientboundSetEntityMotionPacket", "ClientboundBlockUpdatePacket", "ClientboundSectionBlocksUpdatePacket", "ClientboundBlockChangedAckPacket");
     private static final AtomicBoolean ACTIVE = new AtomicBoolean();
     private static final ArrayBlockingQueue<String> ROWS = new ArrayBlockingQueue<>(QUEUE);
     private static final AtomicLong SEQ = new AtomicLong(), DROPPED = new AtomicLong();
@@ -69,13 +68,62 @@ public final class MovementObserver implements ClientModInitializer {
     }
     private static synchronized void stop(String reason) { if (ACTIVE.compareAndSet(true, false)) stopReason = reason; }
 
-    public static void packet(Packet<?> p, String direction, String stage, boolean success) {
-        String name = p.getClass().getSimpleName();
-        if (!ACTIVE.get() || !(direction.equals("outbound") ? OUT.contains(name) : IN.contains(name))) return;
-        JsonObject fields = new JsonObject(); fields.addProperty("packet", name); fields.add("fields", null);
-        fields.addProperty("fields_capture", "type-only; packet field extraction not yet implemented");
-        if (stage.equals("transport_write_complete")) fields.addProperty("success", success);
-        offer(direction, stage, fields);
+    public static boolean isRecordingFast() { return ACTIVE.get(); }
+    public static void packet(Packet<?> p, String direction, String stage, String errorClass) {
+        if (!isRecordingFast()) return;
+        try {
+            JsonObject data = PacketFields.capture(p);
+            if (data == null) return;
+            data.add("native_id", null); // Minecraft exposes packet type Identifier, not the negotiated numeric wire ID here.
+            data.addProperty("native_stage", direction.equals("outbound") ? "channel_write" : "channel_read_before_listener");
+            if (stage.equals("transport_write_failure") && errorClass != null) data.addProperty("error_class", errorClass);
+            offer(direction, stage, data);
+        } catch (RuntimeException ignored) { /* Diagnostics must never block or alter a packet. */ }
+    }
+    public static JsonObject blockState(net.minecraft.core.BlockPos pos) {
+        try {
+            JsonObject o = new JsonObject(); JsonArray p = new JsonArray(); p.add(pos.getX()); p.add(pos.getY()); p.add(pos.getZ()); o.add("block", p);
+            var level = client == null ? null : client.level;
+            if (level == null) o.add("state", null);
+            else o.addProperty("state", net.minecraft.world.level.block.Block.BLOCK_STATE_REGISTRY.getId(level.getBlockState(pos)));
+            return o;
+        } catch (RuntimeException ignored) { return null; }
+    }
+    public static List<JsonObject> sectionStates(net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket packet) {
+        try { java.util.ArrayList<JsonObject> out = new java.util.ArrayList<>(64); int[] n={0};
+            packet.runUpdates((pos,state)->{ if(n[0]++<4096) out.add(blockState(pos)); }); return out;
+        } catch (RuntimeException ignored) { return List.of(); }
+    }
+    public static void applied(Packet<?> packet, String stage, List<JsonObject> blocks) {
+        if (!isRecordingFast() || client == null || !client.isSameThread()) return;
+        try {
+            JsonObject d=PacketFields.capture(packet); if(d==null)return;
+            d.add("native_id", null); d.addProperty("native_stage", "client_packet_listener_"+stage);
+            JsonObject state=new JsonObject(); LocalPlayer p=client.player;
+            if(p!=null && (packet instanceof net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket || packet instanceof net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket || (packet instanceof net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket m && m.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket t && t.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket a && a.getEntityId()==p.getId()))) state.add("player",playerState(p));
+            else state.add("player",null);
+            if (p!=null && packet instanceof net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket a && a.getEntityId()==p.getId()) state.add("attributes",attributeState(p,a));
+            JsonArray bs=new JsonArray(); blocks.forEach(bs::add); state.add("blocks",bs);
+            if(packet instanceof net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket) { state.add("prediction_state",null); state.addProperty("prediction_state_semantics","Minecraft exposes no local prediction queue snapshot at this hook"); }
+            d.add("applied_state",state); offer("inbound",stage,d);
+        } catch (RuntimeException ignored) { /* Passive observation cannot change Minecraft packet handling. */ }
+    }
+    private static JsonObject playerState(LocalPlayer p) {
+        JsonObject o=new JsonObject(); o.add("position",vec(p.position())); o.add("velocity",vec(p.getDeltaMovement()));
+        o.addProperty("on_ground",p.onGround()); o.addProperty("horizontal_collision",p.horizontalCollision); o.addProperty("yaw",(double)p.getYRot()); o.addProperty("pitch",(double)p.getXRot());
+        o.addProperty("sprinting",p.isSprinting()); o.addProperty("crouching",p.isCrouching()); o.addProperty("swimming",p.isSwimming()); o.addProperty("in_water",p.isInWater()); o.addProperty("in_lava",p.isInLava()); o.addProperty("pose",p.getPose().name()); o.addProperty("food_level",p.getFoodData().getFoodLevel());
+        return o;
+    }
+    private static JsonArray attributeState(LocalPlayer player, net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket packet) {
+        JsonArray out=new JsonArray();
+        for (var snapshot:packet.getValues()) {
+            JsonObject a=new JsonObject(); a.addProperty("attribute",snapshot.attribute().unwrapKey().map(k->k.identifier().toString()).orElse("unknown"));
+            var instance=player.getAttribute(snapshot.attribute());
+            if(instance==null){a.add("base",null);a.add("modifiers",null);a.add("effective",null);}
+            else {a.addProperty("base",instance.getBaseValue());JsonArray modifiers=new JsonArray();for(var m:instance.getModifiers()){JsonObject x=new JsonObject();x.addProperty("id",m.id().toString());x.addProperty("amount",m.amount());x.addProperty("operation",m.operation().name().toLowerCase(java.util.Locale.ROOT));modifiers.add(x);}a.add("modifiers",modifiers);a.addProperty("effective",instance.getValue());}
+            out.add(a);
+        }
+        return out;
     }
     public static void tick(LocalPlayer p, String stage) {
         if (!ACTIVE.get()) return;

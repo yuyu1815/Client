@@ -18,6 +18,17 @@ def validate(text: str) -> tuple[int, dict]:
         assert isinstance(row.get("offset_us"), int) and row["offset_us"] >= prev_offset
         assert row.get("direction") in {"local", "outbound", "inbound"}
         assert isinstance(row.get("stage"), str) and isinstance(row.get("data"), dict)
+        data = row["data"]
+        if "packet" in data:
+            assert isinstance(data["packet"], str) and isinstance(data.get("fields"), dict), "packet fields must be explicit typed JSON"
+            assert "native_id" in data, "numeric native ID must be explicit (null when unavailable)"
+            assert "fields_capture" not in data, "class-name-only packet records are incomplete"
+            if data["packet"] == "section_blocks_update":
+                fields = data["fields"]
+                assert len(fields.get("updates", [])) <= 4096
+                assert fields.get("truncated") == (fields.get("count", 0) > 4096)
+        if row["stage"] == "transport_write_failure":
+            assert isinstance(data.get("error_class"), str) and data["error_class"]
         prev_seq, prev_offset = row["seq"], row["offset_us"]
         def keys(value):
             if isinstance(value, dict):
@@ -38,15 +49,21 @@ def self_test():
     rows = [
         {"type":"header", "schema":1, "client_kind":"fabric", "wire_protocol":776},
         {"seq":1,"offset_us":5,"direction":"local","stage":"before_tick","data":{"event":"movement_tick"}},
-        {"seq":3,"offset_us":5,"direction":"outbound","stage":"transport_write_attempt","data":{"packet":"Pos","fields":None}},
-        {"type":"footer","written":2,"dropped":1,"oversize_omitted":0,"last_seq":3,"complete":False},
+        {"seq":3,"offset_us":5,"direction":"outbound","stage":"transport_write_attempt","data":{"packet":"move_player_rot","native_id":None,"fields":{"position":None,"yaw_pitch":[90.0,10.0],"on_ground":True,"horizontal_collision":False}}},
+        {"seq":4,"offset_us":5,"direction":"inbound","stage":"apply_before","data":{"packet":"block_ack","native_id":None,"fields":{"sequence":17},"applied_state":{"prediction_state":None}}},
+        {"seq":5,"offset_us":5,"direction":"outbound","stage":"transport_write_failure","data":{"packet":"use_item","native_id":None,"fields":{"hand":0,"sequence":2,"yaw_pitch":[0.0,0.0]},"error_class":"java.io.IOException"}},
+        {"type":"footer","written":4,"dropped":1,"oversize_omitted":0,"last_seq":5,"complete":False},
     ]
-    assert validate("\n".join(map(json.dumps, rows)))[0] == 2
+    assert validate("\n".join(map(json.dumps, rows)))[0] == 4
     bad = json.loads(json.dumps(rows)); bad[1]["data"]["raw_bytes"] = "no"
     try: validate("\n".join(map(json.dumps, bad)))
     except AssertionError: pass
     else: raise AssertionError("privacy gate accepted raw_bytes")
-    print("self-test: PASS (ordered rows, gap/drop footer, forbidden-field rejection)")
+    incomplete = json.loads(json.dumps(rows)); incomplete[2]["data"] = {"packet":"Pos","fields":None,"fields_capture":"class only"}
+    try: validate("\n".join(map(json.dumps, incomplete)))
+    except AssertionError: pass
+    else: raise AssertionError("validator accepted class-name-only payload")
+    print("self-test: PASS (ordered rows, drop gaps, typed packet/native-id null, apply and transport failure, privacy rejection)")
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:

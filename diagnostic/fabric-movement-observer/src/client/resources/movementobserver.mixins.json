@@ -3,6 +3,6 @@
   "minVersion": "0.8",
   "package": "com.mine_rust.movementobserver.mixin",
   "compatibilityLevel": "JAVA_25",
-  "client": ["ConnectionMixin", "LocalPlayerMixin"],
+  "client": ["ConnectionMixin", "LocalPlayerMixin", "ClientPacketListenerMixin"],
   "injectors": { "defaultRequire": 1 }
 }
