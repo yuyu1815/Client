@@ -2355,6 +2355,7 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
             EntityKind::Player
                 | EntityKind::Pig
                 | EntityKind::Cow
+                | EntityKind::CaveSpider
                 | EntityKind::Sheep
                 | EntityKind::Chicken
                 | EntityKind::Zombie
@@ -2382,6 +2383,56 @@ pub fn is_living_mob(kind: &EntityKind) -> bool {
                 | EntityKind::TropicalFish
                 | EntityKind::Pufferfish
                 | EntityKind::IronGolem
+                | EntityKind::Allay
+                | EntityKind::Armadillo
+                | EntityKind::Axolotl
+                | EntityKind::Bee
+                | EntityKind::Blaze
+                | EntityKind::Breeze
+                | EntityKind::CopperGolem
+                | EntityKind::Creaking
+                | EntityKind::Dolphin
+                | EntityKind::ElderGuardian
+                | EntityKind::Endermite
+                | EntityKind::Evoker
+                | EntityKind::Fox
+                | EntityKind::Frog
+                | EntityKind::Ghast
+                | EntityKind::Giant
+                | EntityKind::Goat
+                | EntityKind::Guardian
+                | EntityKind::HappyGhast
+                | EntityKind::Hoglin
+                | EntityKind::Illusioner
+                | EntityKind::MagmaCube
+                | EntityKind::Mooshroom
+                | EntityKind::Nautilus
+                | EntityKind::Panda
+                | EntityKind::Parched
+                | EntityKind::Parrot
+                | EntityKind::Phantom
+                | EntityKind::Piglin
+                | EntityKind::PiglinBrute
+                | EntityKind::Pillager
+                | EntityKind::PolarBear
+                | EntityKind::Ravager
+                | EntityKind::Shulker
+                | EntityKind::Silverfish
+                | EntityKind::Sniffer
+                | EntityKind::SnowGolem
+                | EntityKind::Strider
+                | EntityKind::SulfurCube
+                | EntityKind::Tadpole
+                | EntityKind::Turtle
+                | EntityKind::Vex
+                | EntityKind::Vindicator
+                | EntityKind::WanderingTrader
+                | EntityKind::Warden
+                | EntityKind::Wither
+                | EntityKind::WitherSkeleton
+                | EntityKind::Zoglin
+                | EntityKind::ZombieNautilus
+                | EntityKind::ZombifiedPiglin
         )
 }
 
@@ -3116,6 +3167,7 @@ mod tests {
         for kind in [EntityKind::Pig, EntityKind::Nautilus] {
             assert!(!supports_horse_inventory(&kind), "{kind:?}");
         }
+        assert!(is_living_mob(&EntityKind::Nautilus));
 
         // Inventory acceptance must not expand shared equine animation/metadata
         // or the explicit equine riding-jump predicate.
@@ -3127,7 +3179,98 @@ mod tests {
         ] {
             assert!(!is_equine(&kind), "{kind:?} remains outside is_equine");
         }
-        assert!(!is_living_mob(&EntityKind::Nautilus));
+    }
+
+    #[test]
+    fn missing_living_mobs_are_classified_away_from_vehicle_storage() {
+        let missing_mobs = [
+            EntityKind::Allay,
+            EntityKind::Armadillo,
+            EntityKind::Axolotl,
+            EntityKind::Bee,
+            EntityKind::Blaze,
+            EntityKind::Breeze,
+            EntityKind::Camel,
+            EntityKind::CamelHusk,
+            EntityKind::CaveSpider,
+            EntityKind::CopperGolem,
+            EntityKind::Creaking,
+            EntityKind::Dolphin,
+            EntityKind::ElderGuardian,
+            EntityKind::Endermite,
+            EntityKind::Evoker,
+            EntityKind::Fox,
+            EntityKind::Frog,
+            EntityKind::Ghast,
+            EntityKind::Giant,
+            EntityKind::Goat,
+            EntityKind::Guardian,
+            EntityKind::HappyGhast,
+            EntityKind::Hoglin,
+            EntityKind::Illusioner,
+            EntityKind::Llama,
+            EntityKind::MagmaCube,
+            EntityKind::Mooshroom,
+            EntityKind::Nautilus,
+            EntityKind::Panda,
+            EntityKind::Parched,
+            EntityKind::Parrot,
+            EntityKind::Phantom,
+            EntityKind::Piglin,
+            EntityKind::PiglinBrute,
+            EntityKind::Pillager,
+            EntityKind::PolarBear,
+            EntityKind::Ravager,
+            EntityKind::Shulker,
+            EntityKind::Silverfish,
+            EntityKind::Sniffer,
+            EntityKind::SnowGolem,
+            EntityKind::Strider,
+            EntityKind::SulfurCube,
+            EntityKind::Tadpole,
+            EntityKind::TraderLlama,
+            EntityKind::Turtle,
+            EntityKind::Vex,
+            EntityKind::Vindicator,
+            EntityKind::WanderingTrader,
+            EntityKind::Warden,
+            EntityKind::Wither,
+            EntityKind::WitherSkeleton,
+            EntityKind::Zoglin,
+            EntityKind::ZombieNautilus,
+            EntityKind::ZombifiedPiglin,
+        ];
+        let mut store = EntityStore::new();
+        for (id, kind) in missing_mobs.into_iter().enumerate() {
+            assert!(is_living_mob(&kind), "{kind:?} must reach living storage");
+            store.spawn_living(
+                id as i32,
+                kind,
+                Position::default(),
+                LookDirection::default(),
+                0.0,
+                None,
+            );
+            assert!(store.living.contains_key(&(id as i32)));
+            assert!(!store.vehicles.contains_key(&(id as i32)));
+        }
+        for non_mob in [
+            EntityKind::OakBoat,
+            EntityKind::Minecart,
+            EntityKind::Arrow,
+            EntityKind::Snowball,
+            EntityKind::ArmorStand,
+            EntityKind::TextDisplay,
+            EntityKind::ItemDisplay,
+            EntityKind::BlockDisplay,
+            EntityKind::Item,
+            EntityKind::Mannequin,
+        ] {
+            assert!(
+                !is_living_mob(&non_mob),
+                "{non_mob:?} stays on its own route"
+            );
+        }
     }
 
     #[test]

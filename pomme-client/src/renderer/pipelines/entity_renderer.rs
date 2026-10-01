@@ -26,6 +26,14 @@ fn flip_degrees(kind: EntityKind) -> f32 {
     }
 }
 
+fn mob_scale(kind: EntityKind) -> f32 {
+    match kind {
+        EntityKind::Giant => 6.0,
+        EntityKind::CaveSpider => 0.7,
+        _ => 1.0,
+    }
+}
+
 fn death_fall_degrees(death_time: f32, kind: EntityKind) -> f32 {
     if death_time <= 0.0 || matches!(kind, EntityKind::Squid | EntityKind::GlowSquid) {
         return 0.0;
@@ -661,6 +669,7 @@ fn mob_definitions() -> Vec<MobDef> {
     const CREEPER_TEX: &[&[&str]] = tex_table!("creeper" => "creeper");
     const CREEPER_ARMOR_TEX: &[&[&str]] = tex_table!("creeper" => "creeper_armor");
     const SPIDER_TEX: &[&[&str]] = tex_table!("spider" => "spider");
+    const CAVE_SPIDER_TEX: &[&[&str]] = tex_table!("spider" => "cave_spider");
     const SPIDER_EYES_TEX: &[&[&str]] = tex_table!("spider" => "spider_eyes");
     const ENDERMAN_TEX: &[&[&str]] = tex_table!("enderman" => "enderman");
     const ENDERMAN_EYES_TEX: &[&[&str]] = tex_table!("enderman" => "enderman_eyes");
@@ -984,11 +993,36 @@ fn mob_definitions() -> Vec<MobDef> {
             ),
         },
         MobDef {
+            kind: EntityKind::Giant,
+            anim: AnimationType::Zombie,
+            adult: vec![opaque(entity_model::bake_zombie_model(), ZOMBIE_TEX, 64)],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
             kind: EntityKind::Spider,
             anim: AnimationType::Spider,
             adult: vec![opaque(entity_model::bake_spider_model(), SPIDER_TEX, 64)],
             baby: None,
             // Slot 0: glowing eyes (translucent, full-bright), always visible.
+            adult_overlays: vec![VariantDef {
+                model: entity_model::bake_spider_model(),
+                tex_variants: SPIDER_EYES_TEX,
+                tex_size: 64,
+                overlay_kind: OverlayKind::EyesTranslucent,
+            }],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::CaveSpider,
+            anim: AnimationType::Spider,
+            adult: vec![opaque(
+                entity_model::bake_spider_model(),
+                CAVE_SPIDER_TEX,
+                64,
+            )],
+            baby: None,
             adult_overlays: vec![VariantDef {
                 model: entity_model::bake_spider_model(),
                 tex_variants: SPIDER_EYES_TEX,
@@ -1844,6 +1878,12 @@ impl EntityRenderer {
         }
         // body_transform sits before the parts (whose root transforms carry
         // the convention's X flip), matching vanilla's setupRotations order.
+        let mob_scale = mob_scale(info.entity_kind);
+        let base = if mob_scale == 1.0 {
+            base
+        } else {
+            base * glam::Mat4::from_scale(glam::Vec3::splat(mob_scale))
+        };
         info.body_transform.map_or(base, |m| base * m)
     }
 
@@ -2333,6 +2373,8 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         EntityKind::Skeleton | EntityKind::Stray | EntityKind::Bogged => (0.6, 1.99),
         EntityKind::Creeper => (0.6, 1.7),
         EntityKind::Spider => (1.4, 0.9),
+        EntityKind::CaveSpider => (0.98, 0.63),
+        EntityKind::Giant => (3.6, 11.7),
         EntityKind::Enderman => (0.6, 2.9),
         EntityKind::Slime => (0.52, 0.52),
         EntityKind::Wolf => (0.6, 0.85),
@@ -3132,6 +3174,31 @@ mod tests {
         zombie.simulation_position = zombie.position;
         assert!(!visible(&zombie, 8, 50));
         assert!(visible(&zombie, 12, 50));
+    }
+
+    #[test]
+    fn giant_and_cave_spider_have_distinct_vanilla_mesh_entries_and_scales() {
+        use azalea_registry::builtin::EntityKind;
+
+        let defs = super::mob_definitions();
+        for (kind, texture, scale) in [
+            (EntityKind::Giant, "zombie/zombie.png", 6.0),
+            (EntityKind::CaveSpider, "spider/cave_spider.png", 0.7),
+        ] {
+            let matches: Vec<_> = defs.iter().filter(|def| def.kind == kind).collect();
+            assert_eq!(matches.len(), 1, "{kind:?} must have one MobDef");
+            assert!(!matches[0].adult[0].model.vertices.is_empty());
+            assert!(matches[0].adult[0].tex_variants[0][0].ends_with(texture));
+            assert_eq!(super::mob_scale(kind), scale);
+        }
+        let cave_spider = defs
+            .iter()
+            .find(|def| def.kind == EntityKind::CaveSpider)
+            .unwrap();
+        assert_eq!(cave_spider.adult_overlays.len(), 1);
+        assert!(
+            cave_spider.adult_overlays[0].tex_variants[0][0].ends_with("spider/spider_eyes.png")
+        );
     }
 
     /// Bakes every mob model; `generate_cube_vertices`' UV seam
