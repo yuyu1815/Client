@@ -90,4 +90,10 @@ public abstract class LivingEntityMixin {
 
     @Inject(method="travelInAir", at=@At("RETURN"), require=1)
     private void movementobserver$endAirTravel(Vec3 input, CallbackInfo ci) { MovementObserver.endAirTravel((LivingEntity)(Object)this); }
+
+    @Redirect(method="handleRelativeFrictionAndCalculateMovement", at=@At(value="INVOKE", target="Lnet/minecraft/world/entity/LivingEntity;moveRelative(FLnet/minecraft/world/phys/Vec3;)V"), require=1)
+    private void movementobserver$actualMoveRelative(LivingEntity entity, float speed, Vec3 input) {
+        MovementObserver.physicsMoveRelative((LivingEntity)(Object)this, speed, input);
+        ((EntityInvoker)(Object)this).movementobserver$moveRelative(speed, input);
+    }
 }
