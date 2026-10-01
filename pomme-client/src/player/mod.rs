@@ -198,6 +198,7 @@ pub struct LocalPlayer {
     /// Vanilla `getFluidHeight(LAVA)`: lava surface height above the feet.
     pub lava_height: f64,
     pub eyes_in_water: bool,
+    pub eyes_in_bubble_column: bool,
     pub swimming: bool,
     /// Shared LivingEntity flag bit 0x80; packet authority remains external.
     pub fall_flying: bool,
@@ -281,6 +282,7 @@ impl LocalPlayer {
             in_lava: false,
             lava_height: 0.0,
             eyes_in_water: false,
+            eyes_in_bubble_column: false,
             swimming: false,
             fall_flying: false,
             fall_flying_ticks: 0,
@@ -421,6 +423,7 @@ impl LocalPlayer {
         self.in_lava = false;
         self.lava_height = 0.0;
         self.eyes_in_water = false;
+        self.eyes_in_bubble_column = false;
         self.swimming = false;
         self.fall_flying = false;
         self.fall_flying_ticks = 0;
@@ -609,7 +612,7 @@ impl LocalPlayer {
 
     // TODO: OXYGEN_BONUS attribute - chance to skip air loss per tick
     pub fn tick_air_supply(&mut self) {
-        if self.eyes_in_water {
+        if self.eyes_in_water && !self.eyes_in_bubble_column {
             self.air_supply -= 1;
             if self.air_supply <= DROWN_DAMAGE_THRESHOLD {
                 self.air_supply = 0;
@@ -674,7 +677,9 @@ impl LocalPlayer {
         // Vanilla `wasTouchingWater` is exactly "fluid height > 0".
         self.in_water = fluid_height > 0.0;
         self.in_lava = lava_height > 0.0;
-        self.eyes_in_water = is_water_block(chunks.get_block_state(eye_x, eye_y, eye_z));
+        let eye_state = chunks.get_block_state(eye_x, eye_y, eye_z);
+        self.eyes_in_water = is_water_block(eye_state);
+        self.eyes_in_bubble_column = crate::world::block::block_id(eye_state) == "bubble_column";
         let feet_in_water = is_water_block(chunks.get_block_state(
             self.position.x.floor() as i32,
             feet_y.floor() as i32,
@@ -773,6 +778,29 @@ mod tests {
     }
 
     #[test]
+    fn bubble_column_eye_exempts_drowning_but_preserves_water_eye_state() {
+        let mut player = LocalPlayer::new();
+        player.eyes_in_water = true;
+        player.eyes_in_bubble_column = false;
+        player.air_supply = 100;
+        player.tick_air_supply();
+        assert_eq!(player.air_supply, 99);
+
+        player.eyes_in_bubble_column = true;
+        player.tick_air_supply();
+        assert_eq!(player.air_supply, 103);
+        player.air_supply = MAX_AIR_SUPPLY - 2;
+        player.tick_air_supply();
+        assert_eq!(player.air_supply, MAX_AIR_SUPPLY);
+
+        player.eyes_in_water = false;
+        player.eyes_in_bubble_column = false;
+        player.air_supply = 100;
+        player.tick_air_supply();
+        assert_eq!(player.air_supply, 104);
+    }
+
+    #[test]
     fn sleeping_pose_uses_vanilla_dimensions_and_eye_height() {
         let mut player = LocalPlayer::new();
         player.sleeping_pos = Some(azalea_core::position::BlockPos::new(0, 64, 0));
@@ -854,6 +882,7 @@ mod tests {
         player.in_water = true;
         player.fluid_height = 0.8;
         player.eyes_in_water = true;
+        player.eyes_in_bubble_column = true;
         player.swimming = true;
         player.air_supply = 12;
         player.sleeping_pos = Some(azalea_core::position::BlockPos::new(1, 64, 1));
@@ -890,6 +919,7 @@ mod tests {
         assert!(!player.in_water);
         assert_eq!(player.fluid_height, 0.0);
         assert!(!player.eyes_in_water);
+        assert!(!player.eyes_in_bubble_column);
         assert!(!player.swimming);
         assert_eq!(player.air_supply, MAX_AIR_SUPPLY);
         assert!(player.sleeping_pos.is_none());
