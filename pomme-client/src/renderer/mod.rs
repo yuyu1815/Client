@@ -3,6 +3,12 @@ pub mod camera;
 pub mod chunk;
 mod context;
 pub mod entity_model;
+pub(crate) mod entity_models {
+    pub mod aquatic;
+    pub mod flying;
+    pub mod humanoid;
+    pub mod terrestrial;
+}
 pub(crate) mod item_activation_math;
 pub mod map_texture;
 pub(crate) mod packing;

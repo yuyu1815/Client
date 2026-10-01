@@ -12,7 +12,7 @@ use crate::entity::components::Position;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
 use crate::renderer::entity_model::BakedEntityModel;
-use crate::renderer::{MAX_FRAMES_IN_FLIGHT, entity_model, shader, util};
+use crate::renderer::{MAX_FRAMES_IN_FLIGHT, entity_model, entity_models, shader, util};
 
 pub const MAX_OVERLAYS: usize = 4;
 
@@ -294,6 +294,7 @@ pub const WHITE_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// constructor asserts the pools line up.
 pub const CHICKEN_VARIANT_ORDER: &[&str] = &["temperate", "warm", "cold"];
 pub const COW_VARIANT_ORDER: &[&str] = &["temperate", "cold", "warm"];
+pub const PIG_VARIANT_ORDER: &[&str] = &["temperate", "cold", "warm"];
 /// Wolf pool interleaves 3 state textures (wild/tame/angry) per variant.
 pub const WOLF_VARIANT_ORDER: &[&str] = &[
     "pale", "spotted", "snowy", "black", "ashen", "rusty", "woods", "chestnut", "striped",
@@ -318,6 +319,7 @@ fn expected_variant_count(kind: EntityKind) -> Option<usize> {
     match kind {
         EntityKind::Chicken => Some(CHICKEN_VARIANT_ORDER.len()),
         EntityKind::Cow => Some(COW_VARIANT_ORDER.len()),
+        EntityKind::Pig => Some(PIG_VARIANT_ORDER.len()),
         EntityKind::Wolf => Some(WOLF_VARIANT_ORDER.len() * 3),
         EntityKind::Cat => Some(CAT_VARIANT_ORDER.len()),
         _ => None,
@@ -518,11 +520,30 @@ fn mob_definitions() -> Vec<MobDef> {
         };
     }
 
-    const PIG_ADULT_TEX: &[&[&str]] = &[&[
-        "minecraft/textures/entity/pig/pig_temperate.png",
-        "minecraft/textures/entity/pig/temperate_pig.png",
-    ]];
-    const PIG_BABY_TEX: &[&[&str]] = &[&["minecraft/textures/entity/pig/pig_temperate_baby.png"]];
+    const PIG_ADULT_TEX: &[&[&str]] = &[
+        &["minecraft/textures/entity/pig/pig_temperate.png"],
+        &["minecraft/textures/entity/pig/pig_cold.png"],
+        &["minecraft/textures/entity/pig/pig_warm.png"],
+    ];
+    const PIG_BABY_TEX: &[&[&str]] = &[
+        &["minecraft/textures/entity/pig/pig_temperate_baby.png"],
+        &["minecraft/textures/entity/pig/pig_cold_baby.png"],
+        &["minecraft/textures/entity/pig/pig_warm_baby.png"],
+    ];
+    const AXOLOTL_ADULT_TEX: &[&[&str]] = &[
+        &["minecraft/textures/entity/axolotl/axolotl_lucy.png"],
+        &["minecraft/textures/entity/axolotl/axolotl_wild.png"],
+        &["minecraft/textures/entity/axolotl/axolotl_gold.png"],
+        &["minecraft/textures/entity/axolotl/axolotl_cyan.png"],
+        &["minecraft/textures/entity/axolotl/axolotl_blue.png"],
+    ];
+    const AXOLOTL_BABY_TEX: &[&[&str]] = &[
+        &["minecraft/textures/entity/axolotl/axolotl_lucy_baby.png"],
+        &["minecraft/textures/entity/axolotl/axolotl_wild_baby.png"],
+        &["minecraft/textures/entity/axolotl/axolotl_gold_baby.png"],
+        &["minecraft/textures/entity/axolotl/axolotl_cyan_baby.png"],
+        &["minecraft/textures/entity/axolotl/axolotl_blue_baby.png"],
+    ];
     const COW_ADULT_TEX: &[&[&str]] = &[
         &[
             "minecraft/textures/entity/cow/cow_temperate.png",
@@ -756,11 +777,19 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Pig,
             anim: AnimationType::Quadruped,
-            adult: vec![opaque(entity_model::bake_pig_model(), PIG_ADULT_TEX, 64)],
+            adult: vec![
+                opaque(entity_model::bake_pig_model(), &PIG_ADULT_TEX[..1], 64),
+                opaque(
+                    entity_model::bake_cold_pig_model(),
+                    &PIG_ADULT_TEX[1..2],
+                    64,
+                ),
+                opaque(entity_model::bake_pig_model(), &PIG_ADULT_TEX[2..], 64),
+            ],
             baby: Some(opaque(
                 entity_model::bake_baby_pig_model(),
                 PIG_BABY_TEX,
-                32,
+                64,
             )),
             adult_overlays: vec![],
             baby_overlays: vec![],
@@ -1361,6 +1390,558 @@ fn mob_definitions() -> Vec<MobDef> {
             adult_overlays: vec![opaque(
                 entity_model::bake_iron_golem_model(),
                 IRON_GOLEM_CRACKINESS_TEX,
+                128,
+            )],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Axolotl,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::aquatic::bake_axolotl_model(),
+                AXOLOTL_ADULT_TEX,
+                64,
+            )],
+            baby: Some(opaque(
+                entity_models::aquatic::bake_baby_axolotl_model(),
+                AXOLOTL_BABY_TEX,
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Dolphin,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::aquatic::bake_dolphin_model(),
+                tex_table!("dolphin" => "dolphin"),
+                64,
+            )],
+            baby: Some(opaque(
+                entity_models::aquatic::bake_baby_dolphin_model(),
+                tex_table!("dolphin" => "dolphin_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Guardian,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::aquatic::bake_guardian_model(false),
+                tex_table!("guardian" => "guardian"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::ElderGuardian,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::aquatic::bake_guardian_model(true),
+                tex_table!("guardian" => "guardian_elder"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Turtle,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::aquatic::bake_turtle_model(),
+                tex_table!("turtle" => "turtle"),
+                128,
+            )],
+            baby: Some(opaque(
+                entity_models::aquatic::bake_baby_turtle_model(),
+                tex_table!("turtle" => "turtle_baby"),
+                16,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Armadillo,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_armadillo_model(),
+                tex_table!("armadillo" => "armadillo"),
+                64,
+            )],
+            baby: Some(opaque(
+                entity_models::terrestrial::bake_baby_armadillo_model(),
+                tex_table!("armadillo" => "armadillo_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Camel,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_camel_model(),
+                tex_table!("camel" => "camel"),
+                128,
+            )],
+            baby: Some(opaque(
+                entity_models::terrestrial::bake_baby_camel_model(),
+                tex_table!("camel" => "camel_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::CamelHusk,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_camel_husk_model(),
+                tex_table!("camel" => "camel_husk"),
+                128,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Fox,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_fox_model(),
+                tex_table!("fox" => "fox", "fox_sleep", "fox_snow", "fox_snow_sleep"),
+                48,
+            )],
+            baby: Some(opaque(
+                entity_models::terrestrial::bake_baby_fox_model(),
+                tex_table!("fox" => "fox_baby", "fox_sleep_baby", "fox_snow_baby", "fox_snow_sleep_baby"),
+                48,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Frog,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_frog_model(),
+                tex_table!("frog" => "frog_temperate", "frog_warm", "frog_cold"),
+                48,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Goat,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_goat_model(),
+                tex_table!("goat" => "goat"),
+                64,
+            )],
+            baby: Some(opaque(
+                entity_models::terrestrial::bake_baby_goat_model(),
+                tex_table!("goat" => "goat_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Hoglin,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_hoglin_model(),
+                tex_table!("hoglin" => "hoglin"),
+                128,
+            )],
+            baby: Some(opaque(
+                entity_models::terrestrial::bake_baby_hoglin_model(),
+                tex_table!("hoglin" => "hoglin_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Zoglin,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_zoglin_model(),
+                tex_table!("hoglin" => "zoglin"),
+                64,
+            )],
+            baby: Some(opaque(
+                entity_models::terrestrial::bake_baby_zoglin_model(),
+                tex_table!("hoglin" => "zoglin_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Panda,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_panda_model(),
+                tex_table!("panda" => "panda"),
+                64,
+            )],
+            baby: Some(opaque(
+                entity_models::terrestrial::bake_baby_panda_model(),
+                tex_table!("panda" => "panda_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::PolarBear,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_polar_bear_model(),
+                tex_table!("bear" => "polarbear"),
+                128,
+            )],
+            baby: Some(opaque(
+                entity_models::terrestrial::bake_baby_polar_bear_model(),
+                tex_table!("bear" => "polarbear_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Ravager,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_ravager_model(),
+                tex_table!("illager" => "ravager"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Sniffer,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_sniffer_model(),
+                tex_table!("sniffer" => "sniffer"),
+                192,
+            )],
+            baby: Some(opaque(
+                entity_models::terrestrial::bake_baby_sniffer_model(),
+                tex_table!("sniffer" => "snifflet"),
+                128,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Strider,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_strider_model(),
+                tex_table!("strider" => "strider", "strider_cold"),
+                64,
+            )],
+            baby: Some(opaque(
+                entity_models::terrestrial::bake_baby_strider_model(),
+                tex_table!("strider" => "strider_baby", "strider_cold_baby"),
+                32,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Llama,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_llama_model(),
+                tex_table!("llama" => "llama_brown", "llama_creamy", "llama_gray", "llama_white"),
+                128,
+            )],
+            baby: Some(opaque(
+                entity_models::terrestrial::bake_baby_llama_model(),
+                tex_table!("llama" => "llama_brown_baby", "llama_creamy_baby", "llama_gray_baby", "llama_white_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::TraderLlama,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::terrestrial::bake_llama_model(),
+                tex_table!("llama" => "llama_brown", "llama_creamy", "llama_gray", "llama_white"),
+                128,
+            )],
+            baby: Some(opaque(
+                entity_models::terrestrial::bake_baby_llama_model(),
+                tex_table!("llama" => "llama_brown_baby", "llama_creamy_baby", "llama_gray_baby", "llama_white_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Endermite,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_endermite_model(),
+                tex_table!("endermite" => "endermite"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Silverfish,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_silverfish_model(),
+                tex_table!("silverfish" => "silverfish"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::SnowGolem,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_snow_golem_model(),
+                tex_table!("snow_golem" => "snow_golem"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Tadpole,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_tadpole_model(),
+                tex_table!("tadpole" => "tadpole"),
+                16,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::WanderingTrader,
+            anim: AnimationType::Villager,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_wandering_trader_model(),
+                tex_table!("wandering_trader" => "wandering_trader"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Parched,
+            anim: AnimationType::Skeleton,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_parched_model(),
+                tex_table!("skeleton" => "parched"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::WitherSkeleton,
+            anim: AnimationType::Skeleton,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_wither_skeleton_model(),
+                tex_table!("skeleton" => "wither_skeleton"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Evoker,
+            anim: AnimationType::Humanoid,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_illager_model(),
+                tex_table!("illager" => "evoker"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Illusioner,
+            anim: AnimationType::Humanoid,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_illager_model(),
+                tex_table!("illager" => "illusioner"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Pillager,
+            anim: AnimationType::Humanoid,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_illager_model(),
+                tex_table!("illager" => "pillager"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Vindicator,
+            anim: AnimationType::Humanoid,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_illager_model(),
+                tex_table!("illager" => "vindicator"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Piglin,
+            anim: AnimationType::Humanoid,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_piglin_model(),
+                tex_table!("piglin" => "piglin"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::PiglinBrute,
+            anim: AnimationType::Humanoid,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_piglin_model(),
+                tex_table!("piglin" => "piglin_brute"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::ZombifiedPiglin,
+            anim: AnimationType::Humanoid,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_piglin_model(),
+                tex_table!("piglin" => "zombified_piglin"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::CopperGolem,
+            anim: AnimationType::Golem,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_copper_golem_model(),
+                tex_table!("copper_golem" => "copper_golem"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Creaking,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_creaking_model(),
+                tex_table!("creaking" => "creaking"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Parrot,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_parrot_model(),
+                tex_table!("parrot" => "parrot_red_blue", "parrot_blue", "parrot_green", "parrot_yellow_blue", "parrot_grey"),
+                32,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Warden,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_warden_model(),
+                tex_table!("warden" => "warden"),
+                128,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::Nautilus,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_nautilus_model(),
+                tex_table!("nautilus" => "nautilus"),
+                128,
+            )],
+            baby: Some(opaque(
+                entity_models::humanoid::bake_baby_nautilus_model(),
+                tex_table!("nautilus" => "nautilus_baby"),
+                64,
+            )),
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::ZombieNautilus,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::humanoid::bake_zombie_nautilus_model(),
+                tex_table!("nautilus" => "zombie_nautilus"),
+                128,
+            )],
+            baby: Some(opaque(
+                entity_models::humanoid::bake_baby_nautilus_model(),
+                tex_table!("nautilus" => "zombie_nautilus"),
+                64,
+            )),
+            adult_overlays: vec![opaque(
+                entity_models::humanoid::bake_zombie_nautilus_coral_model(),
+                tex_table!("nautilus" => "zombie_nautilus_coral"),
                 128,
             )],
             baby_overlays: vec![],
@@ -3204,7 +3785,45 @@ mod tests {
     /// Bakes every mob model; `generate_cube_vertices`' UV seam
     /// `debug_assert!` fires for any mesh that straddles its sheet.
     #[test]
-    fn all_mob_meshes_bake() {
-        super::mob_definitions();
+    fn all_mob_meshes_bake_and_definitions_are_unique() {
+        let defs = super::mob_definitions();
+        let mut kinds = std::collections::HashSet::new();
+        for def in &defs {
+            assert!(
+                kinds.insert(def.kind),
+                "duplicate MobDef for {:?}",
+                def.kind
+            );
+            for variant in def
+                .adult
+                .iter()
+                .chain(def.baby.iter())
+                .chain(&def.adult_overlays)
+                .chain(&def.baby_overlays)
+            {
+                assert!(
+                    !variant.model.vertices.is_empty(),
+                    "empty model for {:?}",
+                    def.kind
+                );
+                assert!(
+                    !variant.tex_variants.is_empty(),
+                    "empty texture pool for {:?}",
+                    def.kind
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pig_variant_pool_uses_cold_geometry_and_matching_baby_textures() {
+        let defs = super::mob_definitions();
+        let pig = defs.iter().find(|d| d.kind == EntityKind::Pig).unwrap();
+        assert_eq!(pig.adult.len(), 3);
+        assert_eq!(pig.baby.as_ref().unwrap().tex_variants.len(), 3);
+        assert!(pig.adult[1].model.vertices.len() > pig.adult[0].model.vertices.len());
+        assert!(pig.adult[1].tex_variants[0][0].ends_with("pig/pig_cold.png"));
+        assert!(pig.baby.as_ref().unwrap().tex_variants[1][0].ends_with("pig/pig_cold_baby.png"));
+        assert_eq!(pig.baby.as_ref().unwrap().tex_size, 32);
     }
 }

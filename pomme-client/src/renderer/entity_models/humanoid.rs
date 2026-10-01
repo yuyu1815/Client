@@ -520,7 +520,7 @@ pub fn bake_wither_skeleton_model() -> BakedEntityModel {
 /// WanderingTraderRenderer uses VillagerModel's nose/robe layer with its own
 /// 64x64 trader texture; no profession clothing layer is appropriate.
 pub fn bake_wandering_trader_model() -> BakedEntityModel {
-    crate::renderer::entity_model::bake_villager_model()
+    crate::renderer::entity_model::bake_villager_model(false)
 }
 
 /// CopperGolemModel.createBodyLayer: stock body, offset head with nose/ears,

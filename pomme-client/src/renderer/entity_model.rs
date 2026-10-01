@@ -334,6 +334,20 @@ pub fn bake_pig_model() -> BakedEntityModel {
     bake_model(parts, 64, 64)
 }
 
+/// 26.2 `ColdPigModel.createBodyLayer`: the inherited base pig body plus its
+/// raised cold-variant coat cube (deformation 0.5, UV 28,32).
+pub fn bake_cold_pig_model() -> BakedEntityModel {
+    let mut parts = bake_pig_model().parts;
+    parts[1].cubes.push(ModelCube {
+        origin: Vec3::new(-5.0, -10.0, -7.0),
+        size: Vec3::new(10.0, 16.0, 8.0),
+        tex_offset: (28, 32),
+        deformation: 0.5,
+        mirror: false,
+    });
+    bake_model(parts, 64, 64)
+}
+
 pub fn bake_baby_pig_model() -> BakedEntityModel {
     let parts = vec![
         EntityPart {
