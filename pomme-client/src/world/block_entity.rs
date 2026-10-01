@@ -380,6 +380,7 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
         // weathering stage only picks the texture.
         s if s.ends_with("copper_chest") => Some(BlockEntityKind::Chest),
         "conduit" => Some(BlockEntityKind::Conduit),
+        "bell" => Some(BlockEntityKind::Bell),
         "player_head" | "player_wall_head" => Some(BlockEntityKind::Skull),
         s if s.ends_with("copper_golem_statue") => Some(BlockEntityKind::CopperGolemStatue),
         s if s == "shulker_box" || s.ends_with("_shulker_box") => Some(BlockEntityKind::ShulkerBox),
@@ -426,6 +427,7 @@ fn is_rendered(kind: BlockEntityKind) -> bool {
             | BlockEntityKind::HangingSign
             | BlockEntityKind::CopperGolemStatue
             | BlockEntityKind::Conduit
+            | BlockEntityKind::Bell
             | BlockEntityKind::Skull
     )
 }
@@ -863,6 +865,20 @@ mod tests {
             assert!(entries[&pos].sign_front.is_some());
         }
         assert!(is_block_entity_block("oak_sign"));
+    }
+
+    #[test]
+    fn bell_is_synthesized_for_the_block_entity_renderer() {
+        crate::world::block::init("26.2");
+        assert_eq!(rendered_kind("bell"), Some(BlockEntityKind::Bell));
+        let mut entries = HashMap::new();
+        let pos = BlockPos::new(1, 64, 2);
+        sync_block_entity(
+            &mut entries,
+            pos,
+            crate::world::block::first_state_of("bell").unwrap(),
+        );
+        assert_eq!(entries[&pos].kind, BlockEntityKind::Bell);
     }
 
     #[test]

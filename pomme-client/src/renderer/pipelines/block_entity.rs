@@ -131,6 +131,7 @@ const CHEST_XMAS_TEXTURES: &[&[&str]] = chest_textures!("christmas", copper);
 const TRAPPED_CHEST_TEXTURES: &[&[&str]] = chest_textures!("trapped");
 
 const ENDER_CHEST_TEXTURES: &[&[&str]] = &[&["minecraft/textures/entity/chest/ender.png"]];
+const BELL_TEXTURES: &[&[&str]] = &[&["minecraft/textures/entity/bell/bell_body.png"]];
 
 // Skull variants are stored as adjacent [standing, wall] pairs. The pair bit
 // preserves the wall-head transform independently of the texture/model type.
@@ -295,6 +296,13 @@ pub fn yaw_for_block(kind: BlockEntityKind, props: &crate::world::block::PropMap
                 _ => None,
             })
             .unwrap_or(0.0),
+        BlockEntityKind::Bell => match props.get("facing") {
+            Some("south") => 0.0,
+            Some("west") => 90.0,
+            Some("north") => 180.0,
+            Some("east") => 270.0,
+            _ => 0.0,
+        },
         BlockEntityKind::Sign | BlockEntityKind::HangingSign => props
             .get("rotation")
             .and_then(|s| s.parse::<f32>().ok())
@@ -362,6 +370,12 @@ fn kind_definitions(xmas: bool) -> Vec<KindDef> {
             models: vec![block_entity_model::bake_conduit_model()],
             tex_variants: &[&["minecraft/textures/entity/conduit/base.png"]],
             tex_size: 64,
+        },
+        KindDef {
+            kind: BlockEntityKind::Bell,
+            models: vec![block_entity_model::bake_bell_model()],
+            tex_variants: BELL_TEXTURES,
+            tex_size: 32,
         },
         KindDef {
             kind: BlockEntityKind::Skull,
@@ -2479,6 +2493,36 @@ mod sign_text_tests {
         );
         assert!(is_wall_skull_variant(skull_variant("skeleton_wall_skull")));
         assert!(!is_wall_skull_variant(skull_variant("skeleton_skull")));
+    }
+
+    #[test]
+    fn bell_uses_block_facing_for_its_body_transform() {
+        crate::world::block::init("26.2");
+        for (facing, yaw) in [
+            ("south", 0.0),
+            ("west", 90.0),
+            ("north", 180.0),
+            ("east", 270.0),
+        ] {
+            let state = crate::world::block::find_state("bell", &[("facing", facing)]);
+            assert_eq!(
+                yaw_for_block(
+                    BlockEntityKind::Bell,
+                    crate::world::block::block_properties(state)
+                ),
+                yaw
+            );
+        }
+        let defs = kind_definitions(false);
+        let bell = defs
+            .iter()
+            .find(|d| d.kind == BlockEntityKind::Bell)
+            .unwrap();
+        assert_eq!(
+            bell.tex_variants[0][0],
+            "minecraft/textures/entity/bell/bell_body.png"
+        );
+        assert_eq!(bell.models[0].vertices.len(), 72);
     }
 
     #[test]

@@ -5,6 +5,42 @@ use super::entity_model::{
     bake_model, generate_cube_vertices, generate_cube_vertices_faces,
 };
 
+/// Bell body from vanilla `BellModel`: two cubes with their own official
+/// `bell_body.png` UV regions; blockstate models retain the supports.
+pub fn bake_bell_model() -> BakedEntityModel {
+    let cubes = vec![
+        ModelCube {
+            origin: Vec3::new(-3.0, -6.0, -3.0),
+            size: Vec3::new(6.0, 7.0, 6.0),
+            tex_offset: (0, 0),
+            deformation: 0.0,
+            mirror: false,
+        },
+        ModelCube {
+            origin: Vec3::new(-2.0, 1.0, -2.0),
+            size: Vec3::splat(4.0),
+            tex_offset: (0, 13),
+            deformation: 0.0,
+            mirror: false,
+        },
+    ];
+    let mut vertices = Vec::new();
+    for cube in &cubes {
+        generate_cube_vertices(cube, 32, 32, FACE_ALL, true, &mut vertices);
+    }
+    BakedEntityModel::new(
+        vec![EntityPart {
+            name: "bell".into(),
+            offset: Vec3::new(8.0, 12.0, 8.0),
+            default_rotation: Vec3::ZERO,
+            cubes,
+            parent: None,
+        }],
+        vertices,
+        vec![(0, 72)],
+    )
+}
+
 /// Inactive conduit shell and default player head idle geometry.
 pub fn bake_conduit_model() -> BakedEntityModel {
     let cube = ModelCube {
@@ -281,6 +317,17 @@ mod conduit_tests {
             wrong_sheet.iter().map(|v| v.tex_coords).collect::<Vec<_>>()
         );
         assert_eq!(shell, bake_conduit_model().vertices);
+    }
+
+    #[test]
+    fn bell_body_uses_the_verified_32_by_32_entity_sheet() {
+        let model = bake_bell_model();
+        assert_eq!(model.vertices.len(), 72);
+        assert_eq!(model.part_ranges, [(0, 72)]);
+        assert_eq!(model.convention, ModelConvention::EntityYDown);
+        assert!(model.vertices.iter().all(|v| {
+            (0.0..=1.0).contains(&v.tex_coords[0]) && (0.0..=1.0).contains(&v.tex_coords[1])
+        }));
     }
 
     #[test]
