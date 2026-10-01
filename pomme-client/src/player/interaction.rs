@@ -1166,7 +1166,7 @@ impl InteractionState {
                 sound: SoundRef::event("entity.generic.eat"),
                 has_particles: false,
                 texture: String::new(),
-                use_effects: UseEffects::default(),
+                use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
                 duration,
                 remaining: duration,
             });
@@ -4473,16 +4473,42 @@ mod tests {
             "instant crossbow fire sent release action"
         );
 
-        // Vanilla accepts the release packet even below the 10-tick throw threshold;
-        // the server decides not to throw on the short hold.
-        let trident = ItemStackData::new(ItemKind::Trident, 1);
+        // A press and release before the tick still starts use once; the next
+        // tick releases it, with custom UseEffects applied to the active item.
+        let mut trident = ItemStackData::new(ItemKind::Trident, 1);
+        // SAFETY: union value matches UseEffects.
+        unsafe {
+            trident.component_patch.unchecked_insert_component(
+                DataComponentKind::UseEffects,
+                Some(DataComponentUnion::from(UseEffects::new(true, false, 0.65))),
+            );
+        }
         state = InteractionState::new();
         input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        assert!(input.action_just_pressed(input::Action::Use));
+        assert!(!input.performing_action(input::Action::Use));
         tick(&mut state, &input, Some(&trident));
         expect_use!();
-        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        assert_eq!(state.use_speed_multiplier(), 0.65);
+        assert!(!state.slow_due_to_using_item());
+        assert_eq!(
+            state
+                .using_item
+                .as_ref()
+                .map(|active| active.use_effects.interact_vibrations),
+            Some(false)
+        );
+        assert!(rx.try_recv().is_err(), "short click sent duplicate use");
+        input.clear_just_pressed_actions();
         tick(&mut state, &input, Some(&trident));
         expect_release!();
+        assert!(rx.try_recv().is_err(), "short click sent duplicate release");
+        tick(&mut state, &input, Some(&trident));
+        assert!(
+            rx.try_recv().is_err(),
+            "short click repeated use after release"
+        );
 
         // At/above the vanilla threshold the wire sequence is still one start
         // and one release; server-side releaseUsing decides whether to throw.
