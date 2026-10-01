@@ -22,6 +22,8 @@ use steel_login::{JavaTcpClient, ServerConnectionSession};
 /// The protocol the integrated server speaks.
 pub use steel_registry::packets::CURRENT_MC_PROTOCOL as PROTOCOL;
 use steel_utils::Identifier;
+#[cfg(debug_assertions)]
+use steel_utils::threading::DEBUG_STACK_SIZE;
 use steel_utils::threading::{available_worker_threads, worker_threads_for_available};
 pub use steel_utils::types::{Difficulty, GameType};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -84,13 +86,26 @@ pub struct WorldHandle {
 pub fn launch(options: LaunchOptions) -> PendingWorld {
     let cancel = CancellationToken::new();
     let (started, receiver) = sync_channel(1);
-    let thread = thread::Builder::new()
-        .name("integrated-server".to_owned())
-        .spawn({
-            let cancel = cancel.clone();
-            move || drive(options, &cancel, &started)
-        })
-        .expect("spawning the integrated server thread should not fail");
+    let builder = thread::Builder::new().name("integrated-server".to_owned());
+    #[cfg(debug_assertions)]
+    let builder = builder.stack_size(DEBUG_STACK_SIZE);
+
+    let thread = match builder.spawn({
+        let cancel = cancel.clone();
+        let started = started.clone();
+        move || drive(options, &cancel, &started)
+    }) {
+        Ok(thread) => thread,
+        Err(error) => {
+            let _ = started.send(Err(format!(
+                "failed to spawn the integrated server thread: {error}"
+            )));
+            return PendingWorld {
+                started: receiver,
+                world: None,
+            };
+        }
+    };
 
     PendingWorld {
         started: receiver,
