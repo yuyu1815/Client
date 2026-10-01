@@ -1650,6 +1650,70 @@ mod tests {
     }
 
     #[test]
+    fn stair_step_ground_uses_requested_y_and_next_tick_uses_air_physics_after_jump() {
+        let chunks = flat_floor();
+        chunks.set_block_state(
+            4,
+            61,
+            5,
+            crate::world::block::find_state(
+                "stone_brick_stairs",
+                &[
+                    ("facing", "south"),
+                    ("half", "bottom"),
+                    ("shape", "straight"),
+                    ("waterlogged", "false"),
+                ],
+            ),
+        );
+        for jump in [false, true] {
+            let mut player = LocalPlayer::new();
+            player.position = dvec3(4.5, 61.0, 4.6).into();
+            player.on_ground = true;
+            player.velocity.y = -GRAVITY * f64::from(VERTICAL_DRAG);
+            let mut input = InputState::released();
+            input.set_test_key(KeyCode::KeyW, true);
+            input.set_test_key(KeyCode::ControlLeft, true);
+            input.set_test_key(KeyCode::Space, jump);
+
+            tick(&mut player, &input, &chunks, 1.0, false);
+            assert_eq!(
+                player.collision_delta[0].y,
+                if jump {
+                    f64::from(JUMP_VELOCITY)
+                } else {
+                    -GRAVITY * f64::from(VERTICAL_DRAG)
+                },
+            );
+            assert_eq!(player.collision_delta[1].y, 0.5);
+            assert_eq!(player.position.y, 61.5);
+            assert_eq!(player.on_ground, !jump);
+            assert!(player.sprinting);
+            assert!(!player.horizontal_collision);
+
+            let previous_vz = player.velocity.z;
+            let accel = if jump {
+                SPRINT_AIR_ACCELERATION
+            } else {
+                movement_speed(&player)
+                    * (GROUND_ACCEL_FACTOR / (BLOCK_FRICTION * BLOCK_FRICTION * BLOCK_FRICTION))
+            };
+            let drag = if jump {
+                HORIZONTAL_DRAG
+            } else {
+                GROUND_FRICTION
+            };
+            let expected_z = previous_vz + f64::from(INPUT_DAMPING) * f64::from(accel);
+            tick(&mut player, &input, &chunks, 1.0, false);
+            assert!((player.collision_delta[0].z - expected_z).abs() < 1.0e-14);
+            assert!((player.collision_delta[1].z - expected_z).abs() < 1.0e-14);
+            assert!((player.velocity.z - expected_z * f64::from(drag)).abs() < 1.0e-14);
+            assert_eq!(player.collision_delta[1].y, 0.0);
+            assert!(player.on_ground);
+        }
+    }
+
+    #[test]
     fn player_width_stops_at_negative_two_block_face() {
         let block = Aabb::block(0, 0, -2);
         let player = Aabb::from_center(

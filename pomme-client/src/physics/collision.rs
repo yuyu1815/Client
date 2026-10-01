@@ -365,7 +365,8 @@ pub fn resolve_collision_for_player(
                 > resolved.x * resolved.x + resolved.z * resolved.z
             {
                 let result = candidate + dvec3(0.0, grounded_aabb.min.y - player_aabb.min.y, 0.0);
-                return (result, on_ground || was_grounded);
+                // Entity.move: ground is final downward clipping, not step eligibility.
+                return (result, velocity.y < 0.0 && result.y != velocity.y);
             }
         }
     }
