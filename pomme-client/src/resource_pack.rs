@@ -55,13 +55,17 @@ impl ResourcePackManager {
             available_local: Vec::new(),
         };
         mgr.scan_local_packs();
-        let selected = std::fs::read(instance_dir.join("options.json"))
+        let mut selected = std::fs::read(instance_dir.join("options.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .and_then(|settings| settings.get("resource_packs")?.as_array().cloned())
-            .unwrap_or_default();
-        for name in selected.iter().filter_map(serde_json::Value::as_str) {
-            mgr.enable_local_pack(name);
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|name| name.as_str().map(str::to_owned))
+            .collect();
+        normalize_local_pack_selection(&mut selected);
+        for name in selected {
+            mgr.enable_local_pack(&name);
         }
         mgr
     }
@@ -347,7 +351,24 @@ impl ResourcePackManager {
 }
 
 fn valid_local_pack_name(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
+    !name.is_empty()
+        && !name.ends_with('.')
+        && !name.ends_with(' ')
+        && !name.contains(':')
+        && !name.contains('/')
+        && !name.contains('\\')
+        && matches!(
+            Path::new(name).components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+        && Path::new(name).components().count() == 1
+}
+
+pub(crate) fn normalize_local_pack_selection(names: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    names.reverse();
+    names.retain(|name| valid_local_pack_name(name) && seen.insert(name.clone()));
+    names.reverse();
 }
 
 #[derive(Debug)]
@@ -678,7 +699,7 @@ mod tests {
         std::fs::create_dir_all(packs_dir.join(".server_cache/not-a-pack")).unwrap();
         std::fs::write(
             root.join("options.json"),
-            br#"{"resource_packs":["second","missing","../outside","first"]}"#,
+            br#"{"resource_packs":["second","missing","../outside","first","second","C:outside"]}"#,
         )
         .unwrap();
 
@@ -689,7 +710,7 @@ mod tests {
                 .iter()
                 .map(|pack| pack.name.as_str())
                 .collect::<Vec<_>>(),
-            ["second", "first"]
+            ["first", "second"]
         );
         assert!(
             active
@@ -698,6 +719,21 @@ mod tests {
         );
         assert_eq!(manager.available_local_packs().len(), 2);
         assert!(!root.join("outside").exists());
+        assert!(valid_local_pack_name("hello world.zip"));
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "folder/name",
+            r"folder\name",
+            ".. ",
+            "C:outside",
+            r"C:\outside",
+            r"\\server\share",
+        ] {
+            assert!(!valid_local_pack_name(invalid), "accepted {invalid:?}");
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

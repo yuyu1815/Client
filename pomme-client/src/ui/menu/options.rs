@@ -1625,13 +1625,19 @@ impl MainMenu {
             for pack in &mut self.available_packs {
                 pack.enabled = self.resource_pack_selection.contains(&pack.name);
             }
-            self.active_packs
-                .retain(|pack| pack.source == PackSource::Server);
+            let server_packs: Vec<_> = self
+                .active_packs
+                .iter()
+                .filter(|pack| pack.source == PackSource::Server)
+                .cloned()
+                .collect();
+            self.active_packs.clear();
             for name in &self.resource_pack_selection {
                 if let Some(pack) = self.available_packs.iter().find(|pack| &pack.name == name) {
                     self.active_packs.push(pack.clone());
                 }
             }
+            self.active_packs.extend(server_packs);
         }
 
         self.cycle_fields(input, 1);
@@ -2499,6 +2505,43 @@ mod tests {
 
     /// Drives every options screen so `build_options_grid`'s debug assertion
     /// checks each screen's rows against its disabled list.
+    #[test]
+    fn resource_pack_rescan_keeps_local_order_below_server_priority() {
+        let root = std::env::temp_dir().join(format!("pomme-pack-ui-{}", uuid::Uuid::new_v4()));
+        for name in ["low", "high"] {
+            let pack = root.join("resourcepacks").join(name);
+            std::fs::create_dir_all(&pack).unwrap();
+            std::fs::write(
+                pack.join("pack.mcmeta"),
+                br#"{"pack":{"pack_format":88,"description":"test"}}"#,
+            )
+            .unwrap();
+        }
+        let mut menu = test_menu(root.to_str().unwrap());
+        menu.resource_pack_selection = vec!["low".into(), "high".into()];
+        menu.active_packs.push(crate::resource_pack::PackInfo {
+            name: "server".into(),
+            description: "server".into(),
+            compat: crate::resource_pack::PackCompat::Compatible,
+            source: crate::resource_pack::PackSource::Server,
+            enabled: true,
+        });
+        menu.rescan_packs = true;
+        let text_width = |_: &str, _: f32| 0.0;
+        menu.build_options_resource_packs(800.0, 600.0, &MenuInput::default(), &text_width);
+        assert_eq!(
+            menu.active_packs
+                .iter()
+                .map(|pack| (
+                    pack.name.as_str(),
+                    pack.source == crate::resource_pack::PackSource::Server
+                ))
+                .collect::<Vec<_>>(),
+            [("low", false), ("high", false), ("server", true)]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn disabled_prefixes_cover_every_options_screen() {
         let mut menu = test_menu("pomme-options-coverage-test");

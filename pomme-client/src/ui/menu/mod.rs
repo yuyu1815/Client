@@ -26,7 +26,7 @@ use crate::renderer::pipelines::menu_overlay::{
 use crate::ui::chat::ChatOptions;
 use crate::ui::text_edit::{SystemClipboard, TextFieldState, TextInputEvent};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Settings {
     gui_scale: u32,
     render_distance: u32,
@@ -239,12 +239,15 @@ fn load_settings(game_dir: &Path) -> Settings {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     settings.locale = supported_locale(&settings.locale).into();
+    crate::resource_pack::normalize_local_pack_selection(&mut settings.resource_packs);
     settings
 }
 
 fn save_settings(game_dir: &Path, settings: &Settings) -> std::io::Result<()> {
     let path = game_dir.join("options.json");
-    let result = serde_json::to_string_pretty(settings)
+    let mut settings = settings.clone();
+    crate::resource_pack::normalize_local_pack_selection(&mut settings.resource_packs);
+    let result = serde_json::to_string_pretty(&settings)
         .map_err(std::io::Error::other)
         .and_then(|json| crate::util::write_atomic(&path, json.as_bytes()));
     if let Err(error) = &result {
@@ -1375,18 +1378,42 @@ mod tests {
 
     #[test]
     fn selected_resource_pack_order_round_trips_and_defaults_for_legacy_settings() {
+        let dir =
+            std::env::temp_dir().join(format!("pomme-packs-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
         let settings = Settings {
             resource_packs: vec!["high".into(), "low".into()],
             ..Settings::default()
         };
-        let json = serde_json::to_string(&settings).unwrap();
-        let loaded: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.resource_packs, ["high", "low"]);
+        save_settings(&dir, &settings).unwrap();
+        assert_eq!(load_settings(&dir).resource_packs, ["high", "low"]);
+
+        let settings = Settings {
+            resource_packs: vec![
+                "high".into(),
+                "low".into(),
+                "high".into(),
+                "../outside".into(),
+                "C:outside".into(),
+            ],
+            ..Settings::default()
+        };
+        save_settings(&dir, &settings).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("options.json")).unwrap()).unwrap();
+        assert_eq!(saved["resource_packs"], serde_json::json!(["low", "high"]));
+        std::fs::write(
+            dir.join("options.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(load_settings(&dir).resource_packs, ["low", "high"]);
 
         let mut legacy = serde_json::to_value(Settings::default()).unwrap();
         legacy.as_object_mut().unwrap().remove("resource_packs");
-        let legacy: Settings = serde_json::from_value(legacy).unwrap();
-        assert!(legacy.resource_packs.is_empty());
+        std::fs::write(dir.join("options.json"), legacy.to_string()).unwrap();
+        assert!(load_settings(&dir).resource_packs.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
