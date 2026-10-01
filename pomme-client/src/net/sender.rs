@@ -57,6 +57,30 @@ fn encode_sign_update(
     frame
 }
 
+fn encode_set_command_block(
+    packet_id: u32,
+    pos: azalea_core::position::BlockPos,
+    command: &str,
+    mode: u32,
+    flags: u8,
+) -> Option<Vec<u8>> {
+    if mode > 2 || command.encode_utf16().count() > 32_767 || command.len() > 131_068 {
+        return None;
+    }
+    use pomme_protocol::wire;
+    let packed = (((pos.x as i64 & 0x3ff_ffff) << 38)
+        | ((pos.z as i64 & 0x3ff_ffff) << 12)
+        | (pos.y as i64 & 0xfff)) as u64;
+    let mut frame = Vec::new();
+    wire::write_varint(&mut frame, packet_id);
+    frame.extend_from_slice(&packed.to_be_bytes());
+    wire::write_varint(&mut frame, command.len() as u32);
+    frame.extend_from_slice(command.as_bytes());
+    wire::write_varint(&mut frame, mode);
+    frame.push(flags);
+    Some(frame)
+}
+
 fn encode_recipe_book_settings(
     packet_id: u32,
     book_type: u32,
@@ -206,6 +230,31 @@ impl PacketSender {
             return;
         };
         self.send_raw(encode_sign_update(id, pos, front, &lines));
+    }
+
+    /// Sends the native 26.2 command-block edit packet. Older negotiated
+    /// versions are rejected: their raw payload layouts are not translated.
+    pub fn set_command_block(
+        &self,
+        pos: azalea_core::position::BlockPos,
+        command: &str,
+        mode: u32,
+        flags: u8,
+    ) -> bool {
+        if crate::version::session_protocol() != pomme_protocol::version::NATIVE.protocol {
+            return false;
+        }
+        use pomme_protocol::{Direction, PacketTable, Phase};
+        let Some(id) =
+            PacketTable::native().id(Phase::Game, Direction::Serverbound, "set_command_block")
+        else {
+            return false;
+        };
+        let Some(frame) = encode_set_command_block(id, pos, command, mode, flags) else {
+            return false;
+        };
+        self.send_raw(frame);
+        true
     }
 
     pub fn send_raw(&self, bytes: Vec<u8>) {
@@ -366,6 +415,32 @@ mod tests {
             panic!("trade selection must not use ContainerButtonClick");
         };
         assert_eq!(packet.item, 6);
+    }
+
+    #[test]
+    fn command_block_frame_encodes_signed_position_unicode_mode_and_flags() {
+        let pos = azalea_core::position::BlockPos::new(-1, -2, -3);
+        let frame = encode_set_command_block(7, pos, "say 🌙", 1, 5).unwrap();
+        let mut cursor = 0;
+        assert_eq!(
+            pomme_protocol::wire::read_varint(&frame, &mut cursor),
+            Some(7)
+        );
+        let packed = u64::from_be_bytes(frame[cursor..cursor + 8].try_into().unwrap());
+        assert_eq!((packed >> 38) & 0x3ff_ffff, 0x3ff_ffff);
+        assert_eq!((packed >> 12) & 0x3ff_ffff, 0x3ff_fffd);
+        assert_eq!(packed & 0xfff, 0xffe);
+        cursor += 8;
+        let len = pomme_protocol::wire::read_varint(&frame, &mut cursor).unwrap() as usize;
+        assert_eq!(&frame[cursor..cursor + len], "say 🌙".as_bytes());
+        cursor += len;
+        assert_eq!(
+            pomme_protocol::wire::read_varint(&frame, &mut cursor),
+            Some(1)
+        );
+        assert_eq!(frame[cursor], 5);
+        assert!(encode_set_command_block(7, pos, "x", 3, 0).is_none());
+        assert!(encode_set_command_block(7, pos, &"x".repeat(32_768), 0, 0).is_none());
     }
 
     #[test]

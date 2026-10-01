@@ -4,6 +4,7 @@ pub mod book;
 pub mod boss_bar;
 pub mod chat;
 pub mod chest;
+pub mod command_block;
 pub mod common;
 pub mod container;
 pub mod crafting_table;

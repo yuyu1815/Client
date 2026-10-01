@@ -155,6 +155,7 @@ pub struct InteractionState {
     miss_time: u32,
     use_delay: u32,
     pending_writable_book: Option<InteractionHand>,
+    pub pending_command_block: Option<(BlockPos, std::time::Instant)>,
     using_item: Option<ActiveUse>,
     /// Keeps charge/one-shot items from retriggering while the use button stays
     /// down, even if the server clears its using-item metadata mid-hold.
@@ -204,6 +205,7 @@ impl InteractionState {
             miss_time: 0,
             use_delay: 0,
             pending_writable_book: None,
+            pending_command_block: None,
             using_item: None,
             use_latch: None,
             using_bow: false,
@@ -947,6 +949,43 @@ impl InteractionState {
         }
 
         let hit_block = if let Some(HitResult::Block(hit)) = self.target {
+            let target_state =
+                chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
+            let target_id = crate::world::block::block_id(target_state);
+            let target_id = target_id.strip_prefix("minecraft:").unwrap_or(target_id);
+            let command_block = matches!(
+                target_id,
+                "command_block" | "chain_command_block" | "repeating_command_block"
+            );
+            if command_block && held_stack.is_none() {
+                if self.pending_command_block.is_none_or(|(pos, started)| {
+                    pos != hit.block_pos || started.elapsed() > std::time::Duration::from_secs(2)
+                }) {
+                    self.pending_command_block = Some((hit.block_pos, std::time::Instant::now()));
+                    self.seq += 1;
+                    sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
+                        hand,
+                        block_hit: BlockHit {
+                            block_pos: hit.block_pos,
+                            direction: hit.face,
+                            location: azalea_vec3(hit.hit_point),
+                            inside: hit.inside,
+                            world_border: hit.world_border,
+                        },
+                        seq: self.seq,
+                    }));
+                }
+                return true;
+            }
+            if command_block
+                && self.pending_command_block.is_none_or(|(pos, started)| {
+                    pos != hit.block_pos || started.elapsed() > std::time::Duration::from_secs(2)
+                })
+            {
+                self.pending_command_block = Some((hit.block_pos, std::time::Instant::now()));
+            } else if !command_block {
+                self.pending_command_block = None;
+            }
             self.seq += 1;
             sender.send(ServerboundGamePacket::UseItemOn(ServerboundUseItemOn {
                 hand,

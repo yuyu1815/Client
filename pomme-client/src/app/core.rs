@@ -1997,6 +1997,13 @@ impl AppCore {
         let mut disconnect_reason: Option<String> = None;
         let mut processed = 0u32;
         self.drain_player_skin_results(renderer);
+        if game
+            .interaction
+            .pending_command_block
+            .is_some_and(|(_, started)| started.elapsed() > std::time::Duration::from_secs(2))
+        {
+            game.interaction.pending_command_block = None;
+        }
 
         for event in rx.try_iter().take(4096) {
             processed += 1;
@@ -2037,6 +2044,8 @@ impl AppCore {
                     cardinal_light,
                     clock_id,
                 } => {
+                    game.interaction.pending_command_block = None;
+                    game.command_block_edit = None;
                     clear_dimension_projectiles(&mut game.entity_store, &mut game.entity_positions);
                     game.item_cooldowns = Default::default();
                     game.world_border = Default::default();
@@ -2157,6 +2166,7 @@ impl AppCore {
                     change,
                     relative,
                 } => {
+                    game.interaction.pending_command_block = None;
                     apply_player_correction(
                         &mut game.player,
                         game.riding_vehicle_id.is_some(),
@@ -2907,6 +2917,36 @@ impl AppCore {
                     }
                 }
                 NetworkEvent::BlockEntityUpdate { pos, kind, nbt } => {
+                    if let Some((pending_pos, started)) = game.interaction.pending_command_block
+                        && pending_pos == pos
+                    {
+                        game.interaction.pending_command_block = None;
+                        let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
+                        let id = crate::world::block::block_id(state);
+                        if started.elapsed() <= std::time::Duration::from_secs(2)
+                            && matches!(
+                                id.strip_prefix("minecraft:").unwrap_or(id),
+                                "command_block" | "chain_command_block" | "repeating_command_block"
+                            )
+                        {
+                            if let Some(ref nbt) = nbt {
+                                let conditional = crate::world::block::block_properties(state)
+                                    .get("conditional")
+                                    == Some(&"true");
+                                game.command_block_edit =
+                                    Some(crate::ui::command_block::CommandBlockEditState::new(
+                                        pos,
+                                        id,
+                                        conditional,
+                                        nbt,
+                                    ));
+                                game.paused = false;
+                                game.interaction
+                                    .stop_destroying_for_screen(&connection.packet_tx);
+                                self.apply_cursor_grab(window, Some(game));
+                            }
+                        }
+                    }
                     let chunk_pos = azalea_core::position::ChunkPos::new(
                         pos.x.div_euclid(16),
                         pos.z.div_euclid(16),
@@ -4030,6 +4070,8 @@ impl AppCore {
                     self.apply_cursor_grab(window, Some(game));
                 }
                 NetworkEvent::Disconnected { reason } => {
+                    game.interaction.pending_command_block = None;
+                    game.command_block_edit = None;
                     tracing::warn!("Disconnected: {reason}");
                     set_first_disconnect_reason(&mut disconnect_reason, reason);
                     self.server_pack_generations.clear();

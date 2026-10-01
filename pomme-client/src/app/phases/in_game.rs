@@ -292,6 +292,7 @@ pub struct GameState {
     /// Read-only view opened by the server's OpenBook packet.
     pub book_view: Option<crate::ui::book::BookViewState>,
     pub sign_edit: Option<crate::ui::sign::SignEditState>,
+    pub command_block_edit: Option<crate::ui::command_block::CommandBlockEditState>,
     /// Which container menu was open last frame (0 = player inventory,
     /// including the creative inventory), to detect close transitions.
     pub container_was_open: Option<i32>,
@@ -715,6 +716,7 @@ impl GameState {
             book_edit: None,
             book_view: None,
             sign_edit: None,
+            command_block_edit: None,
             container_was_open: None,
             inv_drag: None,
             inv_last_click: None,
@@ -839,6 +841,8 @@ impl GameState {
         use input::TextOwner;
         if self.level_load.is_some() {
             TextOwner::Other
+        } else if self.command_block_edit.is_some() {
+            TextOwner::Sign
         } else if self.sign_edit.is_some() {
             TextOwner::Sign
         } else if self.book_edit.is_some() {
@@ -876,6 +880,7 @@ impl GameState {
             || self.book_edit.is_some()
             || self.book_view.is_some()
             || self.sign_edit.is_some()
+            || self.command_block_edit.is_some()
             || self.dialog_open()
             || self.game_mode_switcher.is_some()
     }
@@ -1031,7 +1036,11 @@ impl GameState {
             return true;
         }
         // Read-only books still need the ordered PageUp/PageDown key stream.
-        if self.book_edit.is_some() || self.book_view.is_some() || self.sign_edit.is_some() {
+        if self.book_edit.is_some()
+            || self.book_view.is_some()
+            || self.sign_edit.is_some()
+            || self.command_block_edit.is_some()
+        {
             return true;
         }
         if self.creative_inventory_open {
@@ -2197,6 +2206,55 @@ pub(crate) fn build_server_screens(
     tick: Option<u64>,
     text_events: &[crate::ui::text_edit::TextInputEvent],
 ) {
+    if game.command_block_edit.is_some() {
+        let cursor = core.input.cursor_pos();
+        let pressed = core.input.left_just_pressed();
+        let done = pressed
+            && crate::ui::common::hit_test(cursor, crate::ui::command_block::done_rect(sw, sh, gs));
+        let cancel = (pressed
+            && crate::ui::common::hit_test(
+                cursor,
+                crate::ui::command_block::cancel_rect(sw, sh, gs),
+            ))
+            || core.input.escape_pressed();
+        if let Some(edit) = &mut game.command_block_edit {
+            edit.input(text_events, &|s| {
+                gfx.renderer.menu_text_width(s, common::FONT_SIZE)
+            });
+            if pressed {
+                for i in 0..4 {
+                    if crate::ui::common::hit_test(
+                        cursor,
+                        crate::ui::command_block::toggle_rect(sw, sh, gs, i),
+                    ) {
+                        edit.toggle(i);
+                        break;
+                    }
+                }
+            }
+            edit.draw(elements, sw, sh, gs, &|s| {
+                gfx.renderer.menu_text_width(s, common::FONT_SIZE)
+            });
+            if done {
+                let (command, mode, flags) = edit.packet();
+                if connection
+                    .packet_tx
+                    .set_command_block(edit.pos, &command, mode, flags)
+                {
+                    game.command_block_edit = None;
+                    game.interaction.pending_command_block = None;
+                    core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
+                }
+            } else if cancel {
+                game.command_block_edit = None;
+                game.interaction.pending_command_block = None;
+                core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
+            }
+        }
+        core.input.consume_left_just_pressed();
+        core.input.clear_just_pressed_actions();
+        return;
+    }
     if game.sign_edit.is_some() {
         let cursor = core.input.cursor_pos();
         let done = core.input.left_just_pressed()
