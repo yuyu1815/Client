@@ -1384,7 +1384,8 @@ mod tests {
         .unwrap();
         assert_eq!(hit.block_pos, pos);
 
-        // Large-leaf bamboo protrudes 1/16 into the next cell after XZ offset.
+        // This seed shifts the canonical large-leaf edge across x=-7; ray through
+        // that adjacent cell to verify the offset outline remains targetable.
         let edge_pos = BlockPos::new(-8, 64, 3);
         let large_bamboo = crate::world::block::find_state(
             "bamboo",
@@ -1393,8 +1394,19 @@ mod tests {
         chunks.set_block_state(edge_pos.x, edge_pos.y, edge_pos.z, large_bamboo);
         let offset = crate::world::block::block_offset(large_bamboo, edge_pos);
         assert!(offset.x > 0.19);
-        let edge_ray = dvec3(-8.0 + offset.x + 0.95, 65.5, 3.5 + offset.z);
-        assert_eq!(edge_ray.x.floor() as i32, -7, "ray is in adjacent cell");
+        let edge_ray = dvec3(
+            edge_pos.x as f64 + 1.0,
+            65.5,
+            edge_pos.z as f64 + 0.5 + offset.z,
+        );
+        let canonical_x = edge_ray.x - edge_pos.x as f64 - offset.x;
+        let outline = outline_shape(large_bamboo);
+        assert!((outline[0][0]..=outline[0][3]).contains(&canonical_x));
+        assert_eq!(
+            edge_ray.x.floor() as i32,
+            edge_pos.x + 1,
+            "ray is in adjacent cell"
+        );
         let hit = crate::player::interaction::raycast(
             edge_ray,
             Vec3::NEG_Y,
