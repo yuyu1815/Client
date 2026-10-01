@@ -12,6 +12,7 @@ import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.resources.Identifier;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.attributes.Attributes;
@@ -60,6 +61,7 @@ public final class MovementObserver implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(mc -> { while (TOGGLE.consumeClick()) { if (ACTIVE.get()) stop("user_stop"); else start(mc); } });
         ClientPlayConnectionEvents.DISCONNECT.register((handler, mc) -> stop("disconnect"));
         ClientLifecycleEvents.CLIENT_STOPPING.register(mc -> stop("end_game"));
+        if (Boolean.getBoolean("movementobserver.smokeAutoStop")) ClientLifecycleEvents.CLIENT_STARTED.register(mc -> mc.execute(mc::stop));
     }
 
     private static synchronized void start(Minecraft mc) {
@@ -112,7 +114,7 @@ public final class MovementObserver implements ClientModInitializer {
             JsonObject d=PacketFields.capture(packet); if(d==null)return;
             d.add("native_id", null); d.addProperty("native_stage", "client_packet_listener_"+stage);
             JsonObject state=new JsonObject(); LocalPlayer p=client.player;
-            if(p!=null && (packet instanceof net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket || packet instanceof net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket || (packet instanceof net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket m && m.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket t && t.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket s && s.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket a && a.getEntityId()==p.getId()))) state.add("player",playerState(p));
+            if(p!=null && (packet instanceof net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket || packet instanceof net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket || (packet instanceof net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket m && m.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket t && t.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket s && s.id()==p.getId()) || (packet instanceof net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket a && a.getEntityId()==p.getId()))) state.add("player",playerState(p, stage, packet instanceof net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket || packet instanceof net.minecraft.network.protocol.game.ClientboundPlayerRotationPacket));
             else state.add("player",null);
             if (p!=null && packet instanceof net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket a && a.getEntityId()==p.getId()) state.add("attributes",attributeState(p,a));
             JsonArray bs=new JsonArray(); blocks.forEach(bs::add); state.add("blocks",bs);
@@ -120,10 +122,12 @@ public final class MovementObserver implements ClientModInitializer {
             d.add("applied_state",state); offer("inbound",stage,d);
         } catch (RuntimeException ignored) { /* Passive observation cannot change Minecraft packet handling. */ }
     }
-    private static JsonObject playerState(LocalPlayer p) {
+    private static JsonObject playerState(LocalPlayer p, String stage, boolean correction) {
         JsonObject o=new JsonObject(); o.add("position",vec(p.position())); o.add("velocity",vec(p.getDeltaMovement()));
+        if (correction) { JsonObject correctionShapes=CollisionSnapshots.capture(p, p.getBoundingBox(), Vec3.ZERO); correctionShapes.addProperty("correction_stage", stage); o.add("shape_snapshot", correctionShapes); }
         o.addProperty("on_ground",p.onGround()); o.addProperty("horizontal_collision",p.horizontalCollision); o.addProperty("yaw",(double)p.getYRot()); o.addProperty("pitch",(double)p.getXRot());
         o.addProperty("sprinting",p.isSprinting()); o.addProperty("crouching",p.isCrouching()); o.addProperty("swimming",p.isSwimming()); o.addProperty("in_water",p.isInWater()); o.addProperty("in_lava",p.isInLava()); o.addProperty("pose",p.getPose().name()); o.addProperty("food_level",p.getFoodData().getFoodLevel());
+        playerConditions(o,p);
         return o;
     }
     private static JsonArray attributeState(LocalPlayer player, net.minecraft.network.protocol.game.ClientboundUpdateAttributesPacket packet) {
@@ -220,6 +224,7 @@ public final class MovementObserver implements ClientModInitializer {
         MoveCapture c = MOVE.get();
         if (c == null || client == null || entity != client.player) return;
         c.clipped = clipped; c.data.add("requested_delta", vec(requested)); c.data.add("clipped_delta", vec(clipped));
+        if (!requested.equals(clipped)) c.data.add("shape_snapshot", CollisionSnapshots.capture((LocalPlayer)entity, entity.getBoundingBox(), requested));
         c.data.addProperty("original_requested_y_negative", requested.y < 0.0);
         c.data.addProperty("final_y_clipped", requested.y != clipped.y);
     }
@@ -248,7 +253,7 @@ public final class MovementObserver implements ClientModInitializer {
         if (source.has("on_ground_at_land_start")) TICK_TRAVEL.add("on_ground_at_land_start", source.get("on_ground_at_land_start").deepCopy());
         if (source.has("jump_power_f32")) TICK_TRAVEL.add("jump_power_f32", source.get("jump_power_f32").deepCopy());
         if (source.has("used_block_jump_factor_f32")) TICK_TRAVEL.add("used_block_jump_factor_f32", source.get("used_block_jump_factor_f32").deepCopy());
-        for (String key : List.of("used_step_height", "used_block_speed_factor_f32", "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped", "ground_decision")) {
+        for (String key : List.of("used_step_height", "used_block_speed_factor_f32", "pose_at_move", "bbox_before", "bbox_after", "support_before", "support_after", "requested_delta", "clipped_delta", "original_requested_y_negative", "final_y_clipped", "ground_decision", "shape_snapshot")) {
             if (!source.has(key)) continue;
             JsonElement value = source.get(key);
             if (value != null && !value.isJsonNull()) {
@@ -315,12 +320,22 @@ public final class MovementObserver implements ClientModInitializer {
         d.addProperty("step_height", p.maxUpStep());
         d.addProperty("food_level", p.getFoodData().getFoodLevel());
         d.addProperty("attributes_semantics", "effective values at snapshot; not a per-travel used-value capture");
+        playerConditions(d,p);
         if (stage.equals("after_tick")) {
             JsonObject travel = TICK_TRAVEL.deepCopy();
             annotateNullReasons(travel);
             d.add("travel_observation", travel);
         }
         offer("local", stage, d);
+    }
+    private static void playerConditions(JsonObject o, LocalPlayer p) {
+        var activeEffects=p.getActiveEffects().stream().sorted(java.util.Comparator.comparing(e -> {
+            var key=BuiltInRegistries.MOB_EFFECT.getKey(e.getEffect().value()); return key==null?"unknown":key.toString();
+        })).toList();
+        JsonArray effects = new JsonArray();
+        for (var effect : activeEffects.stream().limit(64).toList()) { JsonObject e=new JsonObject(); var key=BuiltInRegistries.MOB_EFFECT.getKey(effect.getEffect().value()); e.addProperty("id", key==null?"unknown":key.toString()); e.addProperty("amplifier",effect.getAmplifier()); e.addProperty("duration",effect.getDuration()); effects.add(e); }
+        o.add("effects",effects); o.addProperty("effects_max",64); o.addProperty("effects_truncated",activeEffects.size()>64);
+        var a=p.getAbilities(); JsonObject abilities=new JsonObject(); abilities.addProperty("flying",a.flying); abilities.addProperty("may_fly",a.mayfly); abilities.addProperty("fly_speed",a.getFlyingSpeed()); abilities.addProperty("walk_speed",a.getWalkingSpeed()); abilities.addProperty("invulnerable",a.invulnerable); abilities.addProperty("instabuild",a.instabuild); o.add("abilities",abilities);
     }
     private static JsonObject vec(Vec3 v) { JsonObject a = new JsonObject(); a.addProperty("x",v.x); a.addProperty("y",v.y); a.addProperty("z",v.z); return a; }
     private static JsonObject box(net.minecraft.world.phys.AABB b) { JsonObject a = new JsonObject(); a.add("min", vec(new Vec3(b.minX,b.minY,b.minZ))); a.add("max", vec(new Vec3(b.maxX,b.maxY,b.maxZ))); return a; }

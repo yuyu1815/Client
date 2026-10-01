@@ -13,6 +13,13 @@ import net.minecraft.network.protocol.game.ServerboundPlayerInputPacket;
 import net.minecraft.world.entity.PositionMoveRotation;
 import net.minecraft.world.entity.player.Input;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.SharedConstants;
+import net.minecraft.server.Bootstrap;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.EmptyBlockGetter;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.phys.shapes.CollisionContext;
+import net.minecraft.world.phys.shapes.Shapes;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -21,9 +28,40 @@ import java.util.concurrent.atomic.AtomicInteger;
 /** Framework-free production packet and promise fixture, run by packetFieldsSmoke. */
 public final class ObserverFixture {
     public static void main(String[] args) {
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
         packets();
         promises();
-        System.out.println("observer fixture: PASS (typed packets; success/failure/void promise; one unchanged message write)");
+        collisionShapes();
+        System.out.println("observer fixture: PASS (bootstrapped block collision/outline shapes, negative-coordinate transform, box cap/privacy/status; typed packets and promises)");
+    }
+
+    private static void collisionShapes() {
+        var pos = new BlockPos(-3, 7, -5);
+        var empty = EmptyBlockGetter.INSTANCE;
+        var context = CollisionContext.empty();
+        var chest = Blocks.CHEST.defaultBlockState().getCollisionShape(empty, pos, context);
+        var soul = Blocks.SOUL_SAND.defaultBlockState();
+        var honey = Blocks.HONEY_BLOCK.defaultBlockState().getCollisionShape(empty, pos, context);
+        assert Math.abs(chest.max(net.minecraft.core.Direction.Axis.Y) - 0.875) < 1e-9;
+        assert Math.abs(soul.getCollisionShape(empty, pos, context).max(net.minecraft.core.Direction.Axis.Y) - 0.875) < 1e-9;
+        assert Math.abs(soul.getShape(empty, pos, context).max(net.minecraft.core.Direction.Axis.Y) - 1.0) < 1e-9;
+        assert Math.abs(honey.max(net.minecraft.core.Direction.Axis.Y) - 0.9375) < 1e-9;
+        var localChest = chest.toAabbs().get(0);
+        var translated = CollisionSnapshots.worldBox(localChest, -3, 7, -5);
+        assert translated.minX == localChest.minX - 3 && translated.minY == localChest.minY + 7 && translated.minZ == localChest.minZ - 5;
+        assert translated.minX < 0 && translated.minZ < 0;
+        var many = Shapes.or(Shapes.box(0,0,0,.1,.1,.1), Shapes.box(.2,0,0,.3,.1,.1), Shapes.box(.4,0,0,.5,.1,.1), Shapes.box(.6,0,0,.7,.1,.1), Shapes.box(.8,0,0,.9,.1,.1));
+        assert CollisionSnapshots.boundedBoxes(many.toAabbs(), 4).size() == 4;
+        assert !CollisionSnapshots.finite(new net.minecraft.world.phys.AABB(Double.NaN,0,0,1,1,1));
+        var emptySnapshot = CollisionSnapshots.capture(null, new net.minecraft.world.phys.AABB(-1, 0, -1, 1, 2, 1), Vec3.ZERO);
+        assert emptySnapshot.get("status").getAsString().equals("null_world");
+        assert emptySnapshot.get("max_block_cells").getAsInt() == 32;
+        assert emptySnapshot.get("max_boxes").getAsInt() == 128;
+        assert emptySnapshot.get("visited_cells").getAsInt() == 0;
+        assert emptySnapshot.get("block_cells").isJsonArray() && emptySnapshot.get("shape_aabbs").isJsonArray();
+        assert emptySnapshot.getAsJsonObject("visited_range").getAsJsonArray("min").get(0).getAsInt() == -1;
+        assert !emptySnapshot.toString().contains("custom_name") && !emptySnapshot.toString().contains("uuid") && !emptySnapshot.toString().contains("nbt") && !emptySnapshot.toString().contains("chat");
     }
 
     private static void packets() {
