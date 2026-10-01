@@ -3725,6 +3725,7 @@ impl AppCore {
                 }
                 NetworkEvent::EntityPose { id, pose } => {
                     if id == game.player.entity_id {
+                        game.player.pose = pose;
                         game.player.crouching = pose == crate::entity::EntityPose::Crouching;
                         game.player.fall_flying = pose == crate::entity::EntityPose::FallFlying;
                     } else {

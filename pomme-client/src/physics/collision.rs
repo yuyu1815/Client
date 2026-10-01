@@ -18,24 +18,43 @@ pub fn collect_block_aabbs(chunk_store: &ChunkStore, region: &Aabb) -> Vec<Aabb>
 fn collect_block_aabbs_for_player(
     chunk_store: &ChunkStore,
     region: &Aabb,
-    player: Option<(f64, bool, bool, f32)>,
+    player: Option<(f64, bool, bool, f64)>,
 ) -> Vec<Aabb> {
-    collect_block_aabbs_with(region, player, |bx, by, bz| {
-        let state = chunk_store.get_block_state(bx, by, bz);
-        let piston = (crate::world::block::block_id(state) == "moving_piston")
-            .then(|| chunk_store.block_entities.get(&BlockPos::new(bx, by, bz)))
-            .flatten()
-            .and_then(|entity| crate::world::block_entity::moving_block_collision(&entity.nbt));
-        (state, piston)
+    collect_block_aabbs_with(region, player, |x, y, z| {
+        collision_cell(chunk_store, x, y, z)
     })
+}
+
+fn collision_cell(
+    chunks: &ChunkStore,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> (BlockState, Option<(BlockState, DVec3)>) {
+    let state = chunks.get_block_state(x, y, z);
+    let piston = (crate::world::block::block_id(state) == "moving_piston")
+        .then(|| chunks.block_entities.get(&BlockPos::new(x, y, z)))
+        .flatten()
+        .and_then(|entity| crate::world::block_entity::moving_block_collision(&entity.nbt));
+    (state, piston)
 }
 
 fn collect_block_aabbs_with(
     region: &Aabb,
-    player: Option<(f64, bool, bool, f32)>,
-    mut cell: impl FnMut(i32, i32, i32) -> (BlockState, Option<(BlockState, DVec3)>),
+    player: Option<(f64, bool, bool, f64)>,
+    cell: impl FnMut(i32, i32, i32) -> (BlockState, Option<(BlockState, DVec3)>),
 ) -> Vec<Aabb> {
     let mut aabbs = Vec::new();
+    visit_block_aabbs_with(region, player, cell, |_, aabb| aabbs.push(aabb));
+    aabbs
+}
+
+fn visit_block_aabbs_with(
+    region: &Aabb,
+    player: Option<(f64, bool, bool, f64)>,
+    mut cell: impl FnMut(i32, i32, i32) -> (BlockState, Option<(BlockState, DVec3)>),
+    mut visit: impl FnMut(BlockPos, Aabb),
+) {
     let min_x = region.min.x.floor() as i32;
     // Fences, walls and closed gates extend 0.5 blocks above their cell.
     let min_y = region.min.y.floor() as i32 - 1;
@@ -48,14 +67,15 @@ fn collect_block_aabbs_with(
         for bz in min_z..max_z {
             for bx in min_x..max_x {
                 let (state, piston) = cell(bx, by, bz);
+                let mut push = |aabb| visit(BlockPos::new(bx, by, bz), aabb);
                 if crate::world::block::block_id(state) == "moving_piston" {
                     if let Some((moved, progress_offset)) = piston {
                         let origin = dvec3(bx as f64, by as f64, bz as f64) + progress_offset;
                         match block_shape::partial_shape(moved) {
-                            Some(boxes) => {
-                                aabbs.extend(boxes.iter().map(|b| Aabb::from_local(*b, origin)))
-                            }
-                            None => aabbs.push(Aabb::block(bx, by, bz).offset(progress_offset)),
+                            Some(boxes) => boxes
+                                .iter()
+                                .for_each(|b| push(Aabb::from_local(*b, origin))),
+                            None => push(Aabb::block(bx, by, bz).offset(progress_offset)),
                         }
                     }
                     continue;
@@ -64,7 +84,7 @@ fn collect_block_aabbs_with(
                 if id == "powder_snow" {
                     if let Some((feet, descending, leather_boots, fall_distance)) = player {
                         if fall_distance > 2.5 {
-                            aabbs.push(Aabb::from_local(
+                            push(Aabb::from_local(
                                 [0.0, 0.0, 0.0, 1.0, 0.9_f32 as f64, 1.0],
                                 dvec3(bx as f64, by as f64, bz as f64),
                             ));
@@ -72,7 +92,7 @@ fn collect_block_aabbs_with(
                             && feet > by as f64 + 1.0 - 1.0e-5_f32 as f64
                             && !descending
                         {
-                            aabbs.push(Aabb::block(bx, by, bz));
+                            push(Aabb::block(bx, by, bz));
                         }
                     }
                     continue;
@@ -82,10 +102,10 @@ fn collect_block_aabbs_with(
                         if !descending && feet > by as f64 + 1.0 - 1.0e-5_f32 as f64 {
                             // Stable frame: upper deck and four corner posts.
                             let origin = dvec3(bx as f64, by as f64, bz as f64);
-                            aabbs.push(Aabb::from_local([0.0, 0.875, 0.0, 1.0, 1.0, 1.0], origin));
+                            push(Aabb::from_local([0.0, 0.875, 0.0, 1.0, 1.0, 1.0], origin));
                             for x in [0.0, 0.875] {
                                 for z in [0.0, 0.875] {
-                                    aabbs.push(Aabb::from_local(
+                                    push(Aabb::from_local(
                                         [x, 0.0, z, x + 0.125, 1.0, z + 0.125],
                                         origin,
                                     ));
@@ -96,7 +116,7 @@ fn collect_block_aabbs_with(
                             if props.get("bottom") == Some("true")
                                 && props.get("distance") != Some("0")
                             {
-                                aabbs.push(Aabb::from_local(
+                                push(Aabb::from_local(
                                     [0.0, 0.0, 0.0, 1.0, 0.125, 1.0],
                                     dvec3(bx as f64, by as f64, bz as f64),
                                 ));
@@ -108,15 +128,84 @@ fn collect_block_aabbs_with(
                 match block_shape::partial_shape(state) {
                     Some(boxes) => {
                         let offset = dvec3(bx as f64, by as f64, bz as f64);
-                        aabbs.extend(boxes.iter().map(|&b| Aabb::from_local(b, offset)));
+                        boxes
+                            .iter()
+                            .for_each(|&b| push(Aabb::from_local(b, offset)));
                     }
-                    None => aabbs.push(Aabb::block(bx, by, bz)),
+                    None => push(Aabb::block(bx, by, bz)),
                 }
             }
         }
     }
+}
 
-    aabbs
+pub fn find_supporting_block(
+    chunks: &ChunkStore,
+    region: &Aabb,
+    position: DVec3,
+    context: (f64, bool, bool, f64),
+) -> Option<BlockPos> {
+    let mut closest: Option<BlockPos> = None;
+    let mut distance = f64::MAX;
+    visit_block_aabbs_with(
+        region,
+        Some(context),
+        |x, y, z| collision_cell(chunks, x, y, z),
+        |pos, shape| {
+            if !shape.intersects(region) {
+                return;
+            }
+            let next = (dvec3(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5)
+                - position)
+                .length_squared();
+            // Vec3i.compareTo orders Y, Z, X; equal-distance selection keeps the greatest.
+            if next < distance
+                || (next == distance
+                    && closest.is_none_or(|old| (old.y, old.z, old.x) < (pos.y, pos.z, pos.x)))
+            {
+                closest = Some(pos);
+                distance = next;
+            }
+        },
+    );
+    closest
+}
+
+pub fn no_collision_for_player(
+    chunks: &ChunkStore,
+    aabb: &Aabb,
+    source: &Aabb,
+    entity_aabbs: &[Aabb],
+    border_bounds: Option<[f64; 4]>,
+    context: (bool, bool, f64),
+) -> bool {
+    let (descending, boots, fall) = context;
+    let boxes =
+        collect_block_aabbs_for_player(chunks, aabb, Some((source.min.y, descending, boots, fall)));
+    if boxes.iter().any(|shape| shape.intersects(aabb))
+        || entity_aabbs.iter().any(|shape| shape.intersects(aabb))
+    {
+        return false;
+    }
+    // CollisionGetter.noBorderCollision uses the exterior voxel shape, not
+    // the resolver's thin walls: queries can be entirely beyond a wall.
+    !border_bounds.is_some_and(|[min_x, max_x, min_z, max_z]| {
+        let x = (source.min.x + source.max.x) * 0.5;
+        let z = (source.min.z + source.max.z) * 0.5;
+        let margin = (aabb.max.x - aabb.min.x)
+            .max(aabb.max.z - aabb.min.z)
+            .max(1.0);
+        let distance = (x - min_x).min(max_x - x).min(z - min_z).min(max_z - z);
+        distance < margin * 2.0
+            && x >= min_x - margin
+            && x < max_x + margin
+            && z >= min_z - margin
+            && z < max_z + margin
+            && (aabb.min.x < min_x
+                || aabb.max.x > max_x
+                || aabb.min.z < min_z
+                || aabb.max.z > max_z)
+    })
 }
 
 pub fn no_collision(chunk_store: &ChunkStore, aabb: &Aabb) -> bool {
@@ -308,7 +397,7 @@ pub fn resolve_collision_for_player(
     was_grounded: bool,
     entity_aabbs: &[Aabb],
     border_bounds: Option<[f64; 4]>,
-    context: Option<(bool, bool, f32)>,
+    context: Option<(bool, bool, f64)>,
 ) -> (DVec3, bool) {
     let player =
         context.map(|(descending, boots, fall)| (player_aabb.min.y, descending, boots, fall));

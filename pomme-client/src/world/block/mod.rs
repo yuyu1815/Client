@@ -745,10 +745,14 @@ pub fn blocks_motion(state: BlockState) -> bool {
 }
 
 /// Whether a horizontal face provides FULL support, as used by the falling-
-/// fluid downward-flow bias. This derives from baked collision boxes.
+/// fluid downward-flow bias. Soul sand's support shape is explicitly full;
+/// other blocks use the existing baked boxes.
 pub fn has_full_horizontal_sturdy_face(state: BlockState, dx: i32, dz: i32) -> bool {
-    if dx == 0 && dz == 0 {
+    if !matches!((dx, dz), (1, 0) | (-1, 0) | (0, 1) | (0, -1)) {
         return false;
+    }
+    if block_id(state) == "soul_sand" {
+        return true;
     }
     let full_cube = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
     let boxes = block_data(state)

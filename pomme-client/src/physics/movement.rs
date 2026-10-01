@@ -5,9 +5,10 @@ use glam::{DVec3, dvec3};
 use winit::keyboard::KeyCode;
 
 use super::aabb::Aabb;
-use super::collision::no_collision;
+use super::collision::no_collision_for_player;
 use crate::app::input::{self, InputState};
-use crate::player::{CROUCH_HEIGHT, LocalPlayer, PLAYER_HALF_WIDTH, STANDING_HEIGHT};
+use crate::entity::EntityPose;
+use crate::player::LocalPlayer;
 use crate::world::chunk::ChunkStore;
 
 const GRAVITY: f64 = 0.08;
@@ -96,7 +97,7 @@ pub fn tick_with_context(
     player.update_water_state(chunk_store);
     apply_fluid_currents(player, chunk_store);
     reset_fall_distance_for_tick(player);
-    update_crouch_state(player, input, chunk_store);
+    update_crouch_state(player, input, chunk_store, entity_aabbs, border_bounds);
     player.tick_eye_height();
 
     // Vanilla `LocalPlayer.modifyInput` keeps the entire input pipeline in
@@ -178,6 +179,7 @@ pub fn tick_with_context(
         cos_y_rot,
     );
 
+    update_player_pose(player, input, chunk_store, entity_aabbs, border_bounds);
     player.tick_air_supply();
     stop_flying_on_ground(player);
 
@@ -298,7 +300,8 @@ pub fn tick_dead_with_context(
     // Player.updatePlayerPose runs after LivingEntity.tick in vanilla. With
     // death-screen input released, this becomes standing unless clearance keeps
     // the player in the crouching pose for the following tick.
-    update_crouch_state(player, &neutral, chunk_store);
+    update_crouch_state(player, &neutral, chunk_store, entity_aabbs, border_bounds);
+    update_player_pose(player, &neutral, chunk_store, entity_aabbs, border_bounds);
 
     stop_flying_on_ground(player);
     player.was_forward_pressed = false;
@@ -354,26 +357,7 @@ fn zero_small_velocity(player: &mut LocalPlayer) {
 }
 
 fn jump_from_ground(player: &mut LocalPlayer, chunks: &ChunkStore, sin_y_rot: f32, cos_y_rot: f32) {
-    // ponytail: no mainSupportingBlockPos yet; use vanilla's floor fallback
-    // until the shared supporting-block context is implemented.
-    let factor_at = |y: f64| {
-        let state = chunks.get_block_state(
-            player.position.x.floor() as i32,
-            y.floor() as i32,
-            player.position.z.floor() as i32,
-        );
-        if crate::world::block::block_id(state) == "honey_block" {
-            0.5_f32
-        } else {
-            1.0_f32
-        }
-    };
-    let here = factor_at(player.position.y);
-    let factor = if here == 1.0 {
-        factor_at(player.position.y - f64::from(0.500001_f32))
-    } else {
-        here
-    };
+    let factor = block_movement_factor(player, chunks, true);
     let boost = player
         .effects
         .sorted_desc()
@@ -413,7 +397,7 @@ fn tick_land(
 
     let saved_vy = player.velocity.y;
     let speed = movement_speed(player);
-    let friction = block_friction(chunk_store, player.position);
+    let friction = player_block_friction(chunk_store, player);
     let climbing = is_on_climbable(chunk_store, player.position.into());
     let accel = friction_influenced_speed(speed, player, friction);
     let (move_x, move_z) = movement_delta(forward, strafe, accel, sin_y_rot, cos_y_rot);
@@ -689,6 +673,8 @@ fn apply_collision_with_context(
         player.collision_delta = [*player.velocity; 2];
         player.position += *player.velocity;
         player.on_ground = false;
+        player.main_supporting_block_pos = None;
+        player.on_ground_no_blocks = false;
         player.horizontal_collision = false;
         return;
     }
@@ -719,16 +705,22 @@ fn apply_collision_with_context(
         delta.z = delta.z.clamp(-0.15, 0.15);
         delta.y = delta.y.max(-0.15);
     }
-    delta = back_off_from_edge(
-        chunk_store,
-        &aabb,
-        delta,
-        input.performing_action(input::Action::Sneak),
-        player.on_ground,
-        player.flying,
-    );
     let step_height =
         f64::from(player.attribute_value("minecraft:step_height", f64::from(STEP_HEIGHT)) as f32);
+    let context = (
+        input.performing_action(input::Action::Sneak),
+        has_leather_boots(player),
+        player.fall_distance,
+    );
+    delta = back_off_from_edge(
+        chunk_store,
+        player,
+        delta,
+        context,
+        step_height,
+        entity_aabbs,
+        border_bounds,
+    );
     let (resolved, on_ground) = super::collision::resolve_collision_for_player(
         chunk_store,
         aabb,
@@ -737,11 +729,7 @@ fn apply_collision_with_context(
         player.on_ground,
         entity_aabbs,
         border_bounds,
-        Some((
-            input.performing_action(input::Action::Sneak),
-            has_leather_boots(player),
-            player.fall_distance,
-        )),
+        Some(context),
     );
 
     player.collision_delta = [delta, resolved];
@@ -758,6 +746,7 @@ fn apply_collision_with_context(
     player.position += resolved;
     player.on_ground = on_ground;
     player.horizontal_collision = horizontal_collision;
+    check_supporting_block(player, chunk_store, resolved, context);
     update_fall_distance(
         &mut player.fall_distance,
         resolved.y,
@@ -788,13 +777,11 @@ fn apply_collision_with_context(
     // negative so the next tick's move always probes downward and keeps
     // `on_ground` stable instead of flickering.
     if collided_y {
-        let landed_on_slime = delta.y < 0.0
-            && !input.performing_action(input::Action::Sneak)
-            && crate::world::block::block_id(chunk_store.get_block_state(
-                player.position.x.floor() as i32,
-                (player.bounding_box().min.y - f64::from(0.2_f32)).floor() as i32,
-                player.position.z.floor() as i32,
-            )) == "slime_block";
+        let landed_on_slime = delta.y < 0.0 && !input.performing_action(input::Action::Sneak) && {
+            let pos = player.on_pos(chunk_store, 0.2_f32);
+            crate::world::block::block_id(chunk_store.get_block_state(pos.x, pos.y, pos.z))
+                == "slime_block"
+        };
         // Entity.restituteMovementAfterCollisions compensates gravity and
         // blends air drag by the fraction of the downward move completed.
         player.velocity.y = if landed_on_slime && -delta.y >= GRAVITY {
@@ -815,6 +802,10 @@ fn apply_collision_with_context(
         player.velocity.y = 0.2;
     }
 
+    let speed_factor = f64::from(block_movement_factor(player, chunk_store, false));
+    player.velocity.x *= speed_factor;
+    player.velocity.z *= speed_factor;
+
     if player.sprinting
         && horizontal_collision
         && forward > 0.0
@@ -830,11 +821,11 @@ fn honey_slide_movement(delta_y: f64) -> (f64, f64) {
     (horizontal_scale, (-0.05 - 0.08) * f64::from(VERTICAL_DRAG))
 }
 
-fn update_fall_distance(fall_distance: &mut f32, resolved_y: f64, on_ground: bool, in_water: bool) {
+fn update_fall_distance(fall_distance: &mut f64, resolved_y: f64, on_ground: bool, in_water: bool) {
     if on_ground || in_water {
         *fall_distance = 0.0;
     } else if resolved_y < 0.0 {
-        *fall_distance -= resolved_y as f32;
+        *fall_distance -= f64::from(resolved_y as f32);
     }
 }
 
@@ -906,41 +897,153 @@ fn update_sprint_state(
     }
 }
 
-// Forces the crouch pose under ceilings too low to stand in; riding and
-// sleeping aren't simulated.
-fn update_crouch_state(player: &mut LocalPlayer, input: &InputState, chunk_store: &ChunkStore) {
+fn can_fit_pose(
+    player: &LocalPlayer,
+    chunks: &ChunkStore,
+    pose: EntityPose,
+    entities: &[Aabb],
+    border: Option<[f64; 4]>,
+    descending: bool,
+) -> bool {
+    no_collision_for_player(
+        chunks,
+        &player.bounding_box_for_pose(pose).deflate(1.0e-7),
+        &player.bounding_box(),
+        entities,
+        border,
+        (descending, has_leather_boots(player), player.fall_distance),
+    )
+}
+
+fn update_crouch_state(
+    player: &mut LocalPlayer,
+    input: &InputState,
+    chunks: &ChunkStore,
+    entities: &[Aabb],
+    border: Option<[f64; 4]>,
+) {
+    let shift = input.performing_action(input::Action::Sneak);
     player.crouching = player.game_mode != 3
         && !player.flying
         && !player.swimming
-        && can_fit_with_height(chunk_store, player.position.into(), CROUCH_HEIGHT)
-        && (input.performing_action(input::Action::Sneak)
-            || !can_fit_with_height(chunk_store, player.position.into(), STANDING_HEIGHT));
+        && can_fit_pose(
+            player,
+            chunks,
+            EntityPose::Crouching,
+            entities,
+            border,
+            shift,
+        )
+        && (shift
+            || !can_fit_pose(
+                player,
+                chunks,
+                EntityPose::Standing,
+                entities,
+                border,
+                shift,
+            ));
 }
 
-fn can_fit_with_height(chunk_store: &ChunkStore, pos: DVec3, height: f64) -> bool {
-    no_collision(
-        chunk_store,
-        &Aabb::from_center(pos, PLAYER_HALF_WIDTH, height / 2.0).deflate(1.0e-7),
-    )
+fn update_player_pose(
+    player: &mut LocalPlayer,
+    input: &InputState,
+    chunks: &ChunkStore,
+    entities: &[Aabb],
+    border: Option<[f64; 4]>,
+) {
+    let shift = input.performing_action(input::Action::Sneak);
+    if !can_fit_pose(
+        player,
+        chunks,
+        EntityPose::Swimming,
+        entities,
+        border,
+        shift,
+    ) {
+        return;
+    }
+    let desired = if player.is_sleeping() {
+        EntityPose::Sleeping
+    } else if player.swimming {
+        EntityPose::Swimming
+    } else if player.fall_flying {
+        EntityPose::FallFlying
+    } else if shift && !player.flying {
+        EntityPose::Crouching
+    } else {
+        EntityPose::Standing
+    };
+    player.pose = if player.game_mode == 3
+        || can_fit_pose(player, chunks, desired, entities, border, shift)
+    {
+        desired
+    } else if can_fit_pose(
+        player,
+        chunks,
+        EntityPose::Crouching,
+        entities,
+        border,
+        shift,
+    ) {
+        EntityPose::Crouching
+    } else {
+        EntityPose::Swimming
+    };
+}
+
+fn check_supporting_block(
+    player: &mut LocalPlayer,
+    chunks: &ChunkStore,
+    movement: DVec3,
+    context: (bool, bool, f64),
+) {
+    if !player.on_ground {
+        player.main_supporting_block_pos = None;
+        player.on_ground_no_blocks = false;
+        return;
+    }
+    let bb = player.bounding_box();
+    let area = Aabb::new(
+        bb.min - dvec3(0.0, 1.0e-6, 0.0),
+        dvec3(bb.max.x, bb.min.y, bb.max.z),
+    );
+    let context = (bb.min.y, context.0, context.1, context.2);
+    let mut support =
+        super::collision::find_supporting_block(chunks, &area, player.position.into(), context);
+    if support.is_none() && !player.on_ground_no_blocks {
+        support = super::collision::find_supporting_block(
+            chunks,
+            &area.offset(dvec3(-movement.x, 0.0, -movement.z)),
+            player.position.into(),
+            context,
+        );
+    }
+    player.main_supporting_block_pos = support;
+    player.on_ground_no_blocks = support.is_none();
 }
 
 // While holding shift on the ground, clamp the horizontal move so the player
 // can't fall further than the step height.
 fn back_off_from_edge(
     chunk_store: &ChunkStore,
-    bb: &Aabb,
+    player: &LocalPlayer,
     delta: DVec3,
-    shift_down: bool,
-    on_ground: bool,
-    flying: bool,
+    context: (bool, bool, f64),
+    step_height: f64,
+    entities: &[Aabb],
+    border: Option<[f64; 4]>,
 ) -> DVec3 {
-    if !shift_down || flying || delta.y > 0.0 {
+    let bb = player.bounding_box();
+    let can_fall = |dx, dz, height| {
+        can_fall_at_least(chunk_store, &bb, dx, dz, height, entities, border, context)
+    };
+    if !context.0 || player.flying || delta.y > 0.0 {
         return delta;
     }
-    // TODO: fall distance - falling less than the step height still counts
-    // as above ground
+    let fall = player.fall_distance;
     let above_ground =
-        on_ground || !can_fall_at_least(chunk_store, bb, 0.0, 0.0, f64::from(STEP_HEIGHT));
+        player.on_ground || (fall < step_height && !can_fall(0.0, 0.0, step_height - fall));
     if !above_ground {
         return delta;
     }
@@ -950,24 +1053,21 @@ fn back_off_from_edge(
     let step_x = dx.signum() * 0.05;
     let step_z = dz.signum() * 0.05;
 
-    while dx != 0.0 && can_fall_at_least(chunk_store, bb, dx, 0.0, f64::from(STEP_HEIGHT)) {
+    while dx != 0.0 && can_fall(dx, 0.0, step_height) {
         if dx.abs() <= 0.05 {
             dx = 0.0;
             break;
         }
         dx -= step_x;
     }
-    while dz != 0.0 && can_fall_at_least(chunk_store, bb, 0.0, dz, f64::from(STEP_HEIGHT)) {
+    while dz != 0.0 && can_fall(0.0, dz, step_height) {
         if dz.abs() <= 0.05 {
             dz = 0.0;
             break;
         }
         dz -= step_z;
     }
-    while dx != 0.0
-        && dz != 0.0
-        && can_fall_at_least(chunk_store, bb, dx, dz, f64::from(STEP_HEIGHT))
-    {
+    while dx != 0.0 && dz != 0.0 && can_fall(dx, dz, step_height) {
         dx = if dx.abs() <= 0.05 { 0.0 } else { dx - step_x };
         if dz.abs() <= 0.05 {
             dz = 0.0;
@@ -1160,8 +1260,11 @@ fn can_fall_at_least(
     dx: f64,
     dz: f64,
     min_height: f64,
+    entities: &[Aabb],
+    border: Option<[f64; 4]>,
+    context: (bool, bool, f64),
 ) -> bool {
-    no_collision(
+    no_collision_for_player(
         chunk_store,
         &Aabb::new(
             dvec3(
@@ -1171,13 +1274,47 @@ fn can_fall_at_least(
             ),
             dvec3(bb.max.x - 1.0e-7 + dx, bb.min.y, bb.max.z - 1.0e-7 + dz),
         ),
+        bb,
+        entities,
+        border,
+        context,
     )
 }
 
-/// Vanilla's `Block.getFriction`; floor fallback mirrors
-/// `Entity.getOnPos(0.500001F)`.
-// ponytail: collision resolver has no mainSupportingBlockPos; use the official
-// floor fallback.
+fn player_block_friction(chunks: &ChunkStore, player: &LocalPlayer) -> f32 {
+    let pos = player.on_pos(chunks, 0.500_001_f32);
+    friction_for_block_id(crate::world::block::block_id(
+        chunks.get_block_state(pos.x, pos.y, pos.z),
+    ))
+}
+
+fn block_movement_factor(player: &LocalPlayer, chunks: &ChunkStore, jump: bool) -> f32 {
+    let here = chunks.get_block_state(
+        player.position.x.floor() as i32,
+        player.position.y.floor() as i32,
+        player.position.z.floor() as i32,
+    );
+    let factor = |state| match crate::world::block::block_id(state) {
+        "honey_block" if jump => 0.5_f32,
+        "honey_block" | "soul_sand" if !jump => 0.4_f32,
+        _ => 1.0_f32,
+    };
+    let here_factor = factor(here);
+    if here_factor != 1.0
+        || (!jump
+            && matches!(
+                crate::world::block::block_id(here),
+                "water" | "bubble_column"
+            ))
+    {
+        return here_factor;
+    }
+    let pos = player.on_pos(chunks, 0.500_001_f32);
+    factor(chunks.get_block_state(pos.x, pos.y, pos.z))
+}
+
+/// Floor fallback retained for horse physics and historical-position
+/// diagnostics.
 pub(crate) fn block_friction(
     chunks: &ChunkStore,
     position: crate::entity::components::Position,
@@ -1192,7 +1329,6 @@ pub(crate) fn block_friction(
 
 fn friction_for_block_id(id: &str) -> f32 {
     match id {
-        "honey_block" | "soul_sand" => 0.4,
         "ice" | "packed_ice" | "frosted_ice" => 0.98,
         "blue_ice" => 0.989,
         "slime_block" => 0.8,
@@ -1406,7 +1542,9 @@ fn vanilla_look_y(pitch_degrees: f32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::player::{CROUCH_EYE_HEIGHT, STANDING_EYE_HEIGHT};
+    use crate::player::{
+        CROUCH_EYE_HEIGHT, CROUCH_HEIGHT, PLAYER_HALF_WIDTH, STANDING_EYE_HEIGHT, STANDING_HEIGHT,
+    };
 
     fn flat_floor() -> ChunkStore {
         crate::world::block::init("26.2");
@@ -1427,6 +1565,300 @@ mod tests {
             }
         }
         chunks
+    }
+
+    fn sparse_world(blocks: &[(i32, i32, i32, &str)]) -> ChunkStore {
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        let mut loaded = std::collections::HashSet::new();
+        for &(x, y, z, id) in blocks {
+            let pos = azalea_core::position::ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
+            if loaded.insert(pos) {
+                chunks.partial_storage.set(
+                    &pos,
+                    Some(azalea_world::chunk::Chunk::default()),
+                    &mut chunks.chunk_storage,
+                );
+            }
+            chunks.set_block_state(x, y, z, crate::world::block::find_state(id, &[]));
+        }
+        chunks
+    }
+
+    #[test]
+    fn full_tick_pose_uses_block_entity_and_border_clearance_and_swimming_fallback() {
+        let chunks = flat_floor();
+        let neutral = InputState::released();
+        for (ceiling, expected) in [
+            (1.6, EntityPose::Crouching),
+            (1.0, EntityPose::Swimming),
+            (0.4, EntityPose::Standing),
+        ] {
+            let mut player = LocalPlayer::new();
+            player.position = dvec3(4.5, 61.0, 4.5).into();
+            player.velocity.y = -0.08;
+            let entity = Aabb::new(dvec3(4.0, 61.0 + ceiling, 4.0), dvec3(5.0, 64.0, 5.0));
+            tick_with_context(&mut player, &neutral, &chunks, &[entity], None, 1.0, false);
+            assert_eq!(player.pose, expected, "ceiling={ceiling}");
+            assert_eq!(
+                player.height(),
+                LocalPlayer::dimensions_for_pose(expected).1
+            );
+            assert_eq!(
+                player.swimming, false,
+                "crawling does not set the swim movement flag"
+            );
+            if expected == EntityPose::Swimming {
+                assert_eq!(
+                    player.target_eye_height(),
+                    crate::player::SWIMMING_EYE_HEIGHT
+                );
+                tick_with_context(&mut player, &neutral, &chunks, &[entity], None, 1.0, false);
+                assert!(!player.bounding_box().intersects(&entity));
+            }
+        }
+        let chunks = sparse_world(&[(4, 60, 4, "stone"), (4, 62, 4, "stone")]);
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(4.5, 61.0, 4.5).into();
+        player.velocity.y = -0.08;
+        tick(&mut player, &neutral, &chunks, 1.0, false);
+        assert_eq!(player.pose, EntityPose::Swimming);
+        tick(&mut player, &neutral, &chunks, 1.0, false);
+        assert!(player.on_ground);
+        assert_eq!(player.height(), crate::player::SWIMMING_HEIGHT);
+
+        let chunks = flat_floor();
+        player.position = dvec3(4.9, 61.0, 4.5).into();
+        player.pose = EntityPose::Crouching;
+        player.velocity.y = -0.08;
+        tick_with_context(
+            &mut player,
+            &neutral,
+            &chunks,
+            &[],
+            Some([0.0, 5.0, 0.0, 16.0]),
+            1.0,
+            false,
+        );
+        assert_eq!(
+            player.pose,
+            EntityPose::Crouching,
+            "blocked swimming retains the current metadata pose"
+        );
+        assert!(!can_fit_pose(
+            &player,
+            &chunks,
+            EntityPose::Standing,
+            &[],
+            Some([0.0, 5.0, 0.0, 16.0]),
+            false
+        ));
+    }
+
+    #[test]
+    fn full_tick_sneak_uses_remaining_fall_distance_attribute_step_and_entity_support() {
+        let chunks = sparse_world(&[(0, 60, 0, "stone")]);
+        let mut shift = InputState::released();
+        shift.set_test_key(KeyCode::ShiftLeft, true);
+        for (fall, ground, step, expected_x) in [
+            (0.4, false, 0.6, 1.0),
+            (0.1, false, 0.6, 0.75),
+            (0.4, true, 0.6, 0.75),
+            (0.1, false, 0.2, 1.0),
+        ] {
+            let mut player = LocalPlayer::new();
+            player.position = dvec3(0.5, 61.3, 0.5).into();
+            player.velocity = crate::entity::components::Velocity::new(1.0, -0.01, 0.0);
+            player.fall_distance = fall;
+            player.on_ground = ground;
+            player.set_attribute_value("step_height", step);
+            tick(&mut player, &shift, &chunks, 1.0, false);
+            assert!(
+                (player.collision_delta[0].x - expected_x).abs() < 1.0e-12,
+                "fall={fall} ground={ground} step={step}: {:?}",
+                player.collision_delta
+            );
+        }
+        // Entity.fallDistance is a double; rounding to float would erase the
+        // just-below-maxDownStep case before isAboveGround can inspect it.
+        for (fall, expected_x) in [
+            (f64::from(STEP_HEIGHT) - 1.0e-9, 0.75),
+            (f64::from(STEP_HEIGHT), 1.0),
+        ] {
+            let mut player = LocalPlayer::new();
+            player.position = dvec3(0.5, 61.0, 0.5).into();
+            player.fall_distance = fall;
+            player.velocity = crate::entity::components::Velocity::new(1.0, -0.08, 0.0);
+            tick(&mut player, &shift, &chunks, 1.0, false);
+            assert!((player.collision_delta[0].x - expected_x).abs() < 1.0e-12);
+        }
+        let chunks = sparse_world(&[]);
+        let support = Aabb::block(0, 60, 0);
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(0.5, 61.0, 0.5).into();
+        player.velocity = crate::entity::components::Velocity::new(1.0, -0.08, 0.0);
+        player.on_ground = true;
+        tick_with_context(&mut player, &shift, &chunks, &[support], None, 1.0, false);
+        assert!((player.collision_delta[0].x - 0.75).abs() < 1.0e-12);
+        assert!(player.on_ground);
+        assert_eq!(
+            player.main_supporting_block_pos, None,
+            "entity ground must not invent a block support"
+        );
+    }
+
+    #[test]
+    fn full_tick_equipment_powder_snow_context_reaches_ground_and_support_queries() {
+        let chunks = sparse_world(&[(0, 60, 0, "powder_snow")]);
+        for boots in [false, true] {
+            let mut player = LocalPlayer::new();
+            player.position = dvec3(0.5, 61.0, 0.5).into();
+            player.velocity.y = -0.08;
+            if boots {
+                player.inventory.set_slot(
+                    8,
+                    azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData::new(
+                        azalea_registry::builtin::ItemKind::LeatherBoots,
+                        1,
+                    )),
+                );
+            }
+            let bb = player.bounding_box();
+            assert_eq!(
+                can_fall_at_least(&chunks, &bb, 0.0, 0.0, 0.2, &[], None, (false, boots, 0.0)),
+                !boots
+            );
+            assert!(
+                can_fall_at_least(&chunks, &bb, 0.0, 0.0, 0.2, &[], None, (true, boots, 0.0)),
+                "descending disables boot support"
+            );
+            tick(&mut player, &InputState::released(), &chunks, 1.0, false);
+            assert_eq!(player.on_ground, boots);
+            assert_eq!(player.main_supporting_block_pos.is_some(), boots);
+        }
+    }
+
+    #[test]
+    fn full_tick_edge_support_selects_ice_friction_at_positive_and_negative_coordinates() {
+        for (bx, x) in [(0, 1.05), (-1, -1.05)] {
+            for (id, friction) in [("ice", 0.98_f32), ("stone", 0.6_f32)] {
+                let chunks = sparse_world(&[(bx, 60, 0, id)]);
+                let mut player = LocalPlayer::new();
+                player.position = dvec3(x, 61.0, 0.5).into();
+                player.velocity.y = -0.08;
+                let neutral = InputState::released();
+                tick(&mut player, &neutral, &chunks, 1.0, false);
+                assert_eq!(
+                    player.main_supporting_block_pos,
+                    Some(azalea_core::position::BlockPos::new(bx, 60, 0))
+                );
+                assert_eq!(player_block_friction(&chunks, &player), friction);
+                player.velocity.x = 0.1;
+                tick(&mut player, &neutral, &chunks, 1.0, false);
+                assert_eq!(
+                    player.velocity.x,
+                    0.1 * f64::from(friction * HORIZONTAL_DRAG)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_tick_support_uses_previous_horizontal_position_then_clears_when_airborne() {
+        let chunks = sparse_world(&[(0, 60, 0, "ice")]);
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(0.5, 61.0, 0.5).into();
+        player.velocity = crate::entity::components::Velocity::new(1.0, -0.08, 0.0);
+        let neutral = InputState::released();
+        tick(&mut player, &neutral, &chunks, 1.0, false);
+        assert!(player.on_ground);
+        assert_eq!(
+            player.main_supporting_block_pos,
+            Some(azalea_core::position::BlockPos::new(0, 60, 0))
+        );
+        assert_eq!(player_block_friction(&chunks, &player), 0.98);
+        tick(&mut player, &neutral, &chunks, 1.0, false);
+        assert!(!player.on_ground);
+        assert_eq!(player.main_supporting_block_pos, None);
+    }
+
+    #[test]
+    fn supporting_blocks_use_nearest_center_ties_and_no_block_fallback_gate() {
+        let chunks = sparse_world(&[(0, 60, 0, "ice"), (1, 60, 0, "stone")]);
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(1.0, 61.0, 0.5).into();
+        player.on_ground = true;
+        check_supporting_block(&mut player, &chunks, DVec3::ZERO, (false, false, 0.0));
+        assert_eq!(
+            player.main_supporting_block_pos,
+            Some(azalea_core::position::BlockPos::new(1, 60, 0)),
+            "equal-distance Vec3i ordering chooses greater X"
+        );
+        player.position.x = 0.95;
+        check_supporting_block(&mut player, &chunks, DVec3::ZERO, (false, false, 0.0));
+        assert_eq!(
+            player.main_supporting_block_pos,
+            Some(azalea_core::position::BlockPos::new(0, 60, 0))
+        );
+        player.position.x = 4.0;
+        check_supporting_block(&mut player, &chunks, DVec3::ZERO, (false, false, 0.0));
+        assert!(player.on_ground_no_blocks);
+        check_supporting_block(
+            &mut player,
+            &chunks,
+            dvec3(3.5, 0.0, 0.0),
+            (false, false, 0.0),
+        );
+        assert_eq!(
+            player.main_supporting_block_pos, None,
+            "already on entity-only ground skips previous-block retry"
+        );
+    }
+
+    #[test]
+    fn full_tick_edge_honey_shares_support_for_speed_and_jump_not_friction() {
+        let chunks = sparse_world(&[(0, 60, 0, "honey_block")]);
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(1.05, 60.9375, 0.5).into();
+        player.velocity.y = -0.08;
+        tick(&mut player, &InputState::released(), &chunks, 1.0, false);
+        assert!(player.main_supporting_block_pos.is_some());
+        assert_eq!(player_block_friction(&chunks, &player), 0.6);
+        assert_eq!(block_movement_factor(&player, &chunks, false), 0.4);
+        player.velocity.x = 0.02;
+        tick(&mut player, &InputState::released(), &chunks, 1.0, false);
+        assert_eq!(
+            player.velocity.x,
+            0.02 * f64::from(0.4_f32) * f64::from(GROUND_FRICTION)
+        );
+        let mut jump = InputState::released();
+        jump.set_test_key(KeyCode::Space, true);
+        tick(&mut player, &jump, &chunks, 1.0, false);
+        assert_eq!(player.collision_delta[0].y, f64::from(0.42_f32 * 0.5_f32));
+    }
+
+    #[test]
+    fn soul_sand_support_shape_has_all_horizontal_faces_but_not_invalid_directions() {
+        crate::world::block::init("26.2");
+        let state = crate::world::block::find_state("soul_sand", &[]);
+        for direction in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            assert!(crate::world::block::has_full_horizontal_sturdy_face(
+                state,
+                direction.0,
+                direction.1
+            ));
+        }
+        for direction in [(0, 0), (1, 1), (2, 0)] {
+            assert!(!crate::world::block::has_full_horizontal_sturdy_face(
+                state,
+                direction.0,
+                direction.1
+            ));
+        }
+        assert_eq!(
+            super::super::block_shape::partial_shape(state).unwrap()[0][4],
+            0.875
+        );
     }
 
     #[test]
@@ -2008,8 +2440,8 @@ mod tests {
     fn friction_reads_vanilla_block_property_values() {
         for (id, expected) in [
             ("stone", 0.6),
-            ("honey_block", 0.4),
-            ("soul_sand", 0.4),
+            ("honey_block", 0.6),
+            ("soul_sand", 0.6),
             ("ice", 0.98),
             ("packed_ice", 0.98),
             ("blue_ice", 0.989),
@@ -2132,6 +2564,11 @@ mod tests {
         let mut fall_distance = 1.0;
         update_fall_distance(&mut fall_distance, -0.75, false, false);
         assert_eq!(fall_distance, 1.75);
+        let mut accumulated = 0.0;
+        for _ in 0..10 {
+            update_fall_distance(&mut accumulated, -0.01, false, false);
+        }
+        assert_eq!(accumulated, 10.0 * f64::from(0.01_f32));
         update_fall_distance(&mut fall_distance, 0.5, false, false);
         update_fall_distance(&mut fall_distance, 0.0, false, false);
         assert_eq!(fall_distance, 1.75);
@@ -2241,6 +2678,7 @@ mod tests {
         player.velocity = crate::entity::components::Velocity::new(0.25, 0.0, -0.1);
         player.sprinting = true;
         player.crouching = true;
+        player.pose = EntityPose::Crouching;
         player.eye_height = 1.27;
         player.prev_eye_height = 1.27;
         let chunks = ChunkStore::new(2);

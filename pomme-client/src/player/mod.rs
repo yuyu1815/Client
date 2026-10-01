@@ -12,8 +12,8 @@ use azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot;
 use glam::{dvec2, dvec3};
 use inventory::Inventory;
 
-use crate::entity::HURT_DURATION;
 use crate::entity::components::{LookDirection, Position, Velocity};
+use crate::entity::{EntityPose, HURT_DURATION};
 use crate::physics::aabb::Aabb;
 use crate::world::block::{FluidKind, fluid};
 
@@ -23,6 +23,8 @@ pub const MAX_AIR_SUPPLY: i32 = 300;
 pub const PLAYER_HALF_WIDTH: f64 = (0.6_f32 / 2.0_f32) as f64;
 pub const STANDING_HEIGHT: f64 = 1.8_f32 as f64;
 pub const CROUCH_HEIGHT: f64 = 1.5_f32 as f64;
+pub const SWIMMING_HEIGHT: f64 = 0.6_f32 as f64;
+pub const SWIMMING_EYE_HEIGHT: f32 = 0.4;
 pub const STANDING_EYE_HEIGHT: f32 = 1.62;
 pub const CROUCH_EYE_HEIGHT: f32 = 1.27;
 pub const SLEEPING_EYE_HEIGHT: f32 = 0.2;
@@ -145,6 +147,9 @@ pub struct LocalPlayer {
     pub look_dir: LookDirection,
     pub prev_look_dir: LookDirection,
     pub on_ground: bool,
+    pub main_supporting_block_pos: Option<azalea_core::position::BlockPos>,
+    pub(crate) on_ground_no_blocks: bool,
+    pub pose: EntityPose,
     pub health: f32,
     pub death_time: u32,
     pub absorption: f32,
@@ -197,7 +202,7 @@ pub struct LocalPlayer {
     /// Shared LivingEntity flag bit 0x80; packet authority remains external.
     pub fall_flying: bool,
     pub fall_flying_ticks: u32,
-    pub fall_distance: f32,
+    pub fall_distance: f64,
     pub air_supply: i32,
     /// Vanilla LocalPlayer.portalEffectIntensity: drives the full-screen
     /// portal overlay while standing in a nether portal.
@@ -229,6 +234,9 @@ impl LocalPlayer {
             look_dir: LookDirection::default(),
             prev_look_dir: LookDirection::default(),
             on_ground: false,
+            main_supporting_block_pos: None,
+            on_ground_no_blocks: false,
+            pose: EntityPose::Standing,
             health: 20.0,
             death_time: 0,
             absorption: 0.0,
@@ -365,6 +373,7 @@ impl LocalPlayer {
         let kept_look = self.look_dir;
         let kept_sprinting = self.sprinting;
         let kept_crouching = self.crouching;
+        let kept_pose = self.pose;
         let kept_air_supply = self.air_supply;
         let kept_sleeping_pos = self.sleeping_pos;
 
@@ -413,6 +422,9 @@ impl LocalPlayer {
         self.fall_distance = 0.0;
         self.sleep_counter = 0;
         self.on_ground = false;
+        self.main_supporting_block_pos = None;
+        self.on_ground_no_blocks = false;
+        self.pose = EntityPose::Standing;
 
         if keep_entity_data {
             // SynchedEntityData copied by vanilla includes these Pomme-modeled
@@ -425,6 +437,7 @@ impl LocalPlayer {
             self.prev_look_dir = kept_look;
             self.sprinting = kept_sprinting;
             self.crouching = kept_crouching;
+            self.pose = kept_pose;
             self.air_supply = kept_air_supply;
             self.sleeping_pos = kept_sleeping_pos;
         } else {
@@ -486,33 +499,78 @@ impl LocalPlayer {
         self.flash_on_set_health = false;
     }
 
-    pub fn height(&self) -> f64 {
-        if self.sleeping_pos.is_some() {
-            0.2
-        } else if self.crouching {
-            CROUCH_HEIGHT
-        } else {
-            STANDING_HEIGHT
+    /// Avatar.POSES: pose dimensions are independent of LocalPlayer's input
+    /// slowdown flag.
+    pub fn dimensions_for_pose(pose: EntityPose) -> (f64, f64) {
+        match pose {
+            EntityPose::Sleeping | EntityPose::Dying => (0.2_f32 as f64 / 2.0, 0.2_f32 as f64),
+            EntityPose::Swimming | EntityPose::FallFlying | EntityPose::SpinAttack => {
+                (PLAYER_HALF_WIDTH, SWIMMING_HEIGHT)
+            }
+            EntityPose::Crouching => (PLAYER_HALF_WIDTH, CROUCH_HEIGHT),
+            _ => (PLAYER_HALF_WIDTH, STANDING_HEIGHT),
         }
+    }
+
+    pub fn height(&self) -> f64 {
+        Self::dimensions_for_pose(self.effective_pose()).1
+    }
+
+    fn effective_pose(&self) -> EntityPose {
+        if self.sleeping_pos.is_some() {
+            EntityPose::Sleeping
+        } else {
+            self.pose
+        }
+    }
+
+    pub fn bounding_box_for_pose(&self, pose: EntityPose) -> Aabb {
+        let (half_width, height) = Self::dimensions_for_pose(pose);
+        Aabb::from_center(self.position.into(), half_width, height / 2.0)
     }
 
     pub fn bounding_box(&self) -> Aabb {
-        let half_width = if self.sleeping_pos.is_some() {
-            0.1
-        } else {
-            PLAYER_HALF_WIDTH
-        };
-        Aabb::from_center(self.position.into(), half_width, self.height() / 2.0)
+        self.bounding_box_for_pose(self.effective_pose())
     }
 
     pub fn target_eye_height(&self) -> f32 {
-        if self.sleeping_pos.is_some() {
-            SLEEPING_EYE_HEIGHT
-        } else if self.crouching {
-            CROUCH_EYE_HEIGHT
-        } else {
-            STANDING_EYE_HEIGHT
+        match self.effective_pose() {
+            EntityPose::Sleeping => SLEEPING_EYE_HEIGHT,
+            EntityPose::Crouching => CROUCH_EYE_HEIGHT,
+            EntityPose::Swimming | EntityPose::FallFlying | EntityPose::SpinAttack => {
+                SWIMMING_EYE_HEIGHT
+            }
+            _ => STANDING_EYE_HEIGHT,
         }
+    }
+
+    /// Entity.getOnPos, including the movement-factor offset and tall-block
+    /// exceptions.
+    pub fn on_pos(
+        &self,
+        chunks: &crate::world::chunk::ChunkStore,
+        offset: f32,
+    ) -> azalea_core::position::BlockPos {
+        use azalea_core::position::BlockPos;
+        let y = (self.position.y - f64::from(offset)).floor() as i32;
+        if let Some(pos) = self.main_supporting_block_pos {
+            if offset <= 1.0e-5_f32 {
+                return pos;
+            }
+            let id = crate::world::block::block_id(chunks.get_block_state(pos.x, pos.y, pos.z));
+            if (offset <= 0.5 && id.ends_with("_fence"))
+                || id.ends_with("_wall")
+                || id.ends_with("_fence_gate")
+            {
+                return pos;
+            }
+            return BlockPos::new(pos.x, y, pos.z);
+        }
+        BlockPos::new(
+            self.position.x.floor() as i32,
+            y,
+            self.position.z.floor() as i32,
+        )
     }
 
     pub fn tick_eye_height(&mut self) {
@@ -713,9 +771,9 @@ mod tests {
     fn sleeping_pose_uses_vanilla_dimensions_and_eye_height() {
         let mut player = LocalPlayer::new();
         player.sleeping_pos = Some(azalea_core::position::BlockPos::new(0, 64, 0));
-        assert_eq!(player.height(), 0.2);
+        assert_eq!(player.height(), f64::from(0.2_f32));
         let bounds = player.bounding_box();
-        assert_eq!(bounds.max.x - bounds.min.x, 0.2);
+        assert_eq!(bounds.max.x - bounds.min.x, f64::from(0.2_f32));
         assert_eq!(player.target_eye_height(), SLEEPING_EYE_HEIGHT);
     }
 
@@ -729,6 +787,7 @@ mod tests {
         assert!(player.bounding_box().intersects(&ceiling));
 
         player.crouching = true;
+        player.pose = EntityPose::Crouching;
         assert!(!player.bounding_box().intersects(&ceiling));
         assert_eq!(player.bounding_box().max.y, CROUCH_HEIGHT);
     }
