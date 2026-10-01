@@ -107,6 +107,8 @@ struct Settings {
     theme: u8,
     #[serde(default)]
     chat: ChatOptions,
+    #[serde(default)]
+    resource_packs: Vec<String>,
     #[serde(default = "default_locale")]
     locale: String,
 }
@@ -224,6 +226,7 @@ impl Default for Settings {
             display_mode: 0,
             theme: 0,
             chat: ChatOptions::default(),
+            resource_packs: Vec::new(),
             locale: default_locale(),
         }
     }
@@ -672,6 +675,7 @@ pub struct MainMenu {
     pub pack_toggle: Option<(String, bool)>,
     pub rescan_packs: bool,
     pub reload_assets: bool,
+    resource_pack_selection: Vec<String>,
     pack_search: TextFieldState,
 }
 
@@ -807,6 +811,7 @@ impl MainMenu {
             pack_toggle: None,
             rescan_packs: false,
             reload_assets: false,
+            resource_pack_selection: settings.resource_packs,
             pack_search: TextFieldState::new(MAX_SEARCH),
         }
     }
@@ -916,6 +921,7 @@ impl MainMenu {
                 display_mode: self.display_mode.to_u8(),
                 theme: self.theme.to_u8(),
                 chat: self.chat_options,
+                resource_packs: self.resource_pack_selection.clone(),
                 locale: self.locale.into(),
             },
         )
@@ -1365,6 +1371,22 @@ mod tests {
                 "stored slider value {stored} should clamp to {expected}"
             );
         }
+    }
+
+    #[test]
+    fn selected_resource_pack_order_round_trips_and_defaults_for_legacy_settings() {
+        let settings = Settings {
+            resource_packs: vec!["high".into(), "low".into()],
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.resource_packs, ["high", "low"]);
+
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("resource_packs");
+        let legacy: Settings = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.resource_packs.is_empty());
     }
 
     #[test]

@@ -55,6 +55,14 @@ impl ResourcePackManager {
             available_local: Vec::new(),
         };
         mgr.scan_local_packs();
+        let selected = std::fs::read(instance_dir.join("options.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|settings| settings.get("resource_packs")?.as_array().cloned())
+            .unwrap_or_default();
+        for name in selected.iter().filter_map(serde_json::Value::as_str) {
+            mgr.enable_local_pack(name);
+        }
         mgr
     }
 
@@ -235,48 +243,51 @@ impl ResourcePackManager {
     }
 
     pub fn scan_local_packs(&mut self) {
-        self.available_local.clear();
-        let entries = match std::fs::read_dir(&self.packs_dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path == self.server_cache_dir {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-
-            if path.is_dir() {
-                if path.join("pack.mcmeta").exists() {
-                    let already_active = self
-                        .active_packs
-                        .iter()
-                        .any(|p| p.source == PackSource::Local && p.dir == path);
-                    let mut info = parse_pack_meta_dir(&path, &name);
-                    info.enabled = already_active;
-                    info.source = PackSource::Local;
-                    self.available_local.push(info);
-                }
-            } else if path.extension().is_some_and(|e| e == "zip")
-                && let Some(mut info) = parse_pack_meta_zip(&path, &name)
-            {
-                let already_active = self
-                    .active_packs
-                    .iter()
-                    .any(|p| p.source == PackSource::Local && p.id == name);
-                info.enabled = already_active;
-                info.source = PackSource::Local;
-                self.available_local.push(info);
-            }
+        self.available_local = Self::scan_local_packs_at(&self.packs_dir);
+        for info in &mut self.available_local {
+            info.enabled = self
+                .active_packs
+                .iter()
+                .any(|pack| pack.source == PackSource::Local && pack.id == info.name);
         }
     }
 
+    /// Scans one local resource-pack directory without changing active packs.
+    /// The options UI uses this on screen entry in both title and in-game
+    /// menus.
+    pub fn scan_local_packs_at(packs_dir: &Path) -> Vec<PackInfo> {
+        let Ok(entries) = std::fs::read_dir(packs_dir) else {
+            return Vec::new();
+        };
+        let mut packs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == ".server_cache" || !valid_local_pack_name(&name) {
+                continue;
+            }
+            if path.is_dir() && path.join("pack.mcmeta").exists() {
+                let mut info = parse_pack_meta_dir(&path, &name);
+                info.source = PackSource::Local;
+                packs.push(info);
+            } else if path.extension().is_some_and(|extension| extension == "zip")
+                && let Some(mut info) = parse_pack_meta_zip(&path, &name)
+            {
+                info.source = PackSource::Local;
+                packs.push(info);
+            }
+        }
+        packs
+    }
+
     pub fn enable_local_pack(&mut self, name: &str) {
+        if !valid_local_pack_name(name) {
+            return;
+        }
         let path = self.packs_dir.join(name);
         if path.is_dir() && path.join("pack.mcmeta").exists() {
-            self.active_packs.retain(|p| p.id != name);
+            self.active_packs
+                .retain(|pack| !(pack.id == name && pack.source == PackSource::Local));
             let info = parse_pack_meta_dir(&path, name);
             self.active_packs.push(ActivePack {
                 id: name.to_owned(),
@@ -298,7 +309,8 @@ impl ResourcePackManager {
                 return;
             }
             let info = parse_pack_meta_dir(&extract_dir, name);
-            self.active_packs.retain(|p| p.id != name);
+            self.active_packs
+                .retain(|pack| !(pack.id == name && pack.source == PackSource::Local));
             self.active_packs.push(ActivePack {
                 id: name.to_owned(),
                 source: PackSource::Local,
@@ -332,6 +344,10 @@ impl ResourcePackManager {
     pub fn server_cache_dir(&self) -> &Path {
         &self.server_cache_dir
     }
+}
+
+fn valid_local_pack_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
 }
 
 #[derive(Debug)]
@@ -644,6 +660,45 @@ mod tests {
             }
         });
         (format!("http://{address}/"), server)
+    }
+
+    #[test]
+    fn local_pack_scan_and_saved_selection_restore_order_and_skip_missing_paths() {
+        let root = std::env::temp_dir().join(format!("pomme-pack-{}", uuid::Uuid::new_v4()));
+        let packs_dir = root.join("resourcepacks");
+        for name in ["first", "second"] {
+            let pack = packs_dir.join(name);
+            std::fs::create_dir_all(&pack).unwrap();
+            std::fs::write(
+                pack.join("pack.mcmeta"),
+                br#"{"pack":{"pack_format":88,"description":"test"}}"#,
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(packs_dir.join(".server_cache/not-a-pack")).unwrap();
+        std::fs::write(
+            root.join("options.json"),
+            br#"{"resource_packs":["second","missing","../outside","first"]}"#,
+        )
+        .unwrap();
+
+        let manager = ResourcePackManager::new(&root);
+        let active = manager.active_pack_info();
+        assert_eq!(
+            active
+                .iter()
+                .map(|pack| pack.name.as_str())
+                .collect::<Vec<_>>(),
+            ["second", "first"]
+        );
+        assert!(
+            active
+                .iter()
+                .all(|pack| pack.source == PackSource::Local && pack.enabled)
+        );
+        assert_eq!(manager.available_local_packs().len(), 2);
+        assert!(!root.join("outside").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

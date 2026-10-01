@@ -1611,12 +1611,27 @@ impl MainMenu {
         input: &MenuInput,
         text_width_fn: common::TextWidthFn,
     ) -> MainMenuResult {
-        use crate::resource_pack::PackSource;
+        use crate::resource_pack::{PackSource, ResourcePackManager};
 
         if input.escape {
             self.pack_search.clear();
             self.set_screen(Screen::Options);
             return empty_result(2.0);
+        }
+
+        if self.rescan_packs {
+            self.rescan_packs = false;
+            self.available_packs = ResourcePackManager::scan_local_packs_at(&self.packs_dir);
+            for pack in &mut self.available_packs {
+                pack.enabled = self.resource_pack_selection.contains(&pack.name);
+            }
+            self.active_packs
+                .retain(|pack| pack.source == PackSource::Server);
+            for name in &self.resource_pack_selection {
+                if let Some(pack) = self.available_packs.iter().find(|pack| &pack.name == name) {
+                    self.active_packs.push(pack.clone());
+                }
+            }
         }
 
         self.cycle_fields(input, 1);
@@ -1810,6 +1825,16 @@ impl MainMenu {
             {
                 self.pack_toggle = Some((pack.name.clone(), true));
                 self.reload_assets = true;
+                self.resource_pack_selection.push(pack.name.clone());
+                self.save_settings();
+                if let Some(pack) = self
+                    .available_packs
+                    .iter_mut()
+                    .find(|available| available.name == pack.name)
+                {
+                    pack.enabled = true;
+                    self.active_packs.push(pack.clone());
+                }
             }
         }
 
@@ -1843,6 +1868,19 @@ impl MainMenu {
             {
                 self.pack_toggle = Some((pack.name.clone(), false));
                 self.reload_assets = true;
+                self.resource_pack_selection
+                    .retain(|selected| selected != &pack.name);
+                self.save_settings();
+                self.active_packs.retain(|active| {
+                    active.source != PackSource::Local || active.name != pack.name
+                });
+                if let Some(available) = self
+                    .available_packs
+                    .iter_mut()
+                    .find(|available| available.name == pack.name)
+                {
+                    available.enabled = false;
+                }
             }
         }
 
