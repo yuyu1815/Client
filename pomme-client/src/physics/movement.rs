@@ -445,12 +445,6 @@ fn tick_land(
         }
     }
 
-    if !player.flying {
-        if let Some(delta_y) = levitation_travel_y_delta(player, player.velocity.y) {
-            player.velocity.y += delta_y;
-        }
-    }
-
     apply_collision_with_context(
         player,
         input,
@@ -463,7 +457,13 @@ fn tick_land(
         cos_y_rot,
     );
 
-    if player.flying || !has_effect_named(player, "levitation") {
+    if !player.flying {
+        if let Some(delta_y) = levitation_travel_y_delta(player, player.velocity.y) {
+            player.velocity.y += delta_y;
+        } else {
+            player.velocity.y -= effective_gravity(player);
+        }
+    } else {
         player.velocity.y -= effective_gravity(player);
     }
     player.velocity.y *= f64::from(VERTICAL_DRAG);
@@ -721,6 +721,7 @@ fn apply_collision_with_context(
         return;
     }
 
+    let move_from = *player.position;
     let aabb = player.bounding_box();
     let mut delta = *player.velocity;
     if intersects_block_id(chunk_store, &aabb, "cobweb") {
@@ -859,7 +860,6 @@ fn apply_collision_with_context(
     }
 
     if !player.flying
-        && !input.performing_action(input::Action::Sneak)
         && (horizontal_collision || input.performing_action(input::Action::Jump))
         && is_on_climbable(chunk_store, player.position.into())
     {
@@ -876,7 +876,7 @@ fn apply_collision_with_context(
         player.velocity.y = 0.2;
     }
 
-    apply_bubble_column_effect(player, chunk_store);
+    apply_bubble_column_effect(player, chunk_store, move_from, *player.position);
 
     let speed_factor = f64::from(block_movement_factor(player, chunk_store, false));
     player.last_travel_observation.block_speed_factor = Some(speed_factor as f32);
@@ -892,40 +892,79 @@ fn apply_collision_with_context(
     }
 }
 
-fn apply_bubble_column_effect(player: &mut LocalPlayer, chunks: &ChunkStore) {
+fn apply_bubble_column_effect(
+    player: &mut LocalPlayer,
+    chunks: &ChunkStore,
+    from: DVec3,
+    to: DVec3,
+) {
     if player.flying {
         return;
     }
     let aabb = player.bounding_box();
-    let min_x = aabb.min.x.floor() as i32;
-    let max_x = aabb.max.x.ceil() as i32;
-    let min_y = aabb.min.y.floor() as i32;
-    let max_y = aabb.max.y.ceil() as i32;
-    let min_z = aabb.min.z.floor() as i32;
-    let max_z = aabb.max.z.ceil() as i32;
-    for x in min_x..max_x {
-        for y in min_y..max_y {
-            for z in min_z..max_z {
-                let state = chunks.get_block_state(x, y, z);
-                if crate::world::block::block_id(state) != "bubble_column"
-                    || !Aabb::block(x, y, z).intersects(&aabb)
-                {
-                    continue;
+    let half = (aabb.max - aabb.min) * 0.5;
+    let center_offset = (aabb.max + aabb.min) * 0.5 - *player.position;
+    let start = from + center_offset;
+    let end = to + center_offset;
+    let min = (aabb.min.min(aabb.min + (to - from))).floor().as_ivec3();
+    let max = (aabb.max.max(aabb.max + (to - from))).ceil().as_ivec3();
+    let mut visited = Vec::new();
+    for x in min.x..max.x {
+        for y in min.y..max.y {
+            for z in min.z..max.z {
+                if let Some(t) = swept_aabb_entry(start, end, half, [x, y, z]) {
+                    visited.push((t, x, y, z));
                 }
-                let drag = crate::world::block::block_properties(state).get("drag") == Some("true");
-                let above = chunks.get_block_state(x, y + 1, z);
-                let open_above = crate::physics::block_shape::partial_shape(above)
-                    .is_some_and(|shape| shape.is_empty())
-                    && crate::world::block::fluid(above).kind
-                        == crate::world::block::FluidKind::Empty;
-                player.velocity.y = bubble_column_velocity(player.velocity.y, drag, open_above);
-                if !open_above {
-                    player.fall_distance = 0.0;
-                }
-                return;
             }
         }
     }
+    visited.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then((a.1, a.2, a.3).cmp(&(b.1, b.2, b.3)))
+    });
+    for (_, x, y, z) in visited {
+        let state = chunks.get_block_state(x, y, z);
+        if crate::world::block::block_id(state) != "bubble_column" {
+            continue;
+        }
+        let drag = crate::world::block::block_properties(state).get("drag") == Some("true");
+        let above = chunks.get_block_state(x, y + 1, z);
+        let open_above = crate::physics::block_shape::partial_shape(above)
+            .is_some_and(|shape| shape.is_empty())
+            && crate::world::block::fluid(above).kind == crate::world::block::FluidKind::Empty;
+        player.velocity.y = bubble_column_velocity(player.velocity.y, drag, open_above);
+        if !open_above {
+            player.fall_distance = 0.0;
+        }
+    }
+}
+
+fn swept_aabb_entry(start: DVec3, end: DVec3, half: DVec3, block: [i32; 3]) -> Option<f64> {
+    let block_min = dvec3(
+        f64::from(block[0]),
+        f64::from(block[1]),
+        f64::from(block[2]),
+    ) - half;
+    let block_max = block_min + DVec3::ONE + half * 2.0;
+    let movement = end - start;
+    let mut enter: f64 = 0.0;
+    let mut exit: f64 = 1.0;
+    for axis in 0..3 {
+        if movement[axis] == 0.0 {
+            if start[axis] <= block_min[axis] || start[axis] >= block_max[axis] {
+                return None;
+            }
+            continue;
+        }
+        let a = (block_min[axis] - start[axis]) / movement[axis];
+        let b = (block_max[axis] - start[axis]) / movement[axis];
+        enter = enter.max(a.min(b));
+        exit = exit.min(a.max(b));
+        if enter >= exit {
+            return None;
+        }
+    }
+    (enter < 1.0 && exit > 0.0).then_some(enter.max(0.0))
 }
 
 fn bubble_column_velocity(vy: f64, drag: bool, open_above: bool) -> f64 {
@@ -2858,7 +2897,7 @@ mod tests {
     }
 
     #[test]
-    fn climbable_post_move_impulse_requires_collision_or_jump_and_not_sneak() {
+    fn climbable_post_move_impulse_matches_steel_even_while_sneaking() {
         let chunks = sparse_world(&[(0, 64, 0, "ladder"), (1, 64, 0, "stone")]);
         let ladder = crate::world::block::find_state("ladder", &[("facing", "north")]);
         let mut chunks = chunks;
@@ -2927,13 +2966,13 @@ mod tests {
         );
         assert!(sneaking.horizontal_collision);
         assert_eq!(
-            sneaking.velocity.y, 0.0,
-            "sneak suppresses the climb impulse"
+            sneaking.velocity.y, 0.2,
+            "Steel applies post-move climb impulse while sneaking"
         );
     }
 
     #[test]
-    fn bubble_column_effect_uses_aabb_once_and_respects_all_velocity_limits() {
+    fn bubble_column_effect_visits_each_swept_cell_once_and_respects_velocity_limits() {
         assert_eq!(bubble_column_velocity(0.68, false, false), 0.7);
         assert_eq!(bubble_column_velocity(0.69, false, false), 0.7);
         assert_eq!(bubble_column_velocity(-0.28, true, false), -0.3);
@@ -2958,28 +2997,74 @@ mod tests {
         player.position = dvec3(0.5, 64.0, 0.5).into();
         player.velocity = crate::entity::components::Velocity::new(0.2, 0.0, -0.3);
         player.fall_distance = 5.0;
-        apply_bubble_column_effect(&mut player, &chunks);
+        let position = *player.position;
+        apply_bubble_column_effect(&mut player, &chunks, position, position);
         assert_eq!(player.velocity.x, 0.2);
-        assert_eq!(player.velocity.y, 0.06, "stacked cells apply once");
+        assert_eq!(
+            player.velocity.y, 0.12,
+            "both intersected stacked cells apply"
+        );
         assert_eq!(player.velocity.z, -0.3);
         assert_eq!(player.fall_distance, 0.0);
 
         player.position = dvec3(2.0, 64.0, 0.5).into();
         player.velocity.y = 0.0;
         player.fall_distance = 5.0;
-        apply_bubble_column_effect(&mut player, &chunks);
+        let position = *player.position;
+        apply_bubble_column_effect(&mut player, &chunks, position, position);
         assert_eq!(player.velocity.y, 0.0, "nonintersecting AABB has no effect");
         assert_eq!(player.fall_distance, 5.0);
 
         player.position = dvec3(0.5, 64.0, 0.5).into();
         player.flying = true;
-        apply_bubble_column_effect(&mut player, &chunks);
+        let position = *player.position;
+        apply_bubble_column_effect(&mut player, &chunks, position, position);
         assert_eq!(player.velocity.y, 0.0, "flying player is excluded");
         assert_eq!(player.fall_distance, 5.0);
+
+        let mut mixed = sparse_world(&[
+            (0, 64, 0, "bubble_column"),
+            (0, 65, 0, "bubble_column"),
+            (0, 66, 0, "bubble_column"),
+        ]);
+        mixed.set_block_state(0, 64, 0, upward);
+        mixed.set_block_state(
+            0,
+            65,
+            0,
+            crate::world::block::find_state("bubble_column", &[("drag", "true")]),
+        );
+        mixed.set_block_state(0, 66, 0, upward);
+        let mut traversing = LocalPlayer::new();
+        traversing.position = dvec3(0.5, 64.0, 0.5).into();
+        traversing.velocity.y = 4.5;
+        traversing.fall_distance = 5.0;
+        tick(&mut traversing, &InputState::released(), &mixed, 1.0, false);
+        assert!(
+            traversing.position.y > 68.0,
+            "fast movement crosses the full column"
+        );
+        let expected_vy = (4.5 + 0.06 - 0.03 + 0.1 - GRAVITY) * f64::from(VERTICAL_DRAG);
+        assert!((traversing.velocity.y - expected_vy).abs() < 1.0e-12);
+        assert_eq!(
+            traversing.fall_distance, 0.0,
+            "inside hooks reset fall distance"
+        );
+
+        assert!(
+            swept_aabb_entry(
+                dvec3(0.5, 64.0, 0.5),
+                dvec3(2.5, 64.0, 2.5),
+                dvec3(0.3, 0.9, 0.3),
+                [0, 64, 2],
+            )
+            .is_none(),
+            "diagonal swept bounds do not hit an untraversed corner"
+        );
     }
 
     #[test]
-    fn levitation_adjusts_vertical_velocity_and_removed_effect_restores_gravity() {
+    fn levitation_moves_before_adjusting_velocity_and_removal_restores_gravity() {
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let input = InputState::released();
@@ -2987,7 +3072,7 @@ mod tests {
             .iter()
             .position(|effect| effect.name == "levitation")
             .unwrap() as u32;
-        for (amplifier, expected_y) in [(0, 0.01), (1, 0.02)] {
+        for amplifier in [0, 1] {
             let mut player = LocalPlayer::new();
             player.position = dvec3(0.5, 100.0, 0.5).into();
             player.effects.update(crate::mob_effect::MobEffectInstance {
@@ -2999,7 +3084,15 @@ mod tests {
                 show_icon: true,
             });
             tick(&mut player, &input, &chunks, 1.0, false);
-            assert!((player.position.y - 100.0 - expected_y).abs() < 1.0e-12);
+            assert_eq!(
+                player.position.y, 100.0,
+                "first-tick movement uses initial vy=0"
+            );
+            let target_vy = 0.05 * (f64::from(amplifier) + 1.0) * f64::from(VERTICAL_DRAG);
+            assert!((player.velocity.y - target_vy).abs() < 1.0e-12);
+            let first_vy = player.velocity.y;
+            tick(&mut player, &input, &chunks, 1.0, false);
+            assert!((player.position.y - 100.0 - first_vy).abs() < 1.0e-12);
             assert!(player.velocity.y > 0.0);
             player.effects.remove(levitation);
             player.velocity.y = 0.0;
