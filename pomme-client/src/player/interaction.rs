@@ -4418,6 +4418,28 @@ mod tests {
         tick(&mut state, &input, Some(&crossbow));
         expect_release!();
 
+        // Server completion can clear the using-item bit before physical button-up;
+        // the independent latch must still prevent a fire/reload cycle.
+        state = InteractionState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        tick(&mut state, &input, Some(&crossbow));
+        expect_use!();
+        state.sync_using_item_flag(false);
+        input.clear_just_pressed_actions();
+        for _ in 0..30 {
+            tick(&mut state, &input, Some(&crossbow));
+            assert!(
+                rx.try_recv().is_err(),
+                "server-completed crossbow retriggered"
+            );
+        }
+        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        tick(&mut state, &input, Some(&crossbow));
+        assert!(
+            rx.try_recv().is_err(),
+            "server-completed crossbow sent duplicate release"
+        );
+
         // A server-reported charged projectile makes this press a one-shot fire;
         // holding cannot retrigger and button-up needs no release action packet.
         let mut loaded = ItemStackData::new(ItemKind::Crossbow, 1);
