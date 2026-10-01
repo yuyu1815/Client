@@ -3225,6 +3225,7 @@ impl AppCore {
                     uuid,
                     entity_type,
                     position,
+                    spawn_data,
                     item_frame_direction,
                     velocity,
                     y_rot_deg,
@@ -3298,6 +3299,7 @@ impl AppCore {
                             x_rot_deg,
                             entity_type,
                         );
+                        game.entity_store.set_vehicle_spawn_data(id, spawn_data);
                         if let Some(direction) = item_frame_direction {
                             game.entity_store.set_item_frame_direction(id, direction);
                         }
@@ -5270,6 +5272,7 @@ mod tests {
                     id,
                     entity_type,
                     position,
+                    spawn_data,
                     velocity,
                     y_rot_deg,
                     x_rot_deg,
@@ -5291,11 +5294,13 @@ mod tests {
                     x_rot_deg,
                     entity_type,
                 );
+                store.set_vehicle_spawn_data(id, spawn_data);
                 if let Some(direction) = item_frame_direction {
                     store.set_item_frame_direction(id, direction);
                 }
                 let frame = &store.vehicles[&id];
                 assert_eq!(frame.passengers, [77]);
+                assert_eq!(frame.spawn_data, Some(data as i32));
                 if kind == EntityKind::Snowball {
                     assert_eq!(*frame.position, block);
                     assert_eq!(frame.item_frame_direction, None);

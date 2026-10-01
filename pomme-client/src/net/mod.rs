@@ -504,6 +504,10 @@ pub enum NetworkEvent {
         uuid: uuid::Uuid,
         entity_type: EntityKind,
         position: Position,
+        /// AddEntity protocol payload. FallingBlock uses this as a block-state
+        /// registry id; interpretation must happen against the negotiated
+        /// protocol.
+        spawn_data: i32,
         /// Spawn facing travels atomically with the item frame's center.
         item_frame_direction: Option<azalea_core::direction::Direction>,
         velocity: DVec3,

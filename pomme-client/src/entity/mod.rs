@@ -1235,6 +1235,9 @@ fn projectile_drag(chunks: &ChunkStore, pos: Position, arrow: bool) -> f64 {
 pub struct VehicleState {
     /// Missing for SetPassengers-only placeholders.
     pub kind: Option<EntityKind>,
+    /// Raw AddEntity data, retained without assuming a registry mapping. For a
+    /// FallingBlock this is a protocol block-state id, not a metadata index.
+    pub spawn_data: Option<i32>,
     pub position: Position,
     pub velocity: DVec3,
     pub projectile: Option<ProjectileDisplay>,
@@ -1348,6 +1351,7 @@ impl EntityStore {
                 .get(&vehicle_id)
                 .map_or(Position::default(), |e| e.position),
             kind: None,
+            spawn_data: None,
             velocity: DVec3::ZERO,
             projectile: None,
             look_dir: None,
@@ -1378,6 +1382,7 @@ impl EntityStore {
         let state = self.vehicles.entry(id).or_insert(VehicleState {
             position,
             kind: None,
+            spawn_data: None,
             velocity,
             projectile: None,
             look_dir: None,
@@ -1423,6 +1428,12 @@ impl EntityStore {
                 }
                 display.stopped = display.in_ground || display.on_ground;
             }
+        }
+    }
+
+    pub fn set_vehicle_spawn_data(&mut self, id: i32, spawn_data: i32) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id) {
+            vehicle.spawn_data = Some(spawn_data);
         }
     }
 

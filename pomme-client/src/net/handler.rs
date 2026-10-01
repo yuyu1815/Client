@@ -1193,6 +1193,7 @@ pub(super) async fn handle_game_packet_with_display_text(
                     uuid: p.uuid,
                     entity_type: p.entity_type,
                     position,
+                    spawn_data: p.data,
                     item_frame_direction,
                     velocity: lp_to_dvec3(&p.movement),
                     y_rot_deg,
