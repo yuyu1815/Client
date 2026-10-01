@@ -70,7 +70,7 @@ pub struct EntityPart {
 }
 
 /// Coordinate space a model's parts and vertices were authored in.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ModelConvention {
     /// Vanilla entity convention: cube Y negated at bake, root pivots at
     /// `(24.016 - y)/16` (child pivots just negate y), and the X half of

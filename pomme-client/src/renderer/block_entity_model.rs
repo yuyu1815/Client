@@ -530,7 +530,8 @@ mod conduit_tests {
         assert_eq!(model.part_ranges, [(0, 72)]);
         assert_eq!(model.convention, ModelConvention::EntityYDown);
         assert!(model.vertices.iter().all(|v| {
-            (0.0..=1.0).contains(&v.tex_coords[0]) && (0.0..=1.0).contains(&v.tex_coords[1])
+            (0.0..=1.0).contains(&(v.tex_coords[0] as f32 / 65535.0))
+                && (0.0..=1.0).contains(&(v.tex_coords[1] as f32 / 65535.0))
         }));
     }
 
@@ -551,7 +552,8 @@ mod conduit_tests {
         assert_eq!(dragon.part_scales[0], 0.75);
         assert_eq!(dragon.part_ranges, [(0, 216), (216, 36)]);
         assert!(dragon.vertices.iter().all(|v| {
-            (0.0..=1.0).contains(&v.tex_coords[0]) && (0.0..=1.0).contains(&v.tex_coords[1])
+            (0.0..=1.0).contains(&(v.tex_coords[0] as f32 / 65535.0))
+                && (0.0..=1.0).contains(&(v.tex_coords[1] as f32 / 65535.0))
         }));
 
         let piglin = bake_piglin_head_model();
@@ -570,7 +572,8 @@ mod conduit_tests {
         assert_eq!(piglin.parts[2].parent, Some(0));
         assert_eq!(piglin.part_ranges, [(0, 144), (144, 36), (180, 36)]);
         assert!(piglin.vertices.iter().all(|v| {
-            (0.0..=1.0).contains(&v.tex_coords[0]) && (0.0..=1.0).contains(&v.tex_coords[1])
+            (0.0..=1.0).contains(&(v.tex_coords[0] as f32 / 65535.0))
+                && (0.0..=1.0).contains(&(v.tex_coords[1] as f32 / 65535.0))
         }));
     }
 
