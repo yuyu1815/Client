@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "movementobserver",
+  "version": "${version}",
+  "name": "Movement Observer",
+  "description": "Opt-in client-only movement and allowlisted packet observations.",
+  "authors": ["mine_rust"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": { "client": ["com.mine_rust.movementobserver.MovementObserver"] },
+  "mixins": ["movementobserver.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}

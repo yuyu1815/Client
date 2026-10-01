@@ -1,0 +1,25 @@
+plugins { id 'net.fabricmc.fabric-loom' version "${loom_version}" }
+
+loom {
+    splitEnvironmentSourceSets()
+    mods { movementobserver { sourceSet sourceSets.main; sourceSet sourceSets.client } }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
+}
+
+def revision = providers.exec { commandLine 'git', '-C', rootProject.projectDir.toPath().resolve('../..').normalize().toString(), 'rev-parse', 'HEAD' }.standardOutput.asText.map { it.trim() }
+processClientResources {
+    inputs.property 'version', project.version
+    inputs.property 'sourceRevision', revision
+    filesMatching('fabric.mod.json') { expand version: project.version }
+    filesMatching('observer.properties') { expand sourceRevision: revision.get() }
+}
+
+tasks.withType(JavaCompile).configureEach { options.release = 25 }
+java { sourceCompatibility = JavaVersion.VERSION_25; targetCompatibility = JavaVersion.VERSION_25 }
+version = mod_version
+group = project.group
