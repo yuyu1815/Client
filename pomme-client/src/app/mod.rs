@@ -813,7 +813,18 @@ impl ApplicationHandler for App {
                 ) || matches!(self.phase.get(), AppPhase::InGame { game, .. } if game.paused || game.gui_open())
                     || self.core.input.is_cursor_captured() =>
             {
-                self.core.input.on_mouse_button(button, state);
+                let game_input_live = matches!(
+                    self.phase.get(),
+                    AppPhase::InGame { game, .. }
+                        if game.input_live() && game.chunk_load_bench.is_none()
+                );
+                if game_input_live {
+                    self.core.input.on_mouse_button(button, state);
+                } else {
+                    self.core
+                        .input
+                        .on_mouse_button_with_game_input(button, state, false);
+                }
             }
 
             WindowEvent::Occluded(occluded) => {

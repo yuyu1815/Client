@@ -159,6 +159,7 @@ pub struct InputState {
     selected_slot: u8,
     left_click: ClickState,
     right_click: ClickState,
+    right_use_just_pressed: bool,
     middle_click: ClickState,
     cursor_pos: (f32, f32),
     cursor_moved: bool,
@@ -273,6 +274,7 @@ impl InputState {
             selected_slot: 0,
             left_click: ClickState::default(),
             right_click: ClickState::default(),
+            right_use_just_pressed: false,
             middle_click: ClickState::default(),
             cursor_pos: (0.0, 0.0),
             cursor_moved: false,
@@ -591,7 +593,7 @@ impl InputState {
 
     pub fn action_just_pressed(&self, action: Action) -> bool {
         self.recent_actions.get(&action).copied().unwrap_or(false)
-            || (action == Action::Use && self.right_click.just_pressed)
+            || (action == Action::Use && self.right_use_just_pressed)
     }
 
     /// Drops a pending action so a handler that already consumed the
@@ -607,6 +609,7 @@ impl InputState {
         self.left_click.just_released = false;
         self.right_click.just_pressed = false;
         self.right_click.just_released = false;
+        self.right_use_just_pressed = false;
         self.middle_click.just_pressed = false;
         self.middle_click.just_released = false;
         self.cursor_moved = false;
@@ -1052,6 +1055,15 @@ impl InputState {
     }
 
     pub fn on_mouse_button(&mut self, button: MouseButton, state: ElementState) {
+        self.on_mouse_button_with_game_input(button, state, true);
+    }
+
+    pub fn on_mouse_button_with_game_input(
+        &mut self,
+        button: MouseButton,
+        state: ElementState,
+        game_input_live: bool,
+    ) {
         let was_pressed = match state {
             ElementState::Pressed => true,
             ElementState::Released => false,
@@ -1072,7 +1084,8 @@ impl InputState {
                 self.right_click.held = was_pressed;
                 if was_pressed {
                     self.right_click.just_pressed = true;
-                    self.recent_actions.insert(Action::Use, true);
+                    self.right_use_just_pressed |= game_input_live;
+                    self.recent_actions.insert(Action::Use, game_input_live);
                 } else {
                     self.right_click.just_released = true;
                     self.recent_actions.insert(Action::Use, false);
@@ -1195,14 +1208,26 @@ mod ime_tests {
     use crate::ui::text_edit::TextInputEvent;
 
     #[test]
-    fn short_right_click_keeps_press_until_tick() {
+    fn short_right_click_keeps_game_use_until_tick() {
         let mut input = InputState::released();
-        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
-        input.on_mouse_button(MouseButton::Right, ElementState::Released);
+        input.on_mouse_button_with_game_input(MouseButton::Right, ElementState::Pressed, true);
+        input.on_mouse_button_with_game_input(MouseButton::Right, ElementState::Released, true);
 
+        assert!(input.right_just_pressed());
         assert!(!input.performing_action(Action::Use));
         assert!(input.action_just_pressed(Action::Use));
         input.clear_just_pressed_actions();
+        assert!(!input.action_just_pressed(Action::Use));
+    }
+
+    #[test]
+    fn gui_right_click_does_not_latch_game_use() {
+        let mut input = InputState::released();
+        input.on_mouse_button_with_game_input(MouseButton::Right, ElementState::Pressed, false);
+        input.on_mouse_button_with_game_input(MouseButton::Right, ElementState::Released, false);
+
+        assert!(input.right_just_pressed());
+        assert!(!input.performing_action(Action::Use));
         assert!(!input.action_just_pressed(Action::Use));
     }
 
