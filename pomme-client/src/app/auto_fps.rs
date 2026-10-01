@@ -1,7 +1,7 @@
 //! One-shot unattended FPS run. Status deliberately contains no connection or
 //! account data.
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::util::write_atomic;
 
@@ -20,7 +20,6 @@ enum Phase {
 pub(crate) struct AutoFps {
     path: PathBuf,
     run_id: String,
-    started_at: SystemTime,
     benchmark_file: String,
     since: Instant,
     unchanged_since: Instant,
@@ -80,7 +79,6 @@ impl AutoFps {
             path: game_dir.join(format!("auto-fps-benchmark-status-{run_id}.json")),
             benchmark_file: format!("benchmark-{run_id}.json"),
             run_id,
-            started_at: SystemTime::now(),
             since: now,
             unchanged_since: now,
             last_chunks: 0,
@@ -116,6 +114,11 @@ impl AutoFps {
     }
 
     pub fn start(&mut self) -> std::io::Result<()> {
+        match std::fs::remove_file(self.path.with_file_name(&self.benchmark_file)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
         self.write("running", None, None)
     }
 
@@ -249,12 +252,28 @@ impl AutoFps {
         if self.phase != Phase::Running {
             return Err(std::io::Error::other("benchmark was not running"));
         }
-        let modified = std::fs::metadata(self.benchmark_path(game_dir))?.modified()?;
-        if modified < self.started_at {
-            return Err(std::io::Error::other(
-                "benchmark file was not updated by this run",
+        let path = self.benchmark_path(game_dir);
+        let result: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path)?).map_err(std::io::Error::other)?;
+        let valid = result
+            .get("auto_fps_run_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(&self.run_id)
+            && result
+                .get("total_frames")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|frames| frames > 0)
+            && result
+                .get("avg_fps")
+                .and_then(serde_json::Value::as_f64)
+                .is_some_and(|fps| fps.is_finite() && fps > 0.0);
+        if !valid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "benchmark result is invalid or belongs to another run",
             ));
         }
+        let modified = std::fs::metadata(path)?.modified()?;
         let ms = modified
             .duration_since(UNIX_EPOCH)
             .map_err(std::io::Error::other)?
@@ -458,6 +477,49 @@ mod tests {
     }
 
     #[test]
+    fn succeed_uses_run_identity_and_valid_result_not_mtime() {
+        let dir = crate::test_util::test_temp_dir("auto-result-validation");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut current = AutoFps::new(&dir, None);
+        current.start().unwrap();
+        current.phase = Phase::Running;
+        let result = serde_json::json!({
+            "auto_fps_run_id": current.run_id,
+            "total_frames": 1200,
+            "avg_fps": 60.0,
+        });
+        let path = current.benchmark_path(&dir);
+        std::fs::write(&path, result.to_string()).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH))
+            .unwrap();
+        current.succeed(&dir).unwrap();
+
+        let mut stale = AutoFps::new(&dir, Some("a0000000000000000000000000000000"));
+        std::fs::write(
+            stale.benchmark_path(&dir),
+            r#"{"total_frames":1200,"avg_fps":60}"#,
+        )
+        .unwrap();
+        stale.start().unwrap();
+        assert!(!stale.benchmark_path(&dir).exists());
+        stale.phase = Phase::Running;
+        assert!(stale.succeed(&dir).is_err());
+
+        let mut invalid = AutoFps::new(&dir, None);
+        invalid.start().unwrap();
+        invalid.phase = Phase::Running;
+        std::fs::write(invalid.benchmark_path(&dir), "{}").unwrap();
+        assert_eq!(
+            invalid.succeed(&dir).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn stable_chunks_timeout_and_one_shot() {
         let dir = crate::test_util::test_temp_dir("auto-fps");
         std::fs::create_dir_all(&dir).unwrap();
@@ -522,7 +584,16 @@ mod tests {
             Ok(true)
         );
         assert!(success.succeed(&dir).is_err()); // No result file yet.
-        std::fs::write(success.benchmark_path(&dir), "{}").unwrap();
+        std::fs::write(
+            success.benchmark_path(&dir),
+            serde_json::json!({
+                "auto_fps_run_id": success.run_id,
+                "total_frames": 1200,
+                "avg_fps": 60.0,
+            })
+            .to_string(),
+        )
+        .unwrap();
         success.succeed(&dir).unwrap();
         assert!(success.succeed(&dir).is_err());
         let status: serde_json::Value =
