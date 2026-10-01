@@ -34,7 +34,7 @@ fn bake(parts: Vec<EntityPart>, w: u32, h: u32) -> BakedEntityModel {
 }
 
 /// AllayModel.createBodyLayer, 32x32: oversized head, narrow body, arms and
-/// two thin wings. Vanilla entity scale is 0.35 (applied by the renderer).
+/// two thin wings. Apply the vanilla renderer scale outside this model.
 pub fn bake_allay_model() -> BakedEntityModel {
     bake(
         vec![
