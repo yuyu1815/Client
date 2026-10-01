@@ -29,6 +29,36 @@ pub fn bake_conduit_model() -> BakedEntityModel {
     )
 }
 
+/// Vanilla's flat-texture skull model: an 8x8x8 head on the mob's skin sheet.
+pub fn bake_skull_model(texture_height: u32) -> BakedEntityModel {
+    let head = ModelCube {
+        origin: Vec3::new(-4.0, -8.0, -4.0),
+        size: Vec3::splat(8.0),
+        tex_offset: (0, 0),
+        deformation: 0.0,
+        mirror: false,
+    };
+    let mut vertices = Vec::new();
+    generate_cube_vertices(&head, 64, texture_height, FACE_ALL, false, &mut vertices);
+    BakedEntityModel::new(
+        vec![EntityPart {
+            name: "head".into(),
+            offset: Vec3::ZERO,
+            default_rotation: Vec3::ZERO,
+            cubes: Vec::new(),
+            parent: None,
+        }],
+        vertices,
+        vec![(0, 36)],
+    )
+}
+
+/// No faithful block-head mesh is implemented for dragon or piglin yet. An
+/// empty model keeps those variants from silently rendering as a Steve head.
+pub fn bake_unsupported_skull_model() -> BakedEntityModel {
+    BakedEntityModel::new(Vec::new(), Vec::new(), Vec::new())
+}
+
 pub fn bake_player_head_model() -> BakedEntityModel {
     let head = ModelCube {
         origin: Vec3::new(-4.0, -8.0, -4.0),
@@ -251,5 +281,22 @@ mod conduit_tests {
             wrong_sheet.iter().map(|v| v.tex_coords).collect::<Vec<_>>()
         );
         assert_eq!(shell, bake_conduit_model().vertices);
+    }
+
+    #[test]
+    fn block_skull_uses_the_flat_64_by_32_head_mesh() {
+        let cube = ModelCube {
+            origin: Vec3::new(-4.0, -8.0, -4.0),
+            size: Vec3::splat(8.0),
+            tex_offset: (0, 0),
+            deformation: 0.0,
+            mirror: false,
+        };
+        let mut expected = Vec::new();
+        generate_cube_vertices(&cube, 64, 32, FACE_ALL, false, &mut expected);
+        let model = bake_skull_model(32);
+        assert_eq!(model.vertices, expected);
+        assert_eq!(model.part_ranges, [(0, 36)]);
+        assert_eq!(bake_unsupported_skull_model().vertices.len(), 0);
     }
 }

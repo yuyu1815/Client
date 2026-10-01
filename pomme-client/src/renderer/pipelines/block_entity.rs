@@ -132,6 +132,25 @@ const TRAPPED_CHEST_TEXTURES: &[&[&str]] = chest_textures!("trapped");
 
 const ENDER_CHEST_TEXTURES: &[&[&str]] = &[&["minecraft/textures/entity/chest/ender.png"]];
 
+// Skull variants are stored as adjacent [standing, wall] pairs. The pair bit
+// preserves the wall-head transform independently of the texture/model type.
+const SKULL_TEXTURES: &[&[&str]] = &[
+    &["minecraft/textures/entity/skeleton/skeleton.png"],
+    &["minecraft/textures/entity/skeleton/skeleton.png"],
+    &["minecraft/textures/entity/skeleton/wither_skeleton.png"],
+    &["minecraft/textures/entity/skeleton/wither_skeleton.png"],
+    &["minecraft/textures/entity/zombie/zombie.png"],
+    &["minecraft/textures/entity/zombie/zombie.png"],
+    &["minecraft/textures/entity/creeper/creeper.png"],
+    &["minecraft/textures/entity/creeper/creeper.png"],
+    &["minecraft/textures/entity/player/slim/steve.png"],
+    &["minecraft/textures/entity/player/slim/steve.png"],
+    // Dragon and piglin heads have unique geometry; their intentionally empty
+    // models below prevent a misleading Steve/standard-skull substitute.
+    &["minecraft/textures/entity/skeleton/skeleton.png"],
+    &["minecraft/textures/entity/skeleton/skeleton.png"],
+];
+
 const COPPER_GOLEM_STATUE_TEXTURES: &[&[&str]] = &[
     &["minecraft/textures/entity/copper_golem/copper_golem.png"],
     &["minecraft/textures/entity/copper_golem/copper_golem_exposed.png"],
@@ -217,7 +236,7 @@ pub fn variant_for_block(
             .strip_suffix("_shulker_box")
             .and_then(|s| name_index(&DYE_COLOR_NAMES, s))
             .unwrap_or(16),
-        BlockEntityKind::Skull => u32::from(name == "player_wall_head"),
+        BlockEntityKind::Skull => skull_variant(name),
         BlockEntityKind::Sign | BlockEntityKind::HangingSign => name
             .strip_suffix("_wall_hanging_sign")
             .or_else(|| name.strip_suffix("_hanging_sign"))
@@ -346,8 +365,8 @@ fn kind_definitions(xmas: bool) -> Vec<KindDef> {
         },
         KindDef {
             kind: BlockEntityKind::Skull,
-            models: vec![block_entity_model::bake_player_head_model()],
-            tex_variants: &[&["minecraft/textures/entity/player/slim/steve.png"]],
+            models: skull_models(),
+            tex_variants: SKULL_TEXTURES,
             tex_size: 64,
         },
         KindDef {
@@ -372,6 +391,55 @@ struct ChestInstance {
     tint: [f32; 4],
     overlay_color: [f32; 4],
     uv_params: [f32; 4],
+}
+
+fn skull_variant(name: &str) -> u32 {
+    let (kind, wall) = match name {
+        "skeleton_skull" => (0, false),
+        "skeleton_wall_skull" => (0, true),
+        "wither_skeleton_skull" => (1, false),
+        "wither_skeleton_wall_skull" => (1, true),
+        "zombie_head" => (2, false),
+        "zombie_wall_head" => (2, true),
+        "creeper_head" => (3, false),
+        "creeper_wall_head" => (3, true),
+        "player_head" => (4, false),
+        "player_wall_head" => (4, true),
+        // Dragon, piglin, and unknown skull meshes are intentionally not
+        // approximated with the standard cube or a player skin.
+        _ => (
+            5,
+            name.ends_with("_wall_head") || name.ends_with("_wall_skull"),
+        ),
+    };
+    kind * 2 + u32::from(wall)
+}
+
+fn skull_models() -> Vec<BakedEntityModel> {
+    let standard = block_entity_model::bake_skull_model(32);
+    let zombie = block_entity_model::bake_skull_model(64);
+    let player = block_entity_model::bake_player_head_model();
+    let unsupported = block_entity_model::bake_unsupported_skull_model();
+    vec![
+        standard.clone(), // skeleton
+        standard,
+        zombie,                                   // zombie heads use the 64x64 skin layout
+        block_entity_model::bake_skull_model(32), // creeper
+        player,
+        unsupported,
+    ]
+}
+
+fn is_wall_skull_variant(variant: u32) -> bool {
+    variant % 2 == 1
+}
+
+fn skull_wall_model_matrix(model: glam::Mat4, yaw: f32) -> glam::Mat4 {
+    let facing = glam::Mat4::from_rotation_y((-yaw).to_radians());
+    model
+        * facing
+        * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.25, -0.25))
+        * facing.inverse()
 }
 
 fn chest_matrix(info: &BlockEntityRenderInfo, anchor: glam::DVec3) -> glam::Mat4 {
@@ -1143,6 +1211,8 @@ impl BlockEntityPipeline {
             let model = if is_statue {
                 let pose = info.statue_pose.unwrap_or(0);
                 &entry.models[(pose as usize).min(entry.models.len() - 1)]
+            } else if info.kind == BlockEntityKind::Skull {
+                &entry.models[(info.variant as usize / 2).min(entry.models.len() - 1)]
             } else {
                 &entry.models[info.variant as usize % entry.models.len()]
             };
@@ -1172,11 +1242,8 @@ impl BlockEntityPipeline {
             };
 
             let mut model_mat = model_mat;
-            if info.kind == BlockEntityKind::Skull && info.variant == 1 {
-                let facing = glam::Mat4::from_rotation_y((-info.yaw).to_radians());
-                model_mat *= facing
-                    * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.25, -0.25))
-                    * facing.inverse();
+            if info.kind == BlockEntityKind::Skull && is_wall_skull_variant(info.variant) {
+                model_mat = skull_wall_model_matrix(model_mat, info.yaw);
             }
             if is_statue {
                 // CopperGolemStatueModel.setupAnim sets root.zRot = PI.
@@ -2304,6 +2371,114 @@ mod sign_text_tests {
             assert!(!definition.models[0].vertices.is_empty());
             assert!(!definition.tex_variants.is_empty());
         }
+    }
+
+    #[test]
+    fn skull_variants_pair_textures_models_and_wall_forms() {
+        let cases = [
+            (
+                "skeleton_skull",
+                0,
+                "minecraft/textures/entity/skeleton/skeleton.png",
+            ),
+            (
+                "skeleton_wall_skull",
+                1,
+                "minecraft/textures/entity/skeleton/skeleton.png",
+            ),
+            (
+                "wither_skeleton_skull",
+                2,
+                "minecraft/textures/entity/skeleton/wither_skeleton.png",
+            ),
+            (
+                "wither_skeleton_wall_skull",
+                3,
+                "minecraft/textures/entity/skeleton/wither_skeleton.png",
+            ),
+            (
+                "zombie_head",
+                4,
+                "minecraft/textures/entity/zombie/zombie.png",
+            ),
+            (
+                "zombie_wall_head",
+                5,
+                "minecraft/textures/entity/zombie/zombie.png",
+            ),
+            (
+                "creeper_head",
+                6,
+                "minecraft/textures/entity/creeper/creeper.png",
+            ),
+            (
+                "creeper_wall_head",
+                7,
+                "minecraft/textures/entity/creeper/creeper.png",
+            ),
+            (
+                "player_head",
+                8,
+                "minecraft/textures/entity/player/slim/steve.png",
+            ),
+            (
+                "player_wall_head",
+                9,
+                "minecraft/textures/entity/player/slim/steve.png",
+            ),
+        ];
+        crate::world::block::init("26.2");
+        let props =
+            crate::world::block::block_properties(crate::world::block::find_state("stone", &[]));
+        let def = kind_definitions(false)
+            .into_iter()
+            .find(|d| d.kind == BlockEntityKind::Skull)
+            .unwrap();
+        assert_eq!(def.models.len(), 6);
+        assert_eq!(def.tex_variants.len(), 12);
+        for (name, expected, texture) in cases {
+            let variant = variant_for_block(BlockEntityKind::Skull, name, props) as usize;
+            assert_eq!(variant, expected, "{name}");
+            assert_eq!(def.tex_variants[variant][0], texture, "{name}");
+            assert_eq!(is_wall_skull_variant(variant as u32), expected % 2 == 1);
+            let model_index = variant / 2;
+            if expected < 8 {
+                assert!(!def.models[model_index].vertices.is_empty(), "{name}");
+            }
+        }
+        assert_eq!(def.models[4].vertices.len(), 72); // player head retains its hat
+        assert_eq!(def.models[5].vertices.len(), 0); // dragon/piglin not faked
+        assert_eq!(skull_variant("dragon_head"), 10);
+        assert_eq!(skull_variant("piglin_wall_head"), 11);
+    }
+
+    #[test]
+    fn skull_wall_transform_keeps_facing_offset_and_rotation_conventions() {
+        use glam::Vec3;
+        let north = skull_wall_model_matrix(glam::Mat4::IDENTITY, 0.0).transform_point3(Vec3::ZERO);
+        assert!((north - Vec3::new(0.0, 0.25, -0.25)).length() < 1e-6);
+        let east = skull_wall_model_matrix(glam::Mat4::IDENTITY, 90.0).transform_point3(Vec3::ZERO);
+        assert!((east - Vec3::new(-0.25, 0.25, 0.0)).length() < 1e-6);
+
+        crate::world::block::init("26.2");
+        let standing = crate::world::block::find_state("skeleton_skull", &[("rotation", "8")]);
+        assert_eq!(
+            yaw_for_block(
+                BlockEntityKind::Skull,
+                crate::world::block::block_properties(standing)
+            ),
+            180.0
+        );
+        let wall = crate::world::block::find_state("skeleton_wall_skull", &[("facing", "north")]);
+        assert_eq!(
+            yaw_for_block(
+                BlockEntityKind::Skull,
+                crate::world::block::block_properties(wall)
+            ),
+            180.0
+        );
+        assert!(is_wall_skull_variant(skull_variant("skeleton_wall_skull")));
+        assert!(!is_wall_skull_variant(skull_variant("skeleton_skull")));
     }
 
     #[test]
