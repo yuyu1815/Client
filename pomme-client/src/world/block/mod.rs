@@ -171,6 +171,30 @@ struct BehaviorEntry {
 }
 
 #[derive(serde::Deserialize)]
+struct ShapeFile {
+    version: String,
+    state_count: u32,
+    verified_states: u32,
+    skipped_states: u32,
+    context_dependent_states: u32,
+    offset_dependent_states: u32,
+    oracle_disagreement_states: u32,
+    #[allow(dead_code)]
+    oracle: String,
+    shapes: Vec<Vec<LocalBox>>,
+    blocks: Vec<ShapeBlockEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct ShapeBlockEntry {
+    name: String,
+    first_id: u32,
+    props: Vec<(String, Vec<String>)>,
+    /// `(state offset, collision shape index, outline shape index)`.
+    overrides: Vec<(u32, u32, u32)>,
+}
+
+#[derive(serde::Deserialize)]
 struct StateFile {
     version: String,
     state_count: u32,
@@ -220,23 +244,36 @@ struct EmbeddedBlocks {
     protocol: i32,
     blocks: &'static str,
     state: &'static str,
+    shapes: Option<&'static str>,
 }
 
-/// The `blocks-<v>.json` / `state-<v>.json` pair for version `v`, keyed by
-/// its protocol (checked against the file in [`build_table`]).
+/// The per-version state tables and optional vanilla-verified shape overrides.
 macro_rules! embedded_blocks {
     ($protocol:expr, $version:literal) => {
         EmbeddedBlocks {
             protocol: $protocol,
             blocks: include_str!(concat!("data/blocks-", $version, ".json")),
             state: include_str!(concat!("data/state-", $version, ".json")),
+            shapes: None,
+        }
+    };
+    ($protocol:expr, $version:literal, $shape_version:literal) => {
+        EmbeddedBlocks {
+            protocol: $protocol,
+            blocks: include_str!(concat!("data/blocks-", $version, ".json")),
+            state: include_str!(concat!("data/state-", $version, ".json")),
+            shapes: Some(include_str!(concat!(
+                "data/shapes-",
+                $shape_version,
+                ".json"
+            ))),
         }
     };
 }
 
 /// Per-protocol block-state data, the native version at [`NATIVE_SLOT`].
 const BLOCK_DATA: &[EmbeddedBlocks] = &[
-    embedded_blocks!(pomme_protocol::version::NATIVE.protocol, "26.2"),
+    embedded_blocks!(pomme_protocol::version::NATIVE.protocol, "26.2", "26.2"),
     embedded_blocks!(777, "26.3"),
     embedded_blocks!(775, "26.1"),
     embedded_blocks!(774, "1.21.11"),
@@ -348,6 +385,35 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
         file.blocks.len(),
         "state data block count mismatch"
     );
+    let shape_file = data.shapes.map(|json| {
+        let shapes: ShapeFile = serde_json::from_str(json).expect("invalid block-shape data");
+        assert_eq!(
+            shapes.version, file.version,
+            "shape data is for a different version"
+        );
+        assert_eq!(
+            shapes.state_count, file.state_count,
+            "shape data state count mismatch"
+        );
+        assert_eq!(
+            shapes.verified_states + shapes.skipped_states,
+            shapes.state_count,
+            "shape data coverage mismatch"
+        );
+        assert_eq!(
+            shapes.context_dependent_states
+                + shapes.offset_dependent_states
+                + shapes.oracle_disagreement_states,
+            shapes.skipped_states,
+            "shape data skip counts mismatch"
+        );
+        assert_eq!(
+            shapes.blocks.len(),
+            file.blocks.len(),
+            "shape data block count mismatch"
+        );
+        shapes
+    });
     let masks: &'static [FaceMask] = Vec::leak(
         state_file
             .masks
@@ -377,13 +443,25 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
     };
 
     let mut table: Vec<BlockData> = Vec::with_capacity(file.state_count as usize);
-    for (block, state_entry) in file.blocks.iter().zip(&state_file.blocks) {
+    for (block_index, (block, state_entry)) in
+        file.blocks.iter().zip(&state_file.blocks).enumerate()
+    {
         assert_eq!(
             block.first_id,
             table.len() as u32,
             "block-state data not dense at '{}'",
             block.name
         );
+        let shape_block = shape_file.as_ref().map(|file| {
+            let entry = &file.blocks[block_index];
+            assert_eq!(entry.name, block.name, "shape block order mismatch");
+            assert_eq!(
+                entry.first_id, block.first_id,
+                "shape block state id mismatch"
+            );
+            assert_eq!(entry.props, block.props, "shape block properties mismatch");
+            entry
+        });
         assert_eq!(
             state_entry.name, block.name,
             "state data out of order at '{}'",
@@ -410,6 +488,22 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
 
         let count: u32 = props.iter().map(|(_, vs)| vs.len() as u32).product();
         assert!((block.first_id..block.first_id + count).contains(&block.default_id));
+        if let Some(entry) = shape_block {
+            let mut previous = None;
+            for shape in &entry.overrides {
+                assert!(
+                    shape.0 < count,
+                    "shape offset out of range for {}",
+                    block.name
+                );
+                assert!(
+                    previous.map_or(true, |offset| shape.0 > offset),
+                    "shape offsets not strictly ordered for {}",
+                    block.name
+                );
+                previous = Some(shape.0);
+            }
+        }
         let default_state =
             BlockState::try_from(block.default_id).expect("default state fits id repr");
         let face_indices = light_face_indices(state_entry, count as usize);
@@ -422,8 +516,43 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
             }
             let properties = PropMap::from_pairs(pairs);
             let fluid = state_fluid(name, &properties);
-            let shape = compute_shape(name, &properties).map(Vec::into_boxed_slice);
-            let outline = compute_outline(name, &properties).map(Vec::into_boxed_slice);
+            let override_shape = shape_block.and_then(|block| {
+                block
+                    .overrides
+                    .binary_search_by_key(&offset, |shape| shape.0)
+                    .ok()
+                    .map(|index| &block.overrides[index])
+            });
+            let (shape, outline) = if let Some(exact) = override_shape {
+                let collision = shape_file
+                    .as_ref()
+                    .expect("shape override requires its shape file")
+                    .shapes
+                    .get(exact.1 as usize)
+                    .unwrap_or_else(|| {
+                        panic!("collision shape index out of range for {}", block.name)
+                    })
+                    .clone();
+                let outline = shape_file
+                    .as_ref()
+                    .expect("shape override requires its shape file")
+                    .shapes
+                    .get(exact.2 as usize)
+                    .unwrap_or_else(|| {
+                        panic!("outline shape index out of range for {}", block.name)
+                    })
+                    .clone();
+                let full_cube = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+                let collision_field = (collision.as_slice() != full_cube.as_slice())
+                    .then(|| collision.clone().into_boxed_slice());
+                let outline_field = (outline != collision).then(|| outline.into_boxed_slice());
+                (collision_field, outline_field)
+            } else {
+                (
+                    compute_shape(name, &properties).map(Vec::into_boxed_slice),
+                    compute_outline(name, &properties).map(Vec::into_boxed_slice),
+                )
+            };
             let light = LightProps {
                 emission: state_entry.e.get(offset as usize),
                 dampening: state_entry.d.get(offset as usize),

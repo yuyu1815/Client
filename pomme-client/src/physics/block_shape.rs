@@ -1170,4 +1170,95 @@ mod tests {
             3
         );
     }
+
+    #[test]
+    fn verified_vanilla_overrides_separate_collision_and_outline_shapes() {
+        crate::world::block::init("26.2");
+
+        let wire = crate::world::block::find_state(
+            "redstone_wire",
+            &[
+                ("east", "up"),
+                ("north", "up"),
+                ("power", "0"),
+                ("south", "up"),
+                ("west", "up"),
+            ],
+        );
+        assert_eq!(partial_shape(wire), Some(&[][..]));
+        assert_eq!(
+            outline_shape(wire),
+            &[
+                [0.0, 0.0, 0.1875, 1.0, 0.0625, 0.8125],
+                [0.1875, 0.0, 0.0, 0.8125, 0.0625, 0.1875],
+                [0.1875, 0.0, 0.8125, 0.8125, 0.0625, 1.0],
+                [0.0, 0.0625, 0.1875, 0.0625, 1.0, 0.8125],
+                [0.1875, 0.0625, 0.0, 0.8125, 1.0, 0.0625],
+                [0.1875, 0.0625, 0.9375, 0.8125, 1.0, 1.0],
+                [0.9375, 0.0625, 0.1875, 1.0, 1.0, 0.8125],
+            ]
+        );
+
+        let wall = crate::world::block::find_state(
+            "cobblestone_wall",
+            &[
+                ("east", "none"),
+                ("north", "none"),
+                ("south", "none"),
+                ("up", "true"),
+                ("waterlogged", "false"),
+                ("west", "none"),
+            ],
+        );
+        assert_eq!(
+            partial_shape(wall),
+            Some(&[[0.25, 0.0, 0.25, 0.75, 1.5, 0.75]][..])
+        );
+        assert_eq!(outline_shape(wall), &[[0.25, 0.0, 0.25, 0.75, 1.0, 0.75]]);
+
+        let open_gate = crate::world::block::find_state(
+            "oak_fence_gate",
+            &[
+                ("facing", "north"),
+                ("in_wall", "true"),
+                ("open", "true"),
+                ("powered", "true"),
+            ],
+        );
+        assert_eq!(partial_shape(open_gate), Some(&[][..]));
+        assert_eq!(
+            outline_shape(open_gate),
+            &[[0.0, 0.0, 0.375, 1.0, 0.8125, 0.625]]
+        );
+
+        let bars = crate::world::block::find_state(
+            "copper_bars",
+            &[
+                ("east", "false"),
+                ("north", "false"),
+                ("south", "false"),
+                ("waterlogged", "false"),
+                ("west", "false"),
+            ],
+        );
+        assert_eq!(
+            partial_shape(bars),
+            Some(&[[0.4375, 0.0, 0.4375, 0.5625, 1.0, 0.5625]][..])
+        );
+        assert_eq!(outline_shape(bars), partial_shape(bars).unwrap());
+
+        let grass = crate::world::block::default_state_of("short_grass").unwrap();
+        assert_eq!(partial_shape(grass), Some(&[][..]));
+        assert_eq!(
+            outline_shape(grass),
+            &[[0.125, 0.0, 0.125, 0.875, 0.8125, 0.875]]
+        );
+
+        // These are handled by the entity/world-context collector, not frozen
+        // by the static 26.2 table.
+        for id in ["moving_piston", "scaffolding", "powder_snow"] {
+            let state = crate::world::block::default_state_of(id).unwrap();
+            assert_eq!(crate::world::block::block_shape(state), None, "{id}");
+        }
+    }
 }

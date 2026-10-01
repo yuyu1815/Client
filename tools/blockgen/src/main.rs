@@ -6,6 +6,8 @@
 //!   blockgen blocks <reports/blocks.json> <version> <out.json>
 //!   blockgen behavior <azalea generated.rs> <out.json>
 //!   blockgen state <generated/state.json> <blocks-<v>.json> <out.json>
+//!   blockgen shapes <blocks-<v>.json> <oracle.json> <verified-comparison.json>
+//! <out.json>
 //!
 //! `blocks` flattens the report into a compact per-block table (name, first
 //! state id, default state id, ordered property lists). Every explicit state
@@ -28,7 +30,7 @@
 //! masks are deduped into a dictionary. State counts and value ranges are
 //! cross-checked against the version's blocks table.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::process::ExitCode;
 
@@ -38,7 +40,10 @@ fn main() -> ExitCode {
         [cmd, report, version, out] if cmd == "blocks" => gen_blocks(report, version, out),
         [cmd, generated, out] if cmd == "behavior" => gen_behavior(generated, out),
         [cmd, dump, blocks, out] if cmd == "state" => gen_state(dump, blocks, out),
-        _ => Err("usage: blockgen blocks <blocks.json> <version> <out.json>\n       blockgen behavior <generated.rs> <out.json>\n       blockgen state <state.json> <blocks-<v>.json> <out.json>".into()),
+        [cmd, blocks, oracle, comparison, out] if cmd == "shapes" => {
+            gen_shapes(blocks, oracle, comparison, out)
+        }
+        _ => Err("usage: blockgen blocks <blocks.json> <version> <out.json>\n       blockgen behavior <generated.rs> <out.json>\n       blockgen state <state.json> <blocks-<v>.json> <out.json>\n       blockgen shapes <blocks-<v>.json> <vanilla-shape-oracle.json> <verified-comparison.json> <out.json>".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -387,6 +392,436 @@ struct BlocksEntry {
     first_id: u32,
     #[serde(default)]
     props: Vec<(String, Vec<String>)>,
+}
+
+#[derive(serde::Deserialize)]
+struct ShapeComparison {
+    block: String,
+    props: BTreeMap<String, String>,
+    collision_equal: bool,
+    outline_equal: bool,
+    official_collision: Vec<[f64; 6]>,
+    official_outline: Vec<[f64; 6]>,
+    status: String,
+}
+
+#[derive(serde::Serialize)]
+struct GeneratedShapes {
+    version: String,
+    state_count: u32,
+    verified_states: u32,
+    skipped_states: u32,
+    context_dependent_states: u32,
+    offset_dependent_states: u32,
+    oracle_disagreement_states: u32,
+    oracle: &'static str,
+    shapes: Vec<Vec<[f64; 6]>>,
+    blocks: Vec<GeneratedShapeBlock>,
+}
+
+#[derive(serde::Serialize)]
+struct GeneratedShapeBlock {
+    name: String,
+    first_id: u32,
+    props: Vec<(String, Vec<String>)>,
+    /// `(state offset, collision shape index, outline shape index)`.
+    overrides: Vec<(u32, u32, u32)>,
+}
+
+/// Converts Steel's existing shape oracle into state-local overrides only
+/// where both the report layout and the report's independent vanilla shape
+/// comparison prove the oracle data matches this exact version/state.
+fn gen_shapes(
+    blocks_path: &str,
+    oracle_path: &str,
+    comparison_path: &str,
+    out_path: &str,
+) -> Result<(), Error> {
+    let blocks: BlocksFile = serde_json::from_str(&std::fs::read_to_string(blocks_path)?)?;
+    if blocks.version != "26.2" {
+        return Err(format!(
+            "shape oracle is verified only for 26.2, not '{}'",
+            blocks.version
+        )
+        .into());
+    }
+    let oracle: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(oracle_path)?)?;
+    let oracle_blocks = oracle["blocks"]
+        .as_array()
+        .ok_or("oracle has no blocks array")?;
+    let oracle_shapes = oracle["shapes"]
+        .as_array()
+        .ok_or("oracle has no shapes array")?;
+    let comparisons: Vec<ShapeComparison> =
+        serde_json::from_str(&std::fs::read_to_string(comparison_path)?)?;
+    if comparisons.len() != blocks.state_count as usize {
+        return Err(format!(
+            "comparison has {} states, blocks table has {}",
+            comparisons.len(),
+            blocks.state_count
+        )
+        .into());
+    }
+    if oracle_blocks.len() != blocks.blocks.len() {
+        return Err(format!(
+            "oracle has {} blocks, 26.2 table has {}",
+            oracle_blocks.len(),
+            blocks.blocks.len()
+        )
+        .into());
+    }
+
+    let mut generated = Vec::with_capacity(blocks.blocks.len());
+    let mut shape_dictionary = Vec::new();
+    let mut shape_indices = HashMap::new();
+    let mut state_id = 0u32;
+    let mut verified_states = 0u32;
+    let mut skipped_states = 0u32;
+    let mut context_dependent_states = 0u32;
+    let mut offset_dependent_states = 0u32;
+    let mut oracle_disagreement_states = 0u32;
+    let mut overrides = 0u32;
+
+    for (block_index, block) in blocks.blocks.iter().enumerate() {
+        if block.first_id != state_id {
+            return Err(format!(
+                "blocks table not dense at '{}': starts at {}, expected {state_id}",
+                block.name, block.first_id
+            )
+            .into());
+        }
+        let oracle_block = &oracle_blocks[block_index];
+        if oracle_block["id"].as_u64() != Some(block_index as u64)
+            || oracle_block["name"].as_str() != Some(block.name.as_str())
+        {
+            return Err(format!(
+                "oracle block identity mismatch at {}: expected {}",
+                block_index, block.name
+            )
+            .into());
+        }
+
+        let oracle_properties = oracle_block["properties"]
+            .as_array()
+            .ok_or_else(|| format!("{}: oracle properties missing", block.name))?;
+        let oracle_defaults = oracle_block["default_properties"]
+            .as_array()
+            .ok_or_else(|| format!("{}: oracle default_properties missing", block.name))?;
+        if oracle_properties.len() != block.props.len()
+            || oracle_defaults.len() != block.props.len()
+        {
+            return Err(format!(
+                "{}: oracle has {} properties/defaults, version table has {}",
+                block.name,
+                oracle_properties.len(),
+                block.props.len()
+            )
+            .into());
+        }
+        let mut seen = HashMap::new();
+        for (axis, ((key, values), oracle_property)) in
+            block.props.iter().zip(oracle_properties).enumerate()
+        {
+            let raw = oracle_property
+                .as_str()
+                .ok_or_else(|| format!("{}: invalid oracle property", block.name))?;
+            let normalized = shape_property_name(raw, axis, &mut seen);
+            if normalized != *key {
+                return Err(format!(
+                    "{}: oracle property {raw} maps to '{normalized}', version table says '{key}'",
+                    block.name
+                )
+                .into());
+            }
+            let default = oracle_defaults[axis]
+                .as_str()
+                .ok_or_else(|| format!("{}: invalid oracle default property", block.name))?;
+            let default_value = shape_property_value(default).ok_or_else(|| {
+                format!(
+                    "{}: cannot decode oracle default property '{default}'",
+                    block.name
+                )
+            })?;
+            if !values.iter().any(|value| value == &default_value) {
+                return Err(format!(
+                    "{}: oracle default {key}={default_value} is not in version table",
+                    block.name
+                )
+                .into());
+            }
+        }
+
+        let count: u32 = block
+            .props
+            .iter()
+            .map(|(_, values)| values.len() as u32)
+            .product();
+        if count == 0 {
+            return Err(format!("{}: zero block states", block.name).into());
+        }
+        let mut block_overrides = Vec::new();
+        for offset in 0..count {
+            let comparison = &comparisons[(state_id + offset) as usize];
+            let properties = state_properties(&block.props, offset);
+            if comparison.block != block.name || comparison.props != properties {
+                return Err(format!(
+                    "state {} identity mismatch: expected {} {:?}, comparison has {} {:?}",
+                    state_id + offset,
+                    block.name,
+                    properties,
+                    comparison.block,
+                    comparison.props
+                )
+                .into());
+            }
+            if comparison.status == "context_dependent" {
+                skipped_states += 1;
+                context_dependent_states += 1;
+                continue;
+            }
+            if comparison.status != "compared" {
+                return Err(format!(
+                    "state {} has unknown comparison status '{}'",
+                    state_id + offset,
+                    comparison.status
+                )
+                .into());
+            }
+
+            let collision = oracle_shape(oracle_block, oracle_shapes, "collision_shapes", offset)?;
+            let outline = oracle_shape(oracle_block, oracle_shapes, "outline_shapes", offset)?;
+            let has_offset = oracle_block["collision_shapes"]["usesOffset"] == true
+                || oracle_block["outline_shapes"]["usesOffset"] == true;
+            if has_offset {
+                // Randomized boxes need the block position at their call site.
+                skipped_states += 1;
+                offset_dependent_states += 1;
+                continue;
+            }
+            if !same_boxes(&collision, &comparison.official_collision)
+                || !same_boxes(&outline, &comparison.official_outline)
+            {
+                // The oracle has a small number of cross-version changes.
+                skipped_states += 1;
+                oracle_disagreement_states += 1;
+                continue;
+            }
+            verified_states += 1;
+            if !comparison.collision_equal || !comparison.outline_equal {
+                block_overrides.push((
+                    offset,
+                    intern_shape(collision, &mut shape_dictionary, &mut shape_indices),
+                    intern_shape(outline, &mut shape_dictionary, &mut shape_indices),
+                ));
+                overrides += 1;
+            }
+        }
+        state_id += count;
+        generated.push(GeneratedShapeBlock {
+            name: block.name.clone(),
+            first_id: block.first_id,
+            props: block.props.clone(),
+            overrides: block_overrides,
+        });
+    }
+    if state_id != blocks.state_count {
+        return Err(format!(
+            "blocks cover {state_id} states, table declares {}",
+            blocks.state_count
+        )
+        .into());
+    }
+    if verified_states + skipped_states != state_id {
+        return Err(format!(
+            "shape coverage is {} verified + {} skipped, expected {state_id}",
+            verified_states, skipped_states
+        )
+        .into());
+    }
+
+    let output = GeneratedShapes {
+        version: blocks.version,
+        state_count: state_id,
+        verified_states,
+        skipped_states,
+        context_dependent_states,
+        offset_dependent_states,
+        oracle_disagreement_states,
+        oracle: "third_party/SteelMC/steel-registry/build_assets/blocks.json",
+        shapes: shape_dictionary,
+        blocks: generated,
+    };
+    std::fs::write(out_path, format!("{}\n", serde_json::to_string(&output)?))?;
+    println!(
+        "wrote shape overrides for {} states ({} verified, {} skipped, {} overrides, {} shared shapes) to {out_path}",
+        state_id,
+        verified_states,
+        skipped_states,
+        overrides,
+        output.shapes.len()
+    );
+    Ok(())
+}
+
+fn intern_shape(
+    boxes: Vec<[f64; 6]>,
+    dictionary: &mut Vec<Vec<[f64; 6]>>,
+    indices: &mut HashMap<Vec<[u64; 6]>, u32>,
+) -> u32 {
+    let key: Vec<[u64; 6]> = boxes
+        .iter()
+        .map(|bounds| bounds.map(f64::to_bits))
+        .collect();
+    if let Some(&index) = indices.get(&key) {
+        return index;
+    }
+    let index = dictionary.len() as u32;
+    indices.insert(key, index);
+    dictionary.push(boxes);
+    index
+}
+
+fn shape_property_name(raw: &str, _axis: usize, seen: &mut HashMap<String, usize>) -> String {
+    let name = raw.to_ascii_lowercase();
+    if name == "has_bottle" {
+        let index = seen.entry(name).or_default();
+        let result = format!("has_bottle_{index}");
+        *index += 1;
+        return result;
+    }
+    if name.starts_with("has_bottle_") {
+        return name;
+    }
+    match name.as_str() {
+        "horizontal_facing" | "facing_hopper" => "facing".into(),
+        "slab_type" | "chest_type" | "piston_type" => "type".into(),
+        "stairs_shape" | "rail_shape" | "rail_shape_straight" => "shape".into(),
+        "bed_part" => "part".into(),
+        "double_block_half" => "half".into(),
+        "side_chain_part" => "side_chain".into(),
+        "noteblock_instrument" => "instrument".into(),
+        "east_wall" | "east_redstone" => "east".into(),
+        "north_wall" | "north_redstone" => "north".into(),
+        "south_wall" | "south_redstone" => "south".into(),
+        "west_wall" | "west_redstone" => "west".into(),
+        "door_hinge" => "hinge".into(),
+        "attach_face" => "face".into(),
+        "horizontal_axis" => "axis".into(),
+        "level_cauldron" | "level_composter" => "level".into(),
+        "dried_ghast_hydration_levels" => "hydration".into(),
+        "bamboo_leaves" => "leaves".into(),
+        "stability_distance" => "distance".into(),
+        "bell_attachment" => "attachment".into(),
+        "structureblock_mode" | "test_block_mode" | "mode_comparator" => "mode".into(),
+        "level_honey" => "honey_level".into(),
+        "respawn_anchor_charges" => "charges".into(),
+        "speleothem_thickness" => "thickness".into(),
+        _ => name
+            .rsplit_once('_')
+            .filter(|(_, suffix)| suffix.parse::<u32>().is_ok())
+            .map_or(name.clone(), |(base, _)| base.to_string()),
+    }
+}
+
+fn shape_property_value(value: &str) -> Option<String> {
+    if let Some(value) = value.strip_prefix("bool_") {
+        return Some(value.into());
+    }
+    if let Some(value) = value.strip_prefix("int_") {
+        return Some(value.into());
+    }
+    if let Some(value) = value.strip_prefix("enum_") {
+        return value.split_once('_').map(|(_, value)| value.to_string());
+    }
+    None
+}
+
+fn state_properties(props: &[(String, Vec<String>)], offset: u32) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    let mut stride: u32 = props
+        .iter()
+        .map(|(_, values)| values.len() as u32)
+        .product();
+    for (key, choices) in props {
+        stride /= choices.len() as u32;
+        values.insert(
+            key.clone(),
+            choices[(offset / stride) as usize % choices.len()].clone(),
+        );
+    }
+    values
+}
+
+fn oracle_shape(
+    block: &serde_json::Value,
+    dictionary: &[serde_json::Value],
+    key: &str,
+    offset: u32,
+) -> Result<Vec<[f64; 6]>, Error> {
+    let shape = &block[key];
+    if shape["usesOffset"] != false {
+        return Ok(Vec::new());
+    }
+    let indices = shape["overwrites"]
+        .as_array()
+        .ok_or_else(|| format!("{}: {key} overwrites missing", block["name"]))?
+        .iter()
+        .find(|entry| entry["offset"].as_u64() == Some(offset as u64))
+        .map_or(&shape["default"], |entry| &entry["shapes"]);
+    let indices = indices
+        .as_array()
+        .ok_or_else(|| format!("{}: {key} default missing", block["name"]))?;
+    indices
+        .iter()
+        .map(|index| {
+            let id = index
+                .as_u64()
+                .ok_or_else(|| format!("{}: invalid shape index", block["name"]))?
+                as usize;
+            let aabb = dictionary
+                .get(id)
+                .ok_or_else(|| format!("{}: shape index {id} out of range", block["name"]))?;
+            let min = aabb["min"]
+                .as_array()
+                .ok_or_else(|| format!("{}: shape {id} has no min", block["name"]))?;
+            let max = aabb["max"]
+                .as_array()
+                .ok_or_else(|| format!("{}: shape {id} has no max", block["name"]))?;
+            if min.len() != 3 || max.len() != 3 {
+                return Err(format!("{}: shape {id} is not 3D", block["name"]).into());
+            }
+            let mut result = [0.0; 6];
+            for axis in 0..3 {
+                result[axis] = min[axis]
+                    .as_f64()
+                    .ok_or_else(|| format!("{}: shape {id} invalid min", block["name"]))?;
+                result[axis + 3] = max[axis]
+                    .as_f64()
+                    .ok_or_else(|| format!("{}: shape {id} invalid max", block["name"]))?;
+                if result[axis] > result[axis + 3] {
+                    return Err(format!("{}: shape {id} has inverted bounds", block["name"]).into());
+                }
+            }
+            Ok(result)
+        })
+        .collect()
+}
+
+fn same_boxes(a: &[[f64; 6]], b: &[[f64; 6]]) -> bool {
+    let mut a = a.to_vec();
+    let mut b = b.to_vec();
+    let order = |x: &[f64; 6], y: &[f64; 6]| {
+        for axis in 0..6 {
+            let compare = x[axis].total_cmp(&y[axis]);
+            if compare != std::cmp::Ordering::Equal {
+                return compare;
+            }
+        }
+        std::cmp::Ordering::Equal
+    };
+    a.sort_by(order);
+    b.sort_by(order);
+    a == b
 }
 
 fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), Error> {
