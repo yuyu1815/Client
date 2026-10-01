@@ -69,6 +69,29 @@ impl DisplayResolver {
         self.cache.borrow_mut().clear();
     }
 
+    /// Resolve a concrete model (used by condition-selected special item
+    /// display bases such as shield_blocking) through the same pack/cache path.
+    pub fn resolve_model_path(
+        &self,
+        model_path: &str,
+        default: DisplayTransform,
+    ) -> DisplayTransform {
+        let key = format!("model:{model_path}");
+        if let Some(t) = self.cache.borrow().get(&key) {
+            return *t;
+        }
+        let resolved = resolve_display(
+            model_path,
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &self.pack_dirs,
+            self.key,
+        )
+        .unwrap_or(default);
+        self.cache.borrow_mut().insert(key, resolved);
+        resolved
+    }
+
     pub fn resolve(&self, item_name: &str, default: DisplayTransform) -> DisplayTransform {
         if let Some(t) = self.cache.borrow().get(item_name) {
             return *t;
@@ -194,6 +217,45 @@ mod tests {
             .resolve("totem_of_undying", DisplayTransform::IDENTITY)
             .scale
             .x
+    }
+
+    #[test]
+    fn shield_gui_and_blocking_hand_displays_resolve_the_selected_base() {
+        let root = std::env::temp_dir().join(format!("shield-display-{}", uuid::Uuid::new_v4()));
+        write(
+            &root,
+            "minecraft/items/shield.json",
+            r#"{"model":{"type":"minecraft:condition","on_false":{"type":"minecraft:special","base":"minecraft:item/shield","model":{"type":"minecraft:shield"}},"on_true":{"type":"minecraft:special","base":"minecraft:item/shield_blocking","model":{"type":"minecraft:shield"}},"property":"minecraft:using_item"}}"#,
+        );
+        model(
+            &root,
+            "shield",
+            r#"{"display":{"gui":{"rotation":[15,-25,-5],"translation":[2,3,0],"scale":[0.65,0.65,0.65]}}}"#,
+        );
+        model(
+            &root,
+            "shield_blocking",
+            r#"{"display":{"firstperson_righthand":{"rotation":[0,180,-5],"translation":[-15,3.25,-11],"scale":[1.25,1.25,1.25]},"firstperson_lefthand":{"rotation":[0,180,-5],"translation":[5,5,-11],"scale":[1.25,1.25,1.25]}}}"#,
+        );
+        let gui = DisplayResolver::new(&root.join("assets"), "gui")
+            .resolve("shield", DisplayTransform::IDENTITY);
+        assert_eq!(gui.rotation, Vec3::new(15.0, -25.0, -5.0));
+        assert_eq!(gui.translation, Vec3::new(2.0, 3.0, 0.0) / 16.0);
+        for (key, expected) in [
+            ("firstperson_righthand", Vec3::new(-15.0, 3.25, -11.0)),
+            ("firstperson_lefthand", Vec3::new(5.0, 5.0, -11.0)),
+        ] {
+            let resolver = DisplayResolver::new(&root.join("assets"), key);
+            let blocked = resolver
+                .resolve_model_path("minecraft:item/shield_blocking", DisplayTransform::IDENTITY);
+            assert_eq!(blocked.translation, expected / 16.0);
+            assert_eq!(blocked.scale, Vec3::splat(1.25));
+            assert_eq!(
+                resolver.resolve("shield", DisplayTransform::IDENTITY).scale,
+                Vec3::ONE
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

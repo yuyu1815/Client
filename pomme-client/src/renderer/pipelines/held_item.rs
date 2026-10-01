@@ -30,6 +30,7 @@ pub struct UseAnim {
     pub duration: f32,
     pub left_hand: bool,
     pub bow: bool,
+    pub shield_blocking: bool,
 }
 
 pub struct HeldItemPipeline {
@@ -93,10 +94,10 @@ impl HeldItemPipeline {
         asset_index: &Option<crate::assets::AssetIndex>,
         pack_dirs: &[std::path::PathBuf],
     ) {
-        if self.activation {
-            self.display
-                .update_resources(jar_assets_dir, asset_index, pack_dirs);
-        }
+        self.display
+            .update_resources(jar_assets_dir, asset_index, pack_dirs);
+        self.left_display
+            .update_resources(jar_assets_dir, asset_index, pack_dirs);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -133,15 +134,22 @@ impl HeldItemPipeline {
         let uniform = CameraUniform::with_view_proj(view_projection);
         self.shared.update_camera(frame, &uniform);
 
-        let display = if left_hand {
-            self.left_display
-                .resolve(&item.name, default_first_person(item.has_3d_model, true))
+        let resolver = if left_hand {
+            &self.left_display
         } else {
-            self.display
-                .resolve(&item.name, default_first_person(item.has_3d_model, false))
+            &self.display
+        };
+        let display_default = default_first_person(item.has_3d_model, left_hand);
+        let display = if item.name == "shield" && shield_blocking_for_hand(use_anim, left_hand) {
+            resolver.resolve_model_path("minecraft:item/shield_blocking", display_default)
+        } else {
+            resolver.resolve(&item.name, display_default)
         };
         let arm = match use_anim.filter(|anim| anim.left_hand == left_hand) {
             Some(anim) if anim.bow => bow_item_matrix(anim, inverse_height),
+            Some(anim) if anim.shield_blocking => {
+                first_person_item_matrix(swing_progress, left_hand, inverse_height)
+            }
             Some(anim) => eat_item_matrix(anim, inverse_height),
             None => first_person_item_matrix(swing_progress, left_hand, inverse_height),
         };
@@ -284,6 +292,10 @@ impl HeldItemPipeline {
 }
 
 /// CPU model selection shared by the draw path and headless interaction tests.
+fn shield_blocking_for_hand(use_anim: Option<UseAnim>, left_hand: bool) -> bool {
+    use_anim.is_some_and(|anim| anim.shield_blocking && anim.left_hand == left_hand)
+}
+
 pub(crate) fn selected_item_model_name(
     base_name: &str,
     use_anim: Option<UseAnim>,
@@ -401,6 +413,7 @@ mod tests {
                 duration: 72_000.0,
                 left_hand: false,
                 bow: true,
+                shield_blocking: false,
             })
         };
         for (ticks, expected) in [
@@ -412,6 +425,29 @@ mod tests {
             (20.0, "bow_pulling_2"),
         ] {
             assert_eq!(stage(ticks), expected);
+        }
+    }
+
+    #[test]
+    fn shield_blocking_keeps_the_same_mesh_for_both_logical_hands() {
+        for left_hand in [false, true] {
+            let anim = UseAnim {
+                curr_usage_time: 1.0,
+                duration: 72_000.0,
+                left_hand,
+                bow: false,
+                shield_blocking: true,
+            };
+            assert_eq!(
+                selected_item_model_name("shield", Some(anim), left_hand),
+                "shield"
+            );
+            assert_eq!(
+                selected_item_model_name("shield", None, left_hand),
+                "shield"
+            );
+            assert!(shield_blocking_for_hand(Some(anim), left_hand));
+            assert!(!shield_blocking_for_hand(Some(anim), !left_hand));
         }
     }
 
@@ -435,6 +471,7 @@ mod tests {
             duration: 72_000.0,
             left_hand,
             bow: true,
+            shield_blocking: false,
         };
         let idle = bow_item_matrix(anim(0.0, false), 0.0);
         let early = bow_item_matrix(anim(10.0, false), 0.0);
@@ -499,6 +536,7 @@ mod tests {
                     duration: 32.0,
                     left_hand,
                     bow: false,
+                    shield_blocking: false,
                 };
                 assert!(eat_item_matrix(anim, inverse).abs_diff_eq(idle, 1e-6));
                 let lower = Mat4::from_translation(Vec3::new(0.0, -inverse * 0.6, 0.0));

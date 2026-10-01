@@ -976,6 +976,38 @@ pub fn bake_item_models(
         flat_tints.remove("player_head");
     }
 
+    // Vanilla 26.2 special shield uses an entity-layer texture and has no
+    // elements in either display base model, so bake its shared plate/handle
+    // geometry into the regular item mesh/atlas path.
+    let shield_item = resolve_asset_path_with_packs(
+        jar_assets_dir,
+        asset_index,
+        "minecraft/items/shield.json",
+        packs,
+    );
+    if std::fs::read_to_string(shield_item)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .is_some_and(|json| {
+            ["/model/on_false", "/model/on_true"]
+                .into_iter()
+                .all(|path| {
+                    json.pointer(path).is_some_and(|branch| {
+                        branch.get("type").and_then(serde_json::Value::as_str)
+                            == Some("minecraft:special")
+                            && branch
+                                .pointer("/model/type")
+                                .and_then(serde_json::Value::as_str)
+                                == Some("minecraft:shield")
+                    })
+                })
+        })
+    {
+        item_models.insert("shield".to_string(), bake_shield_item_model());
+        flat_keys.remove("shield");
+        flat_tints.remove("shield");
+    }
+
     // Vanilla 26.2 special conduit shell; only synthesize it when the resolved
     // item definition is still the vanilla special type.
     let conduit_item = resolve_asset_path_with_packs(
@@ -1289,6 +1321,58 @@ pub(crate) fn bake_player_head_item_model(transform: Mat4) -> BakedModel {
         }
     }
     // template_skull's GUI rotation is (30,45,0), not block/block's 225 Y.
+    apply_gui_lambert(&mut quads, CHEST_GUI_ROTATION_DEG);
+    BakedModel {
+        quads,
+        ambient_occlusion: true,
+        is_full_cube: false,
+        occludes: false,
+    }
+}
+
+/// ShieldModel.createLayer in the 26.2 jar: plate and handle are identical
+/// in idle/blocking state. Apply the special model's (1,-1,-1) scale here;
+/// display transforms remain resolved separately from shield*.json.
+fn bake_shield_item_model() -> BakedModel {
+    use crate::renderer::entity_model::{ModelCube, cube_faces};
+
+    let mut quads = Vec::with_capacity(12);
+    for cube in [
+        ModelCube {
+            origin: Vec3::new(-6.0, -11.0, -2.0),
+            size: Vec3::new(12.0, 22.0, 1.0),
+            tex_offset: (0, 0),
+            deformation: 0.0,
+            mirror: false,
+        },
+        ModelCube {
+            origin: Vec3::new(-1.0, -3.0, -1.0),
+            size: Vec3::new(2.0, 6.0, 6.0),
+            tex_offset: (26, 0),
+            deformation: 0.0,
+            mirror: false,
+        },
+    ] {
+        for (positions, [u0, v0, u1, v1]) in cube_faces(&cube, true) {
+            quads.push(BakedQuad {
+                positions: positions.map(|[x, y, z]| [x + 0.5, -y + 0.5, -z + 0.5]),
+                uvs: [
+                    [u1 / 64.0, v0 / 64.0],
+                    [u0 / 64.0, v0 / 64.0],
+                    [u0 / 64.0, v1 / 64.0],
+                    [u1 / 64.0, v1 / 64.0],
+                ],
+                texture: "entity/shield/shield_base_nopattern".to_string(),
+                ambient_occlusion: true,
+                cullface: None,
+                tint_index: None,
+                tint: Tint::None,
+                item_tint: ItemTint::Untinted,
+                shade_light: 1.0,
+                shade_face: None,
+            });
+        }
+    }
     apply_gui_lambert(&mut quads, CHEST_GUI_ROTATION_DEG);
     BakedModel {
         quads,
@@ -2757,6 +2841,44 @@ fn determine_tint_for_index(block_name: &str, tint_index: Option<i32>) -> Tint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shield_special_mesh_has_plate_handle_faces_and_valid_uvs() {
+        let model = bake_shield_item_model();
+        assert_eq!(model.quads.len(), 12);
+        assert!(model.quads.iter().all(|quad| {
+            quad.texture == "entity/shield/shield_base_nopattern"
+                && quad.uvs.iter().flatten().all(|uv| (0.0..=1.0).contains(uv))
+        }));
+        assert!(
+            model
+                .quads
+                .iter()
+                .flat_map(|quad| quad.positions)
+                .all(|p| { p.into_iter().all(|v| (-0.25..=1.25).contains(&v)) })
+        );
+        let bounds = |faces: &[BakedQuad]| {
+            let points: Vec<_> = faces.iter().flat_map(|quad| quad.positions).collect();
+            let axis = |i: usize| {
+                (
+                    points.iter().map(|p| p[i]).fold(f32::INFINITY, f32::min),
+                    points
+                        .iter()
+                        .map(|p| p[i])
+                        .fold(f32::NEG_INFINITY, f32::max),
+                )
+            };
+            [axis(0), axis(1), axis(2)]
+        };
+        let plate = bounds(&model.quads[..6]);
+        assert_eq!(plate[0], (0.125, 0.875));
+        assert_eq!(plate[1], (-0.1875, 1.1875));
+        assert_eq!(plate[2], (0.5625, 0.625));
+        let handle = bounds(&model.quads[6..]);
+        assert_eq!(handle[0], (0.4375, 0.5625));
+        assert_eq!(handle[1], (0.3125, 0.6875));
+        assert_eq!(handle[2], (0.1875, 0.5625));
+    }
 
     #[test]
     fn shulker_item_matches_vanilla_closed_box_uv_and_overlap() {

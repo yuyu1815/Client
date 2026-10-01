@@ -1860,6 +1860,11 @@ impl Renderer {
         ) {
             tracing::warn!("Keeping previous head fallback after reload failure: {error}");
         }
+        self.held_item_pipeline.update_display_resources(
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &self.activation_pack_dirs,
+        );
         if let Some(pipeline) = self.activation_pipeline.as_mut() {
             pipeline.update_display_resources(
                 &self.jar_assets_dir,

@@ -1465,6 +1465,7 @@ impl InteractionState {
         let active = self.using_item.as_ref()?;
         if active.remaining <= 0
             || (!active.bow
+                && active.use_kind != ActiveUseKind::Shield
                 && !matches!(active.anim, ItemUseAnimation::Eat | ItemUseAnimation::Drink))
         {
             return None;
@@ -1474,6 +1475,7 @@ impl InteractionState {
             duration: active.duration as f32,
             left_hand: active.hand == InteractionHand::OffHand,
             bow: active.bow,
+            shield_blocking: active.use_kind == ActiveUseKind::Shield,
         })
     }
 
@@ -2786,28 +2788,28 @@ mod tests {
     }
 
     #[test]
-    fn synced_using_item_flag_clears_server_stopped_use() {
+    fn synced_using_item_flag_clears_server_stopped_shield_blocking_pose() {
         let mut state = InteractionState::new();
         state.using_item = Some(ActiveUse {
             hand: InteractionHand::MainHand,
-            kind: ItemKind::Apple,
-            use_kind: ActiveUseKind::Consumable,
-            anim: ItemUseAnimation::Eat,
+            kind: ItemKind::Shield,
+            use_kind: ActiveUseKind::Shield,
+            anim: ItemUseAnimation::BlockKind,
             bow: false,
-            sound: SoundRef::event("entity.generic.eat"),
-            has_particles: true,
-            texture: "item/apple".to_string(),
+            sound: SoundRef::event("item.armor.equip_generic"),
+            has_particles: false,
+            texture: "entity/shield/shield_base_nopattern".to_string(),
             use_effects: UseEffects::default(),
-            duration: 32,
+            duration: 72_000,
             remaining: 12,
         });
 
         state.sync_using_item_flag(true);
         assert!(state.using_item.is_some());
-        state.using_bow = true;
+        assert!(state.use_animation(0.0).unwrap().shield_blocking);
         state.sync_using_item_flag(false);
         assert!(state.using_item.is_none());
-        assert!(!state.using_bow);
+        assert!(state.use_animation(0.0).is_none());
     }
 
     #[test]
