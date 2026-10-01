@@ -2815,7 +2815,9 @@ fn classify_block(state: azalea_block::BlockState) -> BlockKind {
 fn classify_block_entity_geometry(id: &str) -> BlockKind {
     match crate::world::block_entity::rendered_kind(id) {
         // The sign renderer draws text only; the blockstate model supplies its board/post.
-        Some(azalea_registry::builtin::BlockEntityKind::Sign) | None => BlockKind::Solid,
+        Some(azalea_registry::builtin::BlockEntityKind::Sign)
+        | Some(azalea_registry::builtin::BlockEntityKind::EnchantingTable)
+        | None => BlockKind::Solid,
         // These entities replace the chunk model (notably copper-golem statues).
         Some(_) => BlockKind::Air,
     }
