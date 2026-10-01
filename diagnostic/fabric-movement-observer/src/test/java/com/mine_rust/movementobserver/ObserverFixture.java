@@ -7,6 +7,7 @@ import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.MessageToByteEncoder;
 import io.netty.buffer.ByteBuf;
+import net.minecraft.network.Connection;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.network.protocol.game.ClientboundEntityPositionSyncPacket;
@@ -130,11 +131,13 @@ public final class ObserverFixture {
     }
 
     private static void outboundDirection() {
-        assert PacketWriteObserver.shouldObserveOutbound(true, PacketFlow.CLIENTBOUND);
-        assert !PacketWriteObserver.shouldObserveOutbound(true, PacketFlow.SERVERBOUND);
-        assert !PacketWriteObserver.shouldObserveOutbound(false, PacketFlow.CLIENTBOUND);
-        checkOutbound(PacketFlow.CLIENTBOUND, 2);
-        checkOutbound(PacketFlow.SERVERBOUND, 0);
+        PacketFlow clientReceiving = new Connection(PacketFlow.CLIENTBOUND).getReceiving();
+        PacketFlow serverReceiving = new Connection(PacketFlow.SERVERBOUND).getReceiving();
+        assert PacketWriteObserver.shouldObserveOutbound(true, clientReceiving);
+        assert !PacketWriteObserver.shouldObserveOutbound(true, serverReceiving);
+        assert !PacketWriteObserver.shouldObserveOutbound(false, clientReceiving);
+        checkOutbound(clientReceiving, 2);
+        checkOutbound(serverReceiving, 0);
     }
 
     private static void checkOutbound(PacketFlow receiving, int expectedEvents) {
