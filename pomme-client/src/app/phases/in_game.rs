@@ -2004,7 +2004,7 @@ pub(crate) const fn server_tick_runs(frozen: bool, steps: u32) -> bool {
 
 pub(crate) fn server_time_tick_period(rate: f32) -> f32 {
     if rate.is_finite() && rate >= 1.0 {
-        1.0 / rate
+        TICK_RATE.max(1.0 / rate)
     } else {
         TICK_RATE
     }
@@ -2045,28 +2045,34 @@ fn advance_world_clock_tick(
     }
 }
 
-pub(crate) fn advance_server_time(
+pub(crate) fn advance_level_time(
     accumulator: &mut f32,
     dt: f32,
     tick_rate: f32,
     frozen: bool,
+    paused: bool,
     steps: &mut u32,
     sky: &mut SkyState,
-    _clocks: &mut HashMap<u32, crate::net::environment::ClockSample>,
+    game_time: &mut i64,
+    clocks: &mut HashMap<u32, crate::net::environment::ClockSample>,
 ) -> u32 {
+    if paused {
+        return 0;
+    }
     let period = server_time_tick_period(tick_rate);
-    *accumulator = (*accumulator + dt.max(0.0)).min(1.0);
+    *accumulator += dt.max(0.0);
     let mut ticks = 0;
     while *accumulator + 1e-6 >= period {
+        *accumulator = (*accumulator - period).max(0.0);
         if server_tick_runs(frozen, *steps) {
             sky.advance_clock_tick();
             sky.game_time = sky.game_time.wrapping_add(1);
+            advance_world_clock_tick(game_time, clocks);
             if frozen {
                 *steps -= 1;
             }
             ticks += 1;
         }
-        *accumulator = (*accumulator - period).max(0.0);
     }
     ticks
 }
@@ -3257,19 +3263,21 @@ pub fn update_game(
     game.mesh_dispatcher
         .set_camera_position(*game.player.position);
 
-    // Predict the selected sky clock between SetTime packets. Other clocks
-    // advance from authoritative game-time deltas to avoid double prediction.
-    // This cadence is separate from the 20 Hz player/input loop below.
-    let simulation_ticks = advance_server_time(
+    // ClientLevel.tickTime runs at max(20 Hz, server tick rate). It owns the
+    // world clocks and frozen step budget; the independent 20 Hz input loop
+    // below must not consume either.
+    let level_ticks = advance_level_time(
         &mut core.time_tick_accumulator,
         dt,
         core.server_tick_rate,
         core.server_tick_frozen,
+        game.singleplayer && game.paused,
         &mut core.server_tick_steps,
         &mut game.sky_state,
+        &mut game.world_clock_game_time,
         &mut game.world_clocks,
     );
-    game.item_entity_store.advance_age(simulation_ticks);
+    game.item_entity_store.advance_age(level_ticks);
 
     if game.input_live() && game.chunk_load_bench.is_none() {
         gfx.renderer.update_camera(
@@ -3305,12 +3313,6 @@ pub fn update_game(
             game.item_activation = None;
         }
         game.item_cooldowns.tick();
-        // ClientLevel.tickTime advances once per eligible fixed world tick;
-        // never use the server tick-rate/interpolation cadence for this clock.
-        if (!core.server_tick_frozen || simulation_ticks > 0) && !(game.singleplayer && game.paused)
-        {
-            advance_world_clock_tick(&mut game.world_clock_game_time, &mut game.world_clocks);
-        }
         // ClientLevel ticks the border on each fixed client/world tick, even
         // when the world clock is frozen or running at a modified rate.
         game.world_border.tick();
@@ -8432,8 +8434,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        advance_server_time, advance_world_clock_tick, armor_stand_render_infos,
-        arrow_render_infos, block_entity_in_frustum, boat_render_infos, boat_underwater_status,
+        advance_level_time, advance_world_clock_tick, armor_stand_render_infos, arrow_render_infos,
+        block_entity_in_frustum, boat_render_infos, boat_underwater_status,
         bump_loaded_content_generations, bump_section_generations, consecutive_section_runs,
         credits_may_advance, current_edit_section_runs, death_confirm_escape_allowed,
         experience_orb_color, experience_orb_icon, experience_orb_light,
@@ -9875,7 +9877,7 @@ mod tests {
         let source = include_str!("in_game.rs");
         assert_eq!(
             source
-                .matches("advance_world_clock_tick(&mut game.world_clock_game_time")
+                .matches("advance_world_clock_tick(game_time, clocks)")
                 .count(),
             1
         );
@@ -9911,99 +9913,145 @@ mod tests {
     }
 
     #[test]
-    fn server_clock_uses_10_20_and_40_tick_cadences() {
-        for (rate, expected) in [(10.0, 10u32), (20.0, 20), (40.0, 40)] {
+    fn native_world_cadence_is_max_twenty_hz_or_server_rate() {
+        for (rate, expected) in [(10.0, 10), (20.0, 20), (120.0, 20)] {
             let mut sky = SkyState::default_day();
             sky.apply_clock_update(0, 0, 0.0, 1.0);
-            let mut accumulator = 0.0;
-            let mut steps = 0;
+            let (mut accumulator, mut game_time, mut steps) = (0.0, 0, 0);
+            let mut clocks = HashMap::new();
             assert_eq!(
-                advance_server_time(
+                advance_level_time(
                     &mut accumulator,
                     1.0,
                     rate,
                     false,
+                    false,
                     &mut steps,
                     &mut sky,
-                    &mut HashMap::new(),
+                    &mut game_time,
+                    &mut clocks
                 ),
                 expected
             );
-            assert_eq!(sky.day_time, i64::from(expected));
+            assert_eq!(sky.game_time, i64::from(expected));
+            assert_eq!(game_time, i64::from(expected));
         }
     }
 
     #[test]
-    fn server_tick_prediction_does_not_double_advance_world_clock_samples() {
+    fn level_time_carries_fraction_and_processes_hitch_ticks() {
         let mut sky = SkyState::default_day();
-        let mut clocks = HashMap::from([
-            (
-                1,
-                crate::net::environment::ClockSample {
-                    total_ticks: 20,
-                    partial_tick: 0.0,
-                    rate: 0.0,
-                },
-            ),
-            (
-                2,
-                crate::net::environment::ClockSample {
-                    total_ticks: 30,
-                    partial_tick: 0.0,
-                    rate: 0.5,
-                },
-            ),
-        ]);
-        let mut accumulator = 0.0;
-        let mut steps = 0;
+        let (mut accumulator, mut game_time, mut steps) = (0.0, 0, 0);
+        let mut clocks = HashMap::new();
         assert_eq!(
-            advance_server_time(
+            advance_level_time(
                 &mut accumulator,
-                1.0,
+                1.0 / 120.0,
                 20.0,
+                false,
                 false,
                 &mut steps,
                 &mut sky,
+                &mut game_time,
                 &mut clocks
             ),
-            20
+            0
         );
-        assert_eq!(clocks[&1].total_ticks, 20);
-        assert_eq!(clocks[&2].total_ticks, 30);
-        assert_eq!(clocks[&2].partial_tick, 0.0);
+        assert_eq!(
+            advance_level_time(
+                &mut accumulator,
+                0.15,
+                20.0,
+                false,
+                false,
+                &mut steps,
+                &mut sky,
+                &mut game_time,
+                &mut clocks
+            ),
+            3
+        );
+        assert_eq!(game_time, 3);
     }
 
     #[test]
-    fn frozen_clock_stops_and_step_budget_is_consumed_at_server_cadence() {
+    fn packet_time_delta_reconciles_without_reapplying_predicted_ticks() {
         let mut sky = SkyState::default_day();
-        sky.apply_clock_update(0, 0, 0.0, 1.0);
-        let mut accumulator = 0.0;
-        let mut steps = 0;
-        advance_server_time(
-            &mut accumulator,
-            1.0,
-            20.0,
-            true,
-            &mut steps,
-            &mut sky,
-            &mut HashMap::new(),
-        );
-        assert_eq!(sky.day_time, 0);
-        steps = 2;
+        let mut clocks = HashMap::from([(
+            1,
+            crate::net::environment::ClockSample {
+                total_ticks: 30,
+                partial_tick: 0.0,
+                rate: 0.5,
+            },
+        )]);
+        let (mut accumulator, mut game_time, mut steps) = (0.0, 100, 0);
         assert_eq!(
-            advance_server_time(
+            advance_level_time(
                 &mut accumulator,
                 0.1,
                 20.0,
-                true,
+                false,
+                false,
                 &mut steps,
                 &mut sky,
-                &mut HashMap::new(),
+                &mut game_time,
+                &mut clocks,
             ),
             2
         );
-        assert_eq!(sky.day_time, 2);
-        assert_eq!(steps, 0);
+        assert_eq!((clocks[&1].total_ticks, clocks[&1].partial_tick), (31, 0.0));
+        let packet_game_time = 102_i64;
+        let packet_delta = packet_game_time.wrapping_sub(game_time);
+        clocks.get_mut(&1).unwrap().advance_game_time(packet_delta);
+        game_time = packet_game_time;
+        assert_eq!((clocks[&1].total_ticks, clocks[&1].partial_tick), (31, 0.0));
+        assert_eq!(game_time, 102);
+    }
+
+    #[test]
+    fn frozen_step_budget_is_consumed_once_per_level_tick_and_pause_preserves_it() {
+        let mut sky = SkyState::default_day();
+        sky.apply_clock_update(0, 0, 0.0, 1.0);
+        let (mut accumulator, mut game_time, mut steps) = (0.0, 0, 3);
+        let mut clocks = HashMap::new();
+        assert_eq!(
+            advance_level_time(
+                &mut accumulator,
+                0.15,
+                20.0,
+                true,
+                false,
+                &mut steps,
+                &mut sky,
+                &mut game_time,
+                &mut clocks
+            ),
+            3
+        );
+        assert_eq!((steps, game_time, sky.day_time), (0, 3, 3));
+        steps = 2;
+        assert_eq!(
+            advance_level_time(
+                &mut accumulator,
+                1.0,
+                20.0,
+                true,
+                true,
+                &mut steps,
+                &mut sky,
+                &mut game_time,
+                &mut clocks
+            ),
+            0
+        );
+        assert_eq!(steps, 2);
+    }
+
+    #[test]
+    fn invalid_tick_rate_uses_native_default_cadence() {
+        assert_eq!(super::server_time_tick_period(0.0), super::TICK_RATE);
+        assert_eq!(super::server_time_tick_period(f32::NAN), super::TICK_RATE);
     }
 
     #[test]
@@ -10023,14 +10071,18 @@ mod tests {
 
         let mut accumulator = 0.0;
         let mut steps = 0;
-        let ticks = advance_server_time(
+        let mut game_time = 0;
+        let mut clocks = HashMap::new();
+        let ticks = advance_level_time(
             &mut accumulator,
             1.0,
             20.0,
             true,
+            false,
             &mut steps,
             &mut sky,
-            &mut HashMap::new(),
+            &mut game_time,
+            &mut clocks,
         );
         items.advance_age(ticks);
         assert_eq!(age(&items), 0);
@@ -10038,14 +10090,16 @@ mod tests {
         assert_eq!(age(&items), 0);
 
         steps = 3;
-        let ticks = advance_server_time(
+        let ticks = advance_level_time(
             &mut accumulator,
             0.15,
             20.0,
             true,
+            false,
             &mut steps,
             &mut sky,
-            &mut HashMap::new(),
+            &mut game_time,
+            &mut clocks,
         );
         items.advance_age(ticks);
         assert_eq!(ticks, 3);
