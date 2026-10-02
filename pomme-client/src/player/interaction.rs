@@ -10,7 +10,6 @@ use azalea_inventory::components::{
     AttributeModifiers, BlocksAttacks, ChargedProjectiles, Consumable, EquipmentSlotGroup, Food,
     ItemUseAnimation, KineticWeapon, MinimumAttackCharge, Tool, ToolRule, UseEffects,
 };
-use azalea_inventory::default_components::{DefaultableComponent, get_default_component};
 use azalea_protocol::packets::game::ServerboundGamePacket;
 use azalea_protocol::packets::game::s_interact::InteractionHand;
 use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerAction};
@@ -777,7 +776,7 @@ impl InteractionState {
     /// passes no tolerance); the ratio is unclamped, unlike the scale.
     fn cannot_attack_with_item(&self, held: Option<&ItemStackData>) -> bool {
         let required = held
-            .and_then(stack_component::<MinimumAttackCharge>)
+            .and_then(crate::player::menu_click::component::<MinimumAttackCharge>)
             .map_or(0.0, |c| c.value);
         required > 0.0
             && (self.attack_strength_ticker as f32 / attack_strength_delay(held)) < required
@@ -1163,7 +1162,10 @@ impl InteractionState {
         // LocalPlayer.openItemGui opens writable books immediately; the server
         // sends OpenBook only for written books with content.
         if stack.kind == ItemKind::WritableBook
-            && stack_component::<azalea_inventory::components::WritableBookContent>(stack).is_some()
+            && crate::player::menu_click::component::<
+                azalea_inventory::components::WritableBookContent,
+            >(stack)
+            .is_some()
         {
             self.pending_writable_book = Some(hand);
         }
@@ -1174,7 +1176,7 @@ impl InteractionState {
         let special_use = match stack.kind {
             ItemKind::Bow => Some((ActiveUseKind::Bow, ItemUseAnimation::Bow, 72_000)),
             ItemKind::Crossbow => {
-                let charged = stack_component::<ChargedProjectiles>(stack)
+                let charged = crate::player::menu_click::component::<ChargedProjectiles>(stack)
                     .is_some_and(|projectiles| !projectiles.items.is_empty());
                 Some((
                     if charged {
@@ -1205,14 +1207,15 @@ impl InteractionState {
                 sound: SoundRef::event("entity.generic.eat"),
                 has_particles: false,
                 texture: String::new(),
-                use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
+                use_effects: crate::player::menu_click::component::<UseEffects>(stack)
+                    .unwrap_or_default(),
                 duration,
                 remaining: duration,
             });
             return ItemUseResult::Success;
         }
 
-        let Some(consumable) = stack_component::<Consumable>(stack) else {
+        let Some(consumable) = crate::player::menu_click::component::<Consumable>(stack) else {
             return if main_hand_use_succeeds(stack) {
                 if stack.kind == ItemKind::EnderPearl {
                     self.swing_use(sender, hand);
@@ -1225,7 +1228,7 @@ impl InteractionState {
         // Vanilla `Consumable.canConsume` → `Player.canEat`: food needs
         // hunger unless it can always be eaten; creative players (vanilla
         // invulnerable) always can. Non-food consumables have no gate.
-        if let Some(f) = stack_component::<Food>(stack)
+        if let Some(f) = crate::player::menu_click::component::<Food>(stack)
             && !(creative || f.can_always_eat || food < MAX_FOOD_LEVEL)
         {
             return ItemUseResult::Fail;
@@ -1241,7 +1244,8 @@ impl InteractionState {
             sound: SoundRef::resolve(&consumable.sound),
             has_particles: consumable.has_consume_particles,
             texture: format!("item/{}", item_resource_name(stack.kind)),
-            use_effects: stack_component::<UseEffects>(stack).unwrap_or_default(),
+            use_effects: crate::player::menu_click::component::<UseEffects>(stack)
+                .unwrap_or_default(),
             duration,
             remaining: duration,
         };
@@ -1740,7 +1744,7 @@ pub fn attack_speed(held: Option<&ItemStackData>) -> f64 {
     let mut mul_base = 0.0f64;
     let mut mul_total = 1.0f64;
     if let Some(stack) = held
-        && let Some(mods) = stack_component::<AttributeModifiers>(stack)
+        && let Some(mods) = crate::player::menu_click::component::<AttributeModifiers>(stack)
     {
         for entry in &mods.modifiers {
             if entry.kind != Attribute::AttackSpeed
@@ -1827,7 +1831,7 @@ fn destroy_progress(
         return 1.0;
     }
 
-    let tool = held_stack.and_then(stack_component::<Tool>);
+    let tool = held_stack.and_then(crate::player::menu_click::component::<Tool>);
     let tool = tool.as_ref();
     let kind = state.as_block_kind();
 
@@ -1896,14 +1900,6 @@ pub fn play_break_sound(audio: &mut AudioEngine, state: BlockState, pos: BlockPo
 
 /// The stack's component override if the server set one, else the item's
 /// default.
-fn stack_component<T: DefaultableComponent + Clone>(stack: &ItemStackData) -> Option<T> {
-    stack
-        .component_patch
-        .get::<T>()
-        .cloned()
-        .or_else(|| get_default_component::<T>(stack.kind))
-}
-
 /// Vanilla `Consumable.emitParticlesAndSounds`: the shared bite / final-gulp
 /// burst of item crumbs plus the consume sound. The sound plays locally here
 /// and again from the server's broadcast, doubling up for the eater exactly
@@ -2015,9 +2011,9 @@ fn main_hand_use_succeeds(stack: &ItemStackData) -> bool {
     matches!(
         stack.kind,
         ItemKind::Bow | ItemKind::WritableBook | ItemKind::WrittenBook | ItemKind::EnderPearl
-    ) || stack_component::<Consumable>(stack).is_some()
-        || stack_component::<BlocksAttacks>(stack).is_some()
-        || stack_component::<KineticWeapon>(stack).is_some()
+    ) || crate::player::menu_click::component::<Consumable>(stack).is_some()
+        || crate::player::menu_click::component::<BlocksAttacks>(stack).is_some()
+        || crate::player::menu_click::component::<KineticWeapon>(stack).is_some()
 }
 
 fn stack_for_hand<'a>(
@@ -4584,6 +4580,22 @@ mod tests {
             "short click repeated use after release"
         );
 
+        // Removing UseEffects from a trident must not revive its prototype override.
+        let mut removed_effects = trident.clone();
+        unsafe {
+            removed_effects
+                .component_patch
+                .unchecked_insert_component(DataComponentKind::UseEffects, None);
+        }
+        state = InteractionState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        tick(&mut state, &input, Some(&removed_effects));
+        expect_use!();
+        assert_eq!(
+            state.using_item.as_ref().unwrap().use_effects,
+            UseEffects::default()
+        );
+
         // At/above the vanilla threshold the wire sequence is still one start
         // and one release; server-side releaseUsing decides whether to throw.
         state = InteractionState::new();
@@ -4865,7 +4877,8 @@ mod tests {
     #[test]
     fn iron_pickaxe_default_tool() {
         let pickaxe = ItemStackData::new(ItemKind::IronPickaxe, 1);
-        let tool = stack_component::<Tool>(&pickaxe).expect("iron pickaxe has a tool component");
+        let tool = crate::player::menu_click::component::<Tool>(&pickaxe)
+            .expect("iron pickaxe has a tool component");
         assert_eq!(tool_mining_speed(&tool, BlockKind::Stone), 6.0);
         assert!(tool_correct_for_drops(&tool, BlockKind::Stone));
         assert_eq!(tool_mining_speed(&tool, BlockKind::Dirt), 1.0);

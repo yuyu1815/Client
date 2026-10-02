@@ -433,15 +433,7 @@ fn writable_book_editor(
     if data.kind != ItemKind::WritableBook {
         return None;
     }
-    let content = data
-        .component_patch
-        .get::<WritableBookContent>()
-        .cloned()
-        .or_else(|| {
-            azalea_inventory::default_components::get_default_component::<WritableBookContent>(
-                data.kind,
-            )
-        })?;
+    let content = crate::player::menu_click::component::<WritableBookContent>(data)?;
     Some(crate::ui::book::BookEditState::new(
         slot,
         content.pages.into_iter().map(|page| page.raw).collect(),
@@ -2716,21 +2708,10 @@ impl AppCore {
                     if let ItemStack::Present(data) = stack {
                         match data.kind {
                             ItemKind::WrittenBook => {
-                                let pages = data
-                                    .component_patch
-                                    .get::<WrittenBookContent>()
-                                    .cloned()
-                                    .or_else(|| {
-                                        azalea_inventory::default_components::get_default_component::<
-                                            WrittenBookContent,
-                                        >(data.kind)
-                                    })
-                                    .map(|book| {
-                                        book.pages
-                                            .into_iter()
-                                            .map(|page| page.raw)
-                                            .collect()
-                                    });
+                                let pages = crate::player::menu_click::component::<
+                                    WrittenBookContent,
+                                >(data)
+                                .map(|book| book.pages.into_iter().map(|page| page.raw).collect());
                                 if let Some(pages) = pages {
                                     game.paused = false;
                                     game.book_edit = None;
@@ -2741,9 +2722,9 @@ impl AppCore {
                             }
                             ItemKind::WritableBook => {
                                 // OpenBook is read-only; only local UseItem opens the editor.
-                                let content = data.component_patch.get::<WritableBookContent>()
-                                    .cloned()
-                                    .or_else(|| azalea_inventory::default_components::get_default_component::<WritableBookContent>(data.kind));
+                                let content = crate::player::menu_click::component::<
+                                    WritableBookContent,
+                                >(data);
                                 if let Some(content) = content {
                                     let pages = content
                                         .pages

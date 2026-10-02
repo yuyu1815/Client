@@ -793,7 +793,7 @@ pub fn build_hud(
         use azalea_inventory::components::{CustomName, Rarity};
         let alpha = (tool_highlight_timer as f32 * 256.0 / 10.0 / 255.0).min(1.0);
         // Default-component rarities aren't synced; absent means common.
-        let color = match data.get_component::<Rarity>().as_deref() {
+        let color = match crate::player::menu_click::component::<Rarity>(data).as_ref() {
             Some(Rarity::Uncommon) => super::common::rgb(0xffff55),
             Some(Rarity::Rare) => super::common::rgb(0x55ffff),
             Some(Rarity::Epic) => super::common::rgb(0xff55ff),
@@ -801,7 +801,7 @@ pub fn build_hud(
         };
         // The rarity color and custom-name italic are vanilla's parent
         // style: the name's own styling wins where it sets one.
-        let italic = data.get_component::<CustomName>().is_some();
+        let italic = crate::player::menu_click::component::<CustomName>(data).is_some();
         let mut spans = super::common::item_display_spans(data, color);
         for span in &mut spans {
             span.color[3] *= alpha;

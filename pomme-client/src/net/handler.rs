@@ -1473,7 +1473,9 @@ pub(super) async fn handle_game_packet_with_display_text(
                     let item_id = data.map_or(0, |data| data.kind.to_u32());
                     let damage = data
                         .and_then(|data| {
-                            data.get_component::<azalea_inventory::components::Damage>()
+                            crate::player::menu_click::component::<
+                                azalea_inventory::components::Damage,
+                            >(data)
                         })
                         .map_or(0, |component| component.amount);
                     let count = data.map_or(0, |data| data.count);

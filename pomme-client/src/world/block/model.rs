@@ -1829,13 +1829,14 @@ pub(crate) fn resolve_stack_item_tint(
     stack: &azalea_inventory::ItemStackData,
 ) -> [u8; 3] {
     match tint {
-        ItemTint::Dye { default_rgb } => stack
-            .get_component::<azalea_inventory::components::DyedColor>()
-            .map(|color| {
-                let rgb = color.rgb as u32;
-                [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
-            })
-            .unwrap_or(*default_rgb),
+        ItemTint::Dye { default_rgb } => {
+            crate::player::menu_click::component::<azalea_inventory::components::DyedColor>(stack)
+                .map(|color| {
+                    let rgb = color.rgb as u32;
+                    [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
+                })
+                .unwrap_or(*default_rgb)
+        }
         _ => tint.rgb(),
     }
 }

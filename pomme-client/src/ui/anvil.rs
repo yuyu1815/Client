@@ -79,8 +79,7 @@ pub fn update_rename(
     }
 
     let mut name = state.field.value().to_string();
-    if data
-        .get_component::<azalea_inventory::components::CustomName>()
+    if crate::player::menu_click::component::<azalea_inventory::components::CustomName>(data)
         .is_none()
         && name == super::common::item_display_name(data)
     {

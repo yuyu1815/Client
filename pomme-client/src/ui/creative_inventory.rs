@@ -858,7 +858,14 @@ fn total_component_count(data: &ItemStackData) -> usize {
     TRACKED_COMPONENT_KINDS
         .iter()
         .filter(|&&kind| {
-            data.component_patch.has_kind(kind) || default_has_component(data.kind, kind)
+            match data
+                .component_patch
+                .iter()
+                .find(|(patched_kind, _)| *patched_kind == kind)
+            {
+                Some((_, value)) => value.is_some(),
+                None => default_has_component(data.kind, kind),
+            }
         })
         .count()
 }
@@ -903,12 +910,7 @@ fn default_has_component(item: ItemKind, kind: DataComponentKind) -> bool {
 fn lore_lines(data: &ItemStackData) -> Vec<TooltipLine> {
     let mut lines = Vec::new();
     if let Some(damage) = data.component_patch.get::<Damage>() {
-        let max = data
-            .component_patch
-            .get::<MaxDamage>()
-            .map(|m| m.amount)
-            .or_else(|| get_default_component::<MaxDamage>(data.kind).map(|m| m.amount))
-            .unwrap_or(0);
+        let max = crate::player::menu_click::component::<MaxDamage>(data).map_or(0, |m| m.amount);
         if max > 0 {
             lines.push(TooltipLine::new(
                 format!("Durability: {} / {}", max - damage.amount, max),
@@ -1170,7 +1172,7 @@ fn may_place(slot_num: u16, item: &ItemStackData) -> bool {
         8 => EquipmentSlot::Feet,
         _ => return true,
     };
-    get_default_component::<Equippable>(item.kind).is_some_and(|e| e.slot == required)
+    crate::player::menu_click::component::<Equippable>(item).is_some_and(|e| e.slot == required)
 }
 
 /// A drag can cover a slot only if the item may go there and the slot is empty

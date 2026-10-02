@@ -21,11 +21,10 @@ pub type SpansWidthFn<'a> = &'a dyn Fn(&[crate::ui::text::TextSpan], f32) -> f32
 
 /// The hover-name component: custom name, else item-name component.
 fn item_hover_component(data: &ItemStackData) -> Option<azalea_chat::FormattedText> {
-    if let Some(name) = data.get_component::<CustomName>() {
+    if let Some(name) = crate::player::menu_click::component::<CustomName>(data) {
         return Some(name.name.clone());
     }
-    data.get_component::<ItemName>()
-        .map(|name| name.name.clone())
+    crate::player::menu_click::component::<ItemName>(data).map(|name| name.name.clone())
 }
 
 pub fn item_display_name(data: &ItemStackData) -> String {
@@ -423,12 +422,13 @@ pub fn push_item_icon(
                 data.clone(),
             )),
         tint: WHITE,
-        stack_dye_rgb: data
-            .get_component::<azalea_inventory::components::DyedColor>()
-            .map(|color| {
-                let rgb = color.rgb as u32;
-                [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
-            }),
+        stack_dye_rgb: crate::player::menu_click::component::<
+            azalea_inventory::components::DyedColor,
+        >(data)
+        .map(|color| {
+            let rgb = color.rgb as u32;
+            [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
+        }),
     });
     if data.count > 1 {
         push_item_count(elements, x, y, size, scale, data.count);

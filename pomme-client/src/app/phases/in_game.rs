@@ -3993,7 +3993,9 @@ pub fn update_game(
             &|t, s| gfx.renderer.menu_text_width(t, s),
         );
         if let Some(held) = game.player.inventory.held_stack(core.input.selected_slot()) {
-            if let Some(map_id) = held.get_component::<azalea_inventory::components::MapId>() {
+            if let Some(map_id) =
+                crate::player::menu_click::component::<azalea_inventory::components::MapId>(held)
+            {
                 if map_id.id >= 0 {
                     if let Some(map) = game.maps.0.get(&(map_id.id as u32)) {
                         let size = 128.0;
@@ -4093,7 +4095,9 @@ pub fn update_game(
         let azalea_inventory::ItemStack::Present(stack) = &frame.item_frame_item else {
             continue;
         };
-        let Some(map_id) = stack.get_component::<azalea_inventory::components::MapId>() else {
+        let Some(map_id) =
+            crate::player::menu_click::component::<azalea_inventory::components::MapId>(stack)
+        else {
             continue;
         };
         if map_id.id < 0 {
@@ -6017,12 +6021,13 @@ pub fn update_game(
                 (name != "air").then(|| {
                     let light =
                         get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
-                    let raw_dye_rgb = data
-                        .get_component::<azalea_inventory::components::DyedColor>()
-                        .map(|color| {
-                            let rgb = color.rgb;
-                            [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
-                        });
+                    let raw_dye_rgb = crate::player::menu_click::component::<
+                        azalea_inventory::components::DyedColor,
+                    >(data)
+                    .map(|color| {
+                        let rgb = color.rgb;
+                        [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
+                    });
                     (
                         name,
                         light,
@@ -7612,12 +7617,15 @@ fn snowball_render_infos(
             };
             let ground_transform = ground_transform(&item_name)?;
             let raw_dye_rgb = match &vehicle.projectile_item {
-                azalea_inventory::ItemStack::Present(stack) => stack
-                    .get_component::<azalea_inventory::components::DyedColor>()
+                azalea_inventory::ItemStack::Present(stack) => {
+                    crate::player::menu_click::component::<azalea_inventory::components::DyedColor>(
+                        stack,
+                    )
                     .map(|color| {
                         let rgb = color.rgb;
                         [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
-                    }),
+                    })
+                }
                 azalea_inventory::ItemStack::Empty => None,
             };
             let pos = *vehicle
@@ -7732,7 +7740,11 @@ fn build_item_render_infos(
             &item.item_name,
             item.stack
                 .as_ref()
-                .and_then(|stack| stack.get_component::<azalea_inventory::components::DyedColor>())
+                .and_then(|stack| {
+                    crate::player::menu_click::component::<azalea_inventory::components::DyedColor>(
+                        stack,
+                    )
+                })
                 .map(|color| {
                     let rgb = color.rgb;
                     [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
@@ -7777,7 +7789,11 @@ fn build_item_render_infos(
             pickup
                 .stack
                 .as_ref()
-                .and_then(|stack| stack.get_component::<azalea_inventory::components::DyedColor>())
+                .and_then(|stack| {
+                    crate::player::menu_click::component::<azalea_inventory::components::DyedColor>(
+                        stack,
+                    )
+                })
                 .map(|color| {
                     let rgb = color.rgb;
                     [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
@@ -7853,7 +7869,7 @@ fn build_item_render_infos(
             &frame.item_frame_item,
             azalea_inventory::ItemStack::Present(stack)
                 if !stack.is_empty()
-                    && stack.get_component::<azalea_inventory::components::MapId>().is_some()
+                    && crate::player::menu_click::component::<azalea_inventory::components::MapId>(stack).is_some()
         );
         let item_name = match (
             kind == azalea_registry::builtin::EntityKind::GlowItemFrame,
@@ -7900,8 +7916,7 @@ fn build_item_render_infos(
 
         if let azalea_inventory::ItemStack::Present(stack) = &frame.item_frame_item
             && !stack.is_empty()
-            && stack
-                .get_component::<azalea_inventory::components::MapId>()
+            && crate::player::menu_click::component::<azalea_inventory::components::MapId>(stack)
                 .is_none()
         {
             let name = crate::player::inventory::item_resource_name(stack.kind);
@@ -7913,12 +7928,13 @@ fn build_item_render_infos(
                     .get_item_fixed_transform(&name)
                     .unwrap_or(glam::Mat4::IDENTITY),
             );
-            let raw_dye_rgb = stack
-                .get_component::<azalea_inventory::components::DyedColor>()
-                .map(|color| {
-                    let rgb = color.rgb;
-                    [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
-                });
+            let raw_dye_rgb = crate::player::menu_click::component::<
+                azalea_inventory::components::DyedColor,
+            >(stack)
+            .map(|color| {
+                let rgb = color.rgb;
+                [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
+            });
             infos.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
                 item_name: name,
                 raw_dye_rgb,

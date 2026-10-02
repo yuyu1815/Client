@@ -63,8 +63,7 @@ fn present_stack(stack: &ItemStack) -> Option<&ItemStackData> {
 }
 
 fn cooldown_group(stack: &ItemStackData) -> Identifier {
-    stack
-        .get_component::<UseCooldown>()
+    crate::player::menu_click::component::<UseCooldown>(stack)
         .and_then(|cooldown| cooldown.cooldown_group.clone())
         .unwrap_or_else(|| Identifier::new(stack.kind.to_string()))
 }

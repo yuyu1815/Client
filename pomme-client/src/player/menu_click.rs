@@ -221,7 +221,7 @@ impl ContainerKind {
                     7 => EquipmentSlot::Legs,
                     _ => EquipmentSlot::Feet,
                 };
-                item.get_component::<Equippable>().map(|c| c.slot) == Some(want)
+                component::<Equippable>(item).map(|c| c.slot) == Some(want)
             }
             (Self::ShulkerBox, 0..=26) => {
                 !crate::player::inventory::item_resource_name(item.kind).ends_with("shulker_box")
@@ -718,7 +718,11 @@ fn same_item(a: &ItemStack, b: &ItemStack) -> bool {
 pub(crate) fn component<T: azalea_inventory::default_components::DefaultableComponent + Clone>(
     stack: &ItemStackData,
 ) -> Option<T> {
-    if stack.component_patch.has_kind(T::KIND) {
+    if stack
+        .component_patch
+        .iter()
+        .any(|(kind, _)| kind == T::KIND)
+    {
         stack.component_patch.get::<T>().cloned()
     } else {
         azalea_inventory::default_components::get_default_component::<T>(stack.kind)
@@ -749,23 +753,42 @@ fn with_count(mut data: ItemStackData, count: i32) -> ItemStack {
 
 #[cfg(test)]
 mod tests {
-    use super::{component, effective_stack_limit, split_stack_count};
+    use super::{ContainerKind, component, effective_stack_limit, split_stack_count};
 
     #[test]
     fn equippable_component_uses_item_default_and_respects_tombstone() {
         use azalea_inventory::ItemStackData;
-        use azalea_inventory::components::Equippable;
+        use azalea_inventory::components::{EquipmentSlot, Equippable};
         use azalea_registry::builtin::{DataComponentKind, ItemKind};
 
         let mut elytra = ItemStackData::new(ItemKind::Elytra, 1);
-        assert!(component::<Equippable>(&elytra).is_some());
-        // The patch tombstone must suppress prototype data, not fall back to it.
+        let default = component::<Equippable>(&elytra).expect("elytra default");
+        assert_eq!(default.slot, EquipmentSlot::Chest);
+
+        let mut override_stack = ItemStackData::new(ItemKind::Stone, 1);
+        let mut override_component = Equippable::new();
+        override_component.slot = EquipmentSlot::Head;
+        unsafe {
+            override_stack.component_patch.unchecked_insert_component(
+                DataComponentKind::Equippable,
+                Some(override_component.clone().into()),
+            );
+        }
+        assert_eq!(
+            component::<Equippable>(&override_stack),
+            Some(override_component)
+        );
+        assert!(ContainerKind::Player.may_place(5, &override_stack));
+        assert!(component::<Equippable>(&ItemStackData::new(ItemKind::Stone, 1)).is_none());
+
+        // A tombstone suppresses prototype data rather than falling through.
         unsafe {
             elytra
                 .component_patch
                 .unchecked_insert_component(DataComponentKind::Equippable, None);
         }
         assert!(component::<Equippable>(&elytra).is_none());
+        assert!(!ContainerKind::Player.may_place(6, &elytra));
     }
 
     #[test]

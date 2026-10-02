@@ -420,7 +420,7 @@ pub fn player_head_profile_source_from_item(
     stack: &azalea_inventory::ItemStack,
 ) -> Option<PlayerHeadProfileSource> {
     use azalea_inventory::components::{PartialOrFullProfile, PlayerModelType, Profile};
-    let profile = stack.get_component::<Profile>()?;
+    let profile = crate::player::menu_click::component::<Profile>(stack.as_present()?)?;
     let (name, id, properties, full) = match profile.unpack.as_ref() {
         PartialOrFullProfile::Partial(p) => (p.name.clone(), p.id, &p.properties, false),
         PartialOrFullProfile::Full(p) => (
