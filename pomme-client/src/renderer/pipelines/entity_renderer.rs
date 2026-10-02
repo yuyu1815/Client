@@ -5158,6 +5158,7 @@ pub(super) fn create_pipeline(
     let frag_spv: &[u8] = match blend {
         BlendMode::Glint => shader::include_spirv!("entity_glint.frag.spv").as_slice(),
         BlendMode::Beam => shader::include_spirv!("crystal_beam.frag.spv").as_slice(),
+        BlendMode::DepthOnly => shader::include_spirv!("water_mask.frag.spv").as_slice(),
         _ => shader::include_spirv!("entity.frag.spv").as_slice(),
     };
 
@@ -5730,6 +5731,15 @@ mod tests {
     #[test]
     fn water_patch_pipeline_and_frame_submission_remain_depth_only_and_owned() {
         let source = include_str!("entity_renderer.rs");
+        let water_mask_frag = include_str!("../shaders/water_mask.frag");
+        assert!(source.contains(
+            "BlendMode::DepthOnly => shader::include_spirv!(\"water_mask.frag.spv\").as_slice()"
+        ));
+        assert!(source.contains("_ => shader::include_spirv!(\"entity.frag.spv\").as_slice()"));
+        assert!(!water_mask_frag.contains("sampler"));
+        assert!(!water_mask_frag.contains("texture("));
+        assert!(!water_mask_frag.contains("discard"));
+        assert!(water_mask_frag.contains("void main() {}"));
         assert!(source.contains("BlendMode::DepthOnly => vk::PipelineColorBlendAttachmentState"));
         assert!(source.contains("color_write_mask: vk::ColorComponentFlags::empty()"));
         assert!(source.contains("depth_write_enable: depth_write"));
