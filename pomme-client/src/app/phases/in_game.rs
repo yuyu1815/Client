@@ -6556,7 +6556,8 @@ fn minecart_cargo_render_infos(
                 * glam::Mat4::from_rotation_x(rocking)
                 * glam::Mat4::from_scale(glam::Vec3::splat(0.75))
                 * glam::Mat4::from_translation(glam::vec3(-0.5, (offset - 8) as f32 / 16.0, 0.5))
-                * glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+                * glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2)
+                * glam::Mat4::from_translation(glam::Vec3::splat(0.5));
             Some(crate::renderer::pipelines::item_entity::ItemRenderInfo {
                 item_name,
                 raw_dye_rgb: None,
@@ -10527,6 +10528,45 @@ mod tests {
         assert!(credits.is_none());
         assert!(!death_confirm_escape_allowed(true, true));
         assert!(death_confirm_escape_allowed(true, false));
+    }
+
+    #[test]
+    fn minecart_cargo_matrix_restores_raw_block_coordinates() {
+        use glam::{Mat4, Vec3};
+
+        let corners = [
+            Vec3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+            Vec3::ONE,
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::new(0.0, 1.0, 1.0),
+            Vec3::new(0.23, 0.71, -0.42),
+        ];
+        let position = Vec3::new(12.25, -3.5, 8.75);
+        let yaw = 137.0_f32;
+        let pitch = -19.0_f32;
+        let hurt = 0.63_f32;
+        let parent = Mat4::from_translation(position)
+            * Mat4::from_rotation_y((180.0 - yaw).to_radians())
+            * Mat4::from_rotation_z(-pitch.to_radians())
+            * Mat4::from_translation(Vec3::Y * 0.375)
+            * Mat4::from_rotation_x(hurt);
+
+        for offset in [6, 8, 1, -4, 23] {
+            let child = Mat4::from_scale(Vec3::splat(0.75))
+                * Mat4::from_translation(Vec3::new(-0.5, (offset - 8) as f32 / 16.0, 0.5))
+                * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+            let rust = parent * child * Mat4::from_translation(Vec3::splat(0.5));
+            for point in corners {
+                assert!(
+                    rust.transform_point3(point - Vec3::splat(0.5))
+                        .abs_diff_eq((parent * child).transform_point3(point), 1e-5)
+                );
+            }
+        }
     }
 
     #[test]
