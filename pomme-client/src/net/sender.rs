@@ -22,6 +22,12 @@ pub enum Outbound {
         payload: Option<simdnbt::owned::NbtTag>,
     },
     CodeOfConductDecision(bool),
+    /// Recording-session correlation envelope; removed by the connection loop
+    /// before encoding.
+    Traced {
+        trace: crate::movement_record::PacketTraceId,
+        packet: Box<Outbound>,
+    },
 }
 
 /// A `LastSeenMessagesTracker` update, recorded by the chat UI.
@@ -282,6 +288,7 @@ impl PacketSender {
     }
 
     fn queue(&self, out: Outbound) {
+        let trace = self.recorder.packet_trace_id();
         let observation = if self.recorder.active() {
             match &out {
                 Outbound::Packet(p) => crate::movement_record::outbound(p),
@@ -291,14 +298,35 @@ impl PacketSender {
         } else {
             None
         };
-        self.recorder
-            .record("outbound", "queue_attempt", || observation.clone());
+        if let Some(trace) = trace {
+            self.recorder.packet_stage(trace, "queue_attempt", None);
+        } else {
+            self.recorder
+                .record("outbound", "queue_attempt", || observation.clone());
+        }
+        let out = match trace {
+            Some(trace) => Outbound::Traced {
+                trace,
+                packet: Box::new(out),
+            },
+            None => out,
+        };
         match self.tx.send(out) {
-            // Sampled after admission; another thread may already have dequeued it.
-            Ok(()) => self.recorder.record("outbound", "queued", || observation),
+            Ok(()) => {
+                if let Some(trace) = trace {
+                    self.recorder.packet_stage(trace, "queued", None);
+                } else {
+                    self.recorder.record("outbound", "queued", || observation);
+                }
+            }
             Err(e) => {
-                self.recorder
-                    .record("outbound", "queue_failed", || observation);
+                if let Some(trace) = trace {
+                    self.recorder
+                        .packet_stage(trace, "queue_failed", Some("channel_closed"));
+                } else {
+                    self.recorder
+                        .record("outbound", "queue_failed", || observation);
+                }
                 tracing::error!("Failed to queue outbound packet: {e}");
             }
         }

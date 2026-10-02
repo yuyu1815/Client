@@ -55,6 +55,8 @@ pub struct RawWriter {
 pub struct Conn {
     pub reader: RawReader,
     pub writer: RawWriter,
+    pub recorder: Option<std::sync::Arc<crate::movement_record::Recorder>>,
+    pub pending_trace: Option<crate::movement_record::PacketTraceId>,
 }
 
 fn frame_length_error(size: usize) -> Box<ReadPacketError> {
@@ -322,6 +324,8 @@ impl Conn {
 
     fn new(stream_in: NetReader, stream_out: NetWriter) -> Self {
         Self {
+            recorder: None,
+            pending_trace: None,
             reader: RawReader {
                 stream: stream_in,
                 frame: Vec::new(),

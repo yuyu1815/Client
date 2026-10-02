@@ -1,3 +1,4 @@
+pub mod cloak_state;
 pub mod components;
 mod projectile;
 pub mod villager;
@@ -224,6 +225,8 @@ pub struct EntityDimensions {
 
 pub struct LivingEntity {
     pub position: Position,
+    pub cloak: cloak_state::CloakState,
+    pub cape_motion: cloak_state::CapeMotionState,
     pub prev_position: Position,
     pub look_dir: LookDirection,
     pub prev_look_dir: LookDirection,
@@ -412,6 +415,8 @@ impl LivingEntity {
         };
         Self {
             position,
+            cloak: cloak_state::CloakState::default(),
+            cape_motion: cloak_state::CapeMotionState::default(),
             prev_position: position,
             look_dir,
             prev_look_dir: look_dir,
@@ -1351,8 +1356,13 @@ pub(crate) fn falling_block_model_matrix(position: Position, camera_anchor: DVec
 
 #[derive(Clone, Debug)]
 pub struct VehicleState {
+    /// Vanilla ClientAvatarState cloak motion for Mannequin only.
+    pub cloak: cloak_state::CloakState,
+    pub cape_motion: cloak_state::CapeMotionState,
     /// Missing for SetPassengers-only placeholders.
     pub kind: Option<EntityKind>,
+    /// AddEntity UUID; Mannequin skin caches are per instance, not profile.
+    pub uuid: Option<uuid::Uuid>,
     /// Raw AddEntity data, retained without assuming a registry mapping. For a
     /// FallingBlock this is a protocol block-state id, not a metadata index.
     pub spawn_data: Option<i32>,
@@ -1534,6 +1544,8 @@ impl EntityStore {
             }
         }
         let vehicle = self.vehicles.entry(vehicle_id).or_insert(VehicleState {
+            cloak: cloak_state::CloakState::default(),
+            cape_motion: cloak_state::CapeMotionState::default(),
             position: self
                 .living
                 .get(&vehicle_id)
@@ -1543,6 +1555,7 @@ impl EntityStore {
                 .get(&vehicle_id)
                 .map_or(Position::default(), |e| e.position),
             kind: None,
+            uuid: None,
             spawn_data: None,
             falling_block: FallingBlockRenderState::default(),
             velocity: DVec3::ZERO,
@@ -1622,11 +1635,21 @@ impl EntityStore {
         }
     }
 
+    pub fn reset_vehicle_cape_history(&mut self, id: i32) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id) {
+            vehicle.cloak.reset();
+            vehicle.cape_motion.reset();
+        }
+    }
+
     pub fn set_vehicle_transform(&mut self, id: i32, position: Position, velocity: DVec3) {
         let state = self.vehicles.entry(id).or_insert(VehicleState {
+            cloak: cloak_state::CloakState::default(),
+            cape_motion: cloak_state::CapeMotionState::default(),
             position,
             prev_position: position,
             kind: None,
+            uuid: None,
             spawn_data: None,
             falling_block: FallingBlockRenderState::default(),
             velocity,
@@ -1915,8 +1938,19 @@ impl EntityStore {
         }
     }
 
+    pub fn set_vehicle_uuid(&mut self, id: i32, uuid: uuid::Uuid) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id) {
+            vehicle.uuid = Some(uuid);
+        }
+    }
+
     pub fn set_vehicle_kind(&mut self, id: i32, kind: EntityKind) {
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
+            if kind == EntityKind::Mannequin && vehicle.kind != Some(kind) {
+                vehicle.cloak.reset();
+                vehicle.cape_motion.reset();
+                vehicle.prev_position = vehicle.position;
+            }
             vehicle.kind = Some(kind);
             vehicle.falling_block = FallingBlockRenderState::default();
             if kind == EntityKind::FallingBlock
@@ -2506,6 +2540,8 @@ impl EntityStore {
     pub fn teleport_living(&mut self, id: i32, position: Position, on_ground: bool) {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.interpolate_to_pos(position);
+            entity.cloak.reset();
+            entity.cape_motion.reset();
             entity.on_ground = on_ground;
         }
     }

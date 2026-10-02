@@ -477,6 +477,48 @@ impl ApplicationHandler for App {
         {
             return;
         }
+        let recorder = match self.phase.get() {
+            AppPhase::Connecting { connection, .. } | AppPhase::InGame { connection, .. } => {
+                Some(&connection.packet_tx.recorder)
+            }
+            _ => None,
+        };
+        if let Some(recorder) = recorder.filter(|recorder| recorder.active()) {
+            let input_observation = match &event {
+                WindowEvent::KeyboardInput { event, .. } => Some(serde_json::json!({
+                    "kind":"key","physical_key":format!("{:?}", event.physical_key),
+                    "state":format!("{:?}", event.state),"repeat":event.repeat
+                })),
+                WindowEvent::MouseInput { state, button, .. } => Some(serde_json::json!({
+                    "kind":"button","button":format!("{:?}", button),"state":format!("{:?}", state)
+                })),
+                WindowEvent::MouseWheel { delta, .. } => Some(match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                        serde_json::json!({"kind":"scroll","unit":"line","x":x,"y":y})
+                    }
+                    winit::event::MouseScrollDelta::PixelDelta(p) => {
+                        serde_json::json!({"kind":"scroll","unit":"pixel","x":p.x,"y":p.y})
+                    }
+                }),
+                WindowEvent::CursorMoved { position, .. } => {
+                    Some(serde_json::json!({"kind":"cursor","x":position.x,"y":position.y}))
+                }
+                WindowEvent::CursorEntered { .. } => {
+                    Some(serde_json::json!({"kind":"cursor_enter"}))
+                }
+                WindowEvent::CursorLeft { .. } => Some(serde_json::json!({"kind":"cursor_leave"})),
+                WindowEvent::Focused(focused) => {
+                    Some(serde_json::json!({"kind":"focus","focused":focused}))
+                }
+                WindowEvent::ModifiersChanged(modifiers) => Some(
+                    serde_json::json!({"kind":"modifiers","state":format!("{:?}", modifiers.state())}),
+                ),
+                _ => None,
+            };
+            if let Some(data) = input_observation {
+                recorder.record("local", "input_event", || Some(data));
+            }
+        }
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                 tracing::debug!(target: "renderprobe", termination = if matches!(event, WindowEvent::CloseRequested) { "CloseRequested" } else { "Destroyed" }, "window termination event");
@@ -1388,11 +1430,14 @@ impl ApplicationHandler for App {
     ) {
         if self.core.probe.is_none()
             && self.auto_fps.is_none()
-            && let DeviceEvent::MouseMotion { delta } = event
+            && let DeviceEvent::MouseMotion { delta } = &event
             && self.core.input.is_cursor_captured()
-            && matches!(self.phase.get(), AppPhase::InGame { game,.. } if !game.paused && !game.dead && !game.death_screen_open && !game.gui_open() && !game.chat.is_open())
+            && matches!(self.phase.get(), AppPhase::InGame { gfx, game, .. } if gfx.window.has_focus() && !game.paused && !game.dead && !game.death_screen_open && !game.gui_open() && !game.chat.is_open())
         {
-            self.core.input.on_mouse_motion(delta);
+            if let AppPhase::InGame { connection, .. } = self.phase.get() {
+                connection.packet_tx.recorder.record("local", "input_event", || Some(serde_json::json!({"kind":"mouse_motion","dx":delta.0,"dy":delta.1,"source":"device_event"})));
+            }
+            self.core.input.on_mouse_motion(*delta);
         }
     }
 

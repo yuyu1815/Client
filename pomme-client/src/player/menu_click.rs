@@ -715,14 +715,14 @@ fn same_item(a: &ItemStack, b: &ItemStack) -> bool {
     }
 }
 
-fn component<T: azalea_inventory::default_components::DefaultableComponent + Clone>(
+pub(crate) fn component<T: azalea_inventory::default_components::DefaultableComponent + Clone>(
     stack: &ItemStackData,
 ) -> Option<T> {
-    stack
-        .component_patch
-        .get::<T>()
-        .cloned()
-        .or_else(|| azalea_inventory::default_components::get_default_component::<T>(stack.kind))
+    if stack.component_patch.has_kind(T::KIND) {
+        stack.component_patch.get::<T>().cloned()
+    } else {
+        azalea_inventory::default_components::get_default_component::<T>(stack.kind)
+    }
 }
 
 pub(crate) fn max_stack_size(stack: &ItemStackData) -> i32 {
@@ -749,7 +749,24 @@ fn with_count(mut data: ItemStackData, count: i32) -> ItemStack {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_stack_limit, split_stack_count};
+    use super::{component, effective_stack_limit, split_stack_count};
+
+    #[test]
+    fn equippable_component_uses_item_default_and_respects_tombstone() {
+        use azalea_inventory::ItemStackData;
+        use azalea_inventory::components::Equippable;
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+
+        let mut elytra = ItemStackData::new(ItemKind::Elytra, 1);
+        assert!(component::<Equippable>(&elytra).is_some());
+        // The patch tombstone must suppress prototype data, not fall back to it.
+        unsafe {
+            elytra
+                .component_patch
+                .unchecked_insert_component(DataComponentKind::Equippable, None);
+        }
+        assert!(component::<Equippable>(&elytra).is_none());
+    }
 
     #[test]
     fn hopper_layout_and_shift_transfer_both_directions() {

@@ -113,8 +113,67 @@ async fn fetch_skin(
 
 struct PlayerSkinResult {
     uuid: uuid::Uuid,
+    profile_uuid: Option<uuid::Uuid>,
     source: PlayerSkinSource,
+    generation: u64,
     result: Result<crate::renderer::SkinData, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PlayerSkinRequest {
+    profile_uuid: Option<uuid::Uuid>,
+    source: PlayerSkinSource,
+    generation: u64,
+}
+
+impl PlayerSkinRequest {
+    fn accepts(&self, result: &PlayerSkinResult) -> bool {
+        self.profile_uuid == result.profile_uuid
+            && self.source == result.source
+            && self.generation == result.generation
+    }
+}
+
+#[cfg(test)]
+mod player_skin_request_tests {
+    use super::*;
+
+    fn result(source: PlayerSkinSource, generation: u64) -> PlayerSkinResult {
+        PlayerSkinResult {
+            uuid: uuid::Uuid::nil(),
+            profile_uuid: None,
+            source,
+            generation,
+            result: Err("test only".into()),
+        }
+    }
+
+    #[test]
+    fn changed_request_and_removed_request_reject_old_callbacks() {
+        let textures = PlayerSkinSource::Textures("old".into());
+        let old = result(textures.clone(), 1);
+        let updated = PlayerSkinRequest {
+            profile_uuid: None,
+            source: PlayerSkinSource::Textures("new".into()),
+            generation: 2,
+        };
+        assert!(!updated.accepts(&old));
+        let same_source_new_generation = PlayerSkinRequest {
+            profile_uuid: None,
+            source: textures,
+            generation: 3,
+        };
+        assert!(!same_source_new_generation.accepts(&old));
+        let changed_profile = PlayerSkinRequest {
+            profile_uuid: Some(uuid::Uuid::from_u128(1)),
+            source: PlayerSkinSource::Textures("old".into()),
+            generation: 1,
+        };
+        assert!(!changed_profile.accepts(&old));
+        // Removal/world reset deletes the request; `Option::is_some_and` in
+        // the drain path therefore rejects the callback too.
+        assert!(!Option::<PlayerSkinRequest>::None.is_some_and(|request| request.accepts(&old)));
+    }
 }
 
 /// The identity vanilla's `PlayerSkinRenderCache` keys on: a whole
@@ -1036,6 +1095,9 @@ fn apply_vehicle_teleport(
 ) {
     if store.vehicles.contains_key(&id) {
         store.set_vehicle_transform(id, position, velocity.unwrap_or(current_velocity));
+        if store.vehicles[&id].kind == Some(azalea_registry::builtin::EntityKind::Mannequin) {
+            store.reset_vehicle_cape_history(id);
+        }
         store.set_vehicle_rotation(id, look);
     }
 }
@@ -1196,7 +1258,8 @@ pub struct AppCore {
     os_grab_stale: bool,
     player_skin_tx: crossbeam_channel::Sender<PlayerSkinResult>,
     player_skin_rx: crossbeam_channel::Receiver<PlayerSkinResult>,
-    requested_player_skins: HashMap<uuid::Uuid, PlayerSkinSource>,
+    requested_player_skins: HashMap<uuid::Uuid, PlayerSkinRequest>,
+    next_player_skin_generation: u64,
     /// 8x8 RGBA faces of fetched player skins, for the spectator menu's
     /// face atlas (the GPU-side skins keep no CPU pixels).
     player_faces: HashMap<uuid::Uuid, (Vec<u8>, Vec<u8>)>,
@@ -1361,6 +1424,7 @@ impl AppCore {
             player_skin_tx,
             player_skin_rx,
             requested_player_skins: HashMap::new(),
+            next_player_skin_generation: 0,
             player_faces: HashMap::new(),
             player_faces_dirty: false,
             inline_objects: HashMap::new(),
@@ -1540,26 +1604,55 @@ impl AppCore {
     /// Queues a tab-list player's entity skin: the textures the server sent,
     /// else a session-server lookup by id.
     fn queue_player_skin(&mut self, uuid: uuid::Uuid, textures: Option<String>) {
+        self.queue_player_skin_for(uuid, Some(uuid), textures);
+    }
+
+    fn queue_player_skin_for(
+        &mut self,
+        cache_uuid: uuid::Uuid,
+        profile_uuid: Option<uuid::Uuid>,
+        textures: Option<String>,
+    ) {
+        if profile_uuid.is_none() && textures.is_none() {
+            return;
+        }
         let source = textures
             .map(PlayerSkinSource::Textures)
             .unwrap_or(PlayerSkinSource::Uuid);
-        if self.requested_player_skins.get(&uuid) == Some(&source) {
+        if self
+            .requested_player_skins
+            .get(&cache_uuid)
+            .is_some_and(|request| request.source == source && request.profile_uuid == profile_uuid)
+        {
             return;
         }
-        self.requested_player_skins.insert(uuid, source.clone());
+        self.next_player_skin_generation = self.next_player_skin_generation.wrapping_add(1);
+        let generation = self.next_player_skin_generation;
+        self.requested_player_skins.insert(
+            cache_uuid,
+            PlayerSkinRequest {
+                profile_uuid,
+                source: source.clone(),
+                generation,
+            },
+        );
 
         // Name-derived (v3) UUIDs from offline-mode servers have no Mojang
         // profile to fetch; keep the default skin.
-        if matches!(source, PlayerSkinSource::Uuid) && uuid.get_version_num() == 3 {
+        if matches!(source, PlayerSkinSource::Uuid)
+            && profile_uuid.is_some_and(|uuid| uuid.get_version_num() == 3)
+        {
             return;
         }
 
         let tx = self.player_skin_tx.clone();
         self.tokio_rt.spawn(async move {
-            let result = fetch_skin(&source, Some(uuid)).await;
+            let result = fetch_skin(&source, profile_uuid).await;
             let _ = tx.send(PlayerSkinResult {
-                uuid,
+                uuid: cache_uuid,
+                profile_uuid,
                 source,
+                generation,
                 result,
             });
         });
@@ -1567,7 +1660,11 @@ impl AppCore {
 
     fn drain_player_skin_results(&mut self, renderer: &mut Renderer) {
         while let Ok(skin) = self.player_skin_rx.try_recv() {
-            if self.requested_player_skins.get(&skin.uuid) != Some(&skin.source) {
+            if !self
+                .requested_player_skins
+                .get(&skin.uuid)
+                .is_some_and(|request| request.accepts(&skin))
+            {
                 continue;
             }
             match skin.result {
@@ -2287,8 +2384,17 @@ impl AppCore {
                                 .map(|value| value.value.clone()),
                         ),
                     };
-                    if let Some(profile_id) = profile_id {
-                        self.queue_player_skin(profile_id, textures);
+                    let cache_uuid = game
+                        .entity_store
+                        .vehicles
+                        .get(&id)
+                        .and_then(|vehicle| vehicle.uuid);
+                    if let Some(cache_uuid) = cache_uuid {
+                        if profile_id.is_some() || textures.is_some() {
+                            self.queue_player_skin_for(cache_uuid, profile_id, textures);
+                        } else {
+                            self.remove_player_skin(renderer, &cache_uuid);
+                        }
                     }
                     game.entity_store.set_mannequin_profile(id, profile);
                 }
@@ -3351,10 +3457,22 @@ impl AppCore {
                             .get(&id)
                             .is_some_and(|v| v.kind.is_some());
                     if replaces_real_entity {
+                        let mannequin_skin = game
+                            .entity_store
+                            .vehicles
+                            .get(&id)
+                            .filter(|vehicle| {
+                                vehicle.kind
+                                    == Some(azalea_registry::builtin::EntityKind::Mannequin)
+                            })
+                            .and_then(|vehicle| vehicle.uuid);
                         if let Some(old) = game.entity_store.remove_entity(id)
                             && let Some(uuid) = old.player_uuid
                             && !game.entity_store.has_player_uuid(&uuid)
                         {
+                            self.remove_player_skin(renderer, &uuid);
+                        }
+                        if let Some(uuid) = mannequin_skin {
                             self.remove_player_skin(renderer, &uuid);
                         }
                         game.item_entity_store.remove(&[id]);
@@ -3403,6 +3521,7 @@ impl AppCore {
                             x_rot_deg,
                             entity_type,
                         );
+                        game.entity_store.set_vehicle_uuid(id, uuid);
                         game.entity_store.set_vehicle_spawn_data(id, spawn_data);
                         if let Some(direction) = item_frame_direction {
                             game.entity_store.set_item_frame_direction(id, direction);
@@ -3734,10 +3853,22 @@ impl AppCore {
                         );
                         game.particle_store
                             .detach_tracking_emitter(*id, final_attachment);
+                        let mannequin_skin = game
+                            .entity_store
+                            .vehicles
+                            .get(id)
+                            .filter(|vehicle| {
+                                vehicle.kind
+                                    == Some(azalea_registry::builtin::EntityKind::Mannequin)
+                            })
+                            .and_then(|vehicle| vehicle.uuid);
                         if let Some(entity) = game.entity_store.remove_entity(*id)
                             && let Some(uuid) = entity.player_uuid
                             && !game.entity_store.has_player_uuid(&uuid)
                         {
+                            self.remove_player_skin(renderer, &uuid);
+                        }
+                        if let Some(uuid) = mannequin_skin {
                             self.remove_player_skin(renderer, &uuid);
                         }
                         game.entity_positions.remove(id);

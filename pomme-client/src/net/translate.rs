@@ -5348,12 +5348,29 @@ fn write_substitute_parser(out: &mut Vec<u8>, parser: &str) -> Option<()> {
     Some(())
 }
 
+/// Copies an item registry ID from the source protocol into native wire space.
+fn copy_recipe_item_id(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    let id = u32::azalea_read_var(cur).ok()?;
+    wire::write_varint(out, remaps.remap(ClientRegistry::Item, id)?);
+    Some(())
+}
+
 /// Copies one item `HolderSet` (`ByteBufCodecs.holderSet`: 0 then a tag
 /// id, or count + 1 then that many item ids).
-fn copy_holder_set(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
-    match copy_varint(cur, out)? {
+fn copy_holder_set(
+    cur: &mut Cursor<&[u8]>,
+    out: &mut Vec<u8>,
+    remaps: &RegistryRemaps,
+) -> Option<()> {
+    let kind = u32::azalea_read_var(cur).ok()?;
+    wire::write_varint(out, kind);
+    match kind {
         0 => copy_utf(cur, out),
-        n => (1..n).try_for_each(|_| copy_varint(cur, out).map(drop)),
+        n => (1..n).try_for_each(|_| copy_recipe_item_id(cur, out, remaps)),
     }
 }
 
@@ -5361,8 +5378,7 @@ fn copy_holder_set(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()> {
 /// sends a `HolderSet` where 26.2 sent the tag id, and 26.3's
 /// `Ingredient.display()` routes direct item lists through it too, which
 /// 26.2 sent as a `composite` of `item` displays. The other types' layouts
-/// are unchanged (`SlotDisplay`); item ids stay in wire space.
-/// TODO: remap recipe-display item ids once `remap_inbound` covers recipes.
+/// are unchanged (`SlotDisplay`); embedded item IDs are remapped to native IDs.
 fn copy_slot_display_777(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
@@ -5381,7 +5397,7 @@ fn copy_slot_display_777(
             wire::write_varint(out, set - 1);
             for _ in 1..set {
                 wire::write_varint(out, item);
-                copy_varint(cur, out)?;
+                copy_recipe_item_id(cur, out, remaps)?;
             }
             return Some(());
         }
@@ -5401,10 +5417,10 @@ fn copy_slot_display_777(
         "empty" | "any_fuel" | "with_any_potion" | "dyed" | "with_remainder" | "composite" => {}
         "tag" => copy_utf(cur, out)?,
         "item" => {
-            copy_varint(cur, out)?;
+            copy_recipe_item_id(cur, out, remaps)?;
         }
         "item_stack" => {
-            copy_varint(cur, out)?; // item
+            copy_recipe_item_id(cur, out, remaps)?; // item
             copy_varint(cur, out)?; // count
             copy_component_patch(cur, out, remaps)?;
         }
@@ -5481,7 +5497,7 @@ fn translate_recipe_book_add_777(
         copy_varint(&mut cur, &mut out)?; // group (optional varint)
         copy_varint(&mut cur, &mut out)?; // category
         copy_optional(&mut cur, &mut out, |cur, out| {
-            (0..copy_varint(cur, out)?).try_for_each(|_| copy_holder_set(cur, out))
+            (0..copy_varint(cur, out)?).try_for_each(|_| copy_holder_set(cur, out, remaps))
         })?;
         copy_bytes(&mut cur, &mut out, 1)?; // flags
     }
@@ -5519,11 +5535,11 @@ fn translate_update_recipes_777(
     for _ in 0..copy_varint(&mut cur, &mut out)? {
         copy_utf(&mut cur, &mut out)?; // property set key
         for _ in 0..copy_varint(&mut cur, &mut out)? {
-            copy_varint(&mut cur, &mut out)?; // item
+            copy_recipe_item_id(&mut cur, &mut out, remaps)?;
         }
     }
     for _ in 0..copy_varint(&mut cur, &mut out)? {
-        copy_holder_set(&mut cur, &mut out)?;
+        copy_holder_set(&mut cur, &mut out, remaps)?;
         copy_slot_display_777(&mut cur, &mut out, v.wire_registries, remaps)?;
     }
     Some(out)
@@ -5615,6 +5631,31 @@ fn skip_nbt_payload(cur: &mut Cursor<&[u8]>, tag: u8, depth: u32) -> Option<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_recipe_holder_items_remap_ids_without_reordering() {
+        let remaps = RegistryRemaps::to_native(777).expect("source registry remaps");
+        let source = RegistryTable::for_protocol(777).expect("source registry");
+        let names = source.names(ClientRegistry::Item);
+        let source_ids = [
+            names.iter().position(|name| name == "stone").unwrap() as u32,
+            names.iter().position(|name| name == "granite").unwrap() as u32,
+        ];
+        let expected = source_ids.map(|id| remaps.remap(ClientRegistry::Item, id).unwrap());
+        let mut payload = Vec::new();
+        wire::write_varint(&mut payload, 3); // count + 1 for two direct holders
+        for id in source_ids {
+            wire::write_varint(&mut payload, id);
+        }
+        let mut cursor = Cursor::new(payload.as_slice());
+        let mut native = Vec::new();
+        copy_holder_set(&mut cursor, &mut native, &remaps).unwrap();
+        let mut decoded = Cursor::new(native.as_slice());
+        assert_eq!(u32::azalea_read_var(&mut decoded).unwrap(), 3);
+        assert_eq!(u32::azalea_read_var(&mut decoded).unwrap(), expected[0]);
+        assert_eq!(u32::azalea_read_var(&mut decoded).unwrap(), expected[1]);
+        assert_eq!(decoded.position() as usize, native.len());
+    }
 
     #[test]
     fn legacy_enchantments_use_server_order_and_keep_ambiguous_data() {

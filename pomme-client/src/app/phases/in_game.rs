@@ -1955,6 +1955,31 @@ pub(crate) fn server_time_tick_period(rate: f32) -> f32 {
     }
 }
 
+fn tick_cloaks(player: &mut crate::player::LocalPlayer, entities: &mut crate::entity::EntityStore) {
+    player.cloak.tick(*player.position);
+    for (&id, entity) in entities.living.iter_mut() {
+        entity.cloak.tick(*entity.position);
+        if id != player.entity_id && entity.entity_type == EntityKind::Player {
+            entity.cape_motion.tick_remote(
+                *entity.position,
+                entity.velocity,
+                entity.on_ground,
+                entity.health <= 0.0 || entity.death_time > 0,
+                entity.flags.swimming,
+                entity.flags.fall_flying,
+            );
+        }
+    }
+    for vehicle in entities.vehicles.values_mut() {
+        if vehicle.kind == Some(azalea_registry::builtin::EntityKind::Mannequin) {
+            vehicle.cloak.tick(*vehicle.position);
+            vehicle
+                .cape_motion
+                .tick_mannequin(vehicle.shared_flags & 0x80 != 0);
+        }
+    }
+}
+
 pub(crate) fn advance_server_time(
     accumulator: &mut f32,
     dt: f32,
@@ -3205,6 +3230,8 @@ pub fn update_game(
         }
         let local_player_was_removed = game.dead && game.player.death_animation_finished();
         core.tick_physics(&mut gfx.renderer, connection, &gfx.window, game);
+        // Cloak motion is a level tick (20 Hz), not physics/interpolation cadence.
+        tick_cloaks(&mut game.player, &mut game.entity_store);
         // `LocalPlayer.tick` returns before `super.tick()` until the client has
         // loaded, so the player's own baseTick state waits with it.
         if game.client_loaded && !local_player_was_removed {
@@ -5059,6 +5086,42 @@ pub fn update_game(
                 });
                 let extras =
                     entity_extras(entity_id, e, partial_tick, game.sky_state.game_time as i64);
+                let body_yaw = lerp_angle(e.prev_body_y_rot_deg, e.body_y_rot_deg, partial_tick);
+                let (walk_dist, bob) = if entity_id == game.player.entity_id {
+                    (
+                        game.player
+                            .prev_walk_dist
+                            .lerp(game.player.walk_dist, partial_tick),
+                        game.player.prev_bob.lerp(game.player.bob, partial_tick),
+                    )
+                } else if e.entity_type == EntityKind::Player {
+                    (
+                        e.cape_motion
+                            .prev_walk_dist
+                            .lerp(e.cape_motion.walk_dist, partial_tick),
+                        e.cape_motion.prev_bob.lerp(e.cape_motion.bob, partial_tick),
+                    )
+                } else {
+                    (e.walk_pos(partial_tick), e.walk_speed(partial_tick))
+                };
+                let fall_flying_ticks = if entity_id == game.player.entity_id {
+                    if game.player.fall_flying {
+                        game.player.fall_flying_ticks as f32
+                    } else {
+                        0.0
+                    }
+                } else {
+                    e.cape_motion.fall_flying_ticks as f32
+                };
+                let cape_pose = native_cape_pose(
+                    e.cloak.render_lerp(f64::from(partial_tick)),
+                    *interp_pos,
+                    body_yaw,
+                    walk_dist,
+                    bob,
+                    fall_flying_ticks,
+                    partial_tick,
+                );
 
                 Some(EntityRenderInfo {
                     happy_ghast_equipment_layers: Vec::new(),
@@ -5073,11 +5136,8 @@ pub fn update_game(
                         .prev_look_dir
                         .x_rot_deg()
                         .lerp(e.look_dir.x_rot_deg(), partial_tick),
-                    body_y_rot_deg: lerp_angle(
-                        e.prev_body_y_rot_deg,
-                        e.body_y_rot_deg,
-                        partial_tick,
-                    ),
+                    body_y_rot_deg: body_yaw,
+                    cape_pose,
                     is_baby: e.is_baby,
                     is_crouching: e.is_crouching,
                     shulker_peek: e.prev_shulker_peek_amount
@@ -5106,6 +5166,11 @@ pub fn update_game(
                     body_equipment: e
                         .equipment
                         .get(&azalea_inventory::components::EquipmentSlot::Body)
+                        .cloned()
+                        .unwrap_or(azalea_inventory::ItemStack::Empty),
+                    chest_equipment: e
+                        .equipment
+                        .get(&azalea_inventory::components::EquipmentSlot::Chest)
                         .cloned()
                         .unwrap_or(azalea_inventory::ItemStack::Empty),
                     is_ridden: game
@@ -5237,11 +5302,31 @@ pub fn update_game(
 
         entity_renders.push(EntityRenderInfo {
             happy_ghast_equipment_layers: Vec::new(),
+            chest_equipment: game
+                .player
+                .inventory
+                .slot(crate::player::inventory::ARMOR_START + 1)
+                .clone(),
             position: interp_pos,
             simulation_position: game.player.position,
             head_y_rot_deg: interp_y_rot_deg,
             head_x_rot_deg: gfx.renderer.camera_look_dir().x_rot_deg(),
             body_y_rot_deg: interp_y_rot_deg, // TODO: proper body rotation affected by collisions
+            cape_pose: native_cape_pose(
+                game.player.cloak.render_lerp(f64::from(partial_tick)),
+                *interp_pos,
+                interp_y_rot_deg,
+                game.player
+                    .prev_walk_dist
+                    .lerp(game.player.walk_dist, partial_tick),
+                game.player.prev_bob.lerp(game.player.bob, partial_tick),
+                if game.player.fall_flying {
+                    game.player.fall_flying_ticks as f32
+                } else {
+                    0.0
+                },
+                partial_tick,
+            ),
             is_crouching: game.player.crouching && (!game.dead || game.player.death_time > 0),
             walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
             walk_anim_speed: (game.player_prev_walk_speed
@@ -6463,6 +6548,32 @@ fn mannequin_profile_id(profile: &azalea_inventory::components::Profile) -> Opti
     }
 }
 
+/// Port of AvatarRenderer.extractCapeState plus PlayerCapeModel.setupAnim.
+fn native_cape_pose(
+    cloak: glam::DVec3,
+    position: glam::DVec3,
+    body_yaw_deg: f32,
+    walk_distance: f32,
+    bob: f32,
+    fall_flying_ticks: f32,
+    partial_tick: f32,
+) -> glam::Quat {
+    let delta = cloak - position;
+    let yaw = body_yaw_deg.to_radians();
+    let forward_x = yaw.sin() as f64;
+    let forward_z = -(yaw.cos() as f64);
+    let flap = (delta.y as f32 * 10.0).clamp(-6.0, 32.0) + (walk_distance * 6.0).sin() * 32.0 * bob;
+    let fall_flying_scale = ((fall_flying_ticks + partial_tick).powi(2) / 100.0).clamp(0.0, 1.0);
+    let lean =
+        (((delta.x * forward_x + delta.z * forward_z) as f32) * 100.0 * (1.0 - fall_flying_scale))
+            .clamp(0.0, 150.0);
+    let lean2 = (((delta.x * forward_z - delta.z * forward_x) as f32) * 100.0).clamp(-20.0, 20.0);
+    glam::Quat::from_rotation_y(-std::f32::consts::PI)
+        * glam::Quat::from_rotation_x((6.0 + lean / 2.0 + flap).to_radians())
+        * glam::Quat::from_rotation_z((lean2 / 2.0).to_radians())
+        * glam::Quat::from_rotation_y((180.0 - lean2 / 2.0).to_radians())
+}
+
 fn mannequin_render_infos(
     store: &crate::entity::EntityStore,
     partial_tick: f32,
@@ -6485,21 +6596,44 @@ fn mannequin_render_infos(
                 .mannequin_profile
                 .as_ref()
                 .and_then(mannequin_profile_id);
-            // Native Mannequin.DEFAULT_PROFILE is ResolvableProfile.Static.EMPTY,
-            // whose partial GameProfile id is Util.NIL_UUID (not the entity UUID).
-            let skin_uuid = profile_uuid.unwrap_or_else(uuid::Uuid::nil);
+            // Native fallback variant follows the real profile UUID (or NIL);
+            // the skin cache is independently keyed by this entity instance.
+            let fallback_uuid = profile_uuid.unwrap_or_else(uuid::Uuid::nil);
+            let skin_uuid = mannequin.uuid.unwrap_or(fallback_uuid);
+            let position = mannequin
+                .prev_position
+                .lerp(mannequin.position, f64::from(partial_tick));
+            let cape_pose = native_cape_pose(
+                mannequin.cloak.render_lerp(f64::from(partial_tick)),
+                *position,
+                yaw,
+                mannequin
+                    .cape_motion
+                    .prev_walk_dist
+                    .lerp(mannequin.cape_motion.walk_dist, partial_tick),
+                mannequin
+                    .cape_motion
+                    .prev_bob
+                    .lerp(mannequin.cape_motion.bob, partial_tick),
+                mannequin.cape_motion.fall_flying_ticks as f32,
+                partial_tick,
+            );
             Some(EntityRenderInfo {
                 happy_ghast_equipment_layers: Vec::new(),
-                position: mannequin
-                    .prev_position
-                    .lerp(mannequin.position, f64::from(partial_tick)),
+                cape_pose,
+                chest_equipment: mannequin
+                    .armor_stand_equipment
+                    .get(&azalea_inventory::components::EquipmentSlot::Chest)
+                    .cloned()
+                    .unwrap_or(azalea_inventory::ItemStack::Empty),
+                position,
                 simulation_position: mannequin.position,
                 entity_kind: EntityKind::Mannequin,
                 body_y_rot_deg: yaw,
                 player_uuid: Some(skin_uuid),
                 variant_index:
                     crate::renderer::pipelines::entity_renderer::default_player_skin_index(
-                        skin_uuid,
+                        fallback_uuid,
                     ) as u32,
                 skin_parts_mask: mannequin.mannequin_skin_parts_mask,
                 is_crouching: mannequin.mannequin_pose == crate::entity::EntityPose::Crouching,
@@ -8180,11 +8314,119 @@ mod tests {
         experience_orb_icon, experience_orb_light, experience_orb_render_infos, finish_win_credits,
         finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
         item_frame_base_position, item_frame_base_rotation, limited_crafting_param,
-        mesh_result_is_stale, mesh_target_mask, minecart_render_infos, section_bit, section_bits,
-        server_tick_runs, show_death_screen_param, sign_has_text, sign_text_in_range,
-        tnt_render_effect,
+        mannequin_render_infos, mesh_result_is_stale, mesh_target_mask, minecart_render_infos,
+        native_cape_pose, section_bit, section_bits, server_tick_runs, show_death_screen_param,
+        sign_has_text, sign_text_in_range, tick_cloaks, tnt_render_effect,
     };
     use crate::renderer::SkyState;
+
+    #[test]
+    fn native_cape_pose_matches_standing_and_forward_lean_goldens() {
+        use glam::{DVec3, Vec3};
+
+        let stand = native_cape_pose(DVec3::ZERO, DVec3::ZERO, 0.0, 0.0, 0.0, 0.0, 0.5);
+        let up = stand * Vec3::Y;
+        assert!((up.y - 6.0_f32.to_radians().cos()).abs() < 1e-5);
+        assert!((up.z + 6.0_f32.to_radians().sin()).abs() < 1e-5);
+
+        let lean = native_cape_pose(
+            DVec3::new(0.0, 0.0, -1.0),
+            DVec3::ZERO,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.5,
+        );
+        let up = lean * Vec3::Y;
+        assert!((up.y - 56.0_f32.to_radians().cos()).abs() < 1e-5);
+        assert!((up.z + 56.0_f32.to_radians().sin()).abs() < 1e-5);
+
+        let moving = glam::Mat4::from_quat(native_cape_pose(
+            DVec3::new(0.0, 0.0, -1.0),
+            DVec3::ZERO,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ));
+        let partial_one = glam::Mat4::from_quat(native_cape_pose(
+            DVec3::new(0.0, 0.0, -1.0),
+            DVec3::ZERO,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        ));
+        let flying_done = glam::Mat4::from_quat(native_cape_pose(
+            DVec3::new(0.0, 0.0, -1.0),
+            DVec3::ZERO,
+            0.0,
+            0.0,
+            0.0,
+            10.0,
+            0.0,
+        ));
+        assert!(!moving.abs_diff_eq(partial_one, 1e-5));
+        assert!(partial_one.abs_diff_eq(flying_done, 1e-5));
+        let turned = native_cape_pose(
+            DVec3::new(0.0, 0.0, -1.0),
+            DVec3::ZERO,
+            90.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        );
+        assert!(!moving.abs_diff_eq(glam::Mat4::from_quat(turned), 1e-4));
+    }
+
+    #[test]
+    fn tick_cloaks_snapshots_local_living_and_mannequin_only() {
+        use azalea_registry::builtin::EntityKind;
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::{LookDirection, Position};
+        let mut player = crate::player::LocalPlayer::new();
+        let mut entities = EntityStore::new();
+        entities.spawn_living(
+            1,
+            EntityKind::Zombie,
+            Position::new(1.0, 0.0, 0.0),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        entities.set_vehicle_spawn_transform(
+            2,
+            Position::new(1.0, 0.0, 0.0),
+            glam::DVec3::ZERO,
+            crate::entity::components::LookDirection::default(),
+        );
+        entities.set_vehicle_kind(2, EntityKind::Mannequin);
+        entities.set_vehicle_spawn_transform(
+            3,
+            Position::new(1.0, 0.0, 0.0),
+            glam::DVec3::ZERO,
+            crate::entity::components::LookDirection::default(),
+        );
+        entities.set_vehicle_kind(3, EntityKind::AcaciaBoat);
+
+        tick_cloaks(&mut player, &mut entities);
+        player.position = Position::new(4.0, 0.0, 0.0);
+        entities.vehicles.get_mut(&2).unwrap().position = Position::new(5.0, 0.0, 0.0);
+        entities.vehicles.get_mut(&3).unwrap().position = Position::new(9.0, 0.0, 0.0);
+        entities.living.get_mut(&1).unwrap().position = Position::new(3.0, 0.0, 0.0);
+        tick_cloaks(&mut player, &mut entities);
+        assert_eq!(player.cloak.current.x, 1.0);
+        assert_eq!(entities.living[&1].cloak.current.x, 1.5);
+        assert_eq!(entities.vehicles[&2].cloak.current.x, 2.0);
+        assert!(!entities.vehicles[&3].cloak.initialized);
+        entities.remove_entity(2);
+        assert!(!entities.vehicles.contains_key(&2));
+    }
 
     #[test]
     fn experience_orb_icon_thresholds_and_source_tint() {
@@ -8249,6 +8491,71 @@ mod tests {
         assert_eq!(renders[0].body_transform.unwrap().x_axis.x, 0.5);
         store.apply_vehicle_metadata(1, 0, MetaValue::Byte(0x20));
         assert!(armor_stand_render_infos(&store, 0.5).is_empty());
+    }
+
+    #[test]
+    fn mannequin_skin_keys_use_instance_uuid_and_nil_fallback_stays_native() {
+        use azalea_registry::builtin::EntityKind;
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::Position;
+
+        let mut store = EntityStore::new();
+        let first = uuid::Uuid::from_u128(1);
+        let second = uuid::Uuid::from_u128(2);
+        for (id, uuid) in [(1, first), (2, second)] {
+            store.set_vehicle_transform(id, Position::default(), glam::DVec3::ZERO);
+            store.set_vehicle_kind(id, EntityKind::Mannequin);
+            store.set_vehicle_uuid(id, uuid);
+            store.set_mannequin_profile(id, azalea_inventory::components::Profile::default());
+        }
+        let infos = mannequin_render_infos(&store, 0.0);
+        assert_eq!(infos.len(), 2);
+        assert_ne!(infos[0].player_uuid, infos[1].player_uuid);
+        assert!(infos.iter().all(|info| {
+            info.variant_index
+                == crate::renderer::pipelines::entity_renderer::default_player_skin_index(
+                    uuid::Uuid::nil(),
+                ) as u32
+        }));
+    }
+
+    #[test]
+    fn mannequin_render_extraction_forwards_and_resets_chest_stack() {
+        use azalea_registry::builtin::{EntityKind, ItemKind};
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::Position;
+
+        let mut store = EntityStore::new();
+        store.set_vehicle_kind(3, EntityKind::Mannequin);
+        store.set_vehicle_transform(3, Position::new(1.0, 2.0, 3.0), glam::DVec3::ZERO);
+        let chest = azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData::new(
+            ItemKind::Elytra,
+            1,
+        ));
+        store.set_armor_stand_equipment(
+            3,
+            vec![(
+                azalea_inventory::components::EquipmentSlot::Chest,
+                chest.clone(),
+            )],
+        );
+        assert_eq!(
+            mannequin_render_infos(&store, 0.5)[0].chest_equipment,
+            chest
+        );
+        store.set_armor_stand_equipment(
+            3,
+            vec![(
+                azalea_inventory::components::EquipmentSlot::Chest,
+                azalea_inventory::ItemStack::Empty,
+            )],
+        );
+        assert_eq!(
+            mannequin_render_infos(&store, 0.5)[0].chest_equipment,
+            azalea_inventory::ItemStack::Empty,
+        );
     }
 
     #[test]

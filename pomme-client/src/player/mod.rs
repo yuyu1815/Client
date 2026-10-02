@@ -142,6 +142,7 @@ pub(crate) fn sanitize_attribute(id: &str, value: f64) -> f64 {
 
 pub struct LocalPlayer {
     pub position: Position,
+    pub cloak: crate::entity::cloak_state::CloakState,
     pub prev_position: Position,
     pub velocity: Velocity,
     pub look_dir: LookDirection,
@@ -233,6 +234,7 @@ impl LocalPlayer {
     pub fn new() -> Self {
         Self {
             position: Position::default(),
+            cloak: crate::entity::cloak_state::CloakState::default(),
             prev_position: Position::default(),
             velocity: Velocity::default(),
             look_dir: LookDirection::default(),

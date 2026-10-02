@@ -214,6 +214,7 @@ async fn connect_recorded(
             conn
         }
     };
+    conn.recorder = Some(recorder.clone());
 
     let hello = ServerboundLoginPacket::Hello(ServerboundHello {
         name: username.clone(),
@@ -923,6 +924,41 @@ async fn write_config_outbound(
     conduct_seen: bool,
     conduct_accepted: &mut bool,
 ) -> Result<(), ConnectionError> {
+    let (outbound, trace) = match outbound {
+        Outbound::Traced { trace, packet } => (*packet, Some(trace)),
+        packet => (packet, None),
+    };
+    if let (Some(recorder), Some(trace)) = (&conn.recorder, trace) {
+        recorder.packet_stage(trace, "dequeued", None);
+    }
+    conn.pending_trace = trace;
+    let result = write_config_outbound_inner(conn, outbound, conduct_seen, conduct_accepted).await;
+    if let Some(trace) = conn.pending_trace.take() {
+        if let Some(recorder) = &conn.recorder {
+            recorder.packet_stage(
+                trace,
+                if result.is_err() {
+                    "outbound_failed"
+                } else {
+                    "outbound_skipped"
+                },
+                Some(if result.is_err() {
+                    "configuration_dispatch_error"
+                } else {
+                    "not_written_in_configuration"
+                }),
+            );
+        }
+    }
+    result
+}
+
+async fn write_config_outbound_inner(
+    conn: &mut Conn,
+    outbound: Outbound,
+    conduct_seen: bool,
+    conduct_accepted: &mut bool,
+) -> Result<(), ConnectionError> {
     use azalea_protocol::packets::config::*;
     match outbound {
         Outbound::CustomClick { id, payload } => {
@@ -1455,15 +1491,21 @@ async fn game_loop(
                     // miss this ack; the next login resets the tracker anyway.
                     pump!(send_event(event_tx, NetworkEvent::Reconfiguring))?;
                     while let Ok(out) = outbound_rx.try_recv() {
-                        if let Some(frame) = recorded_outbound_frame(
+                        if let Some((frame, trace)) = recorded_outbound_frame(
                             out,
                             translation,
                             &mut chat,
                             &shared_tree,
                             &recorder,
                         )? {
-                            write_game_frame(&mut conn.writer, translation, frame, &recorder)
-                                .await?;
+                            write_game_frame_traced(
+                                &mut conn.writer,
+                                translation,
+                                frame,
+                                &recorder,
+                                trace,
+                            )
+                            .await?;
                         }
                     }
                     if let Some(frame) = chat.flush_ack() {
@@ -1591,8 +1633,8 @@ async fn pump_game_future<F: std::future::Future>(
         tokio::select! {
             result = &mut future => return Ok(result),
             Some(out) = outbound_rx.recv() => {
-                if let Some(frame) = recorded_outbound_frame(out, translation, chat, tree, recorder)? {
-                    write_game_frame(writer, translation, frame, recorder).await?;
+                if let Some((frame, trace)) = recorded_outbound_frame(out, translation, chat, tree, recorder)? {
+                    write_game_frame_traced(writer, translation, frame, recorder, trace).await?;
                 }
             }
             Some(key_pair) = key_pair_rx.recv() => {
@@ -1611,7 +1653,11 @@ fn recorded_outbound_frame(
     chat: &mut ChatSender,
     tree: &crate::net::commands::SharedCommandTree,
     recorder: &crate::movement_record::Recorder,
-) -> Result<Option<Vec<u8>>, ConnectionError> {
+) -> Result<Option<(Vec<u8>, Option<crate::movement_record::PacketTraceId>)>, ConnectionError> {
+    let (out, trace) = match out {
+        Outbound::Traced { trace, packet } => (*packet, Some(trace)),
+        packet => (packet, None),
+    };
     let observation = if recorder.active() {
         match &out {
             Outbound::Packet(p) => crate::movement_record::outbound(p),
@@ -1621,12 +1667,30 @@ fn recorded_outbound_frame(
     } else {
         None
     };
-    recorder.record("outbound", "dequeued", || observation.clone());
-    let result = outbound_frame(out, translation, chat, tree);
-    if result.is_err() {
-        recorder.record("outbound", "encode_failed", || observation);
+    if let Some(trace) = trace {
+        recorder.packet_stage(trace, "dequeued", None);
     }
-    result
+    let result = outbound_frame(out, translation, chat, tree);
+    match &result {
+        Err(_) => {
+            if let Some(trace) = trace {
+                recorder.packet_stage(trace, "encode_failed", Some("encoder_error"));
+            } else {
+                recorder.record("outbound", "encode_failed", || observation);
+            }
+        }
+        Ok(None) => {
+            if let Some(trace) = trace {
+                recorder.packet_stage(
+                    trace,
+                    "outbound_skipped",
+                    Some("no_frame_for_current_phase"),
+                );
+            }
+        }
+        _ => {}
+    }
+    result.map(|frame| frame.map(|frame| (frame, trace)))
 }
 
 /// The frame one queued outbound item writes, if any.
@@ -1678,6 +1742,7 @@ fn outbound_frame(
             custom_click_frame(Phase::Game, &id, payload.as_ref())
         }
         Outbound::CodeOfConductDecision(_) => None,
+        Outbound::Traced { .. } => unreachable!("trace envelope is unwrapped before encoding"),
     })
 }
 
@@ -1717,6 +1782,16 @@ async fn write_game_frame(
     frame: Vec<u8>,
     recorder: &crate::movement_record::Recorder,
 ) -> Result<(), ConnectionError> {
+    write_game_frame_traced(writer, translation, frame, recorder, None).await
+}
+
+async fn write_game_frame_traced(
+    writer: &mut RawWriter,
+    translation: Option<&super::translate::Translation>,
+    frame: Vec<u8>,
+    recorder: &crate::movement_record::Recorder,
+    trace: Option<crate::movement_record::PacketTraceId>,
+) -> Result<(), ConnectionError> {
     let observation = if recorder.active() {
         crate::movement_record::outbound_frame(&frame)
     } else {
@@ -1727,30 +1802,51 @@ async fn write_game_frame(
         _ => vec![frame],
     };
     if frames.is_empty() {
-        recorder.record("outbound", "translation_suppressed", || observation.clone());
+        if let Some(trace) = trace {
+            recorder.packet_stage(
+                trace,
+                "translation_suppressed",
+                Some("no_translated_frames"),
+            );
+        } else {
+            recorder.record("outbound", "translation_suppressed", || observation.clone());
+        }
     }
     for frame in frames {
-        recorder.raw_packet("outbound", "play", &frame);
+        recorder.raw_packet_traced("outbound", "play", &frame, trace);
         let result = writer.write(&frame).await;
-        recorder.record(
-            "outbound",
-            if result.is_ok() {
-                "transport_write_success"
-            } else {
-                "transport_write_failed"
-            },
-            || {
-                observation.clone().map(|mut data| {
-                    use azalea_buf::AzBufVar;
-                    data["wire_id"] = serde_json::json!(
-                        u32::azalea_read_var(&mut std::io::Cursor::new(frame.as_slice())).ok()
-                    );
-                    data["error_kind"] =
-                        serde_json::json!(result.as_ref().err().map(|e| format!("{:?}", e.kind())));
-                    data
-                })
-            },
-        );
+        if let Some(trace) = trace {
+            recorder.packet_stage(
+                trace,
+                if result.is_ok() {
+                    "transport_write_success"
+                } else {
+                    "transport_write_failed"
+                },
+                result.as_ref().err().map(|_| "io_error"),
+            );
+        } else {
+            recorder.record(
+                "outbound",
+                if result.is_ok() {
+                    "transport_write_success"
+                } else {
+                    "transport_write_failed"
+                },
+                || {
+                    observation.clone().map(|mut data| {
+                        use azalea_buf::AzBufVar;
+                        data["wire_id"] = serde_json::json!(
+                            u32::azalea_read_var(&mut std::io::Cursor::new(frame.as_slice())).ok()
+                        );
+                        data["error_kind"] = serde_json::json!(
+                            result.as_ref().err().map(|e| format!("{:?}", e.kind()))
+                        );
+                        data
+                    })
+                },
+            );
+        }
         result?;
     }
     Ok(())
@@ -1771,12 +1867,41 @@ async fn write_config_frame(conn: &mut Conn, frame: Vec<u8>) -> Result<(), Conne
     let frame = match super::translate::active().filter(|t| t.translates_config()) {
         Some(t) => match t.translate_outbound_config_frame(frame) {
             Some(frame) => frame,
-            None => return Ok(()),
+            None => {
+                if let Some(recorder) = &conn.recorder {
+                    if let Some(trace) = conn.pending_trace.take() {
+                        recorder.packet_stage(
+                            trace,
+                            "translation_suppressed",
+                            Some("configuration_packet_unsupported"),
+                        );
+                    } else {
+                        recorder.record("outbound", "translation_suppressed", || Some(serde_json::json!({"protocol_state":"configuration","reason":"configuration_packet_unsupported"})));
+                    }
+                }
+                return Ok(());
+            }
         },
         None => frame,
     };
-    // LOGIN frames never pass through this helper; this is the config phase only.
-    // The Conn's game-loop recorder is separately attached to the outbound sender.
+    // LOGIN frames never pass through this helper; this remains CONFIG-only.
+    if let Some(recorder) = &conn.recorder {
+        let trace = conn.pending_trace.take();
+        recorder.raw_packet_traced("outbound", "configuration", &frame, trace);
+        let result = conn.writer.write(&frame).await;
+        if let Some(trace) = trace {
+            recorder.packet_stage(
+                trace,
+                if result.is_ok() {
+                    "transport_write_success"
+                } else {
+                    "transport_write_failed"
+                },
+                result.as_ref().err().map(|_| "io_error"),
+            );
+        }
+        return Ok(result?);
+    }
     Ok(conn.writer.write(&frame).await?)
 }
 
@@ -1819,6 +1944,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn configuration_cookie_response_records_the_exact_written_frame() {
+        use azalea_protocol::packets::config::s_cookie_response::ServerboundCookieResponse;
+        use base64::Engine;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = crate::test_util::test_temp_dir("config-cookie-raw");
+        std::fs::create_dir_all(&dir).unwrap();
+        let recorder = std::sync::Arc::new(crate::movement_record::Recorder::default());
+        recorder.start(&rt, &dir);
+        rt.block_on(async {
+            let (client, server) = super::super::conn::memory_pipes();
+            let mut conn = Conn::from_memory(client);
+            conn.recorder = Some(recorder.clone());
+            let mut peer = Conn::from_memory(server);
+            write_config_packet(
+                &mut conn,
+                ServerboundConfigPacket::CookieResponse(ServerboundCookieResponse {
+                    key: "minecraft:private_diagnostic_cookie".into(),
+                    payload: Some(vec![0, 0xff, 7, 8]),
+                }),
+            )
+            .await
+            .unwrap();
+            let wire_frame = peer.reader.read().await.unwrap();
+            recorder.stop("test");
+            let started = std::time::Instant::now();
+            while recorder.status().starts_with("Draining") {
+                assert!(started.elapsed().as_secs() < 5);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let path = std::fs::read_dir(&dir)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let rows: Vec<serde_json::Value> = std::fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let raw = rows
+                .iter()
+                .find(|row| row["stage"] == "packet_raw" && row["direction"] == "outbound")
+                .unwrap();
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(raw["data"]["payload_base64"].as_str().unwrap())
+                    .unwrap()
+                    .as_slice(),
+                wire_frame.as_ref()
+            );
+            assert_eq!(raw["data"]["protocol_state"], "configuration");
+            assert_eq!(raw["data"]["packet_type"], "cookie_response");
+            assert_eq!(raw["data"]["connection_epoch"], rows[0]["connection_epoch"]);
+        });
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn movement_capture_uses_real_queue_and_shared_transport_dispatcher() {
         use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
         use azalea_protocol::packets::game::c_player_position::ClientboundPlayerPosition;
@@ -1854,8 +2038,9 @@ mod tests {
             )
             .unwrap()
             .unwrap();
+            let (frame, trace) = frame;
             assert!(crate::movement_record::outbound_frame(&frame).is_some());
-            write_game_frame(&mut conn.writer, None, frame.clone(), &recorder)
+            write_game_frame_traced(&mut conn.writer, None, frame.clone(), &recorder, trace)
                 .await
                 .unwrap();
             drop(peer);
@@ -1864,7 +2049,9 @@ mod tests {
                 .await
                 .unwrap();
             let mut failed_conn = Conn::from_memory(failed_end);
-            let failed = write_game_frame(&mut failed_conn.writer, None, frame, &recorder).await;
+            let failed =
+                write_game_frame_traced(&mut failed_conn.writer, None, frame, &recorder, trace)
+                    .await;
             drop(failed_peer);
             if failed.is_ok() {
                 recorder.stop("test_failure");
@@ -1911,12 +2098,21 @@ mod tests {
                 "queue_attempt",
                 "queued",
                 "dequeued",
+                "packet_raw",
                 "transport_write_success",
+                "packet_raw",
                 "transport_write_failed",
                 "received",
                 "applied"
             ]
         );
+        let trace_ids: Vec<_> = rows
+            .iter()
+            .filter_map(|row| row["data"]["packet_trace_id"].as_u64())
+            .collect();
+        assert!(trace_ids.len() >= 7);
+        assert!(trace_ids.iter().all(|id| *id == trace_ids[0]));
+        assert!(rows[0]["connection_epoch"].is_u64());
         assert_eq!(rows.last().unwrap()["reason"], "disconnect");
         std::fs::remove_dir_all(dir).unwrap();
     }

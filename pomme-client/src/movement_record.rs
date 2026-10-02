@@ -2,7 +2,7 @@
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use azalea_protocol::packets::ProtocolPacket;
@@ -13,15 +13,34 @@ const QUEUE: usize = 16;
 const LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_RAW: usize = 8 * 1024 * 1024;
 const MAX_ROW: usize = 12 * 1024 * 1024;
-#[derive(Default)]
+static NEXT_PACKET_TRACE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
+static NEXT_RECORDING_ID: AtomicU64 = AtomicU64::new(1);
 pub struct Recorder {
     active: AtomicBool,
+    epoch: u64,
+    context: Mutex<(Option<u64>, Option<u64>)>,
     state: Mutex<State>,
+}
+impl Default for Recorder {
+    fn default() -> Self {
+        Self {
+            active: AtomicBool::new(false),
+            epoch: NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
+            context: Mutex::new((None, None)),
+            state: Mutex::new(State::default()),
+        }
+    }
 }
 #[derive(Default)]
 struct State {
     session: Option<Session>,
     status: String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PacketTraceId {
+    session: u64,
+    id: u64,
 }
 struct Session {
     tx: Option<crossbeam_channel::Sender<Value>>,
@@ -31,6 +50,7 @@ struct Session {
     reason: &'static str,
     path: PathBuf,
     wall: u64,
+    id: u64,
 }
 impl Recorder {
     pub fn active(&self) -> bool {
@@ -61,6 +81,7 @@ impl Recorder {
             reason: "stop",
             path: path.clone(),
             wall,
+            id: NEXT_RECORDING_ID.fetch_add(1, Ordering::Relaxed),
         });
         self.active.store(true, Ordering::Relaxed);
         let recorder = self.clone();
@@ -120,6 +141,16 @@ impl Recorder {
         stage: &'static str,
         make: impl FnOnce() -> Option<Value>,
     ) {
+        self.record_in_session(None, direction, stage, make);
+    }
+
+    fn record_in_session(
+        &self,
+        expected_session: Option<u64>,
+        direction: &'static str,
+        stage: &'static str,
+        make: impl FnOnce() -> Option<Value>,
+    ) {
         if !self.active() {
             return;
         }
@@ -127,11 +158,15 @@ impl Recorder {
         let Some(s) = state.session.as_mut().filter(|s| s.tx.is_some()) else {
             return;
         };
+        if expected_session.is_some_and(|id| id != s.id) {
+            return;
+        }
         let Some(data) = make() else {
             return;
         };
         s.seq += 1;
-        let row = json!({"seq":s.seq,"offset_us":s.start.elapsed().as_micros() as u64,"direction":direction,"stage":stage,"data":data});
+        let (frame_id, tick) = *self.context.lock();
+        let row = json!({"seq":s.seq,"offset_us":s.start.elapsed().as_micros() as u64,"frame_id":frame_id,"tick":tick,"direction":direction,"stage":stage,"data":data});
         if s.tx.as_ref().unwrap().try_send(row).is_err() {
             s.dropped += 1;
         }
@@ -146,7 +181,7 @@ impl Recorder {
         let start = self.state.lock().session.as_ref().unwrap().wall;
         write_row(
             &mut out,
-            &json!({"type":"header","schema":1,"utc_start_unix_ms":start,"wire_protocol":protocol,"executable":executable_identity(),"package_version":env!("CARGO_PKG_VERSION"),"source_build_revision":null,"queue_capacity":QUEUE,"size_limit_bytes":limit,"max_row_bytes":MAX_ROW,"semantics":"client observations only; queued != transport_write_success != server acceptance; normalized packet IDs are native; seq gaps/dropped mean incomplete evidence"}),
+            &json!({"type":"header","schema":1,"utc_start_unix_ms":start,"connection_epoch":self.epoch,"wire_protocol":protocol,"executable":executable_identity(),"package_version":env!("CARGO_PKG_VERSION"),"source_build_revision":null,"queue_capacity":QUEUE,"size_limit_bytes":limit,"max_row_bytes":MAX_ROW,"semantics":"client observations only; queued != transport_write_success != server acceptance; raw PLAY/CONFIG payloads include cookies/chat/custom payloads and are private local diagnostics; LOGIN/auth secrets excluded; normalized packet IDs are native; seq gaps/dropped mean incomplete evidence"}),
         )?;
         let mut bytes = 0;
         let mut omitted = 0;
@@ -162,8 +197,8 @@ impl Recorder {
             out.write_all(&data)?;
             written += 1;
             bytes += data.len() as u64;
-            // ponytail: soft limit then drain; hard ceiling LIMIT + QUEUE*MAX_ROW (<129
-            // MiB).
+            // ponytail: soft limit then drain; hard ceiling LIMIT + QUEUE*MAX_ROW (<1.19
+            // GiB).
             if bytes >= limit {
                 self.stop("size_limit");
             }
@@ -203,14 +238,103 @@ impl Recorder {
     /// Record the exact uncompressed plaintext frame (VarInt id + payload).
     /// LOGIN/authentication frames and transport encryption keys are never
     /// passed here.
-    pub fn raw_packet(&self, direction: &'static str, protocol_state: &'static str, frame: &[u8]) {
+    fn record_omission(
+        &self,
+        expected_session: u64,
+        direction: &'static str,
+        stage: &'static str,
+        data: Value,
+    ) {
         if !self.active() {
             return;
         }
+        let mut state = self.state.lock();
+        let Some(s) = state.session.as_mut().filter(|s| s.tx.is_some()) else {
+            return;
+        };
+        if s.id != expected_session {
+            return;
+        }
+        s.dropped += 1;
+        s.seq += 1;
+        let (frame_id, tick) = *self.context.lock();
+        let row = json!({"seq":s.seq,"offset_us":s.start.elapsed().as_micros() as u64,"frame_id":frame_id,"tick":tick,"direction":direction,"stage":stage,"data":data});
+        if s.tx.as_ref().unwrap().try_send(row).is_err() {
+            s.dropped += 1;
+        }
+    }
+
+    pub fn set_context(&self, frame_id: u64, tick: u64) {
+        *self.context.lock() = (Some(frame_id), Some(tick));
+    }
+
+    pub fn packet_trace_id(&self) -> Option<PacketTraceId> {
+        if !self.active() {
+            return None;
+        }
+        let mut state = self.state.lock();
+        let session = state.session.as_mut().filter(|s| s.tx.is_some())?;
+        let id = NEXT_PACKET_TRACE_ID.fetch_add(1, Ordering::Relaxed);
+        Some(PacketTraceId {
+            session: session.id,
+            id,
+        })
+    }
+
+    pub fn packet_stage(
+        &self,
+        trace: PacketTraceId,
+        stage: &'static str,
+        reason: Option<&'static str>,
+    ) {
+        let current_session = self
+            .state
+            .lock()
+            .session
+            .as_ref()
+            .filter(|s| s.tx.is_some())
+            .map(|s| s.id);
+        if current_session != Some(trace.session) {
+            return;
+        }
+        self.record_in_session(Some(trace.session), "outbound", stage, || {
+            Some(json!({"packet_trace_id":trace.id,"reason":reason}))
+        });
+    }
+
+    pub fn raw_packet(&self, direction: &'static str, protocol_state: &'static str, frame: &[u8]) {
+        self.raw_packet_traced(direction, protocol_state, frame, None);
+    }
+
+    pub fn raw_packet_traced(
+        &self,
+        direction: &'static str,
+        protocol_state: &'static str,
+        frame: &[u8],
+        trace: Option<PacketTraceId>,
+    ) {
+        if !self.active() {
+            return;
+        }
+        let current_session = self
+            .state
+            .lock()
+            .session
+            .as_ref()
+            .filter(|s| s.tx.is_some())
+            .map(|s| s.id);
+        let Some(session_id) = current_session else {
+            return;
+        };
+        if trace.is_some_and(|trace| trace.session != session_id) {
+            return;
+        }
+        let packet_trace_id = trace
+            .map(|trace| trace.id)
+            .unwrap_or_else(|| NEXT_PACKET_TRACE_ID.fetch_add(1, Ordering::Relaxed));
+        let trace_origin = "observed";
         if frame.len() > MAX_RAW {
-            self.record(direction, "packet_raw_omitted_oversize", || {
-                Some(json!({"raw_length":frame.len(),"limit":MAX_RAW}))
-            });
+            self.record_omission(session_id, direction, "packet_raw_omitted_oversize", json!({"packet_trace_id":packet_trace_id,"packet_trace_origin":trace_origin,"raw_length":frame.len(),"limit":MAX_RAW}));
             return;
         }
         let mut cursor = std::io::Cursor::new(frame);
@@ -231,9 +355,9 @@ impl Recorder {
                 .name_of(phase, direction_enum, id)
                 .map(str::to_owned)
         });
-        self.record(direction, "packet_raw", || Some(json!({
-            "protocol_state":protocol_state,"wire_protocol":protocol,"connection_epoch":1,
-            "packet_trace_id":null,"native_id":native_id,"packet_type":packet_type,
+        self.record_in_session(Some(session_id), direction, "packet_raw", || Some(json!({
+            "protocol_state":protocol_state,"wire_protocol":protocol,"connection_epoch":self.epoch,
+            "packet_trace_id":packet_trace_id,"packet_trace_origin":trace_origin,"native_id":native_id,"packet_type":packet_type,
             "raw_length":frame.len(),"payload_base64":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, frame),
             "capture_point":"wire_plaintext","payload_layout":"id_plus_payload"
         })));
@@ -543,6 +667,7 @@ mod tests {
             reason: "stop",
             path: PathBuf::new(),
             wall: wall_ms(),
+            id: NEXT_RECORDING_ID.fetch_add(1, Ordering::Relaxed),
         });
         r.active.store(true, Ordering::Relaxed);
         (r, rx)
@@ -670,6 +795,7 @@ mod tests {
     fn raw_packet_keeps_cookie_bytes_and_malformed_ids_safely() {
         use base64::Engine;
         let (r, rx) = ready(4);
+        r.set_context(42, 9);
         // Native configuration cookie_response ID 5 plus arbitrary cookie bytes.
         let frame = [5, 3, 0xff, 0x00, 0x42];
         r.raw_packet("inbound", "configuration", &frame);
@@ -678,6 +804,8 @@ mod tests {
         assert_eq!(row["data"]["protocol_state"], "configuration");
         assert_eq!(row["data"]["capture_point"], "wire_plaintext");
         assert_eq!(row["data"]["native_id"], 5);
+        assert_eq!(row["frame_id"], 42);
+        assert_eq!(row["tick"], 9);
         assert_eq!(
             base64::engine::general_purpose::STANDARD
                 .decode(row["data"]["payload_base64"].as_str().unwrap())
@@ -688,6 +816,29 @@ mod tests {
         let malformed = rx.try_recv().unwrap();
         assert!(malformed["data"]["native_id"].is_null());
         assert_eq!(malformed["data"]["raw_length"], 5);
+        let (other, _other_rx) = ready(1);
+        assert_ne!(r.epoch, other.epoch);
+        assert_ne!(
+            r.packet_trace_id().unwrap().id,
+            other.packet_trace_id().unwrap().id
+        );
+        let stale_trace = other.packet_trace_id().unwrap();
+        r.raw_packet_traced("outbound", "play", &[1, 2, 3], Some(stale_trace));
+        assert!(
+            rx.is_empty(),
+            "a callback from another recording must not contaminate this session"
+        );
+        r.raw_packet("inbound", "play", &vec![0; MAX_RAW + 1]);
+        assert_eq!(
+            rx.try_recv().unwrap()["stage"],
+            "packet_raw_omitted_oversize"
+        );
+        r.stop("test");
+        let mut log = Vec::new();
+        r.write_log(&mut log, rx, crate::version::session_protocol(), LIMIT)
+            .unwrap();
+        assert_eq!(rows(&log).last().unwrap()["complete"], false);
+        assert!(rows(&log).last().unwrap()["dropped"].as_u64().unwrap() >= 1);
     }
 
     #[test]
