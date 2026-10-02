@@ -279,3 +279,61 @@ mod tests {
         assert!(float_track(&track).is_none());
     }
 }
+    #[test]
+    fn native_day_sky_light_track_reaches_typed_environment() {
+        let frame = |ticks, value| {
+            let mut nbt = NbtCompound::new();
+            nbt.insert("ticks", ticks);
+            nbt.insert("value", value);
+            nbt
+        };
+        let mut track = NbtCompound::new();
+        track.insert(
+            "keyframes",
+            NbtList::from(vec![
+                frame(133, 1.0f32),
+                frame(11_867, 1.0),
+                frame(13_670, 0.26666668),
+                frame(22_330, 0.26666668),
+            ]),
+        );
+        track.insert("modifier", "multiply");
+        let mut tracks = NbtCompound::new();
+        tracks.insert(SKY_LIGHT_LEVEL_ATTRIBUTE, track);
+        let mut day = NbtCompound::new();
+        day.insert("clock", "minecraft:overworld");
+        day.insert("period_ticks", 24_000);
+        day.insert("tracks", tracks);
+
+        let resolved = from_dimension_fields(
+            true,
+            false,
+            false,
+            Some(0.0),
+            Some(15.0),
+            &[("minecraft:day".into(), day)],
+            &["minecraft:day".into()],
+        )
+        .unwrap();
+        let sky_track = &resolved.tracks[0];
+        assert_eq!(sky_track.id, "minecraft:day");
+        assert_eq!(sky_track.clock, "minecraft:overworld");
+        assert_eq!(sky_track.tracks[0].0, SKY_LIGHT_LEVEL_ATTRIBUTE);
+        assert_eq!(sky_track.tracks[0].1.period_ticks, Some(24_000));
+        assert_eq!(sky_track.tracks[0].1.modifier.as_deref(), Some("multiply"));
+        assert_eq!(
+            sky_track.tracks[0]
+                .1
+                .keyframes
+                .iter()
+                .map(|frame| (frame.ticks, frame.value))
+                .collect::<Vec<_>>(),
+            [
+                (133, 1.0),
+                (11_867, 1.0),
+                (13_670, 0.26666668),
+                (22_330, 0.26666668),
+            ]
+        );
+    }
+
