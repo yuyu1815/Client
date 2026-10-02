@@ -116,35 +116,47 @@ pub fn from_dimension_fields(
         }
         result.sky_light_level = value;
     }
-    for (id, nbt) in timeline_registry {
-        if !result.timelines.iter().any(|used| used == id) {
-            continue;
+    for id in &result.timelines {
+        if result
+            .timelines
+            .iter()
+            .filter(|candidate| *candidate == id)
+            .count()
+            > 1
+        {
+            return Err(format!("duplicate dimension timeline id: {id}"));
         }
+        let Some((_, nbt)) = timeline_registry
+            .iter()
+            .find(|(candidate, _)| candidate == id)
+        else {
+            return Err(format!("unknown dimension timeline id: {id}"));
+        };
         let Some(tracks) = nbt.compound("tracks") else {
             continue;
         };
         let Some(track) = tracks.compound("minecraft:sky_light_level") else {
             continue;
         };
-        if let Some(mut parsed) = float_track(track) {
-            parsed.period_ticks = nbt.int("period_ticks");
-            if parsed.period_ticks.is_some_and(|period| {
-                period <= 0 || parsed.keyframes.iter().any(|kf| kf.ticks > period)
-            }) {
-                return Err(format!("invalid SKY_LIGHT_LEVEL timeline period: {id}"));
-            }
-            let clock = string(nbt, "clock")
-                .or_else(|| {
-                    nbt.compound("clock")
-                        .and_then(|clock| string(clock, "value"))
-                })
-                .unwrap_or_default();
-            result.tracks.push(TimelineInput {
-                id: id.clone(),
-                clock,
-                tracks: vec![("minecraft:sky_light_level".into(), parsed)],
-            });
+        let mut parsed =
+            float_track(track).ok_or_else(|| format!("invalid SKY_LIGHT_LEVEL track: {id}"))?;
+        parsed.period_ticks = nbt.int("period_ticks");
+        if parsed.period_ticks.is_some_and(|period| {
+            period <= 0 || parsed.keyframes.iter().any(|kf| kf.ticks > period)
+        }) {
+            return Err(format!("invalid SKY_LIGHT_LEVEL timeline period: {id}"));
         }
+        let clock = string(nbt, "clock")
+            .or_else(|| {
+                nbt.compound("clock")
+                    .and_then(|clock| string(clock, "value"))
+            })
+            .unwrap_or_default();
+        result.tracks.push(TimelineInput {
+            id: id.clone(),
+            clock,
+            tracks: vec![("minecraft:sky_light_level".into(), parsed)],
+        });
     }
     Ok(result)
 }
