@@ -30,7 +30,12 @@ use crate::world::block_entity::PlayerHeadProfileSource;
 const MAX_HEAD_TEXTURES: usize = MAX_ENTRIES + 1;
 
 pub struct BlockEntityRenderInfo {
+    /// Source position for existing pipeline ordering; moving cargo uses its
+    /// cart block position.
     pub pos: BlockPos,
+    /// Optional camera-anchor-relative model root for moving block-entity
+    /// cargo.
+    pub root_matrix: Option<glam::Mat4>,
     pub player_head_profile_source: Option<PlayerHeadProfileSource>,
     pub bell_swing: Option<crate::world::block_entity::BellSwing>,
     pub decorated_pot_sherds: [String; 4],
@@ -708,6 +713,11 @@ fn decorated_pot_wobble_transform(progress: f32, positive: bool) -> glam::Mat4 {
 }
 
 fn chest_matrix(info: &BlockEntityRenderInfo, anchor: glam::DVec3) -> glam::Mat4 {
+    if let Some(matrix) = info.root_matrix
+        && matrix.to_cols_array().iter().all(|value| value.is_finite())
+    {
+        return matrix;
+    }
     let center = (glam::DVec3::new(
         info.pos.x as f64 + 0.5,
         info.pos.y as f64,
@@ -2338,6 +2348,7 @@ mod sign_text_tests {
     fn chest(x: i32, variant: u32) -> BlockEntityRenderInfo {
         BlockEntityRenderInfo {
             pos: BlockPos::new(x, 64, -9),
+            root_matrix: None,
             player_head_profile_source: None,
             bell_swing: None,
             decorated_pot_sherds: crate::world::block_entity::default_pot_sherds(),
@@ -2359,6 +2370,25 @@ mod sign_text_tests {
             sign_wall: false,
             sign_light: 0.0,
         }
+    }
+
+    #[test]
+    fn chest_root_override_is_used_only_when_finite() {
+        let mut info = chest(-20, 0);
+        let anchor = glam::DVec3::new(3.25, 60.0, -12.5);
+        let expected = glam::Mat4::from_translation(glam::Vec3::new(-4.0, 2.0, 7.0))
+            * glam::Mat4::from_rotation_y(0.37);
+        info.root_matrix = Some(expected);
+        assert_eq!(chest_matrix(&info, anchor), expected);
+        info.root_matrix = Some(glam::Mat4::from_cols(
+            glam::Vec4::splat(f32::NAN),
+            glam::Vec4::ZERO,
+            glam::Vec4::ZERO,
+            glam::Vec4::ZERO,
+        ));
+        let fallback = chest_matrix(&info, anchor);
+        info.root_matrix = None;
+        assert_eq!(fallback, chest_matrix(&info, anchor));
     }
 
     #[test]

@@ -5529,6 +5529,7 @@ pub fn update_game(
             entity_view_scale,
         )
     };
+    let mut minecart_chest_renders = Vec::new();
     if !benchmark_running {
         let camera_anchor = gfx.renderer.camera_anchor();
         item_renders.extend(minecart_cargo_render_infos(
@@ -5540,6 +5541,7 @@ pub fn update_game(
             game.cardinal_light,
             camera_anchor,
             partial_tick,
+            &mut minecart_chest_renders,
         ));
         for vehicle in game.entity_store.vehicles.values() {
             if vehicle.kind != Some(azalea_registry::builtin::EntityKind::BlockDisplay) {
@@ -5838,7 +5840,8 @@ pub fn update_game(
         .unwrap_or_default();
 
     let be_extract_start = game.benchmark.is_some().then(std::time::Instant::now);
-    let block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = if benchmark_running {
+    let mut block_entity_renders: Vec<crate::renderer::BlockEntityRenderInfo> = if benchmark_running
+    {
         Vec::new()
     } else {
         let be_frustum = game
@@ -5940,6 +5943,7 @@ pub fn update_game(
                 });
                 Some(crate::renderer::BlockEntityRenderInfo {
                     pos: *pos,
+                    root_matrix: None,
                     player_head_profile_source,
                     bell_swing: be.bell_swing,
                     decorated_pot_sherds: be.decorated_pot_sherds.clone(),
@@ -5980,6 +5984,7 @@ pub fn update_game(
             })
             .collect()
     };
+    block_entity_renders.extend(minecart_chest_renders);
     game.last_update_phases.be_extract_ms = be_extract_start
         .map(|start| start.elapsed().as_secs_f32() * 1000.0)
         .unwrap_or_default();
@@ -6444,6 +6449,23 @@ fn boat_render_infos(
         .collect()
 }
 
+fn is_chest_special_block(name: &str) -> bool {
+    matches!(
+        name,
+        "chest"
+            | "trapped_chest"
+            | "ender_chest"
+            | "copper_chest"
+            | "exposed_copper_chest"
+            | "weathered_copper_chest"
+            | "oxidized_copper_chest"
+            | "waxed_copper_chest"
+            | "waxed_exposed_copper_chest"
+            | "waxed_weathered_copper_chest"
+            | "waxed_oxidized_copper_chest"
+    )
+}
+
 fn minecart_cargo_state(vehicle: &crate::entity::VehicleState) -> Option<azalea_block::BlockState> {
     minecart_cargo_state_for(
         vehicle.kind?,
@@ -6505,6 +6527,7 @@ fn minecart_cargo_render_infos(
     cardinal_light: CardinalLightType,
     camera_anchor: glam::DVec3,
     partial_tick: f32,
+    chest_renders: &mut Vec<crate::renderer::BlockEntityRenderInfo>,
 ) -> Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo> {
     use azalea_registry::builtin::EntityKind;
     store
@@ -6534,6 +6557,74 @@ fn minecart_cargo_render_infos(
                 position.y.floor() as i32,
                 position.z.floor() as i32,
             ];
+            let block_name = crate::world::block::block_id(state);
+            if is_chest_special_block(block_name) {
+                let props = crate::world::block::block_properties(state);
+                let kind = match block_name {
+                    "trapped_chest" => azalea_registry::builtin::BlockEntityKind::TrappedChest,
+                    "ender_chest" => azalea_registry::builtin::BlockEntityKind::EnderChest,
+                    _ => azalea_registry::builtin::BlockEntityKind::Chest,
+                };
+                let variant = crate::renderer::pipelines::block_entity::variant_for_block(
+                    kind, block_name, &props,
+                );
+                let yaw = crate::renderer::pipelines::block_entity::yaw_for_block(kind, &props);
+                let current = vehicle.look_dir?;
+                let (yaw_rot, pitch) = match vehicle.prev_look_dir {
+                    Some(prev) => (
+                        lerp_angle(prev.y_rot_deg(), current.y_rot_deg(), partial_tick),
+                        prev.x_rot_deg() + (current.x_rot_deg() - prev.x_rot_deg()) * partial_tick,
+                    ),
+                    None => (current.y_rot_deg(), current.x_rot_deg()),
+                };
+                let hurt = (vehicle.boat_hurt_time as f32 - partial_tick).max(0.0);
+                let damage = (vehicle.boat_damage - partial_tick).max(0.0);
+                let rocking = (hurt.sin() * hurt * damage / 10.0
+                    * vehicle.boat_hurt_direction as f32)
+                    .to_radians();
+                let relative = glam::DVec3::new(position.x, position.y, position.z) - camera_anchor;
+                let root_matrix = glam::Mat4::from_translation(relative.as_vec3())
+                    * glam::Mat4::from_rotation_y((180.0 - yaw_rot).to_radians())
+                    * glam::Mat4::from_rotation_z(-pitch.to_radians())
+                    * glam::Mat4::from_translation(glam::Vec3::Y * 0.375)
+                    * glam::Mat4::from_rotation_x(rocking)
+                    * glam::Mat4::from_scale(glam::Vec3::splat(0.75))
+                    * glam::Mat4::from_translation(glam::vec3(
+                        -0.5,
+                        (vehicle.minecart_display_offset - 8) as f32 / 16.0,
+                        0.5,
+                    ))
+                    * glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+                chest_renders.push(crate::renderer::BlockEntityRenderInfo {
+                    pos: azalea_core::position::BlockPos::new(
+                        block_pos[0],
+                        block_pos[1],
+                        block_pos[2],
+                    ),
+                    root_matrix: Some(root_matrix),
+                    player_head_profile_source: None,
+                    bell_swing: None,
+                    decorated_pot_sherds: crate::world::block_entity::default_pot_sherds(),
+                    pot_wobble: None,
+                    kind,
+                    statue_pose: None,
+                    banner_phase: 0.0,
+                    bell_partial: partial_tick,
+                    book: None,
+                    yaw,
+                    variant,
+                    lid_open: 0.0,
+                    sign_front: None,
+                    sign_back: None,
+                    sign_front_color: [0.0; 3],
+                    sign_front_glowing: false,
+                    sign_back_color: [0.0; 3],
+                    sign_back_glowing: false,
+                    sign_wall: false,
+                    sign_light: 1.0,
+                });
+                return None;
+            }
             let item_name = renderer.ensure_block_mesh(state, block_pos)?;
             let current = vehicle.look_dir?;
             let (yaw, pitch) = match vehicle.prev_look_dir {
@@ -10593,6 +10684,10 @@ mod tests {
             }
         }
         assert!(minecart_cargo_state_for(K::Minecart, None, false).is_none());
+        assert!(super::is_chest_special_block("chest"));
+        assert!(super::is_chest_special_block("trapped_chest"));
+        assert!(super::is_chest_special_block("waxed_oxidized_copper_chest"));
+        assert!(!super::is_chest_special_block("tnt"));
         let furnace = minecart_cargo_state_for(K::FurnaceMinecart, None, true).unwrap();
         assert_eq!(
             crate::world::block::block_properties(furnace).get("lit"),
