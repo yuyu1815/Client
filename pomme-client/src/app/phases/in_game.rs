@@ -5101,6 +5101,16 @@ pub fn update_game(
                     armor_stand_flags: 0,
                     armor_stand_pose: [[0.0; 3]; 6],
                     armor_stand_equipment: e.equipment.clone(),
+                    body_equipment: e
+                        .equipment
+                        .get(&azalea_inventory::components::EquipmentSlot::Body)
+                        .cloned()
+                        .unwrap_or(azalea_inventory::ItemStack::Empty),
+                    is_ridden: game
+                        .entity_store
+                        .vehicles
+                        .get(&entity_id)
+                        .is_some_and(|v| !v.passengers.is_empty()),
                     overlay_tints: extras.overlay_tints,
                     overlay_variants: extras.overlay_variants,
                     is_unhappy: e.unhappy_counter > 0,

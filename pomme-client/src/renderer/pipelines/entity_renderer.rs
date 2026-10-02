@@ -94,6 +94,11 @@ pub struct EntityRenderInfo {
         azalea_inventory::components::EquipmentSlot,
         azalea_inventory::ItemStack,
     >,
+    /// BODY equipment snapshot for Happy Ghast's native equipment layer.
+    pub body_equipment: azalea_inventory::ItemStack,
+    /// Happy Ghast is ridden when it has a passenger (not when saddle is
+    /// present).
+    pub is_ridden: bool,
     pub overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
     /// Per-slot overlay texture variant (villager type/profession/level).
     pub overlay_variants: [u32; MAX_OVERLAYS],
@@ -200,6 +205,8 @@ impl Default for EntityRenderInfo {
             armor_stand_flags: 0,
             armor_stand_pose: [[0.0; 3]; 6],
             armor_stand_equipment: std::collections::HashMap::new(),
+            body_equipment: azalea_inventory::ItemStack::Empty,
+            is_ridden: false,
             overlay_tints: [None; MAX_OVERLAYS],
             overlay_variants: [0; MAX_OVERLAYS],
             is_unhappy: false,
