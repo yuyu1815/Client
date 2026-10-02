@@ -457,7 +457,9 @@ pub fn bake_player_cape_model() -> BakedEntityModel {
             parent: None,
         }],
         PLAYER_CAPE_TEXTURE_SIZE.0,
-        PLAYER_CAPE_TEXTURE_SIZE.1,
+        // Cape CubeDefinition.bake scales V by texHeight * 0.5; image uploads
+        // retain their actual 64x32 or 64x64 dimensions.
+        PLAYER_CAPE_TEXTURE_SIZE.1 / 2,
     );
     model.convention = ModelConvention::BlockYUp;
     model
@@ -470,6 +472,20 @@ pub fn player_cape_attachment_matrix(
     pose: &PartAnim,
 ) -> Mat4 {
     body_parent * cape_model.compute_part_transforms(pose)[0]
+}
+
+pub fn player_cape_equipment_attachment_matrix(
+    cape_model: &BakedEntityModel,
+    body_parent: Mat4,
+    humanoid_layer: bool,
+    pose: &PartAnim,
+) -> Mat4 {
+    let body_parent = if humanoid_layer {
+        body_parent * Mat4::from_translation(Vec3::new(0.0, -0.053125, 0.06875))
+    } else {
+        body_parent
+    };
+    player_cape_attachment_matrix(cape_model, body_parent, pose)
 }
 
 pub fn bake_player_model(slim: bool) -> BakedEntityModel {

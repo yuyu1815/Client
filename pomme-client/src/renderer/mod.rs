@@ -3,6 +3,9 @@ pub mod camera;
 pub mod chunk;
 mod context;
 pub mod entity_model;
+#[cfg(test)]
+#[path = "entity_model_cape_tests.rs"]
+mod entity_model_cape_tests;
 pub(crate) mod entity_models {
     pub mod aquatic;
     pub mod flying;
@@ -1809,6 +1812,45 @@ impl Renderer {
         let mut equipment_definitions = HashMap::new();
         let mut frame_entities = entities.to_vec();
         for info in &mut frame_entities {
+            if let azalea_inventory::ItemStack::Present(stack) = &info.chest_equipment {
+                let asset_id = crate::player::menu_click::component::<
+                    azalea_inventory::components::Equippable,
+                >(stack)
+                .and_then(|equippable| equippable.asset_id.map(|id| id.to_string()));
+                if let Some(asset_id) = asset_id {
+                    info.cape_has_wings_layer = equipment_definitions
+                        .entry((asset_id.clone(), "wings".to_owned()))
+                        .or_insert_with(|| {
+                            pipelines::equipment::resolve_equipment_layers_with_pack_dirs(
+                                &self.jar_assets_dir,
+                                &self.asset_index,
+                                &self.activation_pack_dirs,
+                                &asset_id,
+                                "wings",
+                            )
+                        })
+                        .is_some();
+                    info.cape_has_humanoid_layer = equipment_definitions
+                        .entry((asset_id.clone(), "humanoid".to_owned()))
+                        .or_insert_with(|| {
+                            pipelines::equipment::resolve_equipment_layers_with_pack_dirs(
+                                &self.jar_assets_dir,
+                                &self.asset_index,
+                                &self.activation_pack_dirs,
+                                &asset_id,
+                                "humanoid",
+                            )
+                        })
+                        .is_some();
+                } else {
+                    info.cape_has_wings_layer = false;
+                    info.cape_has_humanoid_layer = false;
+                }
+            } else {
+                info.cape_has_wings_layer = false;
+                info.cape_has_humanoid_layer = false;
+            }
+
             if info.entity_kind != azalea_registry::builtin::EntityKind::HappyGhast {
                 continue;
             }
@@ -1824,7 +1866,7 @@ impl Renderer {
                 continue;
             };
             let layers = equipment_definitions
-                .entry(asset_id.clone())
+                .entry((asset_id.clone(), "happy_ghast_body".to_owned()))
                 .or_insert_with(|| {
                     pipelines::equipment::resolve_equipment_layers_with_pack_dirs(
                         &self.jar_assets_dir,

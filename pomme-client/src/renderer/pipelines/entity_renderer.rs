@@ -230,6 +230,8 @@ pub struct EntityRenderInfo {
     pub head_x_rot_deg: f32,
     pub head_y_rot_deg: f32,
     pub body_y_rot_deg: f32,
+    /// Native PlayerCapeModel.setupAnim rotation, extracted at render partial.
+    pub cape_pose: glam::Quat,
     pub is_baby: bool,
     pub is_crouching: bool,
     pub shulker_peek: f32,
@@ -257,6 +259,12 @@ pub struct EntityRenderInfo {
     >,
     /// BODY equipment snapshot for Happy Ghast's native equipment layer.
     pub body_equipment: azalea_inventory::ItemStack,
+    /// Chest stack used by the native cape equipment-layer predicate.
+    pub chest_equipment: azalea_inventory::ItemStack,
+    /// Native equipment asset has at least one WINGS layer.
+    pub cape_has_wings_layer: bool,
+    /// Native equipment asset has at least one HUMANOID layer.
+    pub cape_has_humanoid_layer: bool,
     /// Ordered CPU-resolved equipment input for the GPU renderer owner.
     pub happy_ghast_equipment_layers: Vec<super::equipment::ResolvedEquipmentLayer>,
     /// Happy Ghast is ridden when it has a passenger (not when saddle is
@@ -368,6 +376,7 @@ impl Default for EntityRenderInfo {
             head_x_rot_deg: 0.0,
             head_y_rot_deg: 0.0,
             body_y_rot_deg: 0.0,
+            cape_pose: glam::Quat::IDENTITY,
             is_baby: false,
             is_crouching: false,
             shulker_peek: 0.0,
@@ -385,6 +394,9 @@ impl Default for EntityRenderInfo {
             armor_stand_pose: [[0.0; 3]; 6],
             armor_stand_equipment: std::collections::HashMap::new(),
             body_equipment: azalea_inventory::ItemStack::Empty,
+            chest_equipment: azalea_inventory::ItemStack::Empty,
+            cape_has_wings_layer: false,
+            cape_has_humanoid_layer: false,
             happy_ghast_equipment_layers: Vec::new(),
             is_ridden: false,
             overlay_tints: [None; MAX_OVERLAYS],
@@ -3043,12 +3055,31 @@ impl EntityRenderer {
         allocator: &Arc<Mutex<Allocator>>,
         uuid: &uuid::Uuid,
     ) {
-        if let Some(skin) = self.player_skins.remove(uuid) {
-            free_player_skin_texture(device, allocator, self.descriptor_pool, skin);
+        if !self.player_skins.contains_key(uuid) {
+            return;
         }
+        // ponytail: rare eviction waits for GPU; fence retirement if churn matters
+        if let Err(error) = device.wait_idle() {
+            if !player_skin_retirement_safe(true, false) {
+                tracing::warn!("Keeping player skin after GPU wait failed: {error}");
+                return;
+            }
+        }
+        let skin = self.player_skins.remove(uuid).unwrap();
+        free_player_skin_texture(device, allocator, self.descriptor_pool, skin);
     }
 
     pub fn clear_player_skins(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        if self.player_skins.is_empty() {
+            return;
+        }
+        // ponytail: rare eviction waits for GPU; fence retirement if churn matters
+        if let Err(error) = device.wait_idle() {
+            if !player_skin_retirement_safe(true, false) {
+                tracing::warn!("Keeping player skins after GPU wait failed: {error}");
+                return;
+            }
+        }
         let descriptor_pool = self.descriptor_pool;
         for (_, skin) in self.player_skins.drain() {
             free_player_skin_texture(device, allocator, descriptor_pool, skin);
@@ -4187,8 +4218,16 @@ fn player_cape_visible(kind: EntityKind, invisible: bool, mask: u8, has_cape: bo
         && has_cape
 }
 
-// WIP: static native idle pose only; moving cloak state is owned by the next
-// task.
+fn native_cape_draw_visible(
+    kind: EntityKind,
+    invisible: bool,
+    mask: u8,
+    has_cape: bool,
+    has_wings_layer: bool,
+) -> bool {
+    !has_wings_layer && player_cape_visible(kind, invisible, mask, has_cape)
+}
+
 fn collect_player_capes(
     vis: &[VisEntity<'_>],
     model: &BakedEntityModel,
@@ -4206,11 +4245,12 @@ fn collect_player_capes(
         else {
             continue;
         };
-        if !player_cape_visible(
+        if !native_cape_draw_visible(
             entity.info.entity_kind,
             entity.info.is_invisible,
             entity.info.skin_parts_mask,
             skin.cape.is_some(),
+            entity.info.cape_has_wings_layer,
         ) {
             continue;
         }
@@ -4227,11 +4267,18 @@ fn collect_player_capes(
         else {
             continue;
         };
-        let model_matrix = entity_model::player_cape_attachment_matrix(
+        let body_parent = entity.entity_mat * entity.part_transforms[body_index];
+        let attachment = entity_model::player_cape_equipment_attachment_matrix(
             model,
-            entity.entity_mat * entity.part_transforms[body_index],
+            body_parent,
+            entity.info.cape_has_humanoid_layer,
             &entity_model::PartAnim::default(),
         );
+        // The cape mesh owns the baked Y-π pose; native setupAnim replaces it
+        // with the complete quaternion extracted from AvatarRenderer.
+        let local_rotation = glam::Mat4::from_rotation_y(-std::f32::consts::PI)
+            * glam::Mat4::from_quat(entity.info.cape_pose);
+        let model_matrix = attachment * local_rotation;
         let first_instance = instances.len() as u32;
         instances.push(EntityInstance {
             model: model_matrix.to_cols_array_2d(),
@@ -4669,6 +4716,10 @@ fn upload_texture_pixels(
     (image, view, allocation)
 }
 
+fn player_skin_retirement_safe(has_skins: bool, wait_succeeded: bool) -> bool {
+    !has_skins || wait_succeeded
+}
+
 fn free_player_skin_texture(
     device: &vk::Device,
     allocator: &Arc<Mutex<Allocator>>,
@@ -5031,6 +5082,15 @@ pub(super) fn create_pipeline(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn player_skin_retirement_requires_idle_only_when_resources_exist() {
+        use super::player_skin_retirement_safe;
+
+        assert!(player_skin_retirement_safe(false, false));
+        assert!(player_skin_retirement_safe(true, true));
+        assert!(!player_skin_retirement_safe(true, false));
+    }
+
+    #[test]
     fn mannequin_default_skin_hash_order_and_variant_selection_match_native() {
         use super::{DEFAULT_PLAYER_SKINS, default_player_skin_index, mannequin_variant_index};
 
@@ -5287,11 +5347,53 @@ mod tests {
             &super::entity_model::PartAnim::default(),
         );
         assert_eq!(attached.w_axis.truncate(), Vec3::new(1.0, 2.0, 3.125));
-        assert!(super::player_cape_visible(
+        let body = Mat4::from_rotation_y(0.7) * body;
+        let plain = super::entity_model::player_cape_equipment_attachment_matrix(
+            &model,
+            body,
+            false,
+            &super::entity_model::PartAnim::default(),
+        );
+        let corrected = super::entity_model::player_cape_equipment_attachment_matrix(
+            &model,
+            body,
+            true,
+            &super::entity_model::PartAnim::default(),
+        );
+        assert_eq!(
+            plain,
+            super::entity_model::player_cape_attachment_matrix(
+                &model,
+                body,
+                &super::entity_model::PartAnim::default(),
+            )
+        );
+        assert_eq!(
+            corrected,
+            super::entity_model::player_cape_attachment_matrix(
+                &model,
+                body * Mat4::from_translation(Vec3::new(0.0, -0.053125, 0.06875)),
+                &super::entity_model::PartAnim::default(),
+            ),
+        );
+        assert_ne!(
+            corrected.w_axis.truncate() - plain.w_axis.truncate(),
+            Vec3::new(0.0, -0.053125, 0.06875),
+            "translation is in the body-parent coordinate system"
+        );
+        assert!(super::native_cape_draw_visible(
             EntityKind::Player,
             false,
             1,
-            true
+            true,
+            false,
+        ));
+        assert!(!super::native_cape_draw_visible(
+            EntityKind::Player,
+            false,
+            1,
+            true,
+            true,
         ));
         assert!(super::player_cape_visible(
             EntityKind::Mannequin,
