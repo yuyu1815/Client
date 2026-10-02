@@ -146,7 +146,7 @@ impl SkyState {
     }
 
     pub fn apply_clock_update(&mut self, id: u32, total_ticks: u64, partial_tick: f32, rate: f32) {
-        if !partial_tick.is_finite() || !rate.is_finite() || rate < 0.0 {
+        if !partial_tick.is_finite() || !rate.is_finite() {
             tracing::warn!(
                 id,
                 partial_tick,
@@ -168,7 +168,7 @@ impl SkyState {
         }
         self.clock_partial_tick += self.clock_rate;
         let full_ticks = self.clock_partial_tick.floor();
-        self.day_time = self.day_time.wrapping_add(full_ticks as u64);
+        self.day_time = self.day_time.wrapping_add_signed(full_ticks as i64);
         self.clock_partial_tick -= full_ticks;
     }
 
@@ -1286,6 +1286,16 @@ mod tests {
         wrapped.apply_clock_update(0, 23_999, 0.0, 1.0);
         wrapped.advance_clock_tick();
         assert_eq!(wrapped.day_tick(), 0.0);
+    }
+
+    #[test]
+    fn reverse_world_clock_wraps_without_rejecting_negative_rate() {
+        let mut sky = SkyState::default_day();
+        sky.apply_clock_update(1, 0, 0.0, -1.0);
+        sky.advance_clock_tick();
+        assert_eq!(sky.day_time, u64::MAX);
+        assert_eq!(sky.clock_partial_tick, 0.0);
+        assert_eq!(sky.day_tick(), 23_999.0);
     }
 
     #[test]

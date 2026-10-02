@@ -150,6 +150,8 @@ pub enum NetworkEvent {
         /// Server registry ID selected from this dimension type's
         /// `default_clock`.
         clock_id: Option<u32>,
+        /// Snapshot of numeric IDs from the server's world_clock registry.
+        world_clock_ids: std::collections::HashMap<String, u32>,
         environment: environment::DimensionEnvironment,
     },
     ChunkLoaded {

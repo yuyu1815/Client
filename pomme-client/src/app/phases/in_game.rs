@@ -356,6 +356,10 @@ pub struct GameState {
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
     pub dimension_environment: crate::net::environment::DimensionEnvironment,
+    /// Latest authoritative samples for every server clock, independent of the
+    /// clock currently selected by the dimension's visual sky.
+    pub world_clocks: HashMap<u32, crate::net::environment::ClockSample>,
+    pub world_clock_ids: HashMap<String, u32>,
     pub show_debug: bool,
     pub show_chunk_borders: bool,
     pub advanced_item_tooltips: bool,
@@ -581,6 +585,28 @@ pub struct MeshedCol {
 }
 
 impl GameState {
+    /// Resolve a timeline's named world clock against the server registry and
+    /// return the sampled tick position for pure evaluators.
+    pub fn timeline_clock_sample(
+        &self,
+        timeline: &crate::net::environment::TimelineInput,
+        render_partial_tick: f32,
+    ) -> Result<f64, String> {
+        let id = self.world_clock_ids.get(&timeline.clock).ok_or_else(|| {
+            format!(
+                "timeline {} references unknown world clock {}",
+                timeline.id, timeline.clock
+            )
+        })?;
+        let sample = self.world_clocks.get(id).ok_or_else(|| {
+            format!(
+                "timeline {} world clock {} (id {id}) has no sample",
+                timeline.id, timeline.clock
+            )
+        })?;
+        Ok(sample.tick(render_partial_tick))
+    }
+
     /// Resolve a spawned entity's attachment from the dimensions available to
     /// existing raycast/player state. Pose/attribute-scale mutations beyond
     /// these sources are not represented by the current shared entity state.
@@ -779,6 +805,8 @@ impl GameState {
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
             dimension_environment: Default::default(),
+            world_clocks: HashMap::new(),
+            world_clock_ids: HashMap::new(),
             show_debug: false,
             show_chunk_borders: false,
             advanced_item_tooltips: false,
@@ -1989,6 +2017,7 @@ pub(crate) fn advance_server_time(
     frozen: bool,
     steps: &mut u32,
     sky: &mut SkyState,
+    clocks: &mut HashMap<u32, crate::net::environment::ClockSample>,
 ) -> u32 {
     let period = server_time_tick_period(tick_rate);
     *accumulator = (*accumulator + dt.max(0.0)).min(1.0);
@@ -1997,6 +2026,9 @@ pub(crate) fn advance_server_time(
         if server_tick_runs(frozen, *steps) {
             sky.advance_clock_tick();
             sky.game_time = sky.game_time.wrapping_add(1);
+            for clock in clocks.values_mut() {
+                clock.advance_tick();
+            }
             if frozen {
                 *steps -= 1;
             }
@@ -3170,6 +3202,7 @@ pub fn update_game(
         core.server_tick_frozen,
         &mut core.server_tick_steps,
         &mut game.sky_state,
+        &mut game.world_clocks,
     );
     game.item_entity_store.advance_age(simulation_ticks);
 
@@ -8308,6 +8341,8 @@ fn client_information_changed(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{
         advance_server_time, armor_stand_render_infos, arrow_render_infos, block_entity_in_frustum,
         boat_render_infos, boat_underwater_status, bump_loaded_content_generations,
@@ -9713,11 +9748,59 @@ mod tests {
             let mut accumulator = 0.0;
             let mut steps = 0;
             assert_eq!(
-                advance_server_time(&mut accumulator, 1.0, rate, false, &mut steps, &mut sky,),
+                advance_server_time(
+                    &mut accumulator,
+                    1.0,
+                    rate,
+                    false,
+                    &mut steps,
+                    &mut sky,
+                    &mut HashMap::new(),
+                ),
                 expected
             );
             assert_eq!(sky.day_time, u64::from(expected));
         }
+    }
+
+    #[test]
+    fn all_world_clocks_advance_independently_at_server_cadence() {
+        let mut sky = SkyState::default_day();
+        let mut clocks = HashMap::from([
+            (
+                1,
+                crate::net::environment::ClockSample {
+                    total_ticks: 20,
+                    partial_tick: 0.0,
+                    rate: 0.0,
+                },
+            ),
+            (
+                2,
+                crate::net::environment::ClockSample {
+                    total_ticks: 30,
+                    partial_tick: 0.0,
+                    rate: 0.5,
+                },
+            ),
+        ]);
+        let mut accumulator = 0.0;
+        let mut steps = 0;
+        assert_eq!(
+            advance_server_time(
+                &mut accumulator,
+                1.0,
+                20.0,
+                false,
+                &mut steps,
+                &mut sky,
+                &mut clocks
+            ),
+            20
+        );
+        assert_eq!(clocks[&1].total_ticks, 20);
+        assert_eq!(clocks[&2].total_ticks, 40);
+        assert_eq!(clocks[&2].partial_tick, 0.0);
     }
 
     #[test]
@@ -9726,11 +9809,27 @@ mod tests {
         sky.apply_clock_update(0, 0, 0.0, 1.0);
         let mut accumulator = 0.0;
         let mut steps = 0;
-        advance_server_time(&mut accumulator, 1.0, 20.0, true, &mut steps, &mut sky);
+        advance_server_time(
+            &mut accumulator,
+            1.0,
+            20.0,
+            true,
+            &mut steps,
+            &mut sky,
+            &mut HashMap::new(),
+        );
         assert_eq!(sky.day_time, 0);
         steps = 2;
         assert_eq!(
-            advance_server_time(&mut accumulator, 0.1, 20.0, true, &mut steps, &mut sky,),
+            advance_server_time(
+                &mut accumulator,
+                0.1,
+                20.0,
+                true,
+                &mut steps,
+                &mut sky,
+                &mut HashMap::new(),
+            ),
             2
         );
         assert_eq!(sky.day_time, 2);
@@ -9754,14 +9853,30 @@ mod tests {
 
         let mut accumulator = 0.0;
         let mut steps = 0;
-        let ticks = advance_server_time(&mut accumulator, 1.0, 20.0, true, &mut steps, &mut sky);
+        let ticks = advance_server_time(
+            &mut accumulator,
+            1.0,
+            20.0,
+            true,
+            &mut steps,
+            &mut sky,
+            &mut HashMap::new(),
+        );
         items.advance_age(ticks);
         assert_eq!(age(&items), 0);
         sky.day_time = 6000;
         assert_eq!(age(&items), 0);
 
         steps = 3;
-        let ticks = advance_server_time(&mut accumulator, 0.15, 20.0, true, &mut steps, &mut sky);
+        let ticks = advance_server_time(
+            &mut accumulator,
+            0.15,
+            20.0,
+            true,
+            &mut steps,
+            &mut sky,
+            &mut HashMap::new(),
+        );
         items.advance_age(ticks);
         assert_eq!(ticks, 3);
         assert_eq!(age(&items), 3);

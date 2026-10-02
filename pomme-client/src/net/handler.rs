@@ -81,6 +81,7 @@ fn dimension_info(
     dim: &azalea_core::registry_holder::dimension_type::DimensionKindElement,
     is_debug: bool,
     clock_id: Option<u32>,
+    world_key: &str,
     registries: &RegistryHolder,
 ) -> NetworkEvent {
     NetworkEvent::DimensionInfo {
@@ -88,6 +89,18 @@ fn dimension_info(
         height: dim.height,
         min_y: dim.min_y,
         clock_id,
+        world_clock_ids: registries
+            .extra
+            .get(&Identifier::new("world_clock"))
+            .map(|registry| {
+                registry
+                    .map
+                    .iter()
+                    .enumerate()
+                    .map(|(id, (key, _))| (key.to_string(), id as u32))
+                    .collect()
+            })
+            .unwrap_or_default(),
         has_skylight: dim
             ._extra
             .get("has_skylight")
@@ -134,7 +147,8 @@ fn dimension_info(
                 .unwrap_or_default();
             match super::environment::from_dimension_fields(
                 byte("has_skylight", true),
-                !byte("has_ceiling", false),
+                byte("has_ceiling", false),
+                world_key == "minecraft:the_end",
                 ambient,
                 sky_level,
                 &timelines,
@@ -143,7 +157,10 @@ fn dimension_info(
                 Ok(value) => value,
                 Err(error) => {
                     tracing::warn!(%error, "Invalid dimension environment inputs; using safe defaults");
-                    Default::default()
+                    super::environment::DimensionEnvironment {
+                        unsupported_reason: Some(error),
+                        ..Default::default()
+                    }
                 }
             }
         },
@@ -211,6 +228,7 @@ pub(super) async fn handle_game_packet_with_display_text(
                         dim,
                         p.common.is_debug,
                         dimension_clock_id(registry_holder, dim),
+                        &p.common.dimension.to_string(),
                         registry_holder,
                     ),
                 )
@@ -1974,6 +1992,7 @@ pub(super) async fn handle_game_packet_with_display_text(
                         dim,
                         p.common.is_debug,
                         dimension_clock_id(registry_holder, dim),
+                        &p.common.dimension.to_string(),
                         registry_holder,
                     ),
                 )
@@ -4384,7 +4403,13 @@ mod dimension_info_tests {
             is_debug,
             clock_id,
             ..
-        } = dimension_info(&dim, true, None, &RegistryHolder::default())
+        } = dimension_info(
+            &dim,
+            true,
+            None,
+            "minecraft:overworld",
+            &RegistryHolder::default(),
+        )
         else {
             panic!("dimension_info returned the wrong event variant");
         };
@@ -4547,7 +4572,13 @@ mod dimension_info_tests {
             cardinal_light,
             is_debug,
             ..
-        } = dimension_info(&dim, false, None, &RegistryHolder::default())
+        } = dimension_info(
+            &dim,
+            false,
+            None,
+            "minecraft:overworld",
+            &RegistryHolder::default(),
+        )
         else {
             panic!("dimension_info returned the wrong event variant");
         };

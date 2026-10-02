@@ -32,8 +32,33 @@ pub struct DimensionEnvironment {
     pub has_weather: bool,
     pub ambient_light: f32,
     pub sky_light_level: f32,
+    /// Nonempty when native environment data could not be represented. Safe
+    /// fallback values remain usable, but are not claimed as valid ingress.
+    pub unsupported_reason: Option<String>,
     pub timelines: Vec<String>,
     pub tracks: Vec<TimelineInput>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClockSample {
+    pub total_ticks: u64,
+    pub partial_tick: f32,
+    pub rate: f32,
+}
+
+impl ClockSample {
+    pub fn advance_tick(&mut self) {
+        let partial = self.partial_tick + self.rate;
+        let full_ticks = partial.floor();
+        self.total_ticks = self.total_ticks.wrapping_add_signed(full_ticks as i64);
+        self.partial_tick = partial - full_ticks;
+    }
+
+    pub fn tick(self, render_partial_tick: f32) -> f64 {
+        self.total_ticks as f64
+            + f64::from(self.partial_tick)
+            + f64::from(render_partial_tick) * f64::from(self.rate)
+    }
 }
 
 impl Default for DimensionEnvironment {
@@ -43,6 +68,7 @@ impl Default for DimensionEnvironment {
             has_weather: true,
             ambient_light: 0.0,
             sky_light_level: SKY_LIGHT_LEVEL,
+            unsupported_reason: None,
             timelines: Vec::new(),
             tracks: Vec::new(),
         }
@@ -92,6 +118,7 @@ fn float_track(compound: &NbtCompound) -> Option<FloatTrack> {
 pub fn from_dimension_fields(
     has_sky_light: bool,
     has_ceiling: bool,
+    is_end_world: bool,
     ambient_light: Option<f32>,
     sky_light_level: Option<f32>,
     timeline_registry: &[(String, NbtCompound)],
@@ -99,7 +126,7 @@ pub fn from_dimension_fields(
 ) -> Result<DimensionEnvironment, String> {
     let mut result = DimensionEnvironment {
         has_sky_light,
-        has_weather: has_sky_light && !has_ceiling,
+        has_weather: has_sky_light && !has_ceiling && !is_end_world,
         ambient_light: ambient_light.ok_or("missing/invalid ambient_light")?,
         ..Default::default()
     };
@@ -167,17 +194,28 @@ mod tests {
 
     #[test]
     fn dimension_defaults_and_trust_boundary_ranges() {
-        let defaults = from_dimension_fields(true, false, Some(0.0), None, &[], &[]).unwrap();
+        let defaults =
+            from_dimension_fields(true, false, false, Some(0.0), None, &[], &[]).unwrap();
         assert_eq!(defaults.sky_light_level, 15.0);
         assert!(defaults.has_weather);
-        assert!(from_dimension_fields(true, false, Some(f32::NAN), None, &[], &[]).is_err());
+        let end = from_dimension_fields(true, false, true, Some(0.25), None, &[], &[]).unwrap();
+        assert_eq!(end.ambient_light, 0.25);
+        assert!(!end.has_weather);
+        let custom_end_type =
+            from_dimension_fields(true, false, false, Some(0.25), None, &[], &[]).unwrap();
+        assert!(custom_end_type.has_weather);
+        assert!(from_dimension_fields(true, false, false, Some(f32::NAN), None, &[], &[]).is_err());
         assert!(
-            from_dimension_fields(true, false, Some(0.0), Some(f32::INFINITY), &[], &[]).is_err()
+            from_dimension_fields(true, false, false, Some(0.0), Some(f32::INFINITY), &[], &[])
+                .is_err()
         );
-        assert!(from_dimension_fields(true, false, Some(0.0), Some(16.0), &[], &[]).is_err());
+        assert!(
+            from_dimension_fields(true, false, false, Some(0.0), Some(16.0), &[], &[]).is_err()
+        );
         assert!(
             from_dimension_fields(
                 true,
+                false,
                 false,
                 Some(0.0),
                 None,
@@ -185,6 +223,30 @@ mod tests {
                 &vec!["x".into(); MAX_TIMELINES + 1]
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn end_weather_uses_world_key_and_dimension_flags() {
+        assert!(
+            !from_dimension_fields(true, false, true, Some(0.25), None, &[], &[])
+                .unwrap()
+                .has_weather
+        );
+        assert!(
+            from_dimension_fields(true, false, false, Some(0.25), None, &[], &[])
+                .unwrap()
+                .has_weather
+        );
+        assert!(
+            !from_dimension_fields(true, true, false, Some(0.25), None, &[], &[])
+                .unwrap()
+                .has_weather
+        );
+        assert!(
+            !from_dimension_fields(false, false, false, Some(0.25), None, &[], &[])
+                .unwrap()
+                .has_weather
         );
     }
 

@@ -2140,6 +2140,7 @@ impl AppCore {
                     has_skylight,
                     cardinal_light,
                     clock_id,
+                    world_clock_ids,
                     environment,
                 } => {
                     game.interaction.pending_command_block = None;
@@ -2154,6 +2155,7 @@ impl AppCore {
                     game.sky_state.clock_partial_tick = 0.0;
                     game.sky_state.clock_rate = 0.0;
                     game.sky_state.last_network_clock = None;
+                    game.world_clock_ids = world_clock_ids;
                     game.dimension_environment = environment;
                     game.cardinal_light = cardinal_light;
                     game.chunk_store =
@@ -3373,6 +3375,25 @@ impl AppCore {
                     legacy,
                 } => {
                     game.sky_state.game_time = game_time;
+                    for (id, total_ticks, partial_tick, rate) in &clock_updates {
+                        if partial_tick.is_finite() && rate.is_finite() {
+                            game.world_clocks.insert(
+                                *id,
+                                crate::net::environment::ClockSample {
+                                    total_ticks: *total_ticks,
+                                    partial_tick: partial_tick.rem_euclid(1.0),
+                                    rate: *rate,
+                                },
+                            );
+                        } else {
+                            tracing::warn!(
+                                clock_id = id,
+                                partial_tick,
+                                rate,
+                                "Ignoring invalid world-clock sample"
+                            );
+                        }
+                    }
                     let selected_clock_id = game.sky_state.clock_id;
                     let clock_id = selected_clock_id.or(legacy.then_some(0));
                     if let Some((clock_id, total_ticks, partial_tick, rate)) =
