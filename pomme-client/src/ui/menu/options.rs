@@ -186,6 +186,8 @@ fn option_value_for(locale: &str, value: &str) -> String {
         "Unlimited" => ("options.framerateLimit.max", "無制限"),
         "Fancy" => ("options.graphics.fancy", "高品質"),
         "All" => ("options.particles.all", "すべて"),
+        "Decreased" => ("options.particles.decreased", "減少"),
+        "Minimal" => ("options.particles.minimal", "最小限"),
         "Default" => ("options.graphicsApi.default", "デフォルト"),
         "Current" => ("options.fullscreen.current", "現在の設定"),
         "Right" => ("options.mainHand.right", "右"),
@@ -580,6 +582,14 @@ impl MainMenu {
         };
         let clouds_label = format!("Clouds: {}", self.cloud_mode.label());
         let attack_label = format!("Attack Indicator: {}", self.attack_indicator.label());
+        let particles_label = format!(
+            "Particles: {}",
+            match self.particle_status() {
+                crate::particle::ParticleMode::All => "All",
+                crate::particle::ParticleMode::Decreased => "Decreased",
+                crate::particle::ParticleMode::Minimal => "Minimal",
+            }
+        );
         let vignette_label = if self.vignette {
             "Vignette: ON"
         } else {
@@ -604,7 +614,7 @@ impl MainMenu {
             OptRow::Pair("Prioritize Chunk Updates: None", &sd),
             OptRow::Pair("Smooth Lighting: ON", &clouds_label),
             OptRow::PairLeft(&cd),
-            OptRow::Pair("Particles: All", "Mipmap Levels: 4"),
+            OptRow::Pair(&particles_label, "Mipmap Levels: 4"),
             OptRow::Pair("Entity Shadows: ON", &ed),
             OptRow::Pair("Menu Background Blur: 50%", "Cloud Range: 128"),
             OptRow::Pair("Cutout Leaves: Fancy", "Improved Transparency: OFF"),
@@ -639,7 +649,6 @@ impl MainMenu {
             "Prioritize Chunk Updates:",
             "Simulation Distance:",
             "Smooth Lighting:",
-            "Particles:",
             "Mipmap Levels:",
             "Entity Shadows:",
             "Menu Background Blur:",
@@ -1000,17 +1009,7 @@ impl MainMenu {
             OptRow::Pair(left_pants, right_pants),
             OptRow::Pair(hat, main_hand),
         ];
-        // "Main Hand:" stays enabled: it moves the attack indicator client-side.
-        // The model toggles do nothing; `client_information` hardcodes them.
-        let disabled = &[
-            "Cape:",
-            "Jacket:",
-            "Left Sleeve:",
-            "Right Sleeve:",
-            "Left Pants Leg:",
-            "Right Pants Leg:",
-            "Hat:",
-        ];
+        let disabled: &[&str] = &[];
         self.build_options_grid(
             sw,
             sh,
@@ -1393,6 +1392,13 @@ impl MainMenu {
                     }
                     if label.starts_with("Fullscreen:") {
                         self.set_display_mode(self.display_mode.cycle());
+                    }
+                    if label.starts_with("Particles:") {
+                        self.particle_status =
+                            crate::particle::ParticleMode::from_u8(self.particle_status)
+                                .cycle()
+                                .to_u8();
+                        self.save_settings();
                     }
                     if label.starts_with("Clouds:") {
                         self.cloud_mode = self.cloud_mode.cycle();
