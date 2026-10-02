@@ -2676,7 +2676,7 @@ fn emit_baked_model(
         let cutout_start = sink.cutout.len();
         let water_start = sink.water.len();
         let translucent_start = sink.translucent.len();
-        let lights = model_quad_lights(
+        let (lights, raw) = model_quad_lighting(
             snapshot,
             registry,
             state,
@@ -2684,12 +2684,6 @@ fn emit_baked_model(
             model.ambient_occlusion,
             [bx, by, bz],
         );
-        let [dx, dy, dz] = quad
-            .cullface
-            .or(quad.shade_face)
-            .map_or([0; 3], |dir| dir.offset());
-        let raw =
-            packed_raw_light_replicated(raw_light_pair(snapshot, state, bx + dx, by + dy, bz + dz));
         emit_face(
             sink,
             vertex_origin,
@@ -2699,7 +2693,7 @@ fn emit_baked_model(
             region,
             tint,
         );
-        stamp_raw_samples(sink, vertex_start, [raw; 4]);
+        stamp_raw_samples(sink, vertex_start, raw);
         if trace_target.is_some() {
             let (index_list, index_start, index_count) = if sink.solid.len() > solid_start {
                 ("solid", solid_start, sink.solid.len() - solid_start)
@@ -2779,10 +2773,17 @@ fn emit_cube_faces(
         };
         let region = uv_map.get_region(face_tex);
         let (positions, uvs) = cube_face_geometry(*dir);
-        let lights = compute_face_ao(snapshot, registry, bx, by, bz, *dir, Some(*dir), true);
-        let [dx, dy, dz] = dir.offset();
-        let raw =
-            packed_raw_light_replicated(raw_light_pair(snapshot, state, bx + dx, by + dy, bz + dz));
+        let (lights, raw) = compute_face_ao_samples(
+            snapshot,
+            registry,
+            state,
+            bx,
+            by,
+            bz,
+            *dir,
+            Some(*dir),
+            true,
+        );
 
         let is_side = i >= 2;
         if let Some(overlay) = textures.side_overlay.as_deref().filter(|_| is_side) {
@@ -2796,7 +2797,7 @@ fn emit_cube_faces(
                 region,
                 PACKED_WHITE_SHIFTED,
             );
-            stamp_raw_samples(sink, start, [raw; 4]);
+            stamp_raw_samples(sink, start, raw);
             let overlay_region = uv_map.get_region(overlay);
             let start = sink.vertices.len();
             emit_face(
@@ -2808,7 +2809,7 @@ fn emit_cube_faces(
                 overlay_region,
                 tint,
             );
-            stamp_raw_samples(sink, start, [raw; 4]);
+            stamp_raw_samples(sink, start, raw);
         } else {
             let is_tinted =
                 !matches!(textures.tint, Tint::None) && (textures.side_overlay.is_none() || i == 0);
@@ -2819,7 +2820,7 @@ fn emit_cube_faces(
             };
             let start = sink.vertices.len();
             emit_face(sink, block_pos, &positions, &uvs, lights, region, face_tint);
-            stamp_raw_samples(sink, start, [raw; 4]);
+            stamp_raw_samples(sink, start, raw);
         }
     }
 }
@@ -3230,6 +3231,13 @@ fn emit_fluid(
                 [snapshot.cardinal_lighting.up; 4],
                 region,
                 tint,
+                packed_raw_light_replicated(raw_light_pair(
+                    snapshot,
+                    fluid_state,
+                    bx + Direction::Up.offset()[0],
+                    by + Direction::Up.offset()[1],
+                    bz + Direction::Up.offset()[2],
+                )),
             );
             if should_render_backward_up_face(snapshot, registry, fluid_state, bx, by, bz) {
                 let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
@@ -3243,6 +3251,13 @@ fn emit_fluid(
                     [snapshot.cardinal_lighting.up; 4],
                     region,
                     tint,
+                    packed_raw_light_replicated(raw_light_pair(
+                        snapshot,
+                        fluid_state,
+                        bx + Direction::Up.offset()[0],
+                        by + Direction::Up.offset()[1],
+                        bz + Direction::Up.offset()[2],
+                    )),
                 );
             }
             continue;
@@ -3272,6 +3287,13 @@ fn emit_fluid(
                         uv_map.get_region("lava_still")
                     },
                     tint,
+                    packed_raw_light_replicated(raw_light_pair(
+                        snapshot,
+                        fluid_state,
+                        bx + Direction::Down.offset()[0],
+                        by + Direction::Down.offset()[1],
+                        bz + Direction::Down.offset()[2],
+                    )),
                 );
                 continue;
             }
@@ -3342,6 +3364,13 @@ fn emit_fluid(
             [snapshot.cardinal_lighting.by_face(*dir); 4],
             region,
             tint,
+            packed_raw_light_replicated(raw_light_pair(
+                snapshot,
+                fluid_state,
+                bx + dir.offset()[0],
+                by + dir.offset()[1],
+                bz + dir.offset()[2],
+            )),
         );
         // Flow sprites have no water_overlay material, so match vanilla's
         // two-sided ordinary fluid sides while reusing identical vertex data.
@@ -3396,7 +3425,7 @@ fn emit_multipart(
         let cutout_start = sink.cutout.len();
         let water_start = sink.water.len();
         let translucent_start = sink.translucent.len();
-        let lights = model_quad_lights(
+        let (lights, raw) = model_quad_lighting(
             snapshot,
             registry,
             state,
@@ -3404,12 +3433,6 @@ fn emit_multipart(
             quad.ambient_occlusion,
             [bx, by, bz],
         );
-        let [dx, dy, dz] = quad
-            .cullface
-            .or(quad.shade_face)
-            .map_or([0; 3], |dir| dir.offset());
-        let raw =
-            packed_raw_light_replicated(raw_light_pair(snapshot, state, bx + dx, by + dy, bz + dz));
         emit_face(
             sink,
             vertex_origin,
@@ -3419,7 +3442,7 @@ fn emit_multipart(
             region,
             tint,
         );
-        stamp_raw_samples(sink, vertex_start, [raw; 4]);
+        stamp_raw_samples(sink, vertex_start, raw);
         if trace_target.is_some() {
             let (index_list, index_start, index_count) = if sink.solid.len() > solid_start {
                 ("solid", solid_start, sink.solid.len() - solid_start)
@@ -3549,9 +3572,19 @@ fn emit_missing_cube(
         }
 
         let (positions, uvs) = cube_face_geometry(*dir);
-        let light = snapshot.cardinal_lighting.by_face(*dir);
+        let (lights, raw) = compute_face_ao_samples(
+            snapshot,
+            registry,
+            state,
+            bx,
+            by,
+            bz,
+            *dir,
+            Some(*dir),
+            true,
+        );
         let base = sink.vertices.len() as u32;
-        for (pos, uv) in positions.iter().zip(uvs) {
+        for (i, (pos, uv)) in positions.iter().zip(uvs).enumerate() {
             sink.vertices.push(TerrainVertex {
                 position: [
                     block_pos[0] + pos[0],
@@ -3560,8 +3593,8 @@ fn emit_missing_cube(
                 ],
                 sprite_uv: uv,
                 sprite: missing.sprite,
-                light_tint: pack_light_tint(light, MISSING_TINT),
-                raw_light_samples: u32::MAX,
+                light_tint: pack_light_tint(lights[i], MISSING_TINT),
+                raw_light_samples: raw[i],
             });
         }
         // The missing tile is a solid checker, so the cube goes in the solid pass.
@@ -3606,7 +3639,15 @@ fn emit_face(
         cutout
     };
     emit_face_into(
-        vertices, indices, block_pos, positions, uvs, lights, region, tint,
+        vertices,
+        indices,
+        block_pos,
+        positions,
+        uvs,
+        lights,
+        region,
+        tint,
+        u32::MAX,
     );
 }
 
@@ -3626,6 +3667,7 @@ fn emit_face_into(
     lights: [f32; 4],
     region: AtlasRegion,
     tint: u32,
+    raw_light_samples: u32,
 ) {
     let base = vertices.len() as u32;
     for i in 0..4 {
@@ -3638,7 +3680,7 @@ fn emit_face_into(
             sprite_uv: uvs[i],
             sprite: region.sprite,
             light_tint: pack_light_tint(lights[i], tint),
-            raw_light_samples: u32::MAX,
+            raw_light_samples,
         });
     }
 
@@ -3680,24 +3722,24 @@ fn corners0_offset(dir: Direction) -> [i32; 3] {
 /// the face's cardinal shade, where `shade_face` is `None` for a model element
 /// with `shade: false`.
 #[allow(clippy::too_many_arguments)]
-fn compute_face_ao(
+fn compute_face_ao_samples(
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
+    state: BlockState,
     bx: i32,
     by: i32,
     bz: i32,
     dir: Direction,
     shade_face: Option<Direction>,
     ambient_occlusion: bool,
-) -> [f32; 4] {
+) -> ([f32; 4], [u32; 4]) {
     let s = |[dx, dy, dz]: [i32; 3]| -> f32 {
         shade_brightness(
             snapshot.get_block_state(bx + dx, by + dy, bz + dz),
             registry,
         )
     };
-    let l = |[dx, dy, dz]: [i32; 3]| -> f32 { snapshot.get_light(bx + dx, by + dy, bz + dz) };
-
+    let raw = |[dx, dy, dz]: [i32; 3]| raw_light_pair(snapshot, state, bx + dx, by + dy, bz + dz);
     let shade0 = s(corners0_offset(dir));
 
     // Each vertex's (side1, side2, corner) neighbour offsets, in
@@ -3743,31 +3785,78 @@ fn compute_face_ao(
 
     let n = dir.offset();
     let dir_shade = snapshot.shade(shade_face);
-    rows.map(|[side1, side2, corner]| {
+    let vertices: [(f32, u32); 4] = std::array::from_fn(|i| {
+        let [side1, side2, corner] = rows[i];
+        let samples = [raw(n), raw(side1), raw(side2), raw(corner)];
+        let light = avg4(
+            LIGHT_TABLE[((samples[0] & 15).max((samples[0] >> 4) & 15)) as usize],
+            LIGHT_TABLE[((samples[1] & 15).max((samples[1] >> 4) & 15)) as usize],
+            LIGHT_TABLE[((samples[2] & 15).max((samples[2] >> 4) & 15)) as usize],
+            LIGHT_TABLE[((samples[3] & 15).max((samples[3] >> 4) & 15)) as usize],
+        );
         let ao = if ambient_occlusion {
             super::block_ao::vertex_brightness(s(side1), s(side2), s(corner), shade0)
         } else {
             1.0
         };
-        let light = avg4(l(n), l(side1), l(side2), l(corner));
-        ao * light * dir_shade
-    })
+        (ao * light * dir_shade, u32::from_le_bytes(samples))
+    });
+    (
+        vertices.map(|(brightness, _)| brightness),
+        vertices.map(|(_, raw)| raw),
+    )
 }
 
-fn model_quad_lights(
+#[allow(clippy::too_many_arguments)]
+fn compute_face_ao(
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    bx: i32,
+    by: i32,
+    bz: i32,
+    dir: Direction,
+    shade_face: Option<Direction>,
+    ambient_occlusion: bool,
+) -> [f32; 4] {
+    compute_face_ao_samples(
+        snapshot,
+        registry,
+        crate::world::block::first_state_of("air").unwrap(),
+        bx,
+        by,
+        bz,
+        dir,
+        shade_face,
+        ambient_occlusion,
+    )
+    .0
+}
+
+fn model_quad_lighting(
     snapshot: &ChunkStoreSnapshot,
     registry: &BlockRegistry,
     state: BlockState,
     quad: &BakedQuad,
     ambient_occlusion: bool,
     [bx, by, bz]: [i32; 3],
-) -> [f32; 4] {
+) -> ([f32; 4], [u32; 4]) {
     if ambient_occlusion {
-        // Keep the existing smooth-lighting path unchanged.
-        return quad.shade_face.map_or_else(
-            || [snapshot.get_light(bx, by, bz); 4],
-            |dir| compute_face_ao(snapshot, registry, bx, by, bz, dir, Some(dir), true),
-        );
+        if let Some(dir) = quad.shade_face {
+            return compute_face_ao_samples(
+                snapshot,
+                registry,
+                state,
+                bx,
+                by,
+                bz,
+                dir,
+                Some(dir),
+                true,
+            );
+        }
+        let light = snapshot.get_light(bx, by, bz);
+        let raw = packed_raw_light_replicated(raw_light_pair(snapshot, state, bx, by, bz));
+        return ([light; 4], [raw; 4]);
     }
     // ModelBlockRenderer.tesselateFlat supplies the cull-face neighbour's
     // light. Unculled quads use BlockModelLighter.prepareQuadShape's faceCubic:
@@ -3807,13 +3896,29 @@ fn model_quad_lights(
     let light = snapshot
         .get_light(bx + dx, by + dy, bz + dz)
         .max(LIGHT_TABLE[crate::world::block::light_props(state).emission as usize]);
-    [light * snapshot.shade(quad.shade_face); 4]
+    let mut raw = raw_light_pair(snapshot, state, bx + dx, by + dy, bz + dz);
+    let emission = crate::world::block::light_props(state).emission.min(15) as u8;
+    raw = (raw & 0x0f) | (((raw >> 4).max(emission)) << 4);
+    (
+        [light * snapshot.shade(quad.shade_face); 4],
+        [packed_raw_light_replicated(raw); 4],
+    )
 }
 
-fn raw_light_pair(snapshot: &ChunkStoreSnapshot, state: BlockState, x: i32, y: i32, z: i32) -> u8 {
+fn model_quad_lights(
+    snapshot: &ChunkStoreSnapshot,
+    registry: &BlockRegistry,
+    state: BlockState,
+    quad: &BakedQuad,
+    ambient_occlusion: bool,
+    pos: [i32; 3],
+) -> [f32; 4] {
+    model_quad_lighting(snapshot, registry, state, quad, ambient_occlusion, pos).0
+}
+
+fn raw_light_pair(snapshot: &ChunkStoreSnapshot, _state: BlockState, x: i32, y: i32, z: i32) -> u8 {
     let (sky, block) = snapshot.get_light_raw(x, y, z);
-    let emission = crate::world::block::light_props(state).emission;
-    sky.min(15) as u8 | ((block.max(emission).min(15) as u8) << 4)
+    sky.min(15) as u8 | (block.min(15) as u8) << 4
 }
 
 fn packed_raw_light_replicated(sample: u8) -> u32 {
@@ -4640,6 +4745,9 @@ mod terrain_uv_tests {
                     PACKED_WHITE_SHIFTED,
                 );
                 assert!(vertices.iter().all(|v| v.light_tint == expected));
+                let raw = raw_light_pair(&snapshot, hopper, 8 + dx, 8 + dy, 8 + dz);
+                let expected_raw = packed_raw_light_replicated(raw);
+                assert!(vertices.iter().all(|v| v.raw_light_samples == expected_raw));
             }
         }
         let mut quad = model.quads[0].clone();
@@ -4685,6 +4793,23 @@ mod terrain_uv_tests {
             )
         );
         assert!(smooth.iter().any(|light| *light != smooth[0]));
+        let (ao_lights, raw_samples) = compute_face_ao_samples(
+            &snapshot,
+            &registry,
+            hopper,
+            8,
+            8,
+            8,
+            Direction::Up,
+            Some(Direction::Up),
+            true,
+        );
+        assert_eq!(ao_lights, smooth); // keep the established AO brightness/vertex order
+        assert_eq!(raw_samples[0].to_le_bytes(), [0x40, 0x20, 0x20, 0xf0]);
+        let sky15 = LIGHT_TABLE[(0x0f_u8 & 15).max((0x0f >> 4) & 15) as usize];
+        let block15 = LIGHT_TABLE[(0x00_u8 & 15).max((0xf0 >> 4) & 15) as usize];
+        assert_eq!(sky15, block15); // legacy scalar lookup sees equal maxima
+        assert_ne!(0x0f_u8, 0xf0_u8); // raw contract retains which channel supplied it
         for (dir, boundary, toward_edge) in [(Down, 0.0001_f32, -1_i32), (Up, 0.9999_f32, 1_i32)] {
             quad.shade_face = Some(dir);
             quad.positions = face_positions(dir, [0.0; 3], [1.0; 3]);
@@ -4711,6 +4836,8 @@ mod terrain_uv_tests {
             model_quad_lights(&snapshot, &registry, torch, &quad, false, [8; 3]),
             [LIGHT_TABLE[14]; 4]
         );
+        let (_, torch_raw) = model_quad_lighting(&snapshot, &registry, torch, &quad, false, [8; 3]);
+        assert_eq!(torch_raw, [u32::from_le_bytes([0xe0; 4]); 4]);
         quad.cullface = None;
         snapshot.cardinal_lighting = CardinalLighting::NETHER;
         quad.positions = face_positions(Up, [0.0; 3], [1.0; 3]);
@@ -4719,6 +4846,10 @@ mod terrain_uv_tests {
             model_quad_lights(&snapshot, &registry, hopper, &quad, false, [8; 3]),
             [snapshot.get_light(8, 9, 8) * CardinalLighting::NETHER.up; 4]
         );
+        quad.cullface = None;
+        let (_, unshaded_raw) =
+            model_quad_lighting(&snapshot, &registry, hopper, &quad, false, [8; 3]);
+        assert_eq!(unshaded_raw, [u32::from_le_bytes([0x30; 4]); 4]);
     }
 
     #[test]
