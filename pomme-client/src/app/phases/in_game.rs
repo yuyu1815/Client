@@ -2031,6 +2031,16 @@ fn tick_cloaks(player: &mut crate::player::LocalPlayer, entities: &mut crate::en
     }
 }
 
+fn advance_world_clock_tick(
+    game_time: &mut i64,
+    clocks: &mut HashMap<u32, crate::net::environment::ClockSample>,
+) {
+    *game_time = game_time.wrapping_add(1);
+    for clock in clocks.values_mut() {
+        clock.advance_game_time(1);
+    }
+}
+
 pub(crate) fn advance_server_time(
     accumulator: &mut f32,
     dt: f32,
@@ -3258,6 +3268,12 @@ pub fn update_game(
             game.item_activation = None;
         }
         game.item_cooldowns.tick();
+        // ClientLevel.tickTime advances once per eligible fixed world tick;
+        // never use the server tick-rate/interpolation cadence for this clock.
+        if (!core.server_tick_frozen || simulation_ticks > 0) && !(game.singleplayer && game.paused)
+        {
+            advance_world_clock_tick(&mut game.world_clock_game_time, &mut game.world_clocks);
+        }
         // ClientLevel ticks the border on each fixed client/world tick, even
         // when the world clock is frozen or running at a modified rate.
         game.world_border.tick();
@@ -8362,16 +8378,16 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        advance_server_time, armor_stand_render_infos, arrow_render_infos, block_entity_in_frustum,
-        boat_render_infos, boat_underwater_status, bump_loaded_content_generations,
-        bump_section_generations, consecutive_section_runs, credits_may_advance,
-        current_edit_section_runs, death_confirm_escape_allowed, experience_orb_color,
-        experience_orb_icon, experience_orb_light, experience_orb_render_infos, finish_win_credits,
-        finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
-        item_frame_base_position, item_frame_base_rotation, limited_crafting_param,
-        mannequin_render_infos, mesh_result_is_stale, mesh_target_mask, minecart_render_infos,
-        native_cape_pose, section_bit, section_bits, server_tick_runs, show_death_screen_param,
-        sign_has_text, sign_text_in_range, tick_cloaks, tnt_render_effect,
+        advance_server_time, advance_world_clock_tick, armor_stand_render_infos,
+        arrow_render_infos, block_entity_in_frustum, boat_render_infos, boat_underwater_status,
+        bump_loaded_content_generations, bump_section_generations, consecutive_section_runs,
+        credits_may_advance, current_edit_section_runs, death_confirm_escape_allowed,
+        experience_orb_color, experience_orb_icon, experience_orb_light,
+        experience_orb_render_infos, finish_win_credits, finish_win_credits_if_allowed,
+        has_red_overlay, is_win_game_event, item_frame_base_position, item_frame_base_rotation,
+        limited_crafting_param, mannequin_render_infos, mesh_result_is_stale, mesh_target_mask,
+        minecart_render_infos, native_cape_pose, section_bit, section_bits, server_tick_runs,
+        show_death_screen_param, sign_has_text, sign_text_in_range, tick_cloaks, tnt_render_effect,
     };
     use crate::renderer::SkyState;
 
@@ -9748,6 +9764,88 @@ mod tests {
         assert!(
             super::GameState::tracking_attachment_for(&player, &entities, &items, 999).is_none()
         );
+    }
+
+    #[test]
+    fn fixed_world_tick_advances_cursor_and_independent_clock_samples_once() {
+        let mut game_time = 100;
+        let mut clocks = HashMap::from([
+            (
+                1,
+                crate::net::environment::ClockSample {
+                    total_ticks: 100,
+                    partial_tick: 0.0,
+                    rate: 1.0,
+                },
+            ),
+            (
+                2,
+                crate::net::environment::ClockSample {
+                    total_ticks: 7,
+                    partial_tick: 0.75,
+                    rate: 0.0,
+                },
+            ),
+            (
+                3,
+                crate::net::environment::ClockSample {
+                    total_ticks: 0,
+                    partial_tick: 0.75,
+                    rate: -0.25,
+                },
+            ),
+            (
+                4,
+                crate::net::environment::ClockSample {
+                    total_ticks: 0,
+                    partial_tick: 0.0,
+                    rate: 0.25,
+                },
+            ),
+        ]);
+        for _ in 0..20 {
+            advance_world_clock_tick(&mut game_time, &mut clocks);
+        }
+        assert_eq!(game_time, 120);
+        assert_eq!(
+            (clocks[&1].total_ticks, clocks[&1].partial_tick),
+            (120, 0.0)
+        );
+        assert_eq!((clocks[&2].total_ticks, clocks[&2].partial_tick), (7, 0.75));
+        assert_eq!(
+            (clocks[&3].total_ticks, clocks[&3].partial_tick),
+            (-5, 0.75)
+        );
+        assert_eq!((clocks[&4].total_ticks, clocks[&4].partial_tick), (5, 0.0));
+
+        let source = include_str!("in_game.rs");
+        assert_eq!(
+            source
+                .matches("advance_world_clock_tick(&mut game.world_clock_game_time")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn fixed_world_time_obeys_pause_and_freeze_gates() {
+        let mut game_time = 100;
+        let mut clocks = HashMap::from([(
+            1,
+            crate::net::environment::ClockSample {
+                total_ticks: 100,
+                partial_tick: 0.0,
+                rate: 1.0,
+            },
+        )]);
+        for (frozen, simulation_ticks, singleplayer_paused) in [(true, 0, false), (false, 1, true)]
+        {
+            if (!frozen || simulation_ticks > 0) && !singleplayer_paused {
+                advance_world_clock_tick(&mut game_time, &mut clocks);
+            }
+        }
+        assert_eq!(game_time, 100);
+        assert_eq!(clocks[&1].total_ticks, 100);
     }
 
     #[test]
