@@ -113,6 +113,22 @@ pub fn bake_boat_model(chest: bool) -> BakedEntityModel {
     bake_model(parts, texture_size.0, texture_size.1)
 }
 
+/// Native `ModelLayers.BOAT_WATER_PATCH` geometry, shared by all boat and raft
+/// variants. Its root pose is baked here; the renderer applies the same boat
+/// root matrix as the body.
+pub fn bake_boat_water_patch_model() -> BakedEntityModel {
+    bake_model(
+        vec![part(
+            "water_patch",
+            [0.0, -3.0, 1.0],
+            [std::f32::consts::FRAC_PI_2, 0.0, 0.0],
+            vec![cube([-14.0, -9.0, -3.0], [28.0, 16.0, 3.0], (0, 0))],
+        )],
+        0,
+        0,
+    )
+}
+
 /// Bamboo raft geometry; the chest raft uses its own 128x128 layer and raised
 /// chest pivots from `RaftModel.createChestRaftModel`.
 pub fn bake_raft_model(chest: bool) -> BakedEntityModel {
@@ -252,6 +268,22 @@ mod tests {
         }
         assert_eq!(actual_min, min);
         assert_eq!(actual_max, max);
+    }
+
+    #[test]
+    fn boat_water_patch_matches_native_layer_bounds_and_root_pose() {
+        let patch = bake_boat_water_patch_model();
+        assert_eq!(patch.parts.len(), 1);
+        let part = &patch.parts[0];
+        assert_eq!(part.name, "water_patch");
+        assert_eq!(part.offset, Vec3::new(0.0, -3.0, 1.0));
+        assert_eq!(
+            part.default_rotation,
+            Vec3::new(std::f32::consts::FRAC_PI_2, 0.0, 0.0)
+        );
+        assert_eq!(part.cubes.len(), 1);
+        assert_eq!(part.cubes[0].origin, Vec3::new(-14.0, -9.0, -3.0));
+        assert_eq!(part.cubes[0].size, Vec3::new(28.0, 16.0, 3.0));
     }
 
     #[test]
