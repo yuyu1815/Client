@@ -198,11 +198,12 @@ pub fn chunk_vertex_bindings() -> [vk::VertexInputBindingDescription; 2] {
     ]
 }
 
-pub fn chunk_vertex_attributes() -> [vk::VertexInputAttributeDescription; 7] {
+pub fn chunk_vertex_attributes() -> [vk::VertexInputAttributeDescription; 8] {
     let pos_off = std::mem::offset_of!(PackedVertex, pos) as u32;
     let uv_off = std::mem::offset_of!(PackedVertex, uv) as u32;
     let sprite_off = std::mem::offset_of!(PackedVertex, sprite) as u32;
     let light_tint_off = std::mem::offset_of!(PackedVertex, light_tint) as u32;
+    let raw_light_off = std::mem::offset_of!(PackedVertex, raw_light_samples) as u32;
     let origin_off = std::mem::offset_of!(ChunkMeta, origin) as u32;
     let vis_off = std::mem::offset_of!(ChunkMeta, visibility) as u32;
     [
@@ -237,15 +238,21 @@ pub fn chunk_vertex_attributes() -> [vk::VertexInputAttributeDescription; 7] {
             format: vk::Format::R8G8B8A8Unorm,
             offset: light_tint_off,
         },
-        // binding 1 — per-instance meta (origin + fade)
         vk::VertexInputAttributeDescription {
             location: 5,
+            binding: 0,
+            format: vk::Format::R32Uint,
+            offset: raw_light_off,
+        },
+        // binding 1 — per-instance meta (origin + fade)
+        vk::VertexInputAttributeDescription {
+            location: 6,
             binding: 1,
             format: vk::Format::R32G32B32Sint,
             offset: origin_off,
         },
         vk::VertexInputAttributeDescription {
-            location: 6,
+            location: 7,
             binding: 1,
             format: vk::Format::R32Sfloat,
             offset: vis_off,
@@ -2178,6 +2185,22 @@ fn desc_write(
 #[cfg(test)]
 mod staging_tests {
     use super::*;
+
+    #[test]
+    fn terrain_vertex_attributes_match_20_byte_layout() {
+        let attrs = chunk_vertex_attributes();
+        assert_eq!(attrs.map(|attr| attr.location), [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(attrs[5].binding, 0);
+        assert_eq!(attrs[5].format, vk::Format::R32Uint);
+        assert_eq!(attrs[5].offset, 16);
+        assert_eq!(attrs[6].binding, 1);
+        assert_eq!(attrs[7].binding, 1);
+        assert_eq!(chunk_vertex_bindings()[0].stride, 20);
+        assert_eq!(
+            chunk_vertex_bindings()[1].stride,
+            size_of::<ChunkMeta>() as u32
+        );
+    }
 
     fn section(si: i32, pos: BlockPos, open: bool, epoch: u64) -> SectionAlloc {
         SectionAlloc {

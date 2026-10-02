@@ -39,6 +39,7 @@ struct TerrainVertex {
     /// `AtlasRegion::sprite`, resolved to a rectangle in the fragment shader.
     sprite: u16,
     light_tint: u32,
+    raw_light_samples: u32,
 }
 
 impl ChunkVertex {
@@ -78,7 +79,7 @@ impl ChunkVertex {
 
 include!("packing_consts.rs");
 
-/// Compact terrain GPU vertex (16 bytes). Positions stay quantized as before.
+/// Compact terrain GPU vertex (20 bytes). Positions stay quantized as before.
 /// `uv` stores sprite-local coordinates as u16 fixed point over the section's
 /// 0..16 repeat range, and `sprite` indexes the atlas's rectangle buffer. The
 /// shader wraps the UV inside that integer rectangle, which avoids
@@ -91,6 +92,7 @@ pub struct PackedVertex {
     pub uv: [u16; 2],
     pub sprite: u16,
     pub light_tint: [u8; 4],
+    pub raw_light_samples: u32,
 }
 
 #[repr(C)]
@@ -125,6 +127,7 @@ fn pack_vertex(v: &TerrainVertex) -> PackedVertex {
         ],
         sprite: v.sprite,
         light_tint: v.light_tint.to_le_bytes(),
+        raw_light_samples: v.raw_light_samples,
     }
 }
 
@@ -174,6 +177,8 @@ fn chest_quads(
                     sprite_uv: vertex.tex_coords.map(|uv| uv as f32 / 65535.0),
                     sprite: region.sprite,
                     light_tint: pack_light_tint(light, PACKED_WHITE_SHIFTED),
+                    // TODO(source-required): chest quads expose only scalar light.
+                    raw_light_samples: u32::MAX,
                 }));
             }
             indices.extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
@@ -1893,6 +1898,7 @@ fn greedy_mesh_section(
                     sprite_uv: *uv,
                     sprite: region.sprite,
                     light_tint: pack_light_tint(lights[i], tint),
+                    raw_light_samples: quad.raw_light_samples[i],
                 });
             }
 
@@ -2678,6 +2684,12 @@ fn emit_baked_model(
             model.ambient_occlusion,
             [bx, by, bz],
         );
+        let [dx, dy, dz] = quad
+            .cullface
+            .or(quad.shade_face)
+            .map_or([0; 3], |dir| dir.offset());
+        let raw =
+            packed_raw_light_replicated(raw_light_pair(snapshot, state, bx + dx, by + dy, bz + dz));
         emit_face(
             sink,
             vertex_origin,
@@ -2687,6 +2699,7 @@ fn emit_baked_model(
             region,
             tint,
         );
+        stamp_raw_samples(sink, vertex_start, [raw; 4]);
         if trace_target.is_some() {
             let (index_list, index_start, index_count) = if sink.solid.len() > solid_start {
                 ("solid", solid_start, sink.solid.len() - solid_start)
@@ -2767,9 +2780,13 @@ fn emit_cube_faces(
         let region = uv_map.get_region(face_tex);
         let (positions, uvs) = cube_face_geometry(*dir);
         let lights = compute_face_ao(snapshot, registry, bx, by, bz, *dir, Some(*dir), true);
+        let [dx, dy, dz] = dir.offset();
+        let raw =
+            packed_raw_light_replicated(raw_light_pair(snapshot, state, bx + dx, by + dy, bz + dz));
 
         let is_side = i >= 2;
         if let Some(overlay) = textures.side_overlay.as_deref().filter(|_| is_side) {
+            let start = sink.vertices.len();
             emit_face(
                 sink,
                 block_pos,
@@ -2779,7 +2796,9 @@ fn emit_cube_faces(
                 region,
                 PACKED_WHITE_SHIFTED,
             );
+            stamp_raw_samples(sink, start, [raw; 4]);
             let overlay_region = uv_map.get_region(overlay);
+            let start = sink.vertices.len();
             emit_face(
                 sink,
                 block_pos,
@@ -2789,6 +2808,7 @@ fn emit_cube_faces(
                 overlay_region,
                 tint,
             );
+            stamp_raw_samples(sink, start, [raw; 4]);
         } else {
             let is_tinted =
                 !matches!(textures.tint, Tint::None) && (textures.side_overlay.is_none() || i == 0);
@@ -2797,7 +2817,9 @@ fn emit_cube_faces(
             } else {
                 PACKED_WHITE_SHIFTED
             };
+            let start = sink.vertices.len();
             emit_face(sink, block_pos, &positions, &uvs, lights, region, face_tint);
+            stamp_raw_samples(sink, start, [raw; 4]);
         }
     }
 }
@@ -3374,22 +3396,30 @@ fn emit_multipart(
         let cutout_start = sink.cutout.len();
         let water_start = sink.water.len();
         let translucent_start = sink.translucent.len();
+        let lights = model_quad_lights(
+            snapshot,
+            registry,
+            state,
+            quad,
+            quad.ambient_occlusion,
+            [bx, by, bz],
+        );
+        let [dx, dy, dz] = quad
+            .cullface
+            .or(quad.shade_face)
+            .map_or([0; 3], |dir| dir.offset());
+        let raw =
+            packed_raw_light_replicated(raw_light_pair(snapshot, state, bx + dx, by + dy, bz + dz));
         emit_face(
             sink,
             vertex_origin,
             &quad.positions,
             &quad.uvs,
-            model_quad_lights(
-                snapshot,
-                registry,
-                state,
-                quad,
-                quad.ambient_occlusion,
-                [bx, by, bz],
-            ),
+            lights,
             region,
             tint,
         );
+        stamp_raw_samples(sink, vertex_start, [raw; 4]);
         if trace_target.is_some() {
             let (index_list, index_start, index_count) = if sink.solid.len() > solid_start {
                 ("solid", solid_start, sink.solid.len() - solid_start)
@@ -3480,6 +3510,8 @@ fn emit_lod_cube(
                 sprite_uv: uvs[i],
                 sprite: region.sprite,
                 light_tint: pack_light_tint(light, tint),
+                // TODO(source-required): LOD currently has direction shade only.
+                raw_light_samples: u32::MAX,
             });
         }
         sink.indices_for(region).extend_from_slice(&[
@@ -3529,6 +3561,7 @@ fn emit_missing_cube(
                 sprite_uv: uv,
                 sprite: missing.sprite,
                 light_tint: pack_light_tint(light, MISSING_TINT),
+                raw_light_samples: u32::MAX,
             });
         }
         // The missing tile is a solid checker, so the cube goes in the solid pass.
@@ -3578,6 +3611,12 @@ fn emit_face(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn stamp_raw_samples(sink: &mut MeshSink, start: usize, samples: [u32; 4]) {
+    for (vertex, samples) in sink.vertices[start..].iter_mut().zip(samples) {
+        vertex.raw_light_samples = samples;
+    }
+}
+
 fn emit_face_into(
     vertices: &mut Vec<TerrainVertex>,
     indices: &mut Vec<u32>,
@@ -3599,6 +3638,7 @@ fn emit_face_into(
             sprite_uv: uvs[i],
             sprite: region.sprite,
             light_tint: pack_light_tint(lights[i], tint),
+            raw_light_samples: u32::MAX,
         });
     }
 
@@ -3768,6 +3808,16 @@ fn model_quad_lights(
         .get_light(bx + dx, by + dy, bz + dz)
         .max(LIGHT_TABLE[crate::world::block::light_props(state).emission as usize]);
     [light * snapshot.shade(quad.shade_face); 4]
+}
+
+fn raw_light_pair(snapshot: &ChunkStoreSnapshot, state: BlockState, x: i32, y: i32, z: i32) -> u8 {
+    let (sky, block) = snapshot.get_light_raw(x, y, z);
+    let emission = crate::world::block::light_props(state).emission;
+    sky.min(15) as u8 | ((block.max(emission).min(15) as u8) << 4)
+}
+
+fn packed_raw_light_replicated(sample: u8) -> u32 {
+    u32::from_le_bytes([sample; 4])
 }
 
 fn avg4(a: f32, b: f32, c: f32, d: f32) -> f32 {
@@ -4268,6 +4318,21 @@ mod terrain_uv_tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn packed_terrain_vertex_layout_and_raw_samples_are_stable() {
+        assert_eq!(size_of::<PackedVertex>(), 20);
+        assert_eq!(std::mem::offset_of!(PackedVertex, pos), 0);
+        assert_eq!(std::mem::offset_of!(PackedVertex, uv), 6);
+        assert_eq!(std::mem::offset_of!(PackedVertex, sprite), 10);
+        assert_eq!(std::mem::offset_of!(PackedVertex, light_tint), 12);
+        assert_eq!(std::mem::offset_of!(PackedVertex, raw_light_samples), 16);
+        assert_eq!(size_of::<ChunkVertex>(), 20);
+        let samples = [0x21, 0x43, 0x65, 0x87];
+        let packed = u32::from_le_bytes(samples);
+        assert_eq!(packed.to_le_bytes(), samples);
+        assert_eq!(u32::MAX, 0xffff_ffff); // explicit legacy/fullbright bypass
+    }
 
     #[test]
     fn raw_light_keeps_sky_and_block_separate_and_preserves_legacy_lookup() {
@@ -4932,6 +4997,7 @@ mod terrain_uv_tests {
                     sprite_uv: [0.0; 2],
                     sprite: 0,
                     light_tint: 0,
+                    raw_light_samples: u32::MAX,
                 });
                 let decoded = packed
                     .pos
@@ -4955,6 +5021,7 @@ mod terrain_uv_tests {
                         sprite_uv: [0.0; 2],
                         sprite: 0,
                         light_tint: 0,
+                        raw_light_samples: u32::MAX,
                     });
                     let decoded_x = packed.pos[0] as f32 / 65535.0 * POS_RANGE - POS_BIAS;
                     assert!((decoded_x - beyond[0]).abs() <= POS_RANGE / 65535.0);

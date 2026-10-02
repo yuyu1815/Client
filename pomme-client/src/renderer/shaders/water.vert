@@ -16,6 +16,7 @@ layout(location = 1) in float in_pos_z;
 layout(location = 2) in uvec2 in_sprite_uv;
 layout(location = 3) in uint in_sprite;
 layout(location = 4) in vec4 in_light_tint;
+layout(location = 5) in uint in_raw_light_samples;
 
 layout(location = 0) out vec2 v_sprite_uv;
 layout(location = 1) out float v_light;
