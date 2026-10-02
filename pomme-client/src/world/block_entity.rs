@@ -1446,15 +1446,21 @@ mod tests {
         let pos = BlockPos::new(0, 64, 0);
         let near = glam::DVec3::new(1.0, 64.0, 0.5);
         let mut book = EnchantingBookState::default();
-        for _ in 0..20 {
+        book.random = crate::util::JavaRandom::new(0);
+        let previous_target = book.flip_target;
+        book.tick(pos, Some(near));
+        assert_ne!(book.flip_target, previous_target);
+        assert_eq!(book.flip_target, -1.0);
+        for _ in 1..20 {
             book.tick(pos, Some(near));
         }
         assert_eq!(book.open, 1.0);
-        assert!(book.flip_target != 0.0);
         for _ in 0..20 {
             book.tick(pos, None);
         }
         assert_eq!(book.open, 0.0);
+        assert_eq!(book.time, 40);
+        assert_eq!(book.interpolated(0.5).2, 40.5);
         book.o_rotation = std::f32::consts::PI - 0.1;
         book.rotation = -std::f32::consts::PI + 0.1;
         let half = book.interpolated(0.5);
