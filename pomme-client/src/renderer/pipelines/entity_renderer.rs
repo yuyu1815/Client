@@ -82,6 +82,7 @@ pub struct EntityRenderInfo {
     pub walk_anim_speed: f32,
     pub entity_kind: EntityKind,
     pub player_uuid: Option<uuid::Uuid>,
+    pub is_invisible: bool,
     /// Effective vanilla player-model visibility bits; non-players use native
     /// defaults.
     pub skin_parts_mask: u8,
@@ -200,6 +201,7 @@ impl Default for EntityRenderInfo {
             walk_anim_speed: 0.0,
             entity_kind: EntityKind::Player,
             player_uuid: None,
+            is_invisible: false,
             skin_parts_mask: 0x7f,
             variant_index: 0,
             armor_stand_flags: 0,
@@ -310,7 +312,15 @@ struct PlayerSkinTexture {
     view: vk::ImageView,
     allocation: Allocation,
     set: vk::DescriptorSet,
+    cape: Option<PlayerCapeTexture>,
+    cape_set: Option<vk::DescriptorSet>,
     slim: bool,
+}
+
+struct PlayerCapeTexture {
+    image: vk::Image,
+    view: vk::ImageView,
+    allocation: Allocation,
 }
 
 impl MobEntry {
@@ -485,6 +495,9 @@ pub struct EntityRenderer {
     texture_sampler_repeat: vk::Sampler,
     mobs: HashMap<EntityKind, MobEntry>,
     player_skins: HashMap<uuid::Uuid, PlayerSkinTexture>,
+    cape_model: BakedEntityModel,
+    cape_vertex_buffer: vk::Buffer,
+    cape_vertex_allocation: Allocation,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2520,7 +2533,7 @@ impl EntityRenderer {
                 n
             })
             .sum();
-        let tex_count = tex_count + MAX_PLAYER_SKINS as u32;
+        let tex_count = tex_count + (MAX_PLAYER_SKINS * 2) as u32;
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -2558,6 +2571,14 @@ impl EntityRenderer {
         let texture_sampler = unsafe { util::create_nearest_sampler(device) };
         let texture_sampler_repeat = unsafe { util::create_nearest_repeat_sampler(device) };
 
+        let cape_model = entity_model::bake_player_cape_model();
+        let (cape_vertex_buffer, cape_vertex_allocation) = util::create_mapped_buffer(
+            device,
+            allocator,
+            bytemuck::cast_slice(&cape_model.vertices),
+            vk::BufferUsageFlags::VertexBuffer,
+            "player_cape_vertices",
+        );
         let mut mobs = HashMap::new();
 
         for def in defs {
@@ -2638,6 +2659,9 @@ impl EntityRenderer {
             texture_sampler_repeat,
             mobs,
             player_skins: HashMap::new(),
+            cape_model,
+            cape_vertex_buffer,
+            cape_vertex_allocation,
         }
     }
 
@@ -2701,20 +2725,71 @@ impl EntityRenderer {
         };
         device.update_descriptor_sets(&[tex_write], &[]);
 
-        if let Some(old) = self.player_skins.insert(
+        let old = self.player_skins.remove(uuid);
+        let mut cape_set = old.as_ref().and_then(|old| old.cape_set);
+        let cape = skin.cape.as_ref().map(|cape| {
+            let (image, view, allocation) = upload_texture_pixels(
+                device,
+                queue,
+                command_pool,
+                allocator,
+                &cape.pixels,
+                cape.width,
+                cape.height,
+            );
+            let descriptor = *cape_set.get_or_insert_with(|| {
+                let alloc_info = vk::DescriptorSetAllocateInfo {
+                    descriptor_pool: self.descriptor_pool,
+                    descriptor_set_count: 1,
+                    set_layouts: &self.texture_layout,
+                    ..Default::default()
+                };
+                let mut descriptor = vk::DescriptorSet::null();
+                device
+                    .allocate_descriptor_sets(&alloc_info, slice::from_mut(&mut descriptor))
+                    .expect("failed to allocate player cape texture descriptor set");
+                descriptor
+            });
+            let image_info = vk::DescriptorImageInfo {
+                sampler: self.texture_sampler,
+                image_view: view,
+                image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+            };
+            let write = vk::WriteDescriptorSet {
+                dst_set: descriptor,
+                dst_binding: 0,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                descriptor_count: 1,
+                image_info: &image_info,
+                ..Default::default()
+            };
+            device.update_descriptor_sets(&[write], &[]);
+            PlayerCapeTexture {
+                image,
+                view,
+                allocation,
+            }
+        });
+        if let Some(old) = old {
+            if let Some(cape) = old.cape {
+                free_player_cape_texture(device, allocator, cape);
+            }
+            device.destroy_image_view(old.view, None);
+            device.destroy_image(old.image, None);
+            allocator.lock().unwrap().free(old.allocation).ok();
+        }
+        self.player_skins.insert(
             uuid.to_owned(),
             PlayerSkinTexture {
                 image,
                 view,
                 allocation,
                 set,
+                cape,
+                cape_set,
                 slim: skin.slim,
             },
-        ) {
-            device.destroy_image_view(old.view, None);
-            device.destroy_image(old.image, None);
-            allocator.lock().unwrap().free(old.allocation).ok();
-        }
+        );
 
         tracing::debug!(
             "Player skin loaded for {uuid}: {}x{}",
@@ -3339,13 +3414,21 @@ impl EntityRenderer {
                 }
             }
 
+            let mut opaque_records = opaque.emit(&vis, &mut instances);
+            opaque_records.extend(collect_player_capes(
+                &vis,
+                &self.cape_model,
+                self.cape_vertex_buffer,
+                &self.player_skins,
+                &mut instances,
+            ));
             let body = collect_overlays(&vis, OverlayKind::BodyTranslucent);
             let eyes = collect_overlays(&vis, OverlayKind::EyesTranslucent);
             let swirl = collect_overlays(&vis, OverlayKind::SwirlAdditive);
             let glint = collect_overlays(&vis, OverlayKind::TridentGlint);
 
             (
-                opaque.emit(&vis, &mut instances),
+                opaque_records,
                 culled.emit(&vis, &mut instances),
                 body.emit(&vis, &mut instances),
                 eyes.emit(&vis, &mut instances),
@@ -3482,8 +3565,20 @@ impl EntityRenderer {
             }
         }
         for (_, skin) in self.player_skins.drain() {
+            for set in [Some(skin.set), skin.cape_set].into_iter().flatten() {
+                device
+                    .free_descriptor_sets(self.descriptor_pool, &[set])
+                    .ok();
+            }
             destroy_player_skin_texture(device, &mut alloc, skin);
         }
+        device.destroy_buffer(self.cape_vertex_buffer, None);
+        alloc
+            .free(std::mem::replace(
+                &mut self.cape_vertex_allocation,
+                unsafe { std::mem::zeroed() },
+            ))
+            .ok();
 
         drop(alloc);
 
@@ -3723,6 +3818,77 @@ impl<'a> VariantGroups<'a> {
         }
         records
     }
+}
+
+fn player_cape_visible(kind: EntityKind, invisible: bool, mask: u8, has_cape: bool) -> bool {
+    matches!(kind, EntityKind::Player | EntityKind::Mannequin)
+        && !invisible
+        && mask & 1 != 0
+        && has_cape
+}
+
+// WIP: static native idle pose only; moving cloak state is owned by the next
+// task.
+fn collect_player_capes(
+    vis: &[VisEntity<'_>],
+    model: &BakedEntityModel,
+    vertex_buffer: vk::Buffer,
+    player_skins: &HashMap<uuid::Uuid, PlayerSkinTexture>,
+    instances: &mut Vec<EntityInstance>,
+) -> Vec<DrawRecord> {
+    let mut records = Vec::new();
+    for entity in vis {
+        let Some(skin) = entity
+            .info
+            .player_uuid
+            .as_ref()
+            .and_then(|uuid| player_skins.get(uuid))
+        else {
+            continue;
+        };
+        if !player_cape_visible(
+            entity.info.entity_kind,
+            entity.info.is_invisible,
+            entity.info.skin_parts_mask,
+            skin.cape.is_some(),
+        ) {
+            continue;
+        }
+        let Some(texture_set) = skin.cape_set else {
+            continue;
+        };
+        let Some(body_index) = entity
+            .entry
+            .base_variant(entity.info.is_baby, 0)
+            .model
+            .parts
+            .iter()
+            .position(|part| part.name == "body")
+        else {
+            continue;
+        };
+        let model_matrix = entity_model::player_cape_attachment_matrix(
+            model,
+            entity.entity_mat * entity.part_transforms[body_index],
+            &entity_model::PartAnim::default(),
+        );
+        let first_instance = instances.len() as u32;
+        instances.push(EntityInstance {
+            model: model_matrix.to_cols_array_2d(),
+            tint: WHITE_TINT,
+            overlay_color: NO_OVERLAY,
+            uv_params: [0.0, 0.0, 1.0, 1.0],
+        });
+        records.push(DrawRecord {
+            texture_set,
+            vertex_buffer,
+            part_start: 0,
+            part_count: model.vertices.len() as u32,
+            first_instance,
+            instance_count: 1,
+        });
+    }
+    records
 }
 
 /// Group translucent/emissive overlays by pipeline-compatible material.
@@ -4147,9 +4313,9 @@ fn free_player_skin_texture(
     descriptor_pool: vk::DescriptorPool,
     skin: PlayerSkinTexture,
 ) {
-    device
-        .free_descriptor_sets(descriptor_pool, &[skin.set])
-        .ok();
+    for set in [Some(skin.set), skin.cape_set].into_iter().flatten() {
+        device.free_descriptor_sets(descriptor_pool, &[set]).ok();
+    }
     let mut alloc = allocator.lock().unwrap();
     destroy_player_skin_texture(device, &mut alloc, skin);
 }
@@ -4159,9 +4325,31 @@ fn destroy_player_skin_texture(
     allocator: &mut Allocator,
     skin: PlayerSkinTexture,
 ) {
+    if let Some(cape) = skin.cape {
+        destroy_player_cape_texture(device, allocator, cape);
+    }
     device.destroy_image_view(skin.view, None);
     allocator.free(skin.allocation).ok();
     device.destroy_image(skin.image, None);
+}
+
+fn free_player_cape_texture(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    cape: PlayerCapeTexture,
+) {
+    let mut alloc = allocator.lock().unwrap();
+    destroy_player_cape_texture(device, &mut alloc, cape);
+}
+
+fn destroy_player_cape_texture(
+    device: &vk::Device,
+    allocator: &mut Allocator,
+    cape: PlayerCapeTexture,
+) {
+    device.destroy_image_view(cape.view, None);
+    allocator.free(cape.allocation).ok();
+    device.destroy_image(cape.image, None);
 }
 
 pub(super) fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
@@ -4433,6 +4621,66 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cape_geometry_attachment_and_draw_predicate_match_native_idle_layer() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::{Mat4, Vec3};
+
+        let model = super::entity_model::bake_player_cape_model();
+        assert_eq!(model.parts.len(), 1);
+        assert_eq!(model.vertices.len(), 36);
+        assert_eq!(model.parts[0].parent, None); // external player-body parent
+        assert_eq!(super::entity_model::PLAYER_CAPE_TEXTURE_SIZE, (64, 64));
+        assert_eq!(model.parts[0].offset, Vec3::new(0.0, 0.0, 2.0));
+        let cube = model.parts[0].cubes[0];
+        assert_eq!(cube.origin, Vec3::new(-5.0, 0.0, -1.0));
+        assert_eq!(cube.size, Vec3::new(10.0, 16.0, 1.0));
+        assert_eq!(cube.tex_offset, (0, 0));
+        let body = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
+        let attached = super::entity_model::player_cape_attachment_matrix(
+            &model,
+            body,
+            &super::entity_model::PartAnim::default(),
+        );
+        assert_eq!(attached.w_axis.truncate(), Vec3::new(1.0, 2.0, 3.125));
+        assert!(super::player_cape_visible(
+            EntityKind::Player,
+            false,
+            1,
+            true
+        ));
+        assert!(super::player_cape_visible(
+            EntityKind::Mannequin,
+            false,
+            1,
+            true
+        ));
+        assert!(!super::player_cape_visible(
+            EntityKind::Player,
+            false,
+            0,
+            true
+        ));
+        assert!(!super::player_cape_visible(
+            EntityKind::Player,
+            true,
+            1,
+            true
+        ));
+        assert!(!super::player_cape_visible(
+            EntityKind::Player,
+            false,
+            1,
+            false
+        ));
+        assert!(!super::player_cape_visible(
+            EntityKind::Zombie,
+            false,
+            1,
+            true
+        ));
+    }
+
     #[test]
     fn trident_foil_has_exactly_one_second_pass_and_reuses_the_base_mesh_pose() {
         use azalea_registry::builtin::EntityKind;

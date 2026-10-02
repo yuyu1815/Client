@@ -445,6 +445,33 @@ pub fn bake_baby_pig_model() -> BakedEntityModel {
 /// `slim` is the 3px-wide-arm (Alex) layout; same texture offsets and pivots,
 /// only the arm boxes differ.
 // TODO: default-skin-by-UUID selection for players without a fetched skin.
+pub const PLAYER_CAPE_TEXTURE_SIZE: (u32, u32) = (64, 64);
+
+pub fn bake_player_cape_model() -> BakedEntityModel {
+    let mut model = bake_model(
+        vec![EntityPart {
+            name: "cape".into(),
+            offset: Vec3::new(0.0, 0.0, 2.0),
+            default_rotation: Vec3::new(0.0, std::f32::consts::PI, 0.0),
+            cubes: vec![vbox((0, 0), (-5.0, 0.0, -1.0), (10.0, 16.0, 1.0))],
+            parent: None,
+        }],
+        PLAYER_CAPE_TEXTURE_SIZE.0,
+        PLAYER_CAPE_TEXTURE_SIZE.1,
+    );
+    model.convention = ModelConvention::BlockYUp;
+    model
+}
+
+/// Compose a cape child pose with the player's already-computed body matrix.
+pub fn player_cape_attachment_matrix(
+    cape_model: &BakedEntityModel,
+    body_parent: Mat4,
+    pose: &PartAnim,
+) -> Mat4 {
+    body_parent * cape_model.compute_part_transforms(pose)[0]
+}
+
 pub fn bake_player_model(slim: bool) -> BakedEntityModel {
     let arm_w = if slim { 3.0 } else { 4.0 };
     let right_arm_ox = if slim { -2.0 } else { -3.0 };

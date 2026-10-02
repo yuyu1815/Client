@@ -5088,6 +5088,7 @@ pub fn update_game(
                     walk_anim_speed: e.walk_speed(partial_tick),
                     entity_kind: e.entity_type,
                     player_uuid: e.player_uuid,
+                    is_invisible: e.flags.invisible,
                     skin_parts_mask: match e.entity_type {
                         EntityKind::Player if entity_id == game.player.entity_id => {
                             game.local_skin_parts_mask
