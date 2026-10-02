@@ -15,6 +15,8 @@ pub struct Quad {
     /// Per-corner smooth light (quantised brightness 0..=255), ordered to match
     /// `ao_levels`.
     pub light: [u8; 4],
+    /// Four vertex samples, each byte encoding `sky | (block << 4)`.
+    pub raw_light_samples: [u32; 4],
 }
 
 impl Quad {
@@ -33,6 +35,7 @@ impl Quad {
             packed: ((v_type << 32) | (h << 24) | (w << 18) | (z << 12) | (y << 6) | x) as u64,
             ao,
             light,
+            raw_light_samples: [0; 4],
         }
     }
 
@@ -71,6 +74,7 @@ pub struct GreedyMesher<const CS: usize> {
     face_masks: Box<[u64]>,
     ao_faces: Box<[u8]>,
     light_faces: Box<[[u8; 4]]>,
+    raw_light_faces: Box<[[u32; 4]]>,
     forward_merged: Box<[u8]>,
     right_merged: Box<[u8]>,
 }
@@ -85,6 +89,7 @@ impl<const CS: usize> GreedyMesher<CS> {
             face_masks: vec![0; Self::CS_2 * 6].into_boxed_slice(),
             ao_faces: vec![0; Self::CS_2 * 6 * CS].into_boxed_slice(),
             light_faces: vec![[0u8; 4]; Self::CS_2 * 6 * CS].into_boxed_slice(),
+            raw_light_faces: vec![[0u32; 4]; Self::CS_2 * 6 * CS].into_boxed_slice(),
             forward_merged: vec![0; Self::CS_2].into_boxed_slice(),
             right_merged: vec![0; CS].into_boxed_slice(),
             quads: core::array::from_fn(|_| Vec::new()),
@@ -96,10 +101,11 @@ impl<const CS: usize> GreedyMesher<CS> {
         voxels: &[u16],
         occluders: &[bool],
         light: &[f32],
+        raw_light: &[u8],
         transparents: &BTreeSet<u16>,
     ) {
         self.face_culling(voxels, transparents);
-        self.compute_ao_and_light(occluders, light);
+        self.compute_ao_and_light(occluders, light, raw_light);
         self.face_merging(voxels);
     }
 
@@ -155,13 +161,16 @@ impl<const CS: usize> GreedyMesher<CS> {
 
     /// Per-corner AO and smooth light for every visible face cell, written to
     /// the same `idx` so the light merge gate stays locked to the AO gate.
-    fn compute_ao_and_light(&mut self, occluders: &[bool], light: &[f32]) {
+    fn compute_ao_and_light(&mut self, occluders: &[bool], light: &[f32], raw_light: &[u8]) {
         let occ = |x: i32, y: i32, z: i32| -> bool {
             Self::padded_index(x, y, z).is_some_and(|i| occluders[i])
         };
         // Out of range falls back to full bright (never reached for real face cells).
         let lit = |x: i32, y: i32, z: i32| -> f32 {
             Self::padded_index(x, y, z).map_or(1.0, |i| light[i])
+        };
+        let raw_lit = |x: i32, y: i32, z: i32| -> u8 {
+            Self::padded_index(x, y, z).map_or(15, |i| raw_light[i])
         };
 
         for face in 0..=3u8 {
@@ -188,6 +197,8 @@ impl<const CS: usize> GreedyMesher<CS> {
                         let idx = Self::cell_index(face as usize, layer, forward, bit_pos);
                         self.ao_faces[idx] = compute_vertex_ao_packed(face, fx, fy, fz, &occ);
                         self.light_faces[idx] = compute_vertex_light_packed(face, fx, fy, fz, &lit);
+                        self.raw_light_faces[idx] =
+                            compute_vertex_raw_light_samples(face, fx, fy, fz, &raw_lit);
                     }
                 }
             }
@@ -216,6 +227,8 @@ impl<const CS: usize> GreedyMesher<CS> {
                         let idx = Self::cell_index(face as usize, forward, right, bit_pos - 1);
                         self.ao_faces[idx] = compute_vertex_ao_packed(face, fx, fy, fz, &occ);
                         self.light_faces[idx] = compute_vertex_light_packed(face, fx, fy, fz, &lit);
+                        self.raw_light_faces[idx] =
+                            compute_vertex_raw_light_samples(face, fx, fy, fz, &raw_lit);
                     }
                 }
             }
@@ -228,6 +241,10 @@ impl<const CS: usize> GreedyMesher<CS> {
 
     fn get_light4(&self, face: usize, layer: usize, forward: usize, right: usize) -> [u8; 4] {
         self.light_faces[Self::cell_index(face, layer, forward, right)]
+    }
+
+    fn get_raw_light4(&self, face: usize, layer: usize, forward: usize, right: usize) -> [u32; 4] {
+        self.raw_light_faces[Self::cell_index(face, layer, forward, right)]
     }
 
     fn face_merging(&mut self, voxels: &[u16]) {
@@ -252,6 +269,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                             voxels[get_axis_index::<CS>(axis, forward + 1, bit_pos + 1, layer + 1)];
                         let ao_here = self.get_ao(face, layer, forward, bit_pos);
                         let light_here = self.get_light4(face, layer, forward, bit_pos);
+                        let raw_light_here = self.get_raw_light4(face, layer, forward, bit_pos);
 
                         if (bits_next >> bit_pos & 1) != 0
                             && ao_uniform(ao_here)
@@ -265,6 +283,8 @@ impl<const CS: usize> GreedyMesher<CS> {
                                 )]
                             && ao_here == self.get_ao(face, layer, forward + 1, bit_pos)
                             && light_here == self.get_light4(face, layer, forward + 1, bit_pos)
+                            && raw_light_here
+                                == self.get_raw_light4(face, layer, forward + 1, bit_pos)
                         {
                             self.forward_merged[bit_pos] += 1;
                             bits_here &= !(1 << bit_pos);
@@ -285,6 +305,8 @@ impl<const CS: usize> GreedyMesher<CS> {
                                     )]
                                 || ao_here != self.get_ao(face, layer, forward, right)
                                 || light_here != self.get_light4(face, layer, forward, right)
+                                || raw_light_here
+                                    != self.get_raw_light4(face, layer, forward, right)
                             {
                                 break;
                             }
@@ -345,6 +367,8 @@ impl<const CS: usize> GreedyMesher<CS> {
                             ),
                             _ => unreachable!(),
                         };
+                        let mut quad = quad;
+                        quad.raw_light_samples = raw_light_here;
                         self.quads[face].push(quad);
                     }
                 }
@@ -381,6 +405,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                             voxels[get_axis_index::<CS>(axis, right + 1, forward + 1, bit_pos)];
                         let ao_here = self.get_ao(face, forward, right, bit_pos - 1);
                         let light_here = self.get_light4(face, forward, right, bit_pos - 1);
+                        let raw_light_here = self.get_raw_light4(face, forward, right, bit_pos - 1);
                         let forward_merge_i = right_cs + (bit_pos - 1);
 
                         let ao_forward = if (bits_forward >> bit_pos & 1) != 0 {
@@ -405,6 +430,16 @@ impl<const CS: usize> GreedyMesher<CS> {
                         } else {
                             [255u8; 4]
                         };
+                        let raw_light_forward = if (bits_forward >> bit_pos & 1) != 0 {
+                            self.get_raw_light4(face, forward + 1, right, bit_pos - 1)
+                        } else {
+                            [u32::MAX; 4]
+                        };
+                        let raw_light_right = if (bits_right >> bit_pos & 1) != 0 {
+                            self.get_raw_light4(face, forward, right + 1, bit_pos - 1)
+                        } else {
+                            [u32::MAX; 4]
+                        };
 
                         let right_merged_ref = &mut self.right_merged[bit_pos - 1];
 
@@ -417,6 +452,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                                     [get_axis_index::<CS>(axis, right + 1, forward + 2, bit_pos)]
                             && ao_here == ao_forward
                             && light_here == light_forward
+                            && raw_light_here == raw_light_forward
                         {
                             self.forward_merged[forward_merge_i] += 1;
                             continue;
@@ -432,6 +468,7 @@ impl<const CS: usize> GreedyMesher<CS> {
                                     [get_axis_index::<CS>(axis, right + 2, forward + 1, bit_pos)]
                             && ao_here == ao_right
                             && light_here == light_right
+                            && raw_light_here == raw_light_right
                         {
                             self.forward_merged[forward_merge_i] = 0;
                             *right_merged_ref += 1;
@@ -457,6 +494,8 @@ impl<const CS: usize> GreedyMesher<CS> {
                             ao_here,
                             light_here,
                         );
+                        let mut quad = quad;
+                        quad.raw_light_samples = raw_light_here;
                         self.quads[face].push(quad);
                     }
                 }
@@ -544,6 +583,27 @@ fn compute_vertex_light_packed(
         packed[i] = (brightness * 255.0).round() as u8;
     }
     packed
+}
+
+/// Raw sky/block pair for each of the same four corners used by smooth light.
+/// Four 8-bit `sky | (block << 4)` samples are packed little-endian per corner.
+fn compute_vertex_raw_light_samples(
+    face: u8,
+    fx: i32,
+    fy: i32,
+    fz: i32,
+    raw_lit: &dyn Fn(i32, i32, i32) -> u8,
+) -> [u32; 4] {
+    let neighbors = face_ao_neighbors(face);
+    core::array::from_fn(|i| {
+        let [s1, s2, corner] = neighbors[i];
+        u32::from_le_bytes([
+            raw_lit(fx, fy, fz),
+            raw_lit(fx + s1[0], fy + s1[1], fz + s1[2]),
+            raw_lit(fx + s2[0], fy + s2[1], fz + s2[2]),
+            raw_lit(fx + corner[0], fy + corner[1], fz + corner[2]),
+        ])
+    })
 }
 
 /// Whether all four packed AO corners are equal (a flat-lit face). Vanilla
@@ -697,5 +757,82 @@ impl Face {
                 ([x, y, z], [0.0, h]),
             ],
         }
+    }
+}
+
+#[cfg(test)]
+mod raw_light_tests {
+    use super::*;
+
+    fn empty_grid() -> (Vec<u16>, Vec<bool>, Vec<f32>) {
+        (
+            vec![0; GreedyMesher::<2>::CS_P3],
+            vec![false; GreedyMesher::<2>::CS_P3],
+            vec![1.0; GreedyMesher::<2>::CS_P3],
+        )
+    }
+
+    fn index(x: usize, y: usize, z: usize) -> usize {
+        pad_linearize::<2>(x, y, z)
+    }
+
+    fn mesh_two(raw_fn: impl Fn(usize, usize, usize) -> u8) -> GreedyMesher<2> {
+        let (mut voxels, occluders, light) = empty_grid();
+        voxels[index(1, 1, 1)] = 1;
+        voxels[index(2, 1, 1)] = 1;
+        let raw = (0..GreedyMesher::<2>::CS_P3)
+            .map(|i| {
+                let z = i % GreedyMesher::<2>::CS_P;
+                let x = (i / GreedyMesher::<2>::CS_P) % GreedyMesher::<2>::CS_P;
+                let y = i / GreedyMesher::<2>::CS_P2;
+                raw_fn(x, y, z)
+            })
+            .collect::<Vec<_>>();
+        let mut mesher = GreedyMesher::<2>::new();
+        mesher.mesh(&voxels, &occluders, &light, &raw, &BTreeSet::new());
+        mesher
+    }
+
+    #[test]
+    fn cube_grid_keeps_raw_samples_and_identical_raw_still_merges() {
+        let (mut voxels, occluders, light) = empty_grid();
+        voxels[index(1, 1, 1)] = 1;
+        let raw = vec![0x0f; GreedyMesher::<2>::CS_P3];
+        let mut cube = GreedyMesher::<2>::new();
+        cube.mesh(&voxels, &occluders, &light, &raw, &BTreeSet::new());
+        assert!(cube.quads.iter().all(|faces| faces.len() == 1));
+        assert!(
+            cube.quads
+                .iter()
+                .flatten()
+                .all(|q| { q.raw_light_samples == [u32::from_le_bytes([0x0f; 4]); 4] })
+        );
+
+        let merged = mesh_two(|_, _, _| 0x0f);
+        assert_eq!(merged.quads[0].len(), 1);
+        assert_eq!(merged.quads[0][0].height(), 2);
+    }
+
+    #[test]
+    fn different_raw_pairs_with_same_scalar_light_do_not_merge() {
+        let split = mesh_two(|x, _, _| if x < 2 { 0x0f } else { 0xf0 });
+        assert_eq!(split.quads[0].len(), 2);
+        assert_eq!(0x0f & 0x0f, 0xf0 >> 4);
+    }
+
+    #[test]
+    fn raw_sampler_uses_expected_coordinates_and_roundtrips_bytes() {
+        let samples =
+            compute_vertex_raw_light_samples(0, 3, 4, 5, &|x, y, z| (x + y * 10 + z * 100) as u8);
+        assert_eq!(samples[0].to_le_bytes(), [31, 30, 21, 20]);
+        assert_eq!(u32::from_le_bytes(samples[0].to_le_bytes()), samples[0]);
+    }
+
+    #[test]
+    fn negative_padded_coordinate_uses_full_sky_raw_fallback() {
+        let raw = vec![0; GreedyMesher::<2>::CS_P3];
+        let sample = |x, y, z| GreedyMesher::<2>::padded_index(x, y, z).map_or(15, |i| raw[i]);
+        assert_eq!(sample(-1, 0, 0), 15);
+        assert_eq!(sample(0, 0, 0), 0);
     }
 }

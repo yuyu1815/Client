@@ -1825,6 +1825,7 @@ fn greedy_mesh_section(
     let mut voxels = vec![0u16; M::CS_P3];
     let mut occluders = vec![false; M::CS_P3];
     let mut light = vec![0.0f32; M::CS_P3];
+    let mut raw_light = vec![0u8; M::CS_P3];
 
     for ly in 0..18 {
         for lx in 0..18 {
@@ -1837,12 +1838,14 @@ fn greedy_mesh_section(
                 voxels[idx] = type_map.get_id(state);
                 occluders[idx] = registry.is_opaque_full_cube(state);
                 light[idx] = snapshot.get_light(bx, by, bz);
+                let (sky, block) = snapshot.get_light_raw(bx, by, bz);
+                raw_light[idx] = sky | (block << 4);
             }
         }
     }
 
     let transparent_set = std::collections::BTreeSet::new();
-    mesher.mesh(&voxels, &occluders, &light, &transparent_set);
+    mesher.mesh(&voxels, &occluders, &light, &raw_light, &transparent_set);
 
     for face_idx in 0..6 {
         let face = greedy::Face::from(face_idx);
