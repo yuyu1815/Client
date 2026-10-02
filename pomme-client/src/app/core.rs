@@ -2268,6 +2268,14 @@ impl AppCore {
                         &passengers,
                     );
                 }
+                NetworkEvent::ArmorStandData { id, index, value } => {
+                    let crate::net::ArmorStandMetaValue::Rotation(rotation) = value;
+                    game.entity_store
+                        .set_armor_stand_rotation(id, index, rotation);
+                }
+                NetworkEvent::ArmorStandEquipment { id, slots } => {
+                    game.entity_store.set_armor_stand_equipment(id, slots);
+                }
                 NetworkEvent::EntitySaddle { entity_id, saddled } => {
                     if let Some(e) = game.entity_store.living.get_mut(&entity_id) {
                         e.saddled = saddled;
@@ -2369,6 +2377,14 @@ impl AppCore {
                 }
                 NetworkEvent::DialogRegistry(registry) => {
                     game.dialog_registry = registry;
+                }
+                NetworkEvent::LoomPatterns(patterns) => {
+                    game.loom_patterns = patterns;
+                }
+                NetworkEvent::LoomPatternTags(tags, item_tags) => {
+                    let mut patterns = (*game.loom_patterns).clone();
+                    patterns.replace_tags(tags, item_tags);
+                    game.loom_patterns = Arc::new(patterns);
                 }
                 NetworkEvent::ContainerSlot {
                     container_id,
@@ -2501,6 +2517,8 @@ impl AppCore {
                         enchant: None,
                         merchant: None,
                         state_id: 0,
+                        loom_scroll: 0,
+                        stonecutter_scroll: 0,
                     });
                     game.sync_container_from_inventory();
                     game.container_was_open = Some(container_id);
@@ -2621,6 +2639,8 @@ impl AppCore {
                                 )
                             }),
                             state_id: 0,
+                            loom_scroll: 0,
+                            stonecutter_scroll: 0,
                         });
                         game.sync_container_from_inventory();
                         // The new menu replaces any previous one server-side;
@@ -2972,13 +2992,33 @@ impl AppCore {
                 } => {
                     // Action 1 for chest/shulker = open-viewer count.
                     if action_id == 1 {
-                        chest_open_event(
-                            &game.chunk_store,
-                            &mut game.block_entity_anim,
-                            &mut priority_remesh,
-                            pos,
-                            action_parameter,
-                        );
+                        let is_bell = game.chunk_store.block_entities.get(&pos).is_some_and(|be| {
+                            be.kind == azalea_registry::builtin::BlockEntityKind::Bell
+                        });
+                        if is_bell && let Some(be) = game.chunk_store.block_entities.get_mut(&pos) {
+                            be.start_bell_swing(action_parameter);
+                        }
+                        let is_decorated_pot =
+                            crate::world::block_entity::rendered_kind(
+                                crate::world::block::block_id(
+                                    game.chunk_store.get_block_state(pos.x, pos.y, pos.z),
+                                ),
+                            ) == Some(azalea_registry::builtin::BlockEntityKind::DecoratedPot);
+                        if !is_bell && is_decorated_pot {
+                            if action_parameter <= 1
+                                && let Some(be) = game.chunk_store.block_entities.get_mut(&pos)
+                            {
+                                be.start_pot_wobble(game.tick_count, action_parameter == 0);
+                            }
+                        } else if !is_bell {
+                            chest_open_event(
+                                &game.chunk_store,
+                                &mut game.block_entity_anim,
+                                &mut priority_remesh,
+                                pos,
+                                action_parameter,
+                            );
+                        }
                     }
                 }
                 NetworkEvent::Explosion(explosion) => {
@@ -3739,6 +3779,13 @@ impl AppCore {
                 NetworkEvent::TextDisplayText { id, text } => {
                     game.entity_store.set_text_display_text(id, text);
                 }
+                NetworkEvent::DisplayData { id, index, value } => {
+                    game.entity_store.set_display_metadata(id, index, value);
+                }
+                NetworkEvent::ItemDisplayData { id, index, value } => {
+                    game.entity_store
+                        .set_item_display_metadata(id, index, value);
+                }
                 NetworkEvent::TextDisplayTransform { id, index, value } => {
                     game.entity_store
                         .set_text_display_transform(id, index, value);
@@ -3781,10 +3828,20 @@ impl AppCore {
                     {
                         game.item_entity_store.set_shared_flags(id, flags);
                     }
+                    game.entity_store.apply_vehicle_metadata(id, index, value);
                     game.entity_store.set_projectile_metadata(id, index, value);
                     game.entity_store
                         .set_text_display_metadata(id, index, value);
                     game.entity_store.apply_entity_data(id, index, value);
+                }
+                NetworkEvent::EntityProjectileItem { id, stack } => {
+                    renderer.ensure_item_mesh(&crate::player::inventory::item_resource_name(
+                        stack.kind,
+                    ));
+                    game.entity_store.set_projectile_item(id, stack);
+                }
+                NetworkEvent::EntityMainArm { id, right } => {
+                    game.entity_store.set_main_arm(id, right);
                 }
                 NetworkEvent::EntityPose { id, pose } => {
                     if id == game.player.entity_id {

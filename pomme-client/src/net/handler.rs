@@ -847,6 +847,8 @@ pub(super) async fn handle_game_packet_with_display_text(
         }
         ClientboundGamePacket::UpdateTags(p) => {
             send_event(event_tx, NetworkEvent::RecipeItemTags(p.tags.clone())).await?;
+            let (patterns, items) = super::connection::loom_pattern_tags(&p.tags);
+            send_event(event_tx, NetworkEvent::LoomPatternTags(patterns, items)).await?;
         }
         ClientboundGamePacket::SetTitleText(p) => {
             send_event(
@@ -1327,7 +1329,21 @@ pub(super) async fn handle_game_packet_with_display_text(
             .await?;
         }
         ClientboundGamePacket::SetEquipment(p) => {
-            // Only the saddle slot is tracked; equipment rendering is a TODO.
+            let slots: Vec<_> = p
+                .slots
+                .slots
+                .iter()
+                .map(|(slot, item)| (*slot, item.clone()))
+                .collect();
+            send_event(
+                event_tx,
+                NetworkEvent::ArmorStandEquipment {
+                    id: p.entity_id.0,
+                    slots,
+                },
+            )
+            .await?;
+            // Mount saddle state remains on the existing living-entity route.
             for (slot, item) in &p.slots.slots {
                 if *slot == azalea_inventory::components::EquipmentSlot::Saddle {
                     send_event(
@@ -1447,6 +1463,79 @@ pub(super) async fn handle_game_packet_with_display_text(
                     )
                     .await?;
                 }
+                if (16..=21).contains(&item.index)
+                    && let azalea_entity::EntityDataValue::Rotations(rotation) = &item.value
+                {
+                    send_event(
+                        event_tx,
+                        NetworkEvent::ArmorStandData {
+                            id: p.id.0,
+                            index: item.index,
+                            value: crate::net::ArmorStandMetaValue::Rotation([
+                                rotation.x, rotation.y, rotation.z,
+                            ]),
+                        },
+                    )
+                    .await?;
+                }
+                let item_display_value = match (&item.value, item.index) {
+                    (azalea_entity::EntityDataValue::ItemStack(stack), 23) => {
+                        Some(crate::net::ItemDisplayMetaValue::Stack(stack.clone()))
+                    }
+                    (azalea_entity::EntityDataValue::Byte(value), 24) => {
+                        Some(crate::net::ItemDisplayMetaValue::Context(*value))
+                    }
+                    _ => None,
+                };
+                if let Some(value) = item_display_value {
+                    send_event(
+                        event_tx,
+                        NetworkEvent::ItemDisplayData {
+                            id: p.id.0,
+                            index: item.index,
+                            value,
+                        },
+                    )
+                    .await?;
+                }
+                let display_value = match &item.value {
+                    azalea_entity::EntityDataValue::Int(v)
+                        if matches!(item.index, 8..=10 | 16 | 22) =>
+                    {
+                        Some(crate::net::DisplayMetaValue::Int(*v))
+                    }
+                    azalea_entity::EntityDataValue::Float(v) if (17..=21).contains(&item.index) => {
+                        Some(crate::net::DisplayMetaValue::Float(*v))
+                    }
+                    azalea_entity::EntityDataValue::Byte(v) if item.index == 15 => {
+                        Some(crate::net::DisplayMetaValue::Byte(*v))
+                    }
+                    azalea_entity::EntityDataValue::Vector3(v) if matches!(item.index, 11 | 12) => {
+                        Some(crate::net::DisplayMetaValue::Vector([v.x, v.y, v.z]))
+                    }
+                    azalea_entity::EntityDataValue::Quaternion(q)
+                        if matches!(item.index, 13 | 14) =>
+                    {
+                        Some(crate::net::DisplayMetaValue::Quaternion([
+                            q.x, q.y, q.z, q.w,
+                        ]))
+                    }
+                    azalea_entity::EntityDataValue::BlockState(s) if item.index == 23 => {
+                        Some(crate::net::DisplayMetaValue::BlockState(u32::from(s.id())))
+                    }
+                    _ => None,
+                };
+                if let Some(value) = display_value {
+                    send_event(
+                        event_tx,
+                        NetworkEvent::DisplayData {
+                            id: p.id.0,
+                            index: item.index,
+                            value,
+                        },
+                    )
+                    .await?;
+                }
                 let text_display_transform = match (&item.value, item.index) {
                     (azalea_entity::EntityDataValue::Vector3(v), 11 | 12) => {
                         Some(crate::net::TextDisplayTransformValue::Vector([
@@ -1490,6 +1579,34 @@ pub(super) async fn handle_game_packet_with_display_text(
                     )
                     .await?;
                 }
+                // 26.2 Avatar.DATA_PLAYER_MAIN_HAND is the HumanoidArm at
+                // index 15; legacy protocols are normalized by translate.rs.
+                if item.index == 15
+                    && let azalea_entity::EntityDataValue::HumanoidArm(arm) = &item.value
+                {
+                    send_event(
+                        event_tx,
+                        NetworkEvent::EntityMainArm {
+                            id: p.id.0,
+                            right: *arm == azalea_entity::HumanoidArm::Right,
+                        },
+                    )
+                    .await?;
+                }
+                if item.index == 8
+                    && let azalea_entity::EntityDataValue::ItemStack(
+                        azalea_inventory::ItemStack::Present(stack),
+                    ) = &item.value
+                {
+                    send_event(
+                        event_tx,
+                        NetworkEvent::EntityProjectileItem {
+                            id: p.id.0,
+                            stack: stack.clone(),
+                        },
+                    )
+                    .await?;
+                }
                 // Scalar values are forwarded raw; the store resolves their
                 // meaning per (kind, index) like vanilla `onSyncedDataUpdated`
                 // (`EntityStore::apply_entity_data`).
@@ -1501,6 +1618,20 @@ pub(super) async fn handle_game_packet_with_display_text(
                     azalea_entity::EntityDataValue::Long(v) => Some(MetaValue::Long(*v)),
                     azalea_entity::EntityDataValue::BlockState(state) => {
                         Some(MetaValue::BlockState(u32::from(state.id())))
+                    }
+                    azalea_entity::EntityDataValue::OptionalBlockState(state) => {
+                        Some(MetaValue::OptionalBlockState(
+                            (!state.is_air()).then(|| u32::from(state.id())),
+                        ))
+                    }
+                    azalea_entity::EntityDataValue::OptionalBlockPos(pos) => {
+                        Some(MetaValue::OptionalBlockPos(*pos))
+                    }
+                    // Serializer 16 on Shulker only. The consumer gates this
+                    // semantic value by (kind, index); other index-16 fields
+                    // remain their original Bool/Byte/Int variants.
+                    azalea_entity::EntityDataValue::Direction(direction) => {
+                        Some(MetaValue::Direction(*direction))
                     }
                     _ => None,
                 };

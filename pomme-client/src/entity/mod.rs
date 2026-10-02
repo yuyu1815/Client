@@ -31,6 +31,7 @@ pub enum MetaValue {
     Float(f32),
     Long(i64),
     OptionalBlockState(Option<u32>),
+    OptionalBlockPos(Option<BlockPos>),
     BlockState(u32),
     Direction(azalea_core::direction::Direction),
 }
@@ -1267,6 +1268,49 @@ fn projectile_drag(chunks: &ChunkStore, pos: Position, arrow: bool) -> f64 {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DisplayState {
+    pub interpolation_delay: i32,
+    pub transformation_duration: i32,
+    pub position_rotation_duration: i32,
+    pub translation: [f32; 3],
+    pub scale: [f32; 3],
+    pub left_rotation: [f32; 4],
+    pub right_rotation: [f32; 4],
+    pub billboard: u8,
+    pub brightness: i32,
+    pub view_range: f32,
+    pub shadow_radius: f32,
+    pub shadow_strength: f32,
+    pub width: f32,
+    pub height: f32,
+    pub glow_override: i32,
+    pub block_state: Option<u32>,
+}
+
+impl Default for DisplayState {
+    fn default() -> Self {
+        Self {
+            interpolation_delay: 0,
+            transformation_duration: 0,
+            position_rotation_duration: 0,
+            translation: [0.0; 3],
+            scale: [1.0; 3],
+            left_rotation: [0.0, 0.0, 0.0, 1.0],
+            right_rotation: [0.0, 0.0, 0.0, 1.0],
+            billboard: 0,
+            brightness: -1,
+            view_range: 1.0,
+            shadow_radius: 0.0,
+            shadow_strength: 1.0,
+            width: 0.0,
+            height: 0.0,
+            glow_override: -1,
+            block_state: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VehicleState {
     /// Missing for SetPassengers-only placeholders.
@@ -1308,6 +1352,19 @@ pub struct VehicleState {
     pub minecart_display_offset: i32,
     /// MinecartFurnace DATA_ID_FUEL, used by its native default display state.
     pub minecart_furnace_has_fuel: bool,
+    /// EndCrystal metadata 8/9; kept separate from other entity metadata.
+    pub crystal_beam_target: Option<BlockPos>,
+    pub crystal_show_bottom: bool,
+    pub crystal_age: u32,
+    /// ExperienceOrb metadata 8 and its client-side visual age.
+    pub experience_orb_value: i32,
+    pub experience_orb_age: u32,
+    /// ArmorStand metadata 15 flags and native six-part pose (degrees).
+    pub armor_stand_flags: u8,
+    pub armor_stand_pose: [[f32; 3]; 6],
+    /// ArmorStand's hands and armor; equipment rendering is separate.
+    pub armor_stand_equipment:
+        HashMap<azalea_inventory::components::EquipmentSlot, azalea_inventory::ItemStack>,
     /// ItemFrame spawn data / metadata index 8; independent from entity yaw.
     pub item_frame_direction: Option<azalea_core::direction::Direction>,
     /// Full metadata index 9 stack, retained for component-backed item render.
@@ -1315,6 +1372,12 @@ pub struct VehicleState {
     /// Metadata index 10, in 45-degree increments.
     pub item_frame_rotation: i32,
     pub passengers: Vec<i32>,
+    /// Common Display metadata; ItemDisplay/TextDisplay payloads remain
+    /// separate.
+    pub display: DisplayState,
+    /// ItemDisplay metadata 23/24: full stack and native display-context byte.
+    pub item_display_stack: azalea_inventory::ItemStack,
+    pub item_display_context: u8,
     /// TextDisplay metadata: component 23, line width 24, background 25,
     /// opacity 26, and style flags 27.
     pub text_display_text: Option<Vec<crate::ui::text::TextSpan>>,
@@ -1441,10 +1504,28 @@ impl EntityStore {
             minecart_display_state: None,
             minecart_display_offset: 6,
             minecart_furnace_has_fuel: false,
+            crystal_beam_target: None,
+            crystal_show_bottom: true,
+            crystal_age: 0,
+            experience_orb_value: 0,
+            experience_orb_age: 0,
+            armor_stand_flags: 0,
+            armor_stand_pose: [
+                [0.0; 3],
+                [0.0; 3],
+                [-10.0, 0.0, -10.0],
+                [-15.0, 0.0, 10.0],
+                [-1.0, 0.0, -1.0],
+                [1.0, 0.0, 1.0],
+            ],
+            armor_stand_equipment: HashMap::new(),
             item_frame_direction: None,
             item_frame_item: azalea_inventory::ItemStack::Empty,
             item_frame_rotation: 0,
             passengers: Vec::new(),
+            display: DisplayState::default(),
+            item_display_stack: azalea_inventory::ItemStack::Empty,
+            item_display_context: 0,
             text_display_text: None,
             text_display_line_width: 200,
             text_display_background: 0x4000_0000,
@@ -1491,10 +1572,28 @@ impl EntityStore {
             minecart_display_state: None,
             minecart_display_offset: 6,
             minecart_furnace_has_fuel: false,
+            crystal_beam_target: None,
+            crystal_show_bottom: true,
+            crystal_age: 0,
+            experience_orb_value: 0,
+            experience_orb_age: 0,
+            armor_stand_flags: 0,
+            armor_stand_pose: [
+                [0.0; 3],
+                [0.0; 3],
+                [-10.0, 0.0, -10.0],
+                [-15.0, 0.0, 10.0],
+                [-1.0, 0.0, -1.0],
+                [1.0, 0.0, 1.0],
+            ],
+            armor_stand_equipment: HashMap::new(),
             item_frame_direction: None,
             item_frame_item: azalea_inventory::ItemStack::Empty,
             item_frame_rotation: 0,
             passengers: Vec::new(),
+            display: DisplayState::default(),
+            item_display_stack: azalea_inventory::ItemStack::Empty,
+            item_display_context: 0,
             text_display_text: None,
             text_display_line_width: 200,
             text_display_background: 0x4000_0000,
@@ -1565,6 +1664,18 @@ impl EntityStore {
             }
             (Some(EntityKind::Tnt), 9, MetaValue::BlockState(v)) => {
                 vehicle.tnt_block_state = Some(v);
+            }
+            (Some(EntityKind::EndCrystal), 8, MetaValue::OptionalBlockPos(pos)) => {
+                vehicle.crystal_beam_target = pos;
+            }
+            (Some(EntityKind::EndCrystal), 9, MetaValue::Bool(v)) => {
+                vehicle.crystal_show_bottom = v;
+            }
+            (Some(EntityKind::ExperienceOrb), 8, MetaValue::Int(v)) => {
+                vehicle.experience_orb_value = v;
+            }
+            (Some(EntityKind::ArmorStand), 15, MetaValue::Byte(flags)) => {
+                vehicle.armor_stand_flags = flags;
             }
             _ => {}
         }
@@ -1640,6 +1751,69 @@ impl EntityStore {
         }
     }
 
+    pub fn set_item_display_metadata(
+        &mut self,
+        id: i32,
+        index: u8,
+        value: crate::net::ItemDisplayMetaValue,
+    ) {
+        let Some(vehicle) = self.vehicles.get_mut(&id) else {
+            return;
+        };
+        if vehicle.kind != Some(EntityKind::ItemDisplay) {
+            return;
+        }
+        match (index, value) {
+            (23, crate::net::ItemDisplayMetaValue::Stack(stack)) => {
+                vehicle.item_display_stack = stack
+            }
+            (24, crate::net::ItemDisplayMetaValue::Context(context)) => {
+                vehicle.item_display_context = context
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_display_metadata(
+        &mut self,
+        id: i32,
+        index: u8,
+        value: crate::net::DisplayMetaValue,
+    ) {
+        use crate::net::DisplayMetaValue as V;
+        let Some(vehicle) = self.vehicles.get_mut(&id) else {
+            return;
+        };
+        if !matches!(
+            vehicle.kind,
+            Some(EntityKind::BlockDisplay | EntityKind::ItemDisplay | EntityKind::TextDisplay)
+        ) {
+            return;
+        }
+        let d = &mut vehicle.display;
+        match (index, value) {
+            (8, V::Int(v)) => d.interpolation_delay = v,
+            (9, V::Int(v)) => d.transformation_duration = v,
+            (10, V::Int(v)) => d.position_rotation_duration = v,
+            (11, V::Vector(v)) if v.iter().all(|x| x.is_finite()) => d.translation = v,
+            (12, V::Vector(v)) if v.iter().all(|x| x.is_finite()) => d.scale = v,
+            (13, V::Quaternion(v)) if v.iter().all(|x| x.is_finite()) => d.left_rotation = v,
+            (14, V::Quaternion(v)) if v.iter().all(|x| x.is_finite()) => d.right_rotation = v,
+            (15, V::Byte(v)) => d.billboard = v,
+            (16, V::Int(v)) => d.brightness = v,
+            (17, V::Float(v)) if v.is_finite() => d.view_range = v,
+            (18, V::Float(v)) if v.is_finite() => d.shadow_radius = v,
+            (19, V::Float(v)) if v.is_finite() => d.shadow_strength = v,
+            (20, V::Float(v)) if v.is_finite() => d.width = v,
+            (21, V::Float(v)) if v.is_finite() => d.height = v,
+            (22, V::Int(v)) => d.glow_override = v,
+            (23, V::BlockState(v)) if vehicle.kind == Some(EntityKind::BlockDisplay) => {
+                d.block_state = Some(v)
+            }
+            _ => {}
+        }
+    }
+
     pub fn set_vehicle_kind(&mut self, id: i32, kind: EntityKind) {
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.kind = Some(kind);
@@ -1675,6 +1849,12 @@ impl EntityStore {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
         for vehicle in self.vehicles.values_mut() {
+            if vehicle.kind == Some(EntityKind::EndCrystal) {
+                vehicle.crystal_age = vehicle.crystal_age.wrapping_add(1);
+            }
+            if vehicle.kind == Some(EntityKind::ExperienceOrb) {
+                vehicle.experience_orb_age = vehicle.experience_orb_age.wrapping_add(1);
+            }
             if vehicle.kind == Some(EntityKind::Tnt) {
                 vehicle.tnt_prev_fuse = vehicle.tnt_fuse;
                 vehicle.tnt_fuse = vehicle.tnt_fuse.saturating_sub(1);
@@ -1876,6 +2056,33 @@ impl EntityStore {
                     display.current = vehicle.position;
                 }
             }
+        }
+    }
+
+    pub fn set_armor_stand_rotation(&mut self, id: i32, index: u8, rotation: [f32; 3]) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id)
+            && vehicle.kind == Some(EntityKind::ArmorStand)
+            && (16..=21).contains(&index)
+        {
+            let pose = &mut vehicle.armor_stand_pose[usize::from(index - 16)];
+            for (dst, src) in pose.iter_mut().zip(rotation) {
+                *dst = if src.is_finite() { src % 360.0 } else { 0.0 };
+            }
+        }
+    }
+
+    pub fn set_armor_stand_equipment(
+        &mut self,
+        id: i32,
+        slots: Vec<(
+            azalea_inventory::components::EquipmentSlot,
+            azalea_inventory::ItemStack,
+        )>,
+    ) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id)
+            && vehicle.kind == Some(EntityKind::ArmorStand)
+        {
+            vehicle.armor_stand_equipment.extend(slots);
         }
     }
 
@@ -2136,7 +2343,9 @@ impl EntityStore {
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
             // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
             (k, 15, Byte(f)) if k != EntityKind::Player => entity.aggressive = f & 0x04 != 0,
-            (EntityKind::Player, 16, Byte(mask)) => entity.skin_parts_mask = Some(mask & 0x7f),
+            (EntityKind::Player | EntityKind::Mannequin, 16, Byte(mask)) => {
+                entity.skin_parts_mask = Some(mask & 0x7f)
+            }
             (k, 16, Bool(b)) if is_baby_kind(k) => entity.is_baby = b,
             // Skeleton: powder-snow stray conversion; drives the vanilla
             // `isShaking` body jitter.
@@ -3509,6 +3718,16 @@ mod tests {
             0.0,
             None,
         );
+        store.spawn_living(
+            2,
+            EntityKind::Mannequin,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        store.apply_entity_data(2, 16, MetaValue::Byte(2));
+        assert_eq!(store.living[&2].skin_parts_mask, Some(2));
         assert_eq!(store.living[&1].skin_parts_mask, None);
         for mask in 0..=u8::MAX {
             store.apply_entity_data(1, 16, MetaValue::Byte(mask));
@@ -3875,6 +4094,145 @@ mod tests {
             s.vehicles[&10].look_dir,
             Some(LookDirection::new(90.0, 20.0))
         );
+    }
+
+    #[test]
+    fn end_crystal_metadata_defaults_and_indices_are_kind_specific() {
+        let mut store = EntityStore::new();
+        store.set_passengers(1, &[]);
+        store.set_vehicle_kind(1, EntityKind::EndCrystal);
+        assert!(store.vehicles[&1].crystal_beam_target.is_none());
+        assert!(store.vehicles[&1].crystal_show_bottom);
+        let pos = BlockPos::new(2, 3, 4);
+        store.apply_vehicle_metadata(1, 8, MetaValue::OptionalBlockPos(Some(pos)));
+        store.apply_vehicle_metadata(1, 9, MetaValue::Bool(false));
+        assert_eq!(store.vehicles[&1].crystal_beam_target, Some(pos));
+        assert!(!store.vehicles[&1].crystal_show_bottom);
+        store.set_vehicle_kind(2, EntityKind::Arrow);
+        store.apply_vehicle_metadata(2, 8, MetaValue::OptionalBlockPos(Some(pos)));
+        assert!(store.vehicles[&2].crystal_beam_target.is_none());
+    }
+
+    #[test]
+    fn armor_stand_flags_pose_equipment_and_cleanup_stay_nonliving() {
+        let mut store = projectile(EntityKind::ArmorStand, Position::default(), DVec3::ZERO);
+        let stand = &store.vehicles[&1];
+        assert_eq!(stand.armor_stand_flags, 0);
+        assert_eq!(stand.armor_stand_pose[2], [-10.0, 0.0, -10.0]);
+        assert_eq!(stand.armor_stand_pose[3], [-15.0, 0.0, 10.0]);
+        store.apply_vehicle_metadata(1, 15, MetaValue::Byte(0x1d));
+        store.set_armor_stand_rotation(1, 16, [350.0, f32::NAN, -370.0]);
+        assert_eq!(store.vehicles[&1].armor_stand_flags, 0x1d);
+        assert_eq!(store.vehicles[&1].armor_stand_pose[0], [350.0, 0.0, -10.0]);
+        store.set_armor_stand_rotation(1, 21, [1.0, 2.0, 3.0]);
+        assert_eq!(store.vehicles[&1].armor_stand_pose[5], [1.0, 2.0, 3.0]);
+        use azalea_inventory::components::EquipmentSlot as Slot;
+        let slots = [
+            Slot::Mainhand,
+            Slot::Offhand,
+            Slot::Feet,
+            Slot::Legs,
+            Slot::Chest,
+            Slot::Head,
+        ]
+        .into_iter()
+        .map(|slot| (slot, azalea_inventory::ItemStack::Empty))
+        .collect::<Vec<_>>();
+        let helmet = azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData::new(
+            azalea_registry::builtin::ItemKind::DiamondHelmet,
+            1,
+        ));
+        let mut slots = slots;
+        slots[0].1 = helmet.clone();
+        store.set_armor_stand_equipment(1, slots);
+        assert_eq!(store.vehicles[&1].armor_stand_equipment.len(), 6);
+        assert_eq!(
+            store.vehicles[&1].armor_stand_equipment
+                [&azalea_inventory::components::EquipmentSlot::Mainhand],
+            helmet
+        );
+        store.remove_entity(1);
+        assert!(!store.vehicles.contains_key(&1));
+        assert!(store.living.is_empty());
+    }
+
+    #[test]
+    fn experience_orb_value_and_visual_age_are_nonliving_and_kind_specific() {
+        let mut orb = projectile(EntityKind::ExperienceOrb, Position::default(), DVec3::ZERO);
+        assert_eq!(orb.vehicles[&1].experience_orb_value, 0);
+        assert_eq!(orb.vehicles[&1].experience_orb_age, 0);
+        orb.apply_vehicle_metadata(1, 8, MetaValue::Int(149));
+        orb.apply_vehicle_metadata(1, 9, MetaValue::Int(42));
+        assert_eq!(orb.vehicles[&1].experience_orb_value, 149);
+        assert_eq!(orb.vehicles[&1].experience_orb_age, 0);
+        orb.tick_projectile_displays(&ChunkStore::new(2));
+        assert_eq!(orb.vehicles[&1].experience_orb_age, 1);
+        let mut other = projectile(EntityKind::Arrow, Position::default(), DVec3::ZERO);
+        other.apply_vehicle_metadata(1, 8, MetaValue::Int(149));
+        assert_eq!(other.vehicles[&1].experience_orb_value, 0);
+    }
+
+    #[test]
+    fn block_display_metadata_is_typed_and_separate_from_text_content() {
+        let mut store = EntityStore::new();
+        store.set_passengers(42, &[]);
+        store.set_vehicle_kind(42, EntityKind::BlockDisplay);
+        store.set_display_metadata(
+            42,
+            11,
+            crate::net::DisplayMetaValue::Vector([1.0, 2.0, 3.0]),
+        );
+        store.set_display_metadata(
+            42,
+            12,
+            crate::net::DisplayMetaValue::Vector([-1.0, 2.0, 3.0]),
+        );
+        store.set_display_metadata(
+            42,
+            13,
+            crate::net::DisplayMetaValue::Quaternion([0.0, 0.0, 0.0, 1.0]),
+        );
+        store.set_display_metadata(42, 23, crate::net::DisplayMetaValue::BlockState(1));
+        assert_eq!(store.vehicles[&42].display.translation, [1.0, 2.0, 3.0]);
+        assert_eq!(store.vehicles[&42].display.scale, [-1.0, 2.0, 3.0]);
+        assert_eq!(store.vehicles[&42].display.block_state, Some(1));
+        assert!(store.vehicles[&42].text_display_text.is_none());
+        store.set_vehicle_kind(43, EntityKind::TextDisplay);
+        store.set_display_metadata(43, 23, crate::net::DisplayMetaValue::BlockState(2));
+        assert_eq!(store.vehicles[&43].display.block_state, None);
+    }
+
+    #[test]
+    fn item_display_stack_and_native_context_are_typed_and_separate() {
+        let mut store = EntityStore::new();
+        store.set_passengers(1, &[]);
+        store.set_vehicle_kind(1, EntityKind::ItemDisplay);
+        for (id, expected) in [
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (5, 5),
+            (6, 6),
+            (7, 7),
+            (8, 8),
+        ] {
+            store.set_item_display_metadata(1, 24, crate::net::ItemDisplayMetaValue::Context(id));
+            assert_eq!(store.vehicles[&1].item_display_context, expected);
+        }
+        store.set_item_display_metadata(
+            1,
+            23,
+            crate::net::ItemDisplayMetaValue::Stack(azalea_inventory::ItemStack::Empty),
+        );
+        assert!(matches!(
+            store.vehicles[&1].item_display_stack,
+            azalea_inventory::ItemStack::Empty
+        ));
+        store.set_vehicle_kind(2, EntityKind::BlockDisplay);
+        store.set_item_display_metadata(2, 24, crate::net::ItemDisplayMetaValue::Context(8));
+        assert_eq!(store.vehicles[&2].item_display_context, 0);
     }
 
     #[test]

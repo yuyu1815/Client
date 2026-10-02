@@ -3157,6 +3157,10 @@ pub fn update_game(
 
     // Menus never pause the simulation; tick_physics substitutes neutral input.
     game.movement_frame_id = game.movement_frame_id.wrapping_add(1);
+    connection
+        .packet_tx
+        .recorder
+        .set_context(game.movement_frame_id, game.tick_count);
     let accumulator_before = core.tick_accumulator;
     core.tick_accumulator += dt;
     let fixed_tick_start = game.benchmark.is_some().then(std::time::Instant::now);
@@ -3164,6 +3168,10 @@ pub fn update_game(
     while core.tick_accumulator >= TICK_RATE {
         fixed_tick_count += 1;
         game.tick_count = game.tick_count.wrapping_add(1);
+        connection
+            .packet_tx
+            .recorder
+            .set_context(game.movement_frame_id, game.tick_count);
         if game
             .item_activation
             .as_mut()
@@ -5080,7 +5088,18 @@ pub fn update_game(
                     walk_anim_speed: e.walk_speed(partial_tick),
                     entity_kind: e.entity_type,
                     player_uuid: e.player_uuid,
+                    skin_parts_mask: match e.entity_type {
+                        EntityKind::Player if entity_id == game.player.entity_id => {
+                            game.local_skin_parts_mask
+                        }
+                        EntityKind::Player | EntityKind::Mannequin => {
+                            e.skin_parts_mask.unwrap_or(0x7f)
+                        }
+                        _ => 0x7f,
+                    },
                     variant_index: extras.variant_index,
+                    armor_stand_flags: 0,
+                    armor_stand_pose: [[0.0; 3]; 6],
                     overlay_tints: extras.overlay_tints,
                     overlay_variants: extras.overlay_variants,
                     is_unhappy: e.unhappy_counter > 0,
@@ -5217,6 +5236,7 @@ pub fn update_game(
                 .min(1.0),
             entity_kind: EntityKind::Player,
             player_uuid: Some(core.user.uuid),
+            skin_parts_mask: game.local_skin_parts_mask,
             has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
             death_time: render_death_time(game.player.death_time, partial_tick),
             skip_cull: true,
@@ -5226,13 +5246,29 @@ pub fn update_game(
 
     if !benchmark_running {
         entity_renders.extend(arrow_render_infos(&game.entity_store, partial_tick));
-        entity_renders.extend(projectile_render_infos(&game.entity_store, partial_tick));
+        let camera_look = gfx.renderer.camera_look_dir();
+        entity_renders.extend(projectile_render_infos(
+            &game.entity_store,
+            partial_tick,
+            camera_look.y_rot_deg(),
+            camera_look.x_rot_deg(),
+        ));
         entity_renders.extend(boat_render_infos(
             &game.entity_store,
             partial_tick,
             game.tick_count as f32 + partial_tick,
         ));
         entity_renders.extend(minecart_render_infos(&game.entity_store, partial_tick));
+        entity_renders.extend(end_crystal_render_infos(&game.entity_store, partial_tick));
+        entity_renders.extend(armor_stand_render_infos(&game.entity_store, partial_tick));
+        entity_renders.extend(experience_orb_render_infos(
+            &game.entity_store,
+            &game.chunk_store,
+            &game.dimension,
+            partial_tick,
+            camera_look.y_rot_deg(),
+            camera_look.x_rot_deg(),
+        ));
     }
 
     let sky_partial_tick = if core.server_tick_frozen {
@@ -5291,6 +5327,174 @@ pub fn update_game(
             camera_anchor,
             partial_tick,
         ));
+        for vehicle in game.entity_store.vehicles.values() {
+            if vehicle.kind != Some(azalea_registry::builtin::EntityKind::BlockDisplay) {
+                continue;
+            }
+            let Some(state) = vehicle
+                .display
+                .block_state
+                .and_then(crate::world::block::try_state)
+            else {
+                continue;
+            };
+            let pos = vehicle
+                .prev_position
+                .lerp(vehicle.position, f64::from(partial_tick));
+            let block_pos = [
+                pos.x.floor() as i32,
+                pos.y.floor() as i32,
+                pos.z.floor() as i32,
+            ];
+            let Some(item_name) = gfx.renderer.ensure_block_mesh(state, block_pos) else {
+                continue;
+            };
+            let d = vehicle.display;
+            let quat = |q: [f32; 4]| {
+                let q = glam::Quat::from_xyzw(q[0], q[1], q[2], q[3]);
+                if q.is_finite() && q.length_squared() > 1.0e-12 {
+                    q.normalize()
+                } else {
+                    glam::Quat::IDENTITY
+                }
+            };
+            let (entity_yaw, entity_pitch) = vehicle
+                .look_dir
+                .map_or((0.0, 0.0), |look| (look.y_rot_deg(), look.x_rot_deg()));
+            let (camera_yaw, camera_pitch) = gfx.renderer.camera_effective_look_deg();
+            let (yaw, pitch) = match d.billboard {
+                1 => (180.0 - camera_yaw, entity_pitch),
+                2 => (entity_yaw, -camera_pitch),
+                3 => (180.0 - camera_yaw, -camera_pitch),
+                _ => (entity_yaw, entity_pitch),
+            };
+            let orientation = glam::Quat::from_euler(
+                glam::EulerRot::YXZ,
+                -yaw.to_radians(),
+                pitch.to_radians(),
+                0.0,
+            );
+            let trs = glam::Mat4::from_quat(orientation)
+                * glam::Mat4::from_translation(glam::Vec3::from_array(d.translation))
+                * glam::Mat4::from_quat(quat(d.left_rotation))
+                * glam::Mat4::from_scale(glam::Vec3::from_array(d.scale))
+                * glam::Mat4::from_quat(quat(d.right_rotation));
+            let relative = glam::DVec3::new(pos.x, pos.y, pos.z) - camera_anchor;
+            item_renders.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
+                item_name,
+                raw_dye_rgb: None,
+                player_head_profile_source: None,
+                model_matrix: glam::Mat4::from_translation(
+                    relative.as_vec3() + glam::Vec3::splat(0.5),
+                ) * trs,
+                light: lightmap_brightness(
+                    &game.chunk_store,
+                    &game.dimension,
+                    block_pos[0],
+                    block_pos[1],
+                    block_pos[2],
+                ),
+                white_overlay: 0.0,
+                nether_lighting: game.cardinal_light == CardinalLightType::Nether,
+                entity_uuid: None,
+                invisible: vehicle.shared_flags & 0x20 != 0,
+                actual_age: None,
+                actual_render_age: 0.0,
+                age_f: 0.0,
+                actual_spin: 0.0,
+                spin: 0.0,
+                bob_offset: 0.0,
+                actual_bob_offset: 0.0,
+                controlled_phase: false,
+                bob_controlled: false,
+                position: pos.to_array(),
+                stack_count: 1,
+            });
+        }
+        for vehicle in game.entity_store.vehicles.values() {
+            if vehicle.kind != Some(azalea_registry::builtin::EntityKind::ItemDisplay) {
+                continue;
+            }
+            let azalea_inventory::ItemStack::Present(stack) = &vehicle.item_display_stack else {
+                continue;
+            };
+            let item_name = crate::player::inventory::item_resource_name(stack.kind);
+            gfx.renderer.ensure_item_mesh(&item_name);
+            let pos = vehicle
+                .prev_position
+                .lerp(vehicle.position, f64::from(partial_tick));
+            let block_pos = [
+                pos.x.floor() as i32,
+                pos.y.floor() as i32,
+                pos.z.floor() as i32,
+            ];
+            let d = vehicle.display;
+            let quat = |q: [f32; 4]| {
+                let q = glam::Quat::from_xyzw(q[0], q[1], q[2], q[3]);
+                if q.is_finite() && q.length_squared() > 1.0e-12 {
+                    q.normalize()
+                } else {
+                    glam::Quat::IDENTITY
+                }
+            };
+            let (entity_yaw, entity_pitch) = vehicle
+                .look_dir
+                .map_or((0.0, 0.0), |look| (look.y_rot_deg(), look.x_rot_deg()));
+            let (camera_yaw, camera_pitch) = gfx.renderer.camera_effective_look_deg();
+            let (yaw, pitch) = match d.billboard {
+                1 => (180.0 - camera_yaw, entity_pitch),
+                2 => (entity_yaw, -camera_pitch),
+                3 => (180.0 - camera_yaw, -camera_pitch),
+                _ => (entity_yaw, entity_pitch),
+            };
+            let orientation = glam::Quat::from_euler(
+                glam::EulerRot::YXZ,
+                -yaw.to_radians(),
+                pitch.to_radians(),
+                0.0,
+            );
+            let trs = glam::Mat4::from_quat(orientation)
+                * glam::Mat4::from_translation(glam::Vec3::from_array(d.translation))
+                * glam::Mat4::from_quat(quat(d.left_rotation))
+                * glam::Mat4::from_scale(glam::Vec3::from_array(d.scale))
+                * glam::Mat4::from_quat(quat(d.right_rotation));
+            let relative = glam::DVec3::new(pos.x, pos.y, pos.z) - gfx.renderer.camera_anchor();
+            item_renders.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
+                item_name,
+                raw_dye_rgb: None,
+                player_head_profile_source: None,
+                model_matrix: glam::Mat4::from_translation(
+                    relative.as_vec3() + glam::Vec3::splat(0.5),
+                ) * trs
+                    * glam::Mat4::from_rotation_y(std::f32::consts::PI),
+                light: if d.brightness >= 0 {
+                    (((d.brightness >> 4) & 0xf).max((d.brightness >> 20) & 0xf)) as f32 / 15.0
+                } else {
+                    lightmap_brightness(
+                        &game.chunk_store,
+                        &game.dimension,
+                        block_pos[0],
+                        block_pos[1],
+                        block_pos[2],
+                    )
+                },
+                white_overlay: 0.0,
+                nether_lighting: game.cardinal_light == CardinalLightType::Nether,
+                entity_uuid: None,
+                invisible: vehicle.shared_flags & 0x20 != 0,
+                actual_age: None,
+                actual_render_age: 0.0,
+                age_f: 0.0,
+                actual_spin: 0.0,
+                spin: 0.0,
+                bob_offset: 0.0,
+                actual_bob_offset: 0.0,
+                controlled_phase: false,
+                bob_controlled: false,
+                position: pos.to_array(),
+                stack_count: 1,
+            });
+        }
         for vehicle in game.entity_store.vehicles.values() {
             if vehicle.kind != Some(azalea_registry::builtin::EntityKind::Tnt) {
                 continue;
@@ -6020,6 +6224,140 @@ fn minecart_cargo_render_infos(
         .collect()
 }
 
+fn end_crystal_render_infos(
+    store: &crate::entity::EntityStore,
+    partial_tick: f32,
+) -> Vec<EntityRenderInfo> {
+    store
+        .vehicles
+        .values()
+        .filter_map(|entity| {
+            if entity.kind != Some(azalea_registry::builtin::EntityKind::EndCrystal)
+                || entity.shared_flags & 0x20 != 0
+            {
+                return None;
+            }
+            let position = entity
+                .prev_position
+                .lerp(entity.position, partial_tick as f64);
+            Some(EntityRenderInfo {
+                position,
+                simulation_position: entity.position,
+                entity_kind: azalea_registry::builtin::EntityKind::EndCrystal,
+                age_in_ticks: entity.crystal_age as f32 + partial_tick,
+                variant_index: u32::from(!entity.crystal_show_bottom),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+fn armor_stand_render_infos(
+    store: &crate::entity::EntityStore,
+    partial_tick: f32,
+) -> Vec<EntityRenderInfo> {
+    store
+        .vehicles
+        .values()
+        .filter_map(|stand| {
+            if stand.kind != Some(EntityKind::ArmorStand) || stand.shared_flags & 0x20 != 0 {
+                return None;
+            }
+            let position = stand
+                .prev_position
+                .lerp(stand.position, f64::from(partial_tick));
+            let yaw = match (stand.prev_look_dir, stand.look_dir) {
+                (Some(prev), Some(now)) => {
+                    lerp_angle(prev.y_rot_deg(), now.y_rot_deg(), partial_tick)
+                }
+                (_, Some(now)) => now.y_rot_deg(),
+                _ => 0.0,
+            };
+            Some(EntityRenderInfo {
+                position,
+                simulation_position: stand.position,
+                entity_kind: EntityKind::ArmorStand,
+                body_y_rot_deg: yaw,
+                armor_stand_flags: stand.armor_stand_flags,
+                armor_stand_pose: stand.armor_stand_pose,
+                body_transform: (stand.armor_stand_flags & 0x01 != 0)
+                    .then(|| glam::Mat4::from_scale(glam::Vec3::splat(0.5))),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+fn experience_orb_icon(value: i32) -> u32 {
+    [3, 7, 17, 37, 73, 149, 307, 617, 1237, 2477]
+        .iter()
+        .take_while(|&&threshold| value >= threshold)
+        .count() as u32
+}
+
+fn experience_orb_light(block_light: u8, sky_light: u8, dimension: &str) -> f32 {
+    let level = sky_light.max(block_light.saturating_add(7).min(15)) as f32 / 15.0;
+    let curved = level / (4.0 - 3.0 * level);
+    if dimension == "minecraft:the_nether" {
+        curved + (1.0 - curved) * 0.1
+    } else {
+        curved
+    }
+}
+
+fn experience_orb_color(age: f32, light: f32) -> [f32; 4] {
+    let phase = age / 2.0;
+    let red = ((phase.sin() + 1.0) * 0.5 * 255.0) as u8;
+    let blue = ((phase + std::f32::consts::PI * 4.0 / 3.0).sin() + 1.0) * 0.1 * 255.0;
+    [
+        red as f32 / 255.0 * light,
+        light,
+        blue as u8 as f32 / 255.0 * light,
+        128.0 / 255.0,
+    ]
+}
+
+fn experience_orb_render_infos(
+    store: &crate::entity::EntityStore,
+    chunks: &ChunkStore,
+    dimension: &str,
+    partial_tick: f32,
+    camera_yaw: f32,
+    camera_pitch: f32,
+) -> Vec<EntityRenderInfo> {
+    store
+        .vehicles
+        .values()
+        .filter_map(|orb| {
+            if orb.kind != Some(EntityKind::ExperienceOrb) || orb.shared_flags & 0x20 != 0 {
+                return None;
+            }
+            let age = orb.experience_orb_age as f32 + partial_tick;
+            let x = orb.position.x.floor() as i32;
+            let y = orb.position.y.floor() as i32;
+            let z = orb.position.z.floor() as i32;
+            let light = experience_orb_light(
+                chunks.get_block_light(x, y, z),
+                chunks.get_sky_light(x, y, z),
+                dimension,
+            );
+            let mut overlay_tints = [None; MAX_OVERLAYS];
+            overlay_tints[0] = Some(experience_orb_color(age, light));
+            Some(EntityRenderInfo {
+                position: orb.prev_position.lerp(orb.position, partial_tick as f64),
+                simulation_position: orb.position,
+                entity_kind: EntityKind::ExperienceOrb,
+                body_y_rot_deg: camera_yaw,
+                head_x_rot_deg: camera_pitch,
+                variant_index: experience_orb_icon(orb.experience_orb_value),
+                overlay_tints,
+                age_in_ticks: age,
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
 fn minecart_render_infos(
     store: &crate::entity::EntityStore,
     partial_tick: f32,
@@ -6579,6 +6917,8 @@ fn item_frame_item_matrix(base: glam::Mat4, rotation: i32, fixed: glam::Mat4) ->
 fn projectile_render_infos(
     store: &crate::entity::EntityStore,
     partial_tick: f32,
+    camera_yaw: f32,
+    camera_pitch: f32,
 ) -> Vec<EntityRenderInfo> {
     use azalea_registry::builtin::EntityKind as K;
     store
@@ -6589,7 +6929,11 @@ fn projectile_render_infos(
             if vehicle.shared_flags & 0x20 != 0
                 || !matches!(
                     kind,
-                    K::Trident | K::ShulkerBullet | K::WitherSkull | K::LlamaSpit
+                    K::DragonFireball
+                        | K::Trident
+                        | K::ShulkerBullet
+                        | K::WitherSkull
+                        | K::LlamaSpit
                 )
             {
                 return None;
@@ -6598,7 +6942,9 @@ fn projectile_render_infos(
             let position = vehicle
                 .prev_position
                 .lerp(vehicle.position, partial_tick as f64);
-            let (yaw, pitch) = if vehicle.velocity.length_squared() > 1.0e-8 {
+            let (yaw, pitch) = if kind == K::DragonFireball {
+                (camera_yaw, camera_pitch)
+            } else if vehicle.velocity.length_squared() > 1.0e-8 {
                 (
                     vehicle.velocity.x.atan2(vehicle.velocity.z).to_degrees() as f32,
                     vehicle
@@ -7590,16 +7936,106 @@ fn client_information_changed(
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_server_time, arrow_render_infos, block_entity_in_frustum, boat_render_infos,
-        bump_loaded_content_generations, bump_section_generations, consecutive_section_runs,
-        credits_may_advance, current_edit_section_runs, death_confirm_escape_allowed,
-        finish_win_credits, finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
+        advance_server_time, armor_stand_render_infos, arrow_render_infos, block_entity_in_frustum,
+        boat_render_infos, bump_loaded_content_generations, bump_section_generations,
+        consecutive_section_runs, credits_may_advance, current_edit_section_runs,
+        death_confirm_escape_allowed, experience_orb_color, experience_orb_icon,
+        experience_orb_light, experience_orb_render_infos, finish_win_credits,
+        finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
         item_frame_base_position, item_frame_base_rotation, limited_crafting_param,
         mesh_result_is_stale, mesh_target_mask, minecart_render_infos, section_bit, section_bits,
         server_tick_runs, show_death_screen_param, sign_has_text, sign_text_in_range,
         tnt_render_effect,
     };
     use crate::renderer::SkyState;
+
+    #[test]
+    fn experience_orb_icon_thresholds_and_source_tint() {
+        for (value, icon) in [
+            (-1, 0),
+            (0, 0),
+            (2, 0),
+            (3, 1),
+            (6, 1),
+            (7, 2),
+            (17, 3),
+            (37, 4),
+            (73, 5),
+            (149, 6),
+            (307, 7),
+            (617, 8),
+            (1237, 9),
+            (2476, 9),
+            (2477, 10),
+        ] {
+            assert_eq!(experience_orb_icon(value), icon, "value {value}");
+        }
+        assert_eq!(
+            experience_orb_color(0.0, 1.0),
+            [127.0 / 255.0, 1.0, 3.0 / 255.0, 128.0 / 255.0]
+        );
+        assert!((experience_orb_light(0, 0, "minecraft:overworld") - 7.0 / 39.0).abs() < 1e-6);
+        assert_eq!(experience_orb_light(15, 0, "minecraft:overworld"), 1.0);
+        assert_eq!(experience_orb_light(0, 15, "minecraft:overworld"), 1.0);
+        assert!(
+            (experience_orb_light(0, 0, "minecraft:the_nether") - (0.1 + 0.9 * (7.0 / 39.0))).abs()
+                < 1e-6
+        );
+    }
+
+    #[test]
+    fn armor_stand_render_extraction_keeps_marker_visible_and_filters_entity_invisible() {
+        use azalea_registry::builtin::EntityKind;
+
+        use crate::entity::components::Position;
+        use crate::entity::{EntityStore, MetaValue};
+
+        let mut store = EntityStore::new();
+        store.set_vehicle_transform(1, Position::new(1.0, 2.0, 3.0), glam::DVec3::ZERO);
+        store.set_vehicle_kind(1, EntityKind::ArmorStand);
+        store.apply_vehicle_metadata(1, 15, MetaValue::Byte(0x11));
+        store.set_armor_stand_rotation(1, 16, [0.0, 45.0, 0.0]);
+        let renders = armor_stand_render_infos(&store, 0.5);
+        assert_eq!(renders.len(), 1);
+        assert_eq!(renders[0].armor_stand_flags, 0x11);
+        assert_eq!(renders[0].armor_stand_pose[0], [0.0, 45.0, 0.0]);
+        store.apply_vehicle_metadata(1, 15, MetaValue::Byte(0x01));
+        let renders = armor_stand_render_infos(&store, 0.5);
+        assert_eq!(renders[0].body_transform.unwrap().x_axis.x, 0.5);
+        store.apply_vehicle_metadata(1, 0, MetaValue::Byte(0x20));
+        assert!(armor_stand_render_infos(&store, 0.5).is_empty());
+    }
+
+    #[test]
+    fn experience_orb_render_extraction_interpolates_fixed_tick_age_and_filters_invisible() {
+        use azalea_registry::builtin::EntityKind;
+
+        use crate::entity::components::Position;
+        use crate::entity::{EntityStore, MetaValue};
+        use crate::world::chunk::ChunkStore;
+
+        let mut store = EntityStore::new();
+        store.set_passengers(1, &[]);
+        store.set_vehicle_kind(1, EntityKind::ExperienceOrb);
+        store.set_vehicle_transform(1, Position::new(2.0, 3.0, 4.0), glam::DVec3::ZERO);
+        store.apply_vehicle_metadata(1, 8, MetaValue::Int(617));
+        store.tick_projectile_displays(&ChunkStore::new(2));
+        let chunks = ChunkStore::new(2);
+        let info =
+            experience_orb_render_infos(&store, &chunks, "minecraft:overworld", 0.5, 30.0, -15.0);
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].age_in_ticks, 1.5);
+        assert_eq!(info[0].variant_index, 8);
+        assert_eq!(
+            (info[0].body_y_rot_deg, info[0].head_x_rot_deg),
+            (30.0, -15.0)
+        );
+        store.apply_vehicle_metadata(1, 0, MetaValue::Byte(0x20));
+        assert!(
+            experience_orb_render_infos(&store, &chunks, "minecraft:overworld", 0.5, 30.0, -15.0,)
+                .is_empty()
+        );
+    }
 
     #[test]
     fn tnt_fuse_scale_flash_and_partial_tick_boundaries() {

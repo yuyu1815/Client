@@ -41,6 +41,11 @@ fn death_fall_degrees(death_time: f32, kind: EntityKind) -> f32 {
     (((death_time - 1.0) / 20.0 * 1.6).sqrt()).min(1.0) * flip_degrees(kind)
 }
 
+fn end_crystal_y(age: f32) -> f32 {
+    let h = (age * 0.2).sin() * 0.5 + 0.5;
+    (h * h + h) * 0.4 - 1.4
+}
+
 /// Per-frame instance buffer capacity, in (entity, part) draws. Far above any
 /// realistic on-screen entity count; excess is dropped with a warning.
 const MAX_INSTANCES: usize = 16384;
@@ -67,6 +72,8 @@ pub struct EntityRenderInfo {
     pub body_y_rot_deg: f32,
     pub is_baby: bool,
     pub is_crouching: bool,
+    pub shulker_peek: f32,
+    pub shulker_attach_face: azalea_core::direction::Direction,
     pub is_sleeping: bool,
     /// Vanilla `sleepDirectionToRotation` result; absent when bed facing is
     /// unavailable.
@@ -75,7 +82,13 @@ pub struct EntityRenderInfo {
     pub walk_anim_speed: f32,
     pub entity_kind: EntityKind,
     pub player_uuid: Option<uuid::Uuid>,
+    /// Effective vanilla player-model visibility bits; non-players use native
+    /// defaults.
+    pub skin_parts_mask: u8,
     pub variant_index: u32,
+    pub armor_stand_flags: u8,
+    /// head, body, left/right arm, left/right leg; native Euler degrees.
+    pub armor_stand_pose: [[f32; 3]; 6],
     pub overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
     /// Per-slot overlay texture variant (villager type/profession/level).
     pub overlay_variants: [u32; MAX_OVERLAYS],
@@ -125,6 +138,9 @@ pub struct EntityRenderInfo {
     pub animate_tail: bool,
     /// Fish flop pose / squid body branch.
     pub is_in_water: bool,
+    pub is_on_ground: bool,
+    pub boat_left_paddle: bool,
+    pub boat_right_paddle: bool,
     /// Squid tentacle stroke angle, interpolated.
     pub tentacle_angle: f32,
     /// Bat pose flag + its fly/rest animation clock.
@@ -140,6 +156,8 @@ pub struct EntityRenderInfo {
     pub body_transform: Option<glam::Mat4>,
     /// Interpolated entity age in ticks; drives the undead idle arm bob.
     pub age_in_ticks: f32,
+    /// Per-entity deterministic phase used by vanilla's Phantom flap clock.
+    pub animation_phase: f32,
     /// Arm-swing progress 0..1; drives the zombie attack swing.
     pub attack_time: f32,
     pub vex_charging: bool,
@@ -160,13 +178,18 @@ impl Default for EntityRenderInfo {
             body_y_rot_deg: 0.0,
             is_baby: false,
             is_crouching: false,
+            shulker_peek: 0.0,
+            shulker_attach_face: azalea_core::direction::Direction::Down,
             is_sleeping: false,
             sleeping_yaw_deg: None,
             walk_anim_pos: 0.0,
             walk_anim_speed: 0.0,
             entity_kind: EntityKind::Player,
             player_uuid: None,
+            skin_parts_mask: 0x7f,
             variant_index: 0,
+            armor_stand_flags: 0,
+            armor_stand_pose: [[0.0; 3]; 6],
             overlay_tints: [None; MAX_OVERLAYS],
             overlay_variants: [0; MAX_OVERLAYS],
             is_unhappy: false,
@@ -196,6 +219,9 @@ impl Default for EntityRenderInfo {
             feeding_anim: 0.0,
             animate_tail: false,
             is_in_water: false,
+            is_on_ground: false,
+            boat_left_paddle: false,
+            boat_right_paddle: false,
             tentacle_angle: 0.0,
             bat_resting: false,
             bat_elapsed_secs: None,
@@ -204,6 +230,7 @@ impl Default for EntityRenderInfo {
             base_tint: WHITE_TINT,
             body_transform: None,
             age_in_ticks: 0.0,
+            animation_phase: 0.0,
             attack_time: 0.0,
             vex_charging: false,
             skip_cull: false,
@@ -450,7 +477,7 @@ pub(super) enum BlendMode {
     Additive,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AnimationType {
     Quadruped,
     Chicken,
@@ -474,8 +501,19 @@ enum AnimationType {
     Golem,
     Blaze,
     Vex,
+    Allay,
+    Bee,
+    Breeze,
+    Ghast,
+    Phantom,
+    Wither,
+    /// Shulker lid and exposed head follow the synced peek/facing state.
+    Shulker,
     /// No part animation (slime — size/squish live in the body transform).
     Static,
+    Boat,
+    EndCrystal,
+    ArmorStand,
 }
 
 struct VariantDef {
@@ -758,7 +796,7 @@ fn mob_definitions() -> Vec<MobDef> {
         ]
     }
 
-    vec![
+    let mut defs = vec![
         MobDef {
             kind: EntityKind::Arrow,
             anim: AnimationType::Static,
@@ -775,7 +813,25 @@ fn mob_definitions() -> Vec<MobDef> {
                     tex_size: 32,
                     overlay_kind: OverlayKind::OpaqueCulled,
                 },
+                VariantDef {
+                    model: entity_model::bake_arrow_model(),
+                    tex_variants: &[&["minecraft/textures/entity/projectiles/arrow_tipped.png"]],
+                    tex_size: 32,
+                    overlay_kind: OverlayKind::OpaqueCulled,
+                },
             ],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
+            kind: EntityKind::ArmorStand,
+            anim: AnimationType::ArmorStand,
+            adult: vec![opaque(
+                entity_models::nonliving_special::bake_armor_stand_model(),
+                &[&["minecraft/textures/entity/armorstand/armorstand.png"]],
+                64,
+            )],
             baby: None,
             adult_overlays: vec![],
             baby_overlays: vec![],
@@ -1954,7 +2010,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::Allay,
-            anim: AnimationType::Static,
+            anim: AnimationType::Allay,
             adult: vec![opaque(
                 entity_models::flying::bake_allay_model(),
                 tex_table!("allay" => "allay"),
@@ -1966,7 +2022,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::Bee,
-            anim: AnimationType::Static,
+            anim: AnimationType::Bee,
             adult: vec![opaque(
                 entity_models::flying::bake_bee_model(),
                 tex_table!("bee" => "bee", "bee_angry", "bee_nectar", "bee_angry_nectar"),
@@ -1994,7 +2050,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::Breeze,
-            anim: AnimationType::Static,
+            anim: AnimationType::Breeze,
             adult: vec![opaque(
                 entity_models::flying::bake_breeze_model(),
                 tex_table!("breeze" => "breeze"),
@@ -2018,7 +2074,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::Ghast,
-            anim: AnimationType::Static,
+            anim: AnimationType::Ghast,
             adult: vec![opaque(
                 entity_models::flying::bake_ghast_model(),
                 tex_table!("ghast" => "ghast", "ghast_shooting"),
@@ -2030,7 +2086,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::HappyGhast,
-            anim: AnimationType::Static,
+            anim: AnimationType::Ghast,
             adult: vec![opaque(
                 entity_models::flying::bake_happy_ghast_model(),
                 tex_table!("ghast" => "happy_ghast"),
@@ -2074,7 +2130,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::Phantom,
-            anim: AnimationType::Static,
+            anim: AnimationType::Phantom,
             adult: vec![opaque(
                 entity_models::flying::bake_phantom_model(),
                 tex_table!("phantom" => "phantom"),
@@ -2091,7 +2147,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::Shulker,
-            anim: AnimationType::Static,
+            anim: AnimationType::Shulker,
             adult: vec![opaque(
                 entity_models::humanoid::bake_shulker_model(),
                 tex_table!("shulker" => "shulker_white", "shulker_orange", "shulker_magenta", "shulker_light_blue", "shulker_yellow", "shulker_lime", "shulker_pink", "shulker_gray", "shulker_light_gray", "shulker_cyan", "shulker_purple", "shulker_blue", "shulker_brown", "shulker_green", "shulker_red", "shulker_black", "shulker"),
@@ -2149,7 +2205,7 @@ fn mob_definitions() -> Vec<MobDef> {
         },
         MobDef {
             kind: EntityKind::Wither,
-            anim: AnimationType::Static,
+            anim: AnimationType::Wither,
             adult: vec![opaque(
                 entity_models::flying::bake_wither_model(),
                 tex_table!("wither" => "wither", "wither_invulnerable"),
@@ -2164,7 +2220,191 @@ fn mob_definitions() -> Vec<MobDef> {
             }],
             baby_overlays: vec![],
         },
-    ]
+    ];
+    macro_rules! boat_def {
+        ($kind:ident, $wood:literal, $chest:expr, $raft:expr) => {
+            MobDef {
+                kind: EntityKind::$kind,
+                anim: AnimationType::Boat,
+                adult: vec![opaque(
+                    if $raft {
+                        entity_models::vehicles::bake_raft_model($chest)
+                    } else {
+                        entity_models::vehicles::bake_boat_model($chest)
+                    },
+                    if $chest {
+                        &[&[concat!(
+                            "minecraft/textures/entity/chest_boat/",
+                            $wood,
+                            ".png"
+                        )]]
+                    } else {
+                        &[&[concat!("minecraft/textures/entity/boat/", $wood, ".png")]]
+                    },
+                    if $chest { 128 } else { 64 },
+                )],
+                baby: None,
+                adult_overlays: vec![],
+                baby_overlays: vec![],
+            }
+        };
+    }
+    defs.extend([
+        boat_def!(AcaciaBoat, "acacia", false, false),
+        boat_def!(AcaciaChestBoat, "acacia", true, false),
+        boat_def!(BambooRaft, "bamboo", false, true),
+        boat_def!(BambooChestRaft, "bamboo", true, true),
+        boat_def!(BirchBoat, "birch", false, false),
+        boat_def!(BirchChestBoat, "birch", true, false),
+        boat_def!(CherryBoat, "cherry", false, false),
+        boat_def!(CherryChestBoat, "cherry", true, false),
+        boat_def!(DarkOakBoat, "dark_oak", false, false),
+        boat_def!(DarkOakChestBoat, "dark_oak", true, false),
+        boat_def!(JungleBoat, "jungle", false, false),
+        boat_def!(JungleChestBoat, "jungle", true, false),
+        boat_def!(MangroveBoat, "mangrove", false, false),
+        boat_def!(MangroveChestBoat, "mangrove", true, false),
+        boat_def!(OakBoat, "oak", false, false),
+        boat_def!(OakChestBoat, "oak", true, false),
+        boat_def!(PaleOakBoat, "pale_oak", false, false),
+        boat_def!(PaleOakChestBoat, "pale_oak", true, false),
+        boat_def!(SpruceBoat, "spruce", false, false),
+        boat_def!(SpruceChestBoat, "spruce", true, false),
+    ]);
+    for kind in [
+        EntityKind::Minecart,
+        EntityKind::ChestMinecart,
+        EntityKind::FurnaceMinecart,
+        EntityKind::TntMinecart,
+        EntityKind::HopperMinecart,
+        EntityKind::CommandBlockMinecart,
+        EntityKind::SpawnerMinecart,
+    ] {
+        defs.push(MobDef {
+            kind,
+            anim: AnimationType::Static,
+            adult: vec![opaque(
+                entity_models::vehicles::bake_minecart_model(),
+                tex_table!("minecart" => "minecart"),
+                64,
+            )],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        });
+    }
+    for (kind, model, _texture, size, overlay_kind) in [
+        (
+            EntityKind::DragonFireball,
+            entity_models::projectiles::bake_dragon_fireball_model(),
+            "minecraft/textures/entity/enderdragon/dragon_fireball.png",
+            16,
+            OverlayKind::Opaque,
+        ),
+        (
+            EntityKind::Trident,
+            entity_models::projectiles::bake_trident_model(),
+            "minecraft/textures/entity/trident/trident.png",
+            32,
+            OverlayKind::Opaque,
+        ),
+        (
+            EntityKind::ShulkerBullet,
+            entity_models::projectiles::bake_shulker_bullet_model(),
+            "minecraft/textures/entity/shulker/spark.png",
+            64,
+            OverlayKind::BodyTranslucent,
+        ),
+        (
+            EntityKind::WitherSkull,
+            entity_models::projectiles::bake_wither_skull_model(),
+            "minecraft/textures/entity/wither/wither.png",
+            64,
+            OverlayKind::Opaque,
+        ),
+        (
+            EntityKind::LlamaSpit,
+            entity_models::projectiles::bake_llama_spit_model(),
+            "minecraft/textures/entity/llama/llama_spit.png",
+            64,
+            OverlayKind::Opaque,
+        ),
+    ] {
+        let tex_variants: &'static [&'static [&'static str]] = match kind {
+            EntityKind::DragonFireball => {
+                &[&["minecraft/textures/entity/enderdragon/dragon_fireball.png"]]
+            }
+            EntityKind::Trident => &[&["minecraft/textures/entity/trident/trident.png"]],
+            EntityKind::ShulkerBullet => &[&["minecraft/textures/entity/shulker/spark.png"]],
+            EntityKind::WitherSkull => &[
+                &["minecraft/textures/entity/wither/wither.png"],
+                &["minecraft/textures/entity/wither/wither_invulnerable.png"],
+            ],
+            EntityKind::LlamaSpit => &[&["minecraft/textures/entity/llama/llama_spit.png"]],
+            _ => unreachable!(),
+        };
+        defs.push(MobDef {
+            kind,
+            anim: AnimationType::Static,
+            adult: vec![VariantDef {
+                model,
+                tex_variants,
+                tex_size: size,
+                overlay_kind,
+            }],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        });
+    }
+    defs.push(MobDef {
+        kind: EntityKind::EndCrystal,
+        anim: AnimationType::EndCrystal,
+        adult: {
+            let model = entity_models::nonliving_special::bake_end_crystal_model();
+            let mut no_base = model.clone();
+            no_base.part_ranges[3] = (0, 0);
+            vec![
+                opaque(
+                    model,
+                    &[&["minecraft/textures/entity/end_crystal/end_crystal.png"]],
+                    64,
+                ),
+                opaque(
+                    no_base,
+                    &[&["minecraft/textures/entity/end_crystal/end_crystal.png"]],
+                    64,
+                ),
+            ]
+        },
+        baby: None,
+        adult_overlays: vec![],
+        baby_overlays: vec![],
+    });
+    let orb_texture: &'static [&'static [&'static str]] =
+        &[&["minecraft/textures/entity/experience/experience_orb.png"]];
+    let mut orb_base = entity_models::projectiles::bake_dragon_fireball_model();
+    orb_base.vertices.clear();
+    orb_base.part_ranges[0].1 = 0;
+    defs.push(MobDef {
+        kind: EntityKind::ExperienceOrb,
+        anim: AnimationType::Static,
+        adult: vec![VariantDef {
+            model: orb_base,
+            tex_variants: orb_texture,
+            tex_size: 64,
+            overlay_kind: OverlayKind::Opaque,
+        }],
+        baby: None,
+        adult_overlays: vec![VariantDef {
+            model: entity_models::projectiles::bake_dragon_fireball_model(),
+            tex_variants: orb_texture,
+            tex_size: 64,
+            overlay_kind: OverlayKind::BodyTranslucent,
+        }],
+        baby_overlays: vec![],
+    });
+    defs
 }
 
 impl EntityRenderer {
@@ -2709,13 +2949,173 @@ impl EntityRenderer {
                 ));
                 pose
             }
+            AnimationType::Allay => entity_model::compute_allay_anim(
+                model,
+                info.age_in_ticks,
+                info.walk_anim_pos,
+                info.walk_anim_speed,
+            ),
+            AnimationType::Bee => {
+                entity_model::compute_bee_anim(model, info.age_in_ticks, info.is_on_ground)
+            }
+            AnimationType::Breeze => entity_model::compute_breeze_anim(
+                model,
+                info.age_in_ticks,
+                info.head_x_rot_deg,
+                local_head_y,
+            ),
+            AnimationType::Ghast => entity_model::compute_ghast_anim(model, info.age_in_ticks),
+            AnimationType::Phantom => {
+                entity_model::compute_phantom_anim(model, info.age_in_ticks + info.animation_phase)
+            }
+            AnimationType::Wither => entity_model::compute_wither_anim(
+                model,
+                info.age_in_ticks,
+                info.head_x_rot_deg,
+                local_head_y,
+            ),
+            AnimationType::Shulker => {
+                let peek = info.shulker_peek.max(0.0);
+                let phase = (0.5 + peek) * std::f32::consts::PI;
+                let mut pose = entity_model::PartAnim::default();
+                let bob = if phase > std::f32::consts::PI {
+                    (info.age_in_ticks * 0.1).sin() * 0.7
+                } else {
+                    0.0
+                };
+                // Part translation is in source model pixels; the vanilla lid
+                // pivot moves from y=24 to 16 + 8*sin(phase) + bob.
+                pose.translation
+                    .push((0, glam::Vec3::Y * (16.0 + phase.sin() * 8.0 + bob - 24.0)));
+                let lid_y = if peek > 0.3 {
+                    (1.0 - phase.sin()).powi(4) * std::f32::consts::PI * 0.125
+                } else {
+                    0.0
+                };
+                pose.rotation.push((0, glam::Vec3::new(0.0, lid_y, 0.0)));
+                pose.rotation.push((
+                    2,
+                    glam::Vec3::new(
+                        info.head_x_rot_deg.to_radians(),
+                        (info.head_y_rot_deg - 180.0 - info.body_y_rot_deg).to_radians(),
+                        0.0,
+                    ),
+                ));
+                pose
+            }
             AnimationType::Static => entity_model::PartAnim::default(),
+            AnimationType::ArmorStand => armor_stand_pose(info),
+            AnimationType::EndCrystal => {
+                let turn = (info.age_in_ticks * 3.0).to_radians();
+                let tilt = std::f32::consts::FRAC_PI_3 / std::f32::consts::SQRT_2;
+                entity_model::PartAnim {
+                    rotation: vec![
+                        (0, glam::Vec3::new(tilt, turn, tilt)),
+                        (1, glam::Vec3::new(tilt, turn, tilt)),
+                        (2, glam::Vec3::new(tilt, turn, tilt)),
+                    ],
+                    translation: vec![(
+                        0,
+                        glam::Vec3::Y * (-end_crystal_y(info.age_in_ticks) * 0.5),
+                    )],
+                }
+            }
+            AnimationType::Boat => {
+                let time = info.age_in_ticks;
+                let paddle = |left: bool| {
+                    let x_t = ((-time).sin() + 1.0) * 0.5;
+                    let y_t = ((1.0 - time).sin() + 1.0) * 0.5;
+                    let x = -1.0471976 + (1.0471976 - 0.2617994) * x_t;
+                    let mut y = -0.7853982 + (0.7853982 - -0.7853982) * y_t;
+                    if !left {
+                        y = std::f32::consts::PI - y;
+                    }
+                    (x, y, 0.0)
+                };
+                let mut pose = entity_model::PartAnim::default();
+                if model.parts.len() >= 3 {
+                    let (left_index, right_index) = if model.parts.len() >= 7 {
+                        (5, 6)
+                    } else {
+                        (1, 2)
+                    };
+                    if info.boat_left_paddle {
+                        let left = paddle(true);
+                        pose.rotation
+                            .push((left_index, glam::Vec3::new(left.0, left.1, left.2)));
+                    }
+                    if info.boat_right_paddle {
+                        let right = paddle(false);
+                        pose.rotation
+                            .push((right_index, glam::Vec3::new(right.0, right.1, right.2)));
+                    }
+                }
+                pose
+            }
         }
     }
 
     /// The translation is anchor-relative, subtracted in f64 (see
     /// `Camera::anchor`).
     fn entity_matrix(info: &EntityRenderInfo, anchor: glam::DVec3) -> glam::Mat4 {
+        if info.entity_kind == EntityKind::ExperienceOrb {
+            return glam::Mat4::from_translation((*info.position - anchor).as_vec3())
+                * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.1, 0.0))
+                * glam::Mat4::from_rotation_y((180.0 - info.body_y_rot_deg).to_radians())
+                * glam::Mat4::from_rotation_x((-info.head_x_rot_deg).to_radians())
+                * glam::Mat4::from_scale(glam::Vec3::splat(0.3));
+        }
+        if info.entity_kind == EntityKind::EndCrystal {
+            return glam::Mat4::from_translation((*info.position - anchor).as_vec3())
+                * glam::Mat4::from_scale(glam::Vec3::splat(2.0))
+                * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.5, 0.0));
+        }
+        if matches!(
+            info.entity_kind,
+            EntityKind::DragonFireball
+                | EntityKind::Trident
+                | EntityKind::ShulkerBullet
+                | EntityKind::WitherSkull
+                | EntityKind::LlamaSpit
+        ) {
+            let position = glam::Mat4::from_translation((*info.position - anchor).as_vec3());
+            let (yaw, pitch) = (info.body_y_rot_deg, info.head_x_rot_deg);
+            let rotation = match info.entity_kind {
+                EntityKind::DragonFireball => {
+                    glam::Mat4::from_rotation_y((180.0 - yaw).to_radians())
+                        * glam::Mat4::from_rotation_x((-pitch).to_radians())
+                }
+                EntityKind::Trident => {
+                    glam::Mat4::from_rotation_y((yaw - 90.0).to_radians())
+                        * glam::Mat4::from_rotation_z((pitch + 90.0).to_radians())
+                }
+                EntityKind::WitherSkull => {
+                    glam::Mat4::from_rotation_y((180.0 - yaw).to_radians())
+                        * glam::Mat4::from_rotation_x(std::f32::consts::PI)
+                        * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                }
+                EntityKind::LlamaSpit => {
+                    glam::Mat4::from_translation(glam::Vec3::Y * 0.15)
+                        * glam::Mat4::from_rotation_y((180.0 - yaw).to_radians())
+                        * glam::Mat4::from_rotation_x(pitch.to_radians())
+                }
+                EntityKind::ShulkerBullet => {
+                    glam::Mat4::from_rotation_y((180.0 - yaw).to_radians())
+                        * glam::Mat4::from_rotation_x(pitch.to_radians())
+                        * glam::Mat4::from_rotation_z((info.age_in_ticks * 4.0).to_radians())
+                }
+                _ => glam::Mat4::IDENTITY,
+            };
+            let scale = match info.entity_kind {
+                EntityKind::DragonFireball => 2.0,
+                EntityKind::Trident => 1.0 / 16.0,
+                EntityKind::ShulkerBullet => 0.5 / 16.0,
+                EntityKind::WitherSkull => 1.0 / 16.0,
+                EntityKind::LlamaSpit => 1.0 / 16.0,
+                _ => 1.0,
+            };
+            return position * rotation * glam::Mat4::from_scale(glam::Vec3::splat(scale));
+        }
         if info.entity_kind == EntityKind::Arrow {
             // ArrowModel's arrowhead is at x=-12; the entity-model root flip
             // points it along +X. Match vanilla ArrowRenderer's yRot - 90.
@@ -2751,11 +3151,27 @@ impl EntityRenderer {
         // body_transform sits before the parts (whose root transforms carry
         // the convention's X flip), matching vanilla's setupRotations order.
         let mob_scale = mob_scale(info.entity_kind);
-        let base = if mob_scale == 1.0 {
+        let mut base = if mob_scale == 1.0 {
             base
         } else {
             base * glam::Mat4::from_scale(glam::Vec3::splat(mob_scale))
         };
+        if info.entity_kind == EntityKind::Shulker {
+            use azalea_core::direction::Direction as D;
+            let outward = match info.shulker_attach_face {
+                D::Down => glam::Vec3::Y,
+                D::Up => glam::Vec3::NEG_Y,
+                D::North => glam::Vec3::Z,
+                D::South => glam::Vec3::NEG_Z,
+                D::West => glam::Vec3::X,
+                D::East => glam::Vec3::NEG_X,
+            };
+            let center = glam::Vec3::new(0.0, 0.5, 0.0);
+            let orient = glam::Mat4::from_translation(center)
+                * glam::Mat4::from_quat(glam::Quat::from_rotation_arc(glam::Vec3::Y, outward))
+                * glam::Mat4::from_translation(-center);
+            base *= orient;
+        }
         info.body_transform.map_or(base, |m| base * m)
     }
 
@@ -2835,7 +3251,12 @@ impl EntityRenderer {
                 group.add(
                     base,
                     texture_set,
-                    (vi, v.info.base_tint, hurt_color(v.info), [0.0, 0.0]),
+                    (
+                        vi,
+                        v.info.base_tint,
+                        hurt_color(v.info),
+                        [0.0, 0.0, 1.0, 1.0],
+                    ),
                 );
             }
             for slot in 0..MAX_OVERLAYS {
@@ -2857,7 +3278,7 @@ impl EntityRenderer {
                         group.add(
                             overlay,
                             overlay.texture_set,
-                            (vi, tint, hurt_color(v.info), [0.0, 0.0]),
+                            (vi, tint, hurt_color(v.info), [0.0, 0.0, 1.0, 1.0]),
                         );
                     }
                 }
@@ -3103,8 +3524,62 @@ struct DrawRecord {
     instance_count: u32,
 }
 
-/// (visible-entity index, tint, overlay color, uv scroll) for one instance.
-type Member = (usize, [f32; 4], [f32; 4], [f32; 2]);
+/// (visible-entity index, tint, overlay color, uv offset+scale) for one
+/// instance.
+type Member = (usize, [f32; 4], [f32; 4], [f32; 4]);
+
+fn armor_stand_pose(info: &EntityRenderInfo) -> entity_model::PartAnim {
+    let mut pose = entity_model::PartAnim::default();
+    for (part, rotation) in info.armor_stand_pose.iter().enumerate() {
+        pose.rotation.push((
+            [0, 1, 3, 2, 5, 4][part],
+            glam::Vec3::new(
+                rotation[0].to_radians(),
+                rotation[1].to_radians(),
+                rotation[2].to_radians(),
+            ),
+        ));
+    }
+    let body_pose = info.armor_stand_pose[1];
+    let body = glam::Vec3::new(
+        body_pose[0].to_radians(),
+        body_pose[1].to_radians(),
+        body_pose[2].to_radians(),
+    );
+    for part in 6..=8 {
+        pose.rotation.push((part, body));
+    }
+    pose.rotation.push((
+        9,
+        glam::Vec3::new(0.0, -info.body_y_rot_deg.to_radians(), 0.0),
+    ));
+    pose
+}
+
+fn armor_stand_part_visible(kind: EntityKind, name: &str, flags: u8) -> bool {
+    kind != EntityKind::ArmorStand
+        || match name {
+            "right_arm" | "left_arm" => flags & 0x04 != 0,
+            "base_plate" => flags & 0x08 == 0,
+            _ => true,
+        }
+}
+
+pub(crate) fn player_model_part_visible(kind: EntityKind, name: &str, mask: u8) -> bool {
+    if !matches!(kind, EntityKind::Player | EntityKind::Mannequin) {
+        return true;
+    }
+    let bit = match name {
+        "hat" => 1 << 6,
+        "jacket" => 1 << 1,
+        "right_sleeve" => 1 << 3,
+        "left_sleeve" => 1 << 2,
+        "right_pants" => 1 << 5,
+        "left_pants" => 1 << 4,
+        _ => return true,
+    };
+    mask & bit != 0
+}
 
 /// Visible entities grouped by variant (geometry), so each variant's parts emit
 /// one instanced draw covering all its entities.
@@ -3143,7 +3618,19 @@ impl<'a> VariantGroups<'a> {
                     continue;
                 }
                 let first_instance = instances.len() as u32;
+                let mut instance_count = 0;
                 for (k, (vi, tint, overlay, uv)) in members.iter().enumerate() {
+                    if !player_model_part_visible(
+                        vis[*vi].info.entity_kind,
+                        &variant.model.parts[p].name,
+                        vis[*vi].info.skin_parts_mask,
+                    ) || !armor_stand_part_visible(
+                        vis[*vi].info.entity_kind,
+                        &variant.model.parts[p].name,
+                        vis[*vi].info.armor_stand_flags,
+                    ) {
+                        continue;
+                    }
                     let part = match &own {
                         Some(own) => own[k][p],
                         None => vis[*vi].part_transforms[p],
@@ -3153,8 +3640,12 @@ impl<'a> VariantGroups<'a> {
                         model: model.to_cols_array_2d(),
                         tint: *tint,
                         overlay_color: *overlay,
-                        uv_params: [uv[0], uv[1], 0.0, 0.0],
+                        uv_params: *uv,
                     });
+                    instance_count += 1;
+                }
+                if instance_count == 0 {
+                    continue;
                 }
                 records.push(DrawRecord {
                     texture_set: *texture_set,
@@ -3162,7 +3653,7 @@ impl<'a> VariantGroups<'a> {
                     part_start: *start,
                     part_count: *part_count,
                     first_instance,
-                    instance_count: members.len() as u32,
+                    instance_count,
                 });
             }
         }
@@ -3183,13 +3674,19 @@ fn collect_overlays<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGrou
             if overlay.overlay_kind != kind && !wind_in_body_pass {
                 continue;
             }
-            let uv = match overlay.overlay_kind {
-                OverlayKind::SwirlAdditive => {
-                    let o = (v.info.age_in_ticks * 0.01).rem_euclid(1.0);
-                    [o, o]
+            let uv = if v.info.entity_kind == EntityKind::ExperienceOrb {
+                experience_orb_uv(v.info.variant_index)
+            } else {
+                match overlay.overlay_kind {
+                    OverlayKind::SwirlAdditive => {
+                        let o = (v.info.age_in_ticks * 0.01).rem_euclid(1.0);
+                        [o, o, 1.0, 1.0]
+                    }
+                    OverlayKind::WindScroll => {
+                        [(v.info.age_in_ticks * 0.02).rem_euclid(1.0), 0.0, 1.0, 1.0]
+                    }
+                    _ => [0.0, 0.0, 1.0, 1.0],
                 }
-                OverlayKind::WindScroll => [(v.info.age_in_ticks * 0.02).rem_euclid(1.0), 0.0],
-                _ => [0.0, 0.0],
             };
             let overlay_color = if overlay.overlay_kind == OverlayKind::BodyTranslucent {
                 hurt_color(v.info)
@@ -3202,6 +3699,15 @@ fn collect_overlays<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGrou
         }
     }
     groups
+}
+
+fn experience_orb_uv(icon: u32) -> [f32; 4] {
+    [
+        (icon % 4) as f32 * 0.25,
+        (icon / 4) as f32 * 0.25,
+        0.25,
+        0.25,
+    ]
 }
 
 fn hurt_color(info: &EntityRenderInfo) -> [f32; 4] {
@@ -3795,6 +4301,43 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn experience_orb_uv_stays_within_its_16_pixel_sheet_cell() {
+        use super::experience_orb_uv;
+
+        for icon in 0..=10 {
+            let [u, v, du, dv] = experience_orb_uv(icon);
+            assert_eq!((du, dv), (0.25, 0.25));
+            assert!((0.0..=0.75).contains(&u));
+            assert!((0.0..=0.5).contains(&v));
+            assert!(u + du <= 1.0 && v + dv <= 1.0);
+        }
+        assert_eq!(experience_orb_uv(10), [0.5, 0.5, 0.25, 0.25]);
+    }
+
+    #[test]
+    fn experience_orb_uses_native_billboard_transform_scale_and_height_offset() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::{DVec3, Vec3};
+
+        use super::{EntityRenderInfo, EntityRenderer};
+        use crate::entity::components::Position;
+
+        let info = EntityRenderInfo {
+            position: Position::new(2.0, 3.0, 4.0),
+            entity_kind: EntityKind::ExperienceOrb,
+            body_y_rot_deg: 0.0,
+            head_x_rot_deg: 0.0,
+            ..Default::default()
+        };
+        let model = EntityRenderer::entity_matrix(&info, DVec3::ZERO);
+        assert!((model.x_axis.truncate().length() - 0.3).abs() < 1.0e-6);
+        assert!((model.transform_point3(Vec3::ZERO).y - 3.1).abs() < 1.0e-6);
+        let lower_left = model.transform_point3(Vec3::new(-0.5, -0.25, 0.0));
+        let upper_right = model.transform_point3(Vec3::new(0.5, 0.75, 0.0));
+        assert!(((upper_right.x - lower_left.x).abs() - 0.3).abs() < 1.0e-6);
+        assert!((upper_right.y - lower_left.y - 0.3).abs() < 1.0e-6);
+    }
 
     #[test]
     fn arrow_tip_points_along_protocol_yaw() {
@@ -4077,6 +4620,121 @@ mod tests {
     /// Bakes every mob model; `generate_cube_vertices`' UV seam
     /// `debug_assert!` fires for any mesh that straddles its sheet.
     #[test]
+    fn end_crystal_body_uses_registered_bake_variants_and_native_pose() {
+        use azalea_registry::builtin::EntityKind;
+
+        let defs = super::mob_definitions();
+        let def = defs
+            .iter()
+            .find(|def| def.kind == EntityKind::EndCrystal)
+            .unwrap();
+        assert_eq!(def.adult.len(), 2);
+        assert_eq!(def.adult[0].model.parts.len(), 4);
+        assert!(!def.adult[0].model.vertices.is_empty());
+        assert_ne!(
+            def.adult[0].model.part_ranges[3],
+            def.adult[1].model.part_ranges[3]
+        );
+        assert_eq!(def.anim, super::AnimationType::EndCrystal);
+        assert!((super::end_crystal_y(0.0) + 1.1).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn armor_stand_has_real_body_mesh_native_poses_and_visibility_flags() {
+        use azalea_registry::builtin::EntityKind;
+
+        use super::EntityRenderInfo;
+
+        let def = super::mob_definitions()
+            .into_iter()
+            .find(|def| def.kind == EntityKind::ArmorStand)
+            .unwrap();
+        assert_eq!(def.anim, super::AnimationType::ArmorStand);
+        let model = &def.adult[0].model;
+        assert_eq!(model.parts.len(), 10);
+        assert!(!model.vertices.is_empty());
+        assert_eq!(def.adult[0].tex_size, 64);
+        assert_eq!(
+            def.adult[0].tex_variants[0][0],
+            "minecraft/textures/entity/armorstand/armorstand.png"
+        );
+        assert!(super::armor_stand_part_visible(
+            EntityKind::ArmorStand,
+            "head",
+            0
+        ));
+        assert!(!super::armor_stand_part_visible(
+            EntityKind::ArmorStand,
+            "left_arm",
+            0
+        ));
+        assert!(super::armor_stand_part_visible(
+            EntityKind::ArmorStand,
+            "left_arm",
+            0x04
+        ));
+        assert!(!super::armor_stand_part_visible(
+            EntityKind::ArmorStand,
+            "base_plate",
+            0x08
+        ));
+        assert!(super::armor_stand_part_visible(
+            EntityKind::ArmorStand,
+            "head",
+            0x10
+        ));
+
+        let info = EntityRenderInfo {
+            entity_kind: EntityKind::ArmorStand,
+            body_y_rot_deg: 90.0,
+            armor_stand_pose: [
+                [10.0, 20.0, 30.0],
+                [40.0, 50.0, 60.0],
+                [70.0, 80.0, 90.0],
+                [100.0, 110.0, 120.0],
+                [130.0, 140.0, 150.0],
+                [160.0, 170.0, 180.0],
+            ],
+            ..Default::default()
+        };
+        let pose = super::armor_stand_pose(&info);
+        assert_eq!(pose.rotation.len(), 10);
+        let radians = |xyz: [f32; 3]| {
+            glam::Vec3::new(
+                xyz[0].to_radians(),
+                xyz[1].to_radians(),
+                xyz[2].to_radians(),
+            )
+        };
+        assert_eq!(pose.rotation[0], (0, radians([10.0, 20.0, 30.0])));
+        assert_eq!(pose.rotation[2], (3, radians([70.0, 80.0, 90.0])));
+        assert_eq!(pose.rotation[3], (2, radians([100.0, 110.0, 120.0])));
+        assert_eq!(pose.rotation[6], (6, radians([40.0, 50.0, 60.0])));
+        assert_eq!(pose.rotation[9].1.y, -std::f32::consts::FRAC_PI_2);
+    }
+
+    #[test]
+    fn experience_orb_definition_reuses_the_single_dragonfireball_quad_in_translucent_pass() {
+        use azalea_registry::builtin::EntityKind;
+
+        let defs = super::mob_definitions();
+        let def = defs
+            .iter()
+            .find(|def| def.kind == EntityKind::ExperienceOrb)
+            .unwrap();
+        assert!(def.adult[0].model.vertices.is_empty());
+        assert_eq!(def.adult_overlays.len(), 1);
+        let orb = &def.adult_overlays[0];
+        assert!(orb.overlay_kind == super::OverlayKind::BodyTranslucent);
+        assert_eq!(orb.model.vertices.len(), 6);
+        assert_eq!(orb.tex_size, 64);
+        assert_eq!(
+            orb.tex_variants[0][0],
+            "minecraft/textures/entity/experience/experience_orb.png"
+        );
+    }
+
+    #[test]
     fn all_mob_meshes_bake_and_definitions_are_unique() {
         let defs = super::mob_definitions();
         let mut kinds = std::collections::HashSet::new();
@@ -4157,6 +4815,55 @@ mod tests {
         assert!(mooshroom.baby.is_some());
         assert!(mooshroom.adult[0].tex_variants[0][0].ends_with("cow/mooshroom_red.png"));
         assert!(mooshroom.adult[0].tex_variants[1][0].ends_with("cow/mooshroom_brown.png"));
+    }
+
+    #[test]
+    fn twenty_boat_forms_have_dedicated_geometry_and_exact_texture_paths() {
+        use azalea_registry::builtin::EntityKind as K;
+
+        let expected = [
+            (K::AcaciaBoat, "boat/acacia.png", false),
+            (K::AcaciaChestBoat, "chest_boat/acacia.png", true),
+            (K::BambooRaft, "boat/bamboo.png", false),
+            (K::BambooChestRaft, "chest_boat/bamboo.png", true),
+            (K::BirchBoat, "boat/birch.png", false),
+            (K::BirchChestBoat, "chest_boat/birch.png", true),
+            (K::CherryBoat, "boat/cherry.png", false),
+            (K::CherryChestBoat, "chest_boat/cherry.png", true),
+            (K::DarkOakBoat, "boat/dark_oak.png", false),
+            (K::DarkOakChestBoat, "chest_boat/dark_oak.png", true),
+            (K::JungleBoat, "boat/jungle.png", false),
+            (K::JungleChestBoat, "chest_boat/jungle.png", true),
+            (K::MangroveBoat, "boat/mangrove.png", false),
+            (K::MangroveChestBoat, "chest_boat/mangrove.png", true),
+            (K::OakBoat, "boat/oak.png", false),
+            (K::OakChestBoat, "chest_boat/oak.png", true),
+            (K::PaleOakBoat, "boat/pale_oak.png", false),
+            (K::PaleOakChestBoat, "chest_boat/pale_oak.png", true),
+            (K::SpruceBoat, "boat/spruce.png", false),
+            (K::SpruceChestBoat, "chest_boat/spruce.png", true),
+        ];
+        let defs = super::mob_definitions();
+        for (kind, texture, chest) in expected {
+            let matches: Vec<_> = defs.iter().filter(|def| def.kind == kind).collect();
+            assert_eq!(matches.len(), 1, "{kind:?} has one dedicated renderer def");
+            let def = matches[0];
+            let variant = &def.adult[0];
+            assert_eq!(def.anim, super::AnimationType::Boat);
+            assert!(!variant.model.vertices.is_empty());
+            let raft = matches!(kind, K::BambooRaft | K::BambooChestRaft);
+            assert_eq!(
+                variant.model.parts.len(),
+                match (raft, chest) {
+                    (false, false) => 7,
+                    (false, true) => 10,
+                    (true, false) => 3,
+                    (true, true) => 6,
+                }
+            );
+            assert!(variant.tex_variants[0][0].ends_with(texture));
+            assert!(def.baby.is_none());
+        }
     }
 
     #[test]

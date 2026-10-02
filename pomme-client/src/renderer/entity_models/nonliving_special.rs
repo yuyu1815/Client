@@ -44,7 +44,7 @@ fn bake_y_up_model(parts: Vec<EntityPart>, tex_w: u32, tex_h: u32) -> BakedEntit
 /// `ArmorStandModel.createBodyLayer` and its `HumanoidModel.createMesh` parent
 /// (26.2), at the adult scale. Armor/hand items are separate item-mesh draws.
 pub fn bake_armor_stand_model() -> BakedEntityModel {
-    let mut model = bake_model(
+    let model = bake_model(
         vec![
             part(
                 "head",
@@ -115,16 +115,32 @@ pub fn bake_armor_stand_model() -> BakedEntityModel {
 pub fn bake_end_crystal_model() -> BakedEntityModel {
     let mut model = bake_y_up_model(
         vec![
-            part("outer_glass", vec3(0.0, 24.0, 0.0), vec![cube(vec3(-4.0, -4.0, -4.0), vec3(8.0, 8.0, 8.0), (0, 0))]),
+            part(
+                "outer_glass",
+                vec3(0.0, 24.0, 0.0),
+                vec![cube(vec3(-4.0, -4.0, -4.0), vec3(8.0, 8.0, 8.0), (0, 0))],
+            ),
             EntityPart {
                 parent: Some(0),
-                ..part("inner_glass", Vec3::ZERO, vec![cube(vec3(-4.0, -4.0, -4.0), vec3(8.0, 8.0, 8.0), (0, 0))]),
+                ..part(
+                    "inner_glass",
+                    Vec3::ZERO,
+                    vec![cube(vec3(-4.0, -4.0, -4.0), vec3(8.0, 8.0, 8.0), (0, 0))],
+                )
             },
             EntityPart {
                 parent: Some(1),
-                ..part("cube", Vec3::ZERO, vec![cube(vec3(-4.0, -4.0, -4.0), vec3(8.0, 8.0, 8.0), (32, 0))]),
+                ..part(
+                    "cube",
+                    Vec3::ZERO,
+                    vec![cube(vec3(-4.0, -4.0, -4.0), vec3(8.0, 8.0, 8.0), (32, 0))],
+                )
             },
-            part("base", Vec3::ZERO, vec![cube(vec3(-6.0, 0.0, -6.0), vec3(12.0, 4.0, 12.0), (0, 16))]),
+            part(
+                "base",
+                Vec3::ZERO,
+                vec![cube(vec3(-6.0, 0.0, -6.0), vec3(12.0, 4.0, 12.0), (0, 16))],
+            ),
         ],
         64,
         32,

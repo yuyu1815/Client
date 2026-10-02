@@ -88,6 +88,27 @@ pub enum TextDisplayTransformValue {
     Billboard(u8),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DisplayMetaValue {
+    Int(i32),
+    Float(f32),
+    Byte(u8),
+    Vector([f32; 3]),
+    Quaternion([f32; 4]),
+    BlockState(u32),
+}
+
+#[derive(Clone, Debug)]
+pub enum ItemDisplayMetaValue {
+    Stack(ItemStack),
+    Context(u8),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ArmorStandMetaValue {
+    Rotation([f32; 3]),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CriticalHitKind {
     Critical,
@@ -613,6 +634,25 @@ pub enum NetworkEvent {
         id: i32,
         index: u8,
         value: TextDisplayTransformValue,
+    },
+    DisplayData {
+        id: i32,
+        index: u8,
+        value: DisplayMetaValue,
+    },
+    ItemDisplayData {
+        id: i32,
+        index: u8,
+        value: ItemDisplayMetaValue,
+    },
+    ArmorStandData {
+        id: i32,
+        index: u8,
+        value: ArmorStandMetaValue,
+    },
+    ArmorStandEquipment {
+        id: i32,
+        slots: Vec<(azalea_inventory::components::EquipmentSlot, ItemStack)>,
     },
     EntityHeadRotation {
         id: i32,
