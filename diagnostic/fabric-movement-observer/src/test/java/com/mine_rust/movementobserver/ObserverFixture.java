@@ -145,7 +145,7 @@ public final class ObserverFixture {
         AtomicInteger mappedEvents = new AtomicInteger();
         AtomicInteger encodedWrites = new AtomicInteger();
         AtomicInteger encodedByte = new AtomicInteger();
-        PacketWriteObserver.Event event = (observed, stage, cause) -> {
+        PacketWriteObserver.Event event = (observed, stage, cause, traceId) -> {
             assert observed == packet;
             assert cause == null;
             mappedEvents.incrementAndGet();
@@ -193,8 +193,11 @@ public final class ObserverFixture {
         RuntimeException failure = new RuntimeException("fixture failure");
         AtomicInteger writes = new AtomicInteger();
         List<String> stages = new ArrayList<>();
-        PacketWriteObserver.Event event = (p, stage, cause) -> {
+        List<String> traceIds = new ArrayList<>();
+        PacketWriteObserver.Event event = (p, stage, cause, traceId) -> {
             assert p == packet;
+            assert traceId != null && !traceId.isBlank();
+            traceIds.add(traceId);
             stages.add(stage);
         };
         ChannelOutboundHandlerAdapter sink = new ChannelOutboundHandlerAdapter() {
@@ -219,6 +222,7 @@ public final class ObserverFixture {
         assert stages.size() == 2 : stages;
         assert stages.get(0).equals("transport_write_attempt");
         assert stages.get(1).equals(expectedStage) : stages;
+        assert traceIds.size() == 2 && traceIds.get(0).equals(traceIds.get(1)) : traceIds;
         if (!voidPromise) assert promise.isSuccess() == succeed;
         if (succeed) assert channel.readOutbound() == packet;
         else assert channel.readOutbound() == null;

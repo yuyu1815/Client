@@ -18,8 +18,12 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.phys.Vec3;
 import org.lwjgl.glfw.GLFW;
+import io.netty.buffer.ByteBuf;
+import io.netty.channel.Channel;
+import io.netty.util.AttributeKey;
 
 import java.io.BufferedWriter;
+import java.util.Base64;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -37,12 +41,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class MovementObserver implements ClientModInitializer {
-    private static final int QUEUE = 128, MAX_ROW = 512 * 1024;
-    private static final long LIMIT = 64L * 1024 * 1024;
+    private static final int QUEUE = 128, MAX_ROW = 12 * 1024 * 1024;
+    private static final long LIMIT = 1024L * 1024 * 1024;
+    private static final int MAX_RAW = 8 * 1024 * 1024;
+    private static final AttributeKey<Long> CONNECTION_EPOCH = AttributeKey.valueOf("movementobserver:connection_epoch");
+        private static final AtomicLong CONNECTION_IDS = new AtomicLong();
+    private static final ThreadLocal<RawStart> RAW = new ThreadLocal<>();
+    private record RawStart(Channel channel, String direction, String phase, String packetType, int start) {}
     private static final AtomicBoolean ACTIVE = new AtomicBoolean();
     private static final AtomicBoolean WRITER_RUNNING = new AtomicBoolean();
     private static final ArrayBlockingQueue<String> ROWS = new ArrayBlockingQueue<>(QUEUE);
-    private static final AtomicLong SEQ = new AtomicLong(), DROPPED = new AtomicLong();
+    private static final AtomicLong SEQ = new AtomicLong(), DROPPED = new AtomicLong(), RAW_OMITTED_BYTES = new AtomicLong();
     private static final ExecutorService WRITER = Executors.newSingleThreadExecutor(r -> { Thread t = new Thread(r, "movement-observer-writer"); t.setDaemon(true); return t; });
     private static final KeyMapping TOGGLE = KeyMappingHelper.registerKeyMapping(new KeyMapping("key.movementobserver.toggle", GLFW.GLFW_KEY_F8, KeyMapping.Category.register(Identifier.fromNamespaceAndPath("movementobserver", "diagnostic"))));
     private static volatile Path path;
@@ -53,7 +62,7 @@ public final class MovementObserver implements ClientModInitializer {
     @Override public void onInitializeClient() {
         client = Minecraft.getInstance();
         if (Boolean.getBoolean("movementobserver.classloadSmoke")) {
-            for (String name : List.of("net.minecraft.client.multiplayer.ClientPacketListener", "net.minecraft.world.entity.Entity", "net.minecraft.world.entity.LivingEntity", "net.minecraft.world.entity.player.Player", "net.minecraft.client.player.LocalPlayer", "net.minecraft.network.Connection", "net.minecraft.client.Minecraft")) {
+            for (String name : List.of("net.minecraft.client.multiplayer.ClientPacketListener", "net.minecraft.world.entity.Entity", "net.minecraft.world.entity.LivingEntity", "net.minecraft.world.entity.player.Player", "net.minecraft.client.player.LocalPlayer", "net.minecraft.network.Connection", "net.minecraft.network.PacketEncoder", "net.minecraft.network.PacketDecoder", "net.minecraft.client.KeyboardHandler", "net.minecraft.client.MouseHandler", "net.minecraft.client.Minecraft")) {
                 try { Class.forName(name, false, Minecraft.class.getClassLoader()); System.out.println("[movementobserver] classloadSmoke PASS " + name); }
                 catch (ClassNotFoundException e) { throw new IllegalStateException("classloadSmoke FAILED " + name, e); }
             }
@@ -75,7 +84,7 @@ public final class MovementObserver implements ClientModInitializer {
             Files.createDirectories(dir);
             path = dir.resolve("movement-" + UUID.randomUUID() + ".jsonl");
             startedNanos = System.nanoTime(); startWall = System.currentTimeMillis(); stopReason = "stop";
-            SEQ.set(0); DROPPED.set(0); ROWS.clear(); WRITER_RUNNING.set(true); ACTIVE.set(true);
+            SEQ.set(0); DROPPED.set(0); RAW_OMITTED_BYTES.set(0); ROWS.clear(); WRITER_RUNNING.set(true); ACTIVE.set(true);
             WRITER.execute(() -> { try { writeFile(path, mc); } finally { WRITER_RUNNING.set(false); } });
             mc.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.literal("Movement observer recording: " + path));
         } catch (IOException e) { mc.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.literal("Movement observer start failed: " + e)); }
@@ -85,12 +94,56 @@ public final class MovementObserver implements ClientModInitializer {
     public static void frameStart() { if (ACTIVE.get()) { frameId++; frameStartNanos=System.nanoTime(); framePlayerTicks=0; } }
     public static void frameEnd(Minecraft mc) { if (!ACTIVE.get()) return; long now=System.nanoTime(); JsonObject d=new JsonObject(); d.addProperty("event","frame_observation"); d.addProperty("frame_id",frameId); d.addProperty("frame_nanos",Math.max(0L,now-frameStartNanos)); d.addProperty("frame_elapsed_sec",Math.max(0L,now-frameStartNanos)/1_000_000_000.0); d.addProperty("frame_player_tick_count",framePlayerTicks); try { d.addProperty("native_partial_ticks_f32",(double)mc.getDeltaTracker().getGameTimeDeltaPartialTick(false)); } catch(RuntimeException ignored) { d.add("native_partial_ticks_f32",null); } d.add("rust_accumulator",null); d.addProperty("rust_accumulator_reason","Minecraft DeltaTracker exposes partial ticks but not Rust simulation accumulator state"); offer("local","frame_observation",d); }
     public static boolean isRecordingFast() { return ACTIVE.get(); }
-    public static void packet(Packet<?> p, String direction, String stage, String errorClass) {
+    public static boolean capturePhase(String phase) { return phase.equals("PLAY") || phase.equals("CONFIGURATION"); }
+    public static void beginRaw(Channel channel, String direction, String phase, String packetType, int start) {
+        RAW.remove();
+        if (ACTIVE.get() && capturePhase(phase)) RAW.set(new RawStart(channel, direction, phase.toLowerCase(java.util.Locale.ROOT), packetType, start));
+    }
+    public static void endRaw(Channel channel, ByteBuf buffer, int end) { endRaw(channel, buffer, end, null); }
+    public static void endRaw(Channel channel, ByteBuf buffer, int end, String packetType) {
+        RawStart s = RAW.get(); RAW.remove();
+        if (s == null || s.channel() != channel || !ACTIVE.get()) return;
+        int length = end - s.start();
+        if (length <= 0 || length > MAX_RAW || s.start() < 0 || end > buffer.writerIndex()) { DROPPED.incrementAndGet(); RAW_OMITTED_BYTES.addAndGet(Math.max(0, length)); return; }
+        try {
+            byte[] bytes = new byte[length]; buffer.getBytes(s.start(), bytes);
+            int id = 0, shift = 0, idLength = 0; boolean validId = false;
+            for (int i = 0; i < Math.min(length, 5); i++) { int b = bytes[i] & 255; if (i == 4 && (b & 0xf0) != 0) break; id |= (b & 127) << shift; shift += 7; if ((b & 128) == 0) { idLength = i + 1; validId = true; break; } }
+            if (!validId || idLength == 0) id = -1;
+            Long epoch = channel.attr(CONNECTION_EPOCH).get();
+            if (epoch == null) { long assigned = CONNECTION_IDS.incrementAndGet(); Long prev = channel.attr(CONNECTION_EPOCH).setIfAbsent(assigned); epoch = prev == null ? assigned : prev; }
+            JsonObject d = new JsonObject(); d.addProperty("protocol_state", s.phase()); d.addProperty("wire_protocol", net.minecraft.SharedConstants.getProtocolVersion());
+            String traceId = channel.attr(PacketTrace.KEY).get(); if (traceId == null) traceId = UUID.randomUUID().toString();
+            d.addProperty("connection_epoch", epoch); d.addProperty("packet_trace_id", traceId);
+            if (id >= 0) d.addProperty("native_id", id); else d.add("native_id", null);
+            if (packetType != null || s.packetType() != null) d.addProperty("packet_type", packetType == null ? s.packetType() : packetType);
+            d.add("frame_id", frameId == 0 ? com.google.gson.JsonNull.INSTANCE : new com.google.gson.JsonPrimitive(frameId));
+            d.addProperty("payload_base64", Base64.getEncoder().encodeToString(bytes)); d.addProperty("raw_length", length);
+            d.addProperty("capture_point", "wire_plaintext"); d.addProperty("payload_layout", "id_plus_payload");
+            offer(s.direction(), "packet_raw", d);
+            if (s.direction().equals("inbound")) channel.attr(PacketTrace.KEY).set(traceId);
+        } catch (RuntimeException e) { DROPPED.incrementAndGet(); }
+    }
+    public static void input(String kind, long window, int action, int code, int scan, int modifiers, double x, double y) {
+        if (!ACTIVE.get() || client == null || window != client.getWindow().handle()) return;
+        JsonObject d = new JsonObject(); d.addProperty("event", "input_event"); d.addProperty("kind", kind);
+        d.addProperty("action", action); d.addProperty("code", code); d.addProperty("code_name", inputCodeName(kind, code)); d.addProperty("scancode", scan); d.addProperty("modifiers", modifiers);
+        if (kind.equals("cursor") || kind.equals("scroll")) { d.addProperty("x", x); d.addProperty("y", y); }
+        d.addProperty("screen", client.gui.screen() == null ? "none" : client.gui.screen().getClass().getSimpleName());
+        d.addProperty("frame_id", frameId); offer("local", "input_event", d);
+    }
+    private static String inputCodeName(String kind, int code) {
+        if (kind.equals("button")) return switch (code) { case GLFW.GLFW_MOUSE_BUTTON_LEFT -> "mouse_left"; case GLFW.GLFW_MOUSE_BUTTON_RIGHT -> "mouse_right"; case GLFW.GLFW_MOUSE_BUTTON_MIDDLE -> "mouse_middle"; default -> "unknown"; };
+        return switch (code) { case GLFW.GLFW_KEY_W -> "W"; case GLFW.GLFW_KEY_A -> "A"; case GLFW.GLFW_KEY_S -> "S"; case GLFW.GLFW_KEY_D -> "D"; case GLFW.GLFW_KEY_SPACE -> "SPACE"; case GLFW.GLFW_KEY_LEFT_SHIFT -> "LEFT_SHIFT"; case GLFW.GLFW_KEY_RIGHT_SHIFT -> "RIGHT_SHIFT"; case GLFW.GLFW_KEY_LEFT_CONTROL -> "LEFT_CONTROL"; case GLFW.GLFW_KEY_RIGHT_CONTROL -> "RIGHT_CONTROL"; case GLFW.GLFW_KEY_ESCAPE -> "ESCAPE"; case GLFW.GLFW_KEY_ENTER -> "ENTER"; case GLFW.GLFW_KEY_UP -> "UP"; case GLFW.GLFW_KEY_DOWN -> "DOWN"; case GLFW.GLFW_KEY_LEFT -> "LEFT"; case GLFW.GLFW_KEY_RIGHT -> "RIGHT"; default -> "unknown"; };
+    }
+    public static void packet(Packet<?> p, String direction, String stage, String errorClass, String traceId) {
         if (!isRecordingFast()) return;
         try {
             JsonObject data = PacketFields.capture(p);
-            if (data == null) return;
-            data.add("native_id", null); // Minecraft exposes packet type Identifier, not the negotiated numeric wire ID here.
+            if (data == null) { data = new JsonObject(); data.addProperty("packet", "unknown_typed"); data.add("fields", new JsonObject()); }
+            data.addProperty("packet_type", p.type().id().toString());
+            if (traceId != null) data.addProperty("packet_trace_id", traceId);
+            data.add("native_id", null); // Numeric IDs are taken only from the original raw codec bytes.
             data.addProperty("native_stage", direction.equals("outbound") ? "channel_write" : "channel_read_before_listener");
             if (stage.equals("transport_write_failure") && errorClass != null) data.addProperty("error_class", errorClass);
             offer(direction, stage, data);
@@ -148,7 +201,7 @@ public final class MovementObserver implements ClientModInitializer {
     private static final ThreadLocal<JumpCapture> JUMP = new ThreadLocal<>();
     private static final ThreadLocal<JsonObject> PHYSICS = new ThreadLocal<>();
     private static JsonObject TICK_TRAVEL = new JsonObject();
-    private static long frameId, frameStartNanos;
+    private static volatile long frameId, frameStartNanos;
     private static int framePlayerTicks;
     private static final class JumpCapture {
         final JsonObject data = new JsonObject();
@@ -373,20 +426,32 @@ public final class MovementObserver implements ClientModInitializer {
     private static synchronized void offer(String direction, String stage, JsonObject data) {
         long seq = SEQ.incrementAndGet();
         JsonObject r = new JsonObject(); r.addProperty("seq",seq); r.addProperty("offset_us",(System.nanoTime()-startedNanos)/1000); r.addProperty("direction",direction); r.addProperty("stage",stage); r.add("data",data);
-        String line = r.toString(); if (line.getBytes(StandardCharsets.UTF_8).length > MAX_ROW || !ROWS.offer(line)) DROPPED.incrementAndGet();
+        String line = r.toString(); if (line.getBytes(StandardCharsets.UTF_8).length > MAX_ROW || !ROWS.offer(line)) { DROPPED.incrementAndGet(); if (stage.equals("packet_raw")) RAW_OMITTED_BYTES.addAndGet(data.get("raw_length").getAsLong()); }
     }
     private static void writeFile(Path file, Minecraft mc) {
         long bytes=0, written=0, oversize=0; String error=null;
         try (BufferedWriter out=Files.newBufferedWriter(file, StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW)) {
-            JsonObject h=new JsonObject(); h.addProperty("type","header"); h.addProperty("schema",1); h.addProperty("utc_start_unix_ms",startWall); h.addProperty("wire_protocol",776); h.addProperty("client_kind","fabric"); h.add("executable", identity(ProcessHandle.current().info().command().orElse(null))); h.add("minecraft_artifact", null); h.addProperty("source_build_revision", buildRevision()); h.addProperty("queue_capacity",QUEUE); h.addProperty("size_limit_bytes",LIMIT); h.addProperty("max_row_bytes",MAX_ROW); h.addProperty("semantics","client observations only; queued != transport write completion != server acceptance");
-            out.write(h.toString()); out.newLine();
+            JsonObject h=new JsonObject(); h.addProperty("type","header"); h.addProperty("schema",1); h.addProperty("utc_start_unix_ms",startWall); h.addProperty("wire_protocol",net.minecraft.SharedConstants.getProtocolVersion()); h.addProperty("client_kind","fabric"); h.add("executable", identity(ProcessHandle.current().info().command().orElse(null))); h.add("minecraft_artifact", null); h.addProperty("source_build_revision", buildRevision()); h.addProperty("queue_capacity",QUEUE); h.addProperty("size_limit_bytes",LIMIT); h.addProperty("max_row_bytes",MAX_ROW); h.addProperty("semantics","client observations only; queued != transport write completion != server acceptance");
+            String header = h.toString(); out.write(header); out.newLine(); bytes = header.getBytes(StandardCharsets.UTF_8).length + 1;
             while (ACTIVE.get() || !ROWS.isEmpty()) {
                 String row=ROWS.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS);
-                if(row!=null){int size=row.getBytes(StandardCharsets.UTF_8).length+1;if(size>MAX_ROW){oversize++;DROPPED.incrementAndGet();}else{out.write(row);out.newLine();bytes+=size;written++;if(bytes>=LIMIT)stop("size_limit");}}
+                if (row != null) {
+                    int size = row.getBytes(StandardCharsets.UTF_8).length + 1;
+                    if (size > MAX_ROW) { oversize++; discardRow(row); }
+                    else if (bytes + size > LIMIT - 4096) { stop("size_limit"); discardRow(row); }
+                    else { out.write(row); out.newLine(); bytes += size; written++; if (bytes >= LIMIT) stop("size_limit"); }
+                }
             }
-            JsonObject f=new JsonObject(); f.addProperty("type","footer"); f.addProperty("utc_end_unix_ms",System.currentTimeMillis()); f.addProperty("offset_us",(System.nanoTime()-startedNanos)/1000); f.addProperty("last_seq",SEQ.get()); f.addProperty("written",written); f.addProperty("dropped",DROPPED.get()); f.addProperty("oversize_omitted",oversize); f.addProperty("reason",stopReason); f.addProperty("complete",DROPPED.get()==0 && oversize==0); out.write(f.toString()); out.newLine(); out.flush();
+            JsonObject f=new JsonObject(); f.addProperty("type","footer"); f.addProperty("utc_end_unix_ms",System.currentTimeMillis()); f.addProperty("offset_us",(System.nanoTime()-startedNanos)/1000); f.addProperty("last_seq",SEQ.get()); f.addProperty("written",written); f.addProperty("dropped",DROPPED.get()); f.addProperty("oversize_omitted",oversize); f.addProperty("raw_omitted_bytes",RAW_OMITTED_BYTES.get()); f.addProperty("reason",stopReason); f.addProperty("complete",DROPPED.get()==0 && oversize==0 && !stopReason.equals("size_limit")); out.write(f.toString()); out.newLine(); out.flush();
         } catch(Exception e){ACTIVE.set(false); error=e.toString(); e.printStackTrace();}
         if(mc!=null && mc.gui!=null) { String msg=error==null?"Movement observer saved: "+file+" (dropped="+DROPPED.get()+")":"Movement observer FAILED: "+error+"; "+file; mc.execute(()->mc.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.literal(msg))); }
+    }
+    private static void discardRow(String row) {
+        DROPPED.incrementAndGet();
+        try {
+            JsonObject event = com.google.gson.JsonParser.parseString(row).getAsJsonObject();
+            if (event.get("stage").getAsString().equals("packet_raw")) RAW_OMITTED_BYTES.addAndGet(event.getAsJsonObject("data").get("raw_length").getAsLong());
+        } catch (RuntimeException ignored) { /* row already counted as omitted */ }
     }
     private static String buildRevision() {
         try (var in = MovementObserver.class.getResourceAsStream("/observer.properties")) {

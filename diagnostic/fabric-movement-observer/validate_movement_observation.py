@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Read-only schema/privacy check for a Movement Observer JSONL capture."""
+import base64
 import json
 import sys
 from pathlib import Path
@@ -47,6 +48,12 @@ def validate(text: str) -> tuple[int, dict]:
                         assert "physics" in reason.lower() and ("branch" in reason.lower() or "call site" in reason.lower()), "native physics null needs a call-site reason"
                     if key in {"frame_nanos", "frame_elapsed_sec"}:
                         assert "frame_observation" in reason, f"{key} null must identify the separate frame observation"
+        if row["stage"] == "packet_raw":
+            assert data.get("protocol_state") in {"play", "configuration"}
+            assert data.get("payload_layout") == "id_plus_payload" and data.get("capture_point") == "wire_plaintext"
+            payload = base64.b64decode(data["payload_base64"], validate=True)
+            assert len(payload) == data.get("raw_length") and len(payload) > 0
+            assert isinstance(data.get("connection_epoch"), int) and isinstance(data.get("packet_trace_id"), str)
         if "packet" in data:
             assert isinstance(data["packet"], str) and isinstance(data.get("fields"), dict), "packet fields must be explicit typed JSON"
             assert "native_id" in data, "numeric native ID must be explicit (null when unavailable)"
@@ -69,7 +76,9 @@ def validate(text: str) -> tuple[int, dict]:
         list(keys(row["data"]))
     assert f.get("written") == len(events)
     assert isinstance(f.get("dropped"), int) and isinstance(f.get("oversize_omitted"), int)
-    assert f.get("complete") == (f["dropped"] == 0 and f["oversize_omitted"] == 0)
+    assert f.get("complete") == (f["dropped"] == 0 and f["oversize_omitted"] == 0 and f.get("reason") != "size_limit")
+    if "raw_omitted_bytes" in f:
+        assert isinstance(f["raw_omitted_bytes"], int) and f["raw_omitted_bytes"] >= 0
     assert f.get("last_seq", 0) >= prev_seq
     return len(events), f
 
@@ -90,9 +99,11 @@ def self_test():
         {"seq":3,"offset_us":5,"direction":"outbound","stage":"transport_write_attempt","data":{"packet":"move_player_rot","native_id":None,"fields":{"position":None,"yaw_pitch":[90.0,10.0],"on_ground":True,"horizontal_collision":False}}},
         {"seq":4,"offset_us":5,"direction":"inbound","stage":"apply_before","data":{"packet":"block_ack","native_id":None,"fields":{"sequence":17},"applied_state":{"prediction_state":None}}},
         {"seq":5,"offset_us":5,"direction":"outbound","stage":"transport_write_failure","data":{"packet":"use_item","native_id":None,"fields":{"hand":0,"sequence":2,"yaw_pitch":[0.0,0.0]},"error_class":"java.io.IOException"}},
-        {"type":"footer","written":5,"dropped":1,"oversize_omitted":0,"last_seq":5,"complete":False},
+        {"seq":6,"offset_us":5,"direction":"inbound","stage":"packet_raw","data":{"protocol_state":"play","wire_protocol":776,"connection_epoch":1,"packet_trace_id":"fixture-1","native_id":4,"packet_type":"minecraft:cookie_request","raw_length":8,"payload_base64":base64.b64encode(b"cookie!!").decode(),"capture_point":"wire_plaintext","payload_layout":"id_plus_payload"}},
+        {"seq":7,"offset_us":5,"direction":"local","stage":"input_event","data":{"event":"input_event","kind":"key","action":1,"code":87,"code_name":"W","scancode":17,"modifiers":0,"frame_id":2}},
+        {"type":"footer","written":7,"dropped":1,"oversize_omitted":0,"last_seq":7,"complete":False},
     ]
-    assert validate("\n".join(map(json.dumps, rows)))[0] == 5
+    assert validate("\n".join(map(json.dumps, rows)))[0] == 7
     bad_reasons = json.loads(json.dumps(rows)); del bad_reasons[2]["data"]["travel_observation"]["unavailable_reasons"]["actual_gravity_f64"]
     try: validate("\n".join(map(json.dumps, bad_reasons)))
     except AssertionError: pass
@@ -105,7 +116,7 @@ def self_test():
     try: validate("\n".join(map(json.dumps, incomplete)))
     except AssertionError: pass
     else: raise AssertionError("validator accepted class-name-only payload")
-    print("self-test: PASS (ordered rows, drop gaps, typed packet/native-id null, apply and transport failure, privacy rejection)")
+    print("self-test: PASS (ordered rows, raw cookie bytes, key input, drop gaps, typed packets, failure, privacy rejection)")
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:

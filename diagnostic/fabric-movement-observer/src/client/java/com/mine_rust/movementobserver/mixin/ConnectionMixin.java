@@ -22,15 +22,18 @@ public abstract class ConnectionMixin {
         if (ctx.pipeline().get(name) != null) return;
         ctx.pipeline().addBefore(ctx.name(), name, new ChannelDuplexHandler() {
             @Override public void channelRead(ChannelHandlerContext context, Object msg) throws Exception {
-                if (MovementObserver.isRecordingFast() && msg instanceof Packet<?> packet && receiving == net.minecraft.network.protocol.PacketFlow.CLIENTBOUND)
-                    MovementObserver.packet(packet, "inbound", "received", null);
-                super.channelRead(context, msg);
+                String traceId = context.channel().attr(com.mine_rust.movementobserver.PacketTrace.KEY).get();
+                try {
+                    if (MovementObserver.isRecordingFast() && msg instanceof Packet<?> packet && receiving == net.minecraft.network.protocol.PacketFlow.CLIENTBOUND)
+                        MovementObserver.packet(packet, "inbound", "received", null, traceId);
+                    super.channelRead(context, msg);
+                } finally { context.channel().attr(com.mine_rust.movementobserver.PacketTrace.KEY).set(null); }
             }
             @Override public void write(ChannelHandlerContext context, Object msg, io.netty.channel.ChannelPromise promise) throws Exception {
                 PacketWriteObserver.write(context, msg, promise,
                         PacketWriteObserver.shouldObserveOutbound(MovementObserver.isRecordingFast(), receiving),
-                        (packet, stage, cause) -> MovementObserver.packet(packet, "outbound", stage,
-                                cause == null ? (stage.equals("transport_write_failure") ? "unknown" : null) : cause.getClass().getName()));
+                        (packet, stage, cause, traceId) -> MovementObserver.packet(packet, "outbound", stage,
+                                cause == null ? (stage.equals("transport_write_failure") ? "unknown" : null) : cause.getClass().getName(), traceId));
             }
         });
     }

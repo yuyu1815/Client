@@ -3,6 +3,6 @@
   "minVersion": "0.8",
   "package": "com.mine_rust.movementobserver.mixin",
   "compatibilityLevel": "JAVA_25",
-  "client": ["ConnectionMixin", "LocalPlayerMixin", "ClientPacketListenerMixin", "EntityInvoker", "EntityMixin", "LivingEntityInvoker", "LivingEntityMixin", "MinecraftMixin", "PlayerMixin"],
+  "client": ["ConnectionMixin", "PacketEncoderMixin", "PacketDecoderMixin", "KeyboardHandlerMixin", "MouseHandlerMixin", "LocalPlayerMixin", "ClientPacketListenerMixin", "EntityInvoker", "EntityMixin", "LivingEntityInvoker", "LivingEntityMixin", "MinecraftMixin", "PlayerMixin"],
   "injectors": { "defaultRequire": 1 }
 }
