@@ -53,6 +53,8 @@ struct Session {
     queue_full_drops: u64,
     byte_budget_drops: u64,
     oversize_omitted: u64,
+    raw_omitted_packets: u64,
+    raw_omitted_bytes: u64,
     start: Instant,
     seq: u64,
     dropped: u64,
@@ -113,6 +115,8 @@ impl Recorder {
             reason: "stop",
             path: path.clone(),
             wall,
+            raw_omitted_packets: 0,
+            raw_omitted_bytes: 0,
             id: NEXT_RECORDING_ID.fetch_add(1, Ordering::Relaxed),
         });
         self.active.store(true, Ordering::Relaxed);
@@ -261,7 +265,7 @@ impl Recorder {
         let start = self.state.lock().session.as_ref().unwrap().wall;
         write_row(
             &mut out,
-            &json!({"type":"header","schema":1,"utc_start_unix_ms":start,"connection_epoch":self.epoch,"wire_protocol":protocol,"executable":executable_identity(),"package_version":env!("CARGO_PKG_VERSION"),"source_build_revision":null,"queue_capacity":QUEUE,"queue_byte_budget":QUEUE_BYTE_BUDGET,"writer_buffer_bytes":WRITER_BUFFER,"size_limit_bytes":limit,"max_row_bytes":MAX_ROW,"semantics":"client observations only; queued != transport_write_success != server acceptance; raw PLAY/CONFIG payloads include cookies/chat/custom payloads and are private local diagnostics; LOGIN/auth secrets excluded; normalized packet IDs are native; seq gaps/dropped mean incomplete evidence"}),
+            &json!({"type":"header","schema":1,"utc_start_unix_ms":start,"connection_epoch":self.epoch,"wire_protocol":protocol,"executable":executable_identity(),"package_version":env!("CARGO_PKG_VERSION"),"source_build_revision":null,"queue_capacity":QUEUE,"queue_byte_budget":QUEUE_BYTE_BUDGET,"writer_buffer_bytes":WRITER_BUFFER,"size_limit_bytes":limit,"max_row_bytes":MAX_ROW,"semantics":"client observations only; queued != transport_write_success != server acceptance; raw PLAY/CONFIG payloads include cookies/chat/custom payloads and are private local diagnostics; LOGIN/auth secrets excluded; normalized packet IDs are native; dropped=raw_omitted_packets+queue_full_drops+byte_budget_drops+oversize_omitted; seq gaps/dropped mean incomplete evidence"}),
         )?;
         let mut bytes = 0;
         let mut written = 0;
@@ -278,7 +282,7 @@ impl Recorder {
         let footer = {
             let state = self.state.lock();
             let s = state.session.as_ref().unwrap();
-            json!({"type":"footer","utc_end_unix_ms":wall_ms(),"offset_us":s.start.elapsed().as_micros() as u64,"last_seq":s.seq,"written":written,"dropped":s.dropped,"queue_full_drops":s.queue_full_drops,"byte_budget_drops":s.byte_budget_drops,"pending_bytes_high_water":s.high_water_bytes.load(Ordering::Relaxed),"pending_rows_high_water":s.high_water_rows.load(Ordering::Relaxed),"oversize_omitted":s.oversize_omitted,"reason":s.reason,"complete":s.dropped==0})
+            json!({"type":"footer","utc_end_unix_ms":wall_ms(),"offset_us":s.start.elapsed().as_micros() as u64,"last_seq":s.seq,"written":written,"dropped":s.dropped,"queue_full_drops":s.queue_full_drops,"byte_budget_drops":s.byte_budget_drops,"pending_bytes_high_water":s.high_water_bytes.load(Ordering::Relaxed),"pending_rows_high_water":s.high_water_rows.load(Ordering::Relaxed),"oversize_omitted":s.oversize_omitted,"raw_omitted_packets":s.raw_omitted_packets,"raw_omitted_bytes":s.raw_omitted_bytes,"reason":s.reason,"complete":s.dropped==0})
         };
         write_row(&mut out, &footer)?;
         out.flush()
@@ -328,6 +332,8 @@ impl Recorder {
             return;
         }
         s.dropped += 1;
+        s.raw_omitted_packets += 1;
+        s.raw_omitted_bytes += data["raw_length"].as_u64().unwrap_or(0);
         s.seq += 1;
         let (frame_id, tick) = *self.context.lock();
         let row = json!({"seq":s.seq,"offset_us":s.start.elapsed().as_micros() as u64,"frame_id":frame_id,"tick":tick,"direction":direction,"stage":stage,"data":data});
@@ -746,6 +752,8 @@ mod tests {
             path: PathBuf::new(),
             wall: wall_ms(),
             id: NEXT_RECORDING_ID.fetch_add(1, Ordering::Relaxed),
+            raw_omitted_packets: 0,
+            raw_omitted_bytes: 0,
         });
         r.active.store(true, Ordering::Relaxed);
         (r, rx)
@@ -959,18 +967,60 @@ mod tests {
             "a callback from another recording must not contaminate this session"
         );
         r.raw_packet("inbound", "play", &vec![0; MAX_RAW + 1]);
-        assert_eq!(
-            serde_json::from_slice::<Value>(&rx.try_recv().unwrap().bytes).unwrap()["stage"],
-            "packet_raw_omitted_oversize"
-        );
         r.stop("test");
         let mut log = Vec::new();
         r.write_log(&mut log, rx, crate::version::session_protocol(), LIMIT)
             .unwrap();
-        assert_eq!(rows(&log).last().unwrap()["complete"], false);
-        assert!(rows(&log).last().unwrap()["dropped"].as_u64().unwrap() >= 1);
+        let log = rows(&log);
+        let footer = log.last().unwrap();
+        assert_eq!(footer["complete"], false);
+        assert_eq!(footer["raw_omitted_packets"], 1);
+        assert_eq!(footer["raw_omitted_bytes"], MAX_RAW + 1);
+        assert_eq!(footer["queue_full_drops"], 0);
+        assert_eq!(footer["byte_budget_drops"], 0);
+        assert_eq!(footer["oversize_omitted"], 0);
+        assert_eq!(
+            footer["dropped"],
+            footer["raw_omitted_packets"].as_u64().unwrap()
+                + footer["queue_full_drops"].as_u64().unwrap()
+                + footer["byte_budget_drops"].as_u64().unwrap()
+                + footer["oversize_omitted"].as_u64().unwrap()
+        );
+        assert!(
+            log.iter()
+                .any(|row| row["stage"] == "packet_raw_omitted_oversize")
+        );
     }
 
+    #[test]
+    fn omitted_raw_notice_drop_counts_as_a_separate_loss() {
+        let (r, rx) = ready(1);
+        r.record("local", "fills_queue", || Some(json!({"ok":true})));
+        r.raw_packet("inbound", "play", &vec![0; MAX_RAW + 1]);
+        r.stop("test");
+        let mut bytes = Vec::new();
+        r.write_log(&mut bytes, rx, 776, LIMIT).unwrap();
+        let log = rows(&bytes);
+        let footer = log.last().unwrap();
+        assert_eq!(footer["raw_omitted_packets"], 1);
+        assert_eq!(footer["raw_omitted_bytes"], MAX_RAW + 1);
+        assert_eq!(footer["queue_full_drops"], 1);
+        assert_eq!(footer["byte_budget_drops"], 0);
+        assert_eq!(footer["oversize_omitted"], 0);
+        assert_eq!(footer["dropped"], 2);
+        assert_eq!(
+            footer["dropped"],
+            footer["raw_omitted_packets"].as_u64().unwrap()
+                + footer["queue_full_drops"].as_u64().unwrap()
+                + footer["byte_budget_drops"].as_u64().unwrap()
+                + footer["oversize_omitted"].as_u64().unwrap()
+        );
+        assert_eq!(footer["complete"], false);
+        assert!(
+            !log.iter()
+                .any(|row| row["stage"] == "packet_raw_omitted_oversize")
+        );
+    }
     #[test]
     fn writer_write_and_flush_error_are_not_success() {
         struct Fail(bool);
