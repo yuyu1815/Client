@@ -4,6 +4,7 @@
 /reference
 /test-server
 /logs
+/.agent-snapshots/
 /tools/stategen/out
 /tmp
 
