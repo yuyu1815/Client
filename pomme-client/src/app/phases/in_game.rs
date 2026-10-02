@@ -5265,7 +5265,11 @@ pub fn update_game(
             camera_look.x_rot_deg(),
             gfx.renderer.camera_orientation(),
         ));
-        entity_renders.extend(boat_render_infos(&game.entity_store, partial_tick));
+        entity_renders.extend(boat_render_infos(
+            &game.entity_store,
+            &game.chunk_store,
+            partial_tick,
+        ));
         entity_renders.extend(minecart_render_infos(&game.entity_store, partial_tick));
         entity_renders.extend(end_crystal_render_infos(&game.entity_store, partial_tick));
         entity_renders.extend(armor_stand_render_infos(&game.entity_store, partial_tick));
@@ -6075,9 +6079,59 @@ pub fn update_game(
     GameUpdateResult::None
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoatUnderwaterStatus {
+    UnderWater,
+    UnderFlowingWater,
+}
+
+/// Native AbstractBoat.getUnderwaterStatus: scan the box's top plane (+0.001)
+/// and distinguish a source-water result from the first flowing-water result.
+fn boat_underwater_status(
+    min_x: f64,
+    max_x: f64,
+    max_y: f64,
+    min_z: f64,
+    max_z: f64,
+    mut fluid_at: impl FnMut(i32, i32, i32) -> crate::world::block::Fluid,
+) -> Option<BoatUnderwaterStatus> {
+    use crate::world::block::FluidKind;
+
+    let max_y = max_y + 0.001;
+    let (x0, x1) = (min_x.floor() as i32, max_x.ceil() as i32);
+    let (y0, y1) = (max_y.floor() as i32, max_y.ceil() as i32);
+    let (z0, z1) = (min_z.floor() as i32, max_z.ceil() as i32);
+    let mut still_water = false;
+    for x in x0..x1 {
+        for y in y0..y1 {
+            for z in z0..z1 {
+                let water = fluid_at(x, y, z);
+                if water.kind != FluidKind::Water {
+                    continue;
+                }
+                let height = if fluid_at(x, y + 1, z).kind == FluidKind::Water {
+                    1.0
+                } else {
+                    water.height()
+                };
+                if !(max_y < f64::from(y) + f64::from(height)) {
+                    continue;
+                }
+                if water.is_source() {
+                    still_water = true;
+                } else {
+                    return Some(BoatUnderwaterStatus::UnderFlowingWater);
+                }
+            }
+        }
+    }
+    still_water.then_some(BoatUnderwaterStatus::UnderWater)
+}
+
 /// Extract visual interpolation independently from packet movement baselines.
 fn boat_render_infos(
     store: &crate::entity::EntityStore,
+    chunks: &crate::world::chunk::ChunkStore,
     partial_tick: f32,
 ) -> Vec<EntityRenderInfo> {
     use azalea_registry::builtin::EntityKind;
@@ -6125,6 +6179,17 @@ fn boat_render_infos(
             let position = vehicle
                 .prev_position
                 .lerp(vehicle.position, partial_tick as f64);
+            let dimensions = azalea_entity::dimensions::EntityDimensions::from(kind);
+            let half_width = f64::from(dimensions.width) * 0.5;
+            let underwater = boat_underwater_status(
+                position.x - half_width,
+                position.x + half_width,
+                position.y + f64::from(dimensions.height),
+                position.z - half_width,
+                position.z + half_width,
+                |x, y, z| crate::world::block::fluid(chunks.get_block_state(x, y, z)),
+            )
+            .is_some();
             let rowing_time = std::array::from_fn(|i| {
                 vehicle.boat_prev_rowing_time[i]
                     + (vehicle.boat_rowing_time[i] - vehicle.boat_prev_rowing_time[i])
@@ -6149,6 +6214,7 @@ fn boat_render_infos(
                 body_y_rot_deg: yaw,
                 entity_kind: kind,
                 boat_rowing_time: rowing_time,
+                boat_underwater: underwater,
                 body_transform: Some(
                     glam::Mat4::from_translation(glam::Vec3::Y * 0.375)
                         * glam::Mat4::from_rotation_x(hurt_angle)
@@ -8078,10 +8144,10 @@ fn client_information_changed(
 mod tests {
     use super::{
         advance_server_time, armor_stand_render_infos, arrow_render_infos, block_entity_in_frustum,
-        boat_render_infos, bump_loaded_content_generations, bump_section_generations,
-        consecutive_section_runs, credits_may_advance, current_edit_section_runs,
-        death_confirm_escape_allowed, experience_orb_color, experience_orb_icon,
-        experience_orb_light, experience_orb_render_infos, finish_win_credits,
+        boat_render_infos, boat_underwater_status, bump_loaded_content_generations,
+        bump_section_generations, consecutive_section_runs, credits_may_advance,
+        current_edit_section_runs, death_confirm_escape_allowed, experience_orb_color,
+        experience_orb_icon, experience_orb_light, experience_orb_render_infos, finish_win_credits,
         finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
         item_frame_base_position, item_frame_base_rotation, limited_crafting_param,
         mesh_result_is_stale, mesh_target_mask, minecart_render_infos, section_bit, section_bits,
@@ -8200,6 +8266,93 @@ mod tests {
     }
 
     #[test]
+    fn boat_underwater_status_matches_native_top_plane_fluid_scan() {
+        use crate::world::block::{Fluid, FluidKind};
+        let empty = Fluid {
+            kind: FluidKind::Empty,
+            amount: 0,
+            falling: false,
+        };
+        let source = Fluid {
+            kind: FluidKind::Water,
+            amount: 8,
+            falling: false,
+        };
+        let flowing = Fluid {
+            kind: FluidKind::Water,
+            amount: 4,
+            falling: false,
+        };
+        let lava = Fluid {
+            kind: FluidKind::Lava,
+            amount: 8,
+            falling: false,
+        };
+        assert_eq!(
+            boat_underwater_status(0.0, 1.0, 0.0, 0.0, 1.0, |_, _, _| empty),
+            None
+        );
+        // Water contacting only the boat's bottom is not an underwater status.
+        assert_eq!(
+            boat_underwater_status(0.0, 1.0, 0.0, 0.0, 1.0, |_, y, _| if y == -1 {
+                source
+            } else {
+                empty
+            }),
+            None
+        );
+        assert_eq!(
+            boat_underwater_status(0.0, 1.0, 0.0, 0.0, 1.0, |_, y, _| if y == 0 {
+                source
+            } else {
+                empty
+            }),
+            Some(super::BoatUnderwaterStatus::UnderWater)
+        );
+        assert_eq!(
+            boat_underwater_status(0.0, 1.0, 0.0, 0.0, 1.0, |_, y, _| if y == 0 {
+                flowing
+            } else {
+                empty
+            }),
+            Some(super::BoatUnderwaterStatus::UnderFlowingWater)
+        );
+        // Native getHeight returns a full block when the same fluid continues above.
+        assert_eq!(
+            boat_underwater_status(0.0, 1.0, 0.5, 0.0, 1.0, |_, y, _| {
+                if y == 0 || y == 1 { flowing } else { empty }
+            }),
+            Some(super::BoatUnderwaterStatus::UnderFlowingWater)
+        );
+        assert_eq!(
+            boat_underwater_status(0.0, 1.0, 0.0, 0.0, 1.0, |_, _, _| lava),
+            None
+        );
+        // A waterlogged block exposes source water to FluidState just like an ordinary
+        // source.
+        assert_eq!(
+            boat_underwater_status(0.0, 1.0, 0.0, 0.0, 1.0, |_, _, _| source),
+            Some(super::BoatUnderwaterStatus::UnderWater)
+        );
+        // Integer floor/ceil scan is Euclidean in effect for negative coordinates.
+        assert_eq!(
+            boat_underwater_status(-1.8, -0.2, 0.0, -1.8, -0.2, |x, _, z| {
+                if x == -1 && z == -1 { source } else { empty }
+            }),
+            Some(super::BoatUnderwaterStatus::UnderWater)
+        );
+        let surface = f64::from(source.height());
+        assert_eq!(
+            boat_underwater_status(0.0, 1.0, surface - 0.001, 0.0, 1.0, |_, y, _| if y == 0 {
+                source
+            } else {
+                empty
+            }),
+            None
+        );
+    }
+
+    #[test]
     fn all_twenty_boat_kinds_extract_from_nonliving_vehicle_store() {
         use azalea_registry::builtin::EntityKind as K;
 
@@ -8238,12 +8391,14 @@ mod tests {
             );
             store.set_vehicle_kind(id as i32, kind);
         }
-        let draws = boat_render_infos(&store, 1.0);
+        let chunks = crate::world::chunk::ChunkStore::new(1);
+        let draws = boat_render_infos(&store, &chunks, 1.0);
         assert_eq!(draws.len(), 20);
         assert!(store.living.is_empty(), "boats remain nonliving");
         assert!(draws.iter().all(|info| info.body_y_rot_deg == 135.0));
         assert!(draws.iter().all(|info| info.body_transform.is_some()));
         assert!(draws.iter().all(|info| info.boat_rowing_time == [0.0; 2]));
+        assert!(draws.iter().all(|info| !info.boat_underwater));
     }
 
     #[test]
@@ -8269,7 +8424,8 @@ mod tests {
         store.apply_vehicle_metadata(1, 13, crate::entity::MetaValue::Int(10));
         store.tick_projectile_displays(&ChunkStore::new(1));
 
-        let info = &boat_render_infos(&store, 0.5)[0];
+        let chunks = ChunkStore::new(1);
+        let info = &boat_render_infos(&store, &chunks, 0.5)[0];
         assert_eq!(info.boat_rowing_time, [0.19634955; 2]);
         assert_eq!(store.vehicles[&1].boat_prev_hurt_time, 3);
         assert_eq!(store.vehicles[&1].boat_hurt_time, 2);
@@ -8281,7 +8437,7 @@ mod tests {
         store.apply_vehicle_metadata(1, 11, crate::entity::MetaValue::Bool(false));
         store.apply_vehicle_metadata(1, 13, crate::entity::MetaValue::Int(0));
         store.tick_projectile_displays(&ChunkStore::new(1));
-        let reset = &boat_render_infos(&store, 1.0)[0];
+        let reset = &boat_render_infos(&store, &chunks, 1.0)[0];
         assert_eq!(reset.boat_rowing_time[0], 0.0);
         assert_eq!(reset.boat_rowing_time[1], 2.0 * 0.3926991);
         assert_eq!(store.vehicles[&1].boat_bubble_multiplier, 0.0);

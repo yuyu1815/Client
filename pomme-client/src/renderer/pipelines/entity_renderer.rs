@@ -151,6 +151,8 @@ pub struct EntityRenderInfo {
     pub is_in_water: bool,
     pub is_on_ground: bool,
     pub boat_rowing_time: [f32; 2],
+    /// Native AbstractBoat status: bounding-box top is submerged in water.
+    pub boat_underwater: bool,
     /// Squid tentacle stroke angle, interpolated.
     pub tentacle_angle: f32,
     /// Bat pose flag + its fly/rest animation clock.
@@ -240,6 +242,7 @@ impl Default for EntityRenderInfo {
             is_in_water: false,
             is_on_ground: false,
             boat_rowing_time: [0.0; 2],
+            boat_underwater: false,
             tentacle_angle: 0.0,
             bat_resting: false,
             bat_elapsed_secs: None,
