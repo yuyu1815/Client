@@ -482,6 +482,11 @@ pub struct EntityRenderer {
     /// Additive, depth-writing — charged-creeper energy swirl.
     swirl_pipeline: vk::Pipeline,
     glint_pipeline: vk::Pipeline,
+    water_patch_depth_pipeline: vk::Pipeline,
+    water_patch_vertex_buffer: vk::Buffer,
+    water_patch_vertex_allocation: Allocation,
+    water_patch_range: (u32, u32),
+    water_patch_part_transform: glam::Mat4,
     pipeline_layout: vk::PipelineLayout,
     camera_layout: vk::DescriptorSetLayout,
     texture_layout: vk::DescriptorSetLayout,
@@ -516,6 +521,8 @@ pub(super) enum BlendMode {
     Additive,
     /// Vanilla `RenderPipelines.GLINT`: depth-equal, no depth writes.
     Glint,
+    /// WATER_MASK: depth-tested/writing patch, no color attachment writes.
+    DepthOnly,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2517,6 +2524,7 @@ impl EntityRenderer {
             eyes_pipeline,
             swirl_pipeline,
             glint_pipeline,
+            water_patch_depth_pipeline,
         ] = create_pipelines(device, render_pass, pipeline_layout);
 
         let defs = mob_definitions();
@@ -2574,6 +2582,17 @@ impl EntityRenderer {
         let texture_sampler = unsafe { util::create_nearest_sampler(device) };
         let texture_sampler_repeat = unsafe { util::create_nearest_repeat_sampler(device) };
 
+        let water_patch_model = entity_models::vehicles::bake_boat_water_patch_model();
+        let (water_patch_vertex_buffer, water_patch_vertex_allocation) = util::create_mapped_buffer(
+            device,
+            allocator,
+            bytemuck::cast_slice(&water_patch_model.vertices),
+            vk::BufferUsageFlags::VertexBuffer,
+            "boat_water_patch_vertices",
+        );
+        let water_patch_range = water_patch_model.part_ranges[0];
+        let water_patch_part_transform =
+            water_patch_model.compute_part_transforms(&entity_model::PartAnim::default())[0];
         let cape_model = entity_model::bake_player_cape_model();
         let (cape_vertex_buffer, cape_vertex_allocation) = util::create_mapped_buffer(
             device,
@@ -2649,6 +2668,11 @@ impl EntityRenderer {
             eyes_pipeline,
             swirl_pipeline,
             glint_pipeline,
+            water_patch_depth_pipeline,
+            water_patch_vertex_buffer,
+            water_patch_vertex_allocation,
+            water_patch_range,
+            water_patch_part_transform,
             pipeline_layout,
             camera_layout,
             texture_layout,
@@ -3331,7 +3355,7 @@ impl EntityRenderer {
         // part) becomes a single instanced draw. `vis`/`groups` borrow self.mobs
         // and are dropped at the end of this block, before the buffer write below.
         let mut instances: Vec<EntityInstance> = Vec::new();
-        let (opaque, culled, body, eyes, swirl, glint) = {
+        let (opaque, culled, body, eyes, swirl, glint, water_patch) = {
             let mut vis: Vec<VisEntity> = Vec::new();
             for info in entities {
                 let Some(entry) = self.mobs.get(&info.entity_kind) else {
@@ -3429,6 +3453,36 @@ impl EntityRenderer {
             let eyes = collect_overlays(&vis, OverlayKind::EyesTranslucent);
             let swirl = collect_overlays(&vis, OverlayKind::SwirlAdditive);
             let glint = collect_overlays(&vis, OverlayKind::TridentGlint);
+            let mut water_patch = Vec::new();
+            for v in &vis {
+                if !boat_water_patch_visible(
+                    v.info.entity_kind,
+                    v.info.boat_underwater,
+                    v.info.is_invisible,
+                ) {
+                    continue;
+                }
+                let first_instance = instances.len() as u32;
+                instances.push(EntityInstance {
+                    model: boat_water_patch_matrix(v.entity_mat, self.water_patch_part_transform)
+                        .to_cols_array_2d(),
+                    tint: [1.0; 4],
+                    overlay_color: [0.0; 4],
+                    uv_params: [0.0, 0.0, 1.0, 1.0],
+                });
+                let base = v
+                    .entry
+                    .base_variant(v.info.is_baby, self.effective_variant_index(v.info));
+                let (part_start, part_count) = self.water_patch_range;
+                water_patch.push(DrawRecord {
+                    texture_set: self.player_texture_set(v.info, base.texture_set),
+                    vertex_buffer: self.water_patch_vertex_buffer,
+                    part_start,
+                    part_count,
+                    first_instance,
+                    instance_count: 1,
+                });
+            }
 
             (
                 opaque_records,
@@ -3437,6 +3491,7 @@ impl EntityRenderer {
                 eyes.emit(&vis, &mut instances),
                 swirl.emit(&vis, &mut instances),
                 glint.emit(&vis, &mut instances),
+                water_patch,
             )
         };
 
@@ -3460,6 +3515,13 @@ impl EntityRenderer {
         self.record_pass(cmd, frame, self.eyes_pipeline, &eyes, count);
         self.record_pass(cmd, frame, self.swirl_pipeline, &swirl, count);
         self.record_pass(cmd, frame, self.glint_pipeline, &glint, count);
+        self.record_pass(
+            cmd,
+            frame,
+            self.water_patch_depth_pipeline,
+            &water_patch,
+            count,
+        );
         (entity_pose_ms, entity_pose_count)
     }
 
@@ -3512,6 +3574,7 @@ impl EntityRenderer {
         device.destroy_pipeline(self.eyes_pipeline, None);
         device.destroy_pipeline(self.swirl_pipeline, None);
         device.destroy_pipeline(self.glint_pipeline, None);
+        device.destroy_pipeline(self.water_patch_depth_pipeline, None);
         [
             self.pipeline,
             self.culled_pipeline,
@@ -3519,6 +3582,7 @@ impl EntityRenderer {
             self.eyes_pipeline,
             self.swirl_pipeline,
             self.glint_pipeline,
+            self.water_patch_depth_pipeline,
         ] = create_pipelines(device, render_pass, self.pipeline_layout);
     }
 
@@ -3575,6 +3639,13 @@ impl EntityRenderer {
             }
             destroy_player_skin_texture(device, &mut alloc, skin);
         }
+        device.destroy_buffer(self.water_patch_vertex_buffer, None);
+        alloc
+            .free(std::mem::replace(
+                &mut self.water_patch_vertex_allocation,
+                unsafe { std::mem::zeroed() },
+            ))
+            .ok();
         device.destroy_buffer(self.cape_vertex_buffer, None);
         alloc
             .free(std::mem::replace(
@@ -3591,6 +3662,7 @@ impl EntityRenderer {
         device.destroy_pipeline(self.eyes_pipeline, None);
         device.destroy_pipeline(self.swirl_pipeline, None);
         device.destroy_pipeline(self.glint_pipeline, None);
+        device.destroy_pipeline(self.water_patch_depth_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);
@@ -4362,11 +4434,43 @@ pub(super) fn fallback_texture(size: u32) -> (Vec<u8>, u32, u32) {
 
 /// The entity render pipelines, in draw order: opaque base, translucent eyes,
 /// additive swirl.
+fn boat_water_patch_matrix(body_matrix: glam::Mat4, patch_root: glam::Mat4) -> glam::Mat4 {
+    body_matrix * patch_root
+}
+
+fn boat_water_patch_visible(kind: EntityKind, underwater: bool, invisible: bool) -> bool {
+    underwater && !invisible && boat_has_water_patch(kind)
+}
+
+fn boat_has_water_patch(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::AcaciaBoat
+            | EntityKind::AcaciaChestBoat
+            | EntityKind::BirchBoat
+            | EntityKind::BirchChestBoat
+            | EntityKind::CherryBoat
+            | EntityKind::CherryChestBoat
+            | EntityKind::DarkOakBoat
+            | EntityKind::DarkOakChestBoat
+            | EntityKind::JungleBoat
+            | EntityKind::JungleChestBoat
+            | EntityKind::MangroveBoat
+            | EntityKind::MangroveChestBoat
+            | EntityKind::OakBoat
+            | EntityKind::OakChestBoat
+            | EntityKind::PaleOakBoat
+            | EntityKind::PaleOakChestBoat
+            | EntityKind::SpruceBoat
+            | EntityKind::SpruceChestBoat
+    )
+}
+
 fn create_pipelines(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
-) -> [vk::Pipeline; 6] {
+) -> [vk::Pipeline; 7] {
     [
         create_pipeline(
             device,
@@ -4408,6 +4512,13 @@ fn create_pipelines(
             render_pass,
             layout,
             BlendMode::Glint,
+            ModelInput::Instanced,
+        ),
+        create_pipeline(
+            device,
+            render_pass,
+            layout,
+            BlendMode::DepthOnly,
             ModelInput::Instanced,
         ),
     ]
@@ -4502,7 +4613,7 @@ pub(super) fn create_pipeline(
 
     let rasterizer = vk::PipelineRasterizationStateCreateInfo {
         polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: if blend == BlendMode::OpaqueCulled {
+        cull_mode: if matches!(blend, BlendMode::OpaqueCulled | BlendMode::DepthOnly) {
             vk::CullModeFlags::Back
         } else {
             vk::CullModeFlags::None
@@ -4526,6 +4637,8 @@ pub(super) fn create_pipeline(
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
         depth_write_enable: depth_write,
+        // Vanilla WATER_MASK uses GREATER_THAN_OR_EQUAL under reversed-Z;
+        // pomme's shared scene depth is conventional-Z, so use its equivalent.
         depth_compare_op: if blend == BlendMode::Glint {
             vk::CompareOp::Equal
         } else {
@@ -4535,6 +4648,10 @@ pub(super) fn create_pipeline(
     };
 
     let blend_attachment = match blend {
+        BlendMode::DepthOnly => vk::PipelineColorBlendAttachmentState {
+            color_write_mask: vk::ColorComponentFlags::empty(),
+            ..Default::default()
+        },
         BlendMode::Opaque | BlendMode::OpaqueCulled => vk::PipelineColorBlendAttachmentState {
             blend_enable: vk::FALSE,
             color_write_mask: vk::ColorComponentFlags::RGBA,
@@ -4624,6 +4741,85 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn water_patch_scope_geometry_transform_and_visibility_match_native_boats() {
+        use azalea_registry::builtin::EntityKind as K;
+        use glam::{Mat4, Vec3};
+
+        let boats = [
+            K::AcaciaBoat,
+            K::AcaciaChestBoat,
+            K::BirchBoat,
+            K::BirchChestBoat,
+            K::CherryBoat,
+            K::CherryChestBoat,
+            K::DarkOakBoat,
+            K::DarkOakChestBoat,
+            K::JungleBoat,
+            K::JungleChestBoat,
+            K::MangroveBoat,
+            K::MangroveChestBoat,
+            K::OakBoat,
+            K::OakChestBoat,
+            K::PaleOakBoat,
+            K::PaleOakChestBoat,
+            K::SpruceBoat,
+            K::SpruceChestBoat,
+        ];
+        assert_eq!(
+            boats
+                .iter()
+                .filter(|&&kind| super::boat_has_water_patch(kind))
+                .count(),
+            18
+        );
+        assert!(!super::boat_has_water_patch(K::BambooRaft));
+        assert!(!super::boat_has_water_patch(K::BambooChestRaft));
+        assert!(!super::boat_water_patch_visible(K::OakBoat, false, false));
+        assert!(!super::boat_water_patch_visible(K::OakBoat, true, true));
+        assert!(super::boat_water_patch_visible(K::OakBoat, true, false));
+        assert!(!super::boat_water_patch_visible(K::BambooRaft, true, false));
+
+        let patch = super::entity_models::vehicles::bake_boat_water_patch_model();
+        assert_eq!(patch.vertices.len(), 36);
+        assert_eq!(patch.parts[0].offset, Vec3::new(0.0, -3.0, 1.0));
+        assert_eq!(patch.parts[0].cubes[0].origin, Vec3::new(-14.0, -9.0, -3.0));
+        assert_eq!(patch.parts[0].cubes[0].size, Vec3::new(28.0, 16.0, 3.0));
+        let root = patch.compute_part_transforms(&super::entity_model::PartAnim::default())[0];
+        let entity = Mat4::from_translation(Vec3::new(5.0, 6.0, 7.0));
+        let patch_matrix = super::boat_water_patch_matrix(entity, root);
+        assert_eq!(patch_matrix, entity * root);
+        assert_eq!(
+            patch_matrix.w_axis.truncate(),
+            entity.transform_point3(root.w_axis.truncate())
+        );
+        assert!(patch.part_ranges.iter().all(|&(_, count)| count > 0));
+    }
+
+    #[test]
+    fn water_patch_pipeline_and_frame_submission_remain_depth_only_and_owned() {
+        let source = include_str!("entity_renderer.rs");
+        assert!(source.contains("BlendMode::DepthOnly => vk::PipelineColorBlendAttachmentState"));
+        assert!(source.contains("color_write_mask: vk::ColorComponentFlags::empty()"));
+        assert!(source.contains("depth_write_enable: depth_write"));
+        assert!(source.contains("BlendMode::OpaqueCulled | BlendMode::DepthOnly"));
+        assert!(source.contains("GREATER_THAN_OR_EQUAL under reversed-Z"));
+        assert!(source.contains("depth_compare_op: if blend == BlendMode::Glint"));
+        assert!(source.contains("vk::CompareOp::Equal"));
+        assert!(source.contains("vk::CompareOp::LessOrEqual"));
+        let body_end = source
+            .find("self.record_pass(cmd, frame, self.glint_pipeline, &glint, count)")
+            .unwrap();
+        let patch_pass = source
+            .find("self.water_patch_depth_pipeline,\n            &water_patch")
+            .unwrap();
+        assert!(body_end < patch_pass);
+        assert!(source.contains("self.water_patch_vertex_allocation"));
+        assert!(source.contains("device.destroy_buffer(self.water_patch_vertex_buffer, None)"));
+        assert!(source.contains("device.destroy_pipeline(self.water_patch_depth_pipeline, None)"));
+        assert!(source.contains("bytemuck::cast_slice(&water_patch_model.vertices)"));
+    }
+
     #[test]
     fn cape_geometry_attachment_and_draw_predicate_match_native_idle_layer() {
         use azalea_registry::builtin::EntityKind;
