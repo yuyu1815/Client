@@ -2268,6 +2268,30 @@ impl AppCore {
                         &passengers,
                     );
                 }
+                NetworkEvent::MannequinProfile { id, profile } => {
+                    use azalea_inventory::components::PartialOrFullProfile;
+                    let (profile_id, textures) = match profile.unpack.as_ref() {
+                        PartialOrFullProfile::Full(full) => (
+                            Some(full.uuid),
+                            full.properties
+                                .map
+                                .get("textures")
+                                .map(|value| value.value.clone()),
+                        ),
+                        PartialOrFullProfile::Partial(partial) => (
+                            partial.id,
+                            partial
+                                .properties
+                                .map
+                                .get("textures")
+                                .map(|value| value.value.clone()),
+                        ),
+                    };
+                    if let Some(profile_id) = profile_id {
+                        self.queue_player_skin(profile_id, textures);
+                    }
+                    game.entity_store.set_mannequin_profile(id, profile);
+                }
                 NetworkEvent::ArmorStandData { id, index, value } => {
                     let crate::net::ArmorStandMetaValue::Rotation(rotation) = value;
                     game.entity_store
@@ -3791,6 +3815,11 @@ impl AppCore {
                         .set_text_display_transform(id, index, value);
                 }
                 NetworkEvent::EntityData { id, index, value } => {
+                    if index == 16
+                        && let crate::entity::MetaValue::Byte(mask) = &value
+                    {
+                        game.entity_store.set_mannequin_customization(id, *mask);
+                    }
                     if id == game.player.entity_id
                         && index == 0
                         && let crate::entity::MetaValue::Byte(flags) = value

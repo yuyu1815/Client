@@ -921,6 +921,17 @@ fn mob_definitions() -> Vec<MobDef> {
             )],
         },
         MobDef {
+            kind: EntityKind::Mannequin,
+            anim: AnimationType::Humanoid,
+            adult: vec![
+                opaque(entity_model::bake_player_model(false), PLAYER_TEX, 64),
+                opaque(entity_model::bake_player_model(true), PLAYER_TEX, 64),
+            ],
+            baby: None,
+            adult_overlays: vec![],
+            baby_overlays: vec![],
+        },
+        MobDef {
             kind: EntityKind::Player,
             anim: AnimationType::Humanoid,
             // Variant 0 = classic (wide) arms, 1 = slim; picked per player from
@@ -2690,7 +2701,7 @@ impl EntityRenderer {
     }
 
     fn player_skin(&self, info: &EntityRenderInfo) -> Option<&PlayerSkinTexture> {
-        if info.entity_kind != EntityKind::Player {
+        if !matches!(info.entity_kind, EntityKind::Player | EntityKind::Mannequin) {
             return None;
         }
         self.player_skins.get(info.player_uuid.as_ref()?)
@@ -3787,7 +3798,7 @@ fn entity_bounds(kind: EntityKind, is_baby: bool) -> (f32, f32) {
         EntityKind::TropicalFish => (0.5, 0.4),
         EntityKind::Pufferfish => (0.7, 0.7),
         EntityKind::IronGolem => (1.4, 2.7),
-        EntityKind::Player => (0.6, 1.8),
+        EntityKind::Player | EntityKind::Mannequin => (0.6, 1.8),
         _ => (1.0, 1.0),
     };
     let s = if is_baby { 0.5 } else { 1.0 };

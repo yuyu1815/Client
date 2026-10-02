@@ -1437,6 +1437,20 @@ pub(super) async fn handle_game_packet_with_display_text(
                     )
                     .await?;
                 }
+                // Mannequin DATA_PROFILE follows Avatar's main-arm and
+                // customization metadata (indices 15 and 16).
+                if item.index == 17
+                    && let azalea_entity::EntityDataValue::ResolvableProfile(profile) = &item.value
+                {
+                    send_event(
+                        event_tx,
+                        NetworkEvent::MannequinProfile {
+                            id: p.id.0,
+                            profile: profile.clone(),
+                        },
+                    )
+                    .await?;
+                }
                 // Index 6 = entity pose
                 if item.index == 6
                     && let azalea_entity::EntityDataValue::Pose(pose) = &item.value

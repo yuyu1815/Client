@@ -1359,6 +1359,13 @@ pub struct VehicleState {
     /// ExperienceOrb metadata 8 and its client-side visual age.
     pub experience_orb_value: i32,
     pub experience_orb_age: u32,
+    /// Synced Mannequin profile (metadata index 17); its UUID is the
+    /// texture-cache identity.
+    pub mannequin_profile: Option<azalea_inventory::components::Profile>,
+    /// Avatar customization mask defaults to all seven skin layers enabled.
+    pub mannequin_skin_parts_mask: u8,
+    pub mannequin_main_arm_right: bool,
+    pub mannequin_pose: EntityPose,
     /// ArmorStand metadata 15 flags and native six-part pose (degrees).
     pub armor_stand_flags: u8,
     pub armor_stand_pose: [[f32; 3]; 6],
@@ -1509,6 +1516,10 @@ impl EntityStore {
             crystal_age: 0,
             experience_orb_value: 0,
             experience_orb_age: 0,
+            mannequin_profile: None,
+            mannequin_skin_parts_mask: 0x7f,
+            mannequin_main_arm_right: true,
+            mannequin_pose: EntityPose::Standing,
             armor_stand_flags: 0,
             armor_stand_pose: [
                 [0.0; 3],
@@ -1577,6 +1588,10 @@ impl EntityStore {
             crystal_age: 0,
             experience_orb_value: 0,
             experience_orb_age: 0,
+            mannequin_profile: None,
+            mannequin_skin_parts_mask: 0x7f,
+            mannequin_main_arm_right: true,
+            mannequin_pose: EntityPose::Standing,
             armor_stand_flags: 0,
             armor_stand_pose: [
                 [0.0; 3],
@@ -2059,6 +2074,18 @@ impl EntityStore {
         }
     }
 
+    pub fn set_mannequin_profile(
+        &mut self,
+        id: i32,
+        profile: azalea_inventory::components::Profile,
+    ) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id)
+            && vehicle.kind == Some(EntityKind::Mannequin)
+        {
+            vehicle.mannequin_profile = Some(profile);
+        }
+    }
+
     pub fn set_armor_stand_rotation(&mut self, id: i32, index: u8, rotation: [f32; 3]) {
         if let Some(vehicle) = self.vehicles.get_mut(&id)
             && vehicle.kind == Some(EntityKind::ArmorStand)
@@ -2469,6 +2496,19 @@ impl EntityStore {
         {
             entity.main_arm_right = right;
         }
+        if let Some(entity) = self.vehicles.get_mut(&id)
+            && entity.kind == Some(EntityKind::Mannequin)
+        {
+            entity.mannequin_main_arm_right = right;
+        }
+    }
+
+    pub fn set_mannequin_customization(&mut self, id: i32, mask: u8) {
+        if let Some(entity) = self.vehicles.get_mut(&id)
+            && entity.kind == Some(EntityKind::Mannequin)
+        {
+            entity.mannequin_skin_parts_mask = mask & 0x7f;
+        }
     }
 
     /// Stores the complete metadata pose without collapsing
@@ -2477,6 +2517,11 @@ impl EntityStore {
         if let Some(entity) = self.living.get_mut(&id) {
             entity.pose = pose;
             entity.is_crouching = pose == EntityPose::Crouching;
+        }
+        if let Some(entity) = self.vehicles.get_mut(&id)
+            && entity.kind == Some(EntityKind::Mannequin)
+        {
+            entity.mannequin_pose = pose;
         }
     }
 
@@ -3685,6 +3730,22 @@ mod tests {
         let p = store.vehicles[&1].projectile.as_ref().unwrap();
         assert!((p.current.x - (11.466175068104723 + p.velocity.x)).abs() < 1e-10);
         assert_eq!(store.vehicles[&1].position, Position::new(2.0, 70.0, 2.0));
+    }
+
+    #[test]
+    fn mannequin_profile_customization_and_pose_remain_on_nonliving_route() {
+        let mut store = projectile(EntityKind::Mannequin, Position::default(), DVec3::ZERO);
+        assert!(!is_living_mob(&EntityKind::Mannequin));
+        store.set_mannequin_profile(1, azalea_inventory::components::Profile::default());
+        store.set_mannequin_customization(1, 0xff);
+        store.set_main_arm(1, false);
+        store.set_pose(1, EntityPose::Crouching);
+        let mannequin = &store.vehicles[&1];
+        assert!(mannequin.mannequin_profile.is_some());
+        assert_eq!(mannequin.mannequin_skin_parts_mask, 0x7f);
+        assert!(!mannequin.mannequin_main_arm_right);
+        assert_eq!(mannequin.mannequin_pose, EntityPose::Crouching);
+        assert!(!store.living.contains_key(&1));
     }
 
     #[test]

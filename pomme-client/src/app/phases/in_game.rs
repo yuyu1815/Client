@@ -5262,6 +5262,7 @@ pub fn update_game(
         entity_renders.extend(minecart_render_infos(&game.entity_store, partial_tick));
         entity_renders.extend(end_crystal_render_infos(&game.entity_store, partial_tick));
         entity_renders.extend(armor_stand_render_infos(&game.entity_store, partial_tick));
+        entity_renders.extend(mannequin_render_infos(&game.entity_store, partial_tick));
         entity_renders.extend(experience_orb_render_infos(
             &game.entity_store,
             &game.chunk_store,
@@ -6284,6 +6285,52 @@ fn armor_stand_render_infos(
                 armor_stand_equipment: stand.armor_stand_equipment.clone(),
                 body_transform: (stand.armor_stand_flags & 0x01 != 0)
                     .then(|| glam::Mat4::from_scale(glam::Vec3::splat(0.5))),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+fn mannequin_profile_id(profile: &azalea_inventory::components::Profile) -> Option<uuid::Uuid> {
+    use azalea_inventory::components::PartialOrFullProfile;
+    match profile.unpack.as_ref() {
+        PartialOrFullProfile::Full(profile) => Some(profile.uuid),
+        PartialOrFullProfile::Partial(profile) => profile.id,
+    }
+}
+
+fn mannequin_render_infos(
+    store: &crate::entity::EntityStore,
+    partial_tick: f32,
+) -> Vec<EntityRenderInfo> {
+    store
+        .vehicles
+        .values()
+        .filter_map(|mannequin| {
+            if mannequin.kind != Some(EntityKind::Mannequin) || mannequin.shared_flags & 0x20 != 0 {
+                return None;
+            }
+            let yaw = match (mannequin.prev_look_dir, mannequin.look_dir) {
+                (Some(prev), Some(now)) => {
+                    lerp_angle(prev.y_rot_deg(), now.y_rot_deg(), partial_tick)
+                }
+                (_, Some(now)) => now.y_rot_deg(),
+                _ => 0.0,
+            };
+            Some(EntityRenderInfo {
+                position: mannequin
+                    .prev_position
+                    .lerp(mannequin.position, f64::from(partial_tick)),
+                simulation_position: mannequin.position,
+                entity_kind: EntityKind::Mannequin,
+                body_y_rot_deg: yaw,
+                player_uuid: mannequin
+                    .mannequin_profile
+                    .as_ref()
+                    .and_then(mannequin_profile_id),
+                skin_parts_mask: mannequin.mannequin_skin_parts_mask,
+                is_crouching: mannequin.mannequin_pose == crate::entity::EntityPose::Crouching,
+                is_sleeping: mannequin.mannequin_pose == crate::entity::EntityPose::Sleeping,
                 ..Default::default()
             })
         })

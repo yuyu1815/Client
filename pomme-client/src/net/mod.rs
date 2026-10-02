@@ -650,6 +650,10 @@ pub enum NetworkEvent {
         index: u8,
         value: ArmorStandMetaValue,
     },
+    MannequinProfile {
+        id: i32,
+        profile: azalea_inventory::components::Profile,
+    },
     ArmorStandEquipment {
         id: i32,
         slots: Vec<(azalea_inventory::components::EquipmentSlot, ItemStack)>,
