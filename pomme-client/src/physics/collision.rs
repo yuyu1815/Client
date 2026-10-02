@@ -191,15 +191,20 @@ pub(crate) fn diagnostic_block_shapes(
             }
         },
     );
-    let extent = |min: f64, max: f64, extra: i64| {
-        ((max.ceil() as i64)
+    let extent = |min: f64, max: f64| {
+        (max.ceil() as i64)
             .saturating_sub(min.floor() as i64)
-            .saturating_add(extra))
-        .max(0) as u64
+            .max(0) as u64
     };
-    let total = extent(region.min.x, region.max.x, 0)
-        .saturating_mul(extent(region.min.y, region.max.y, 1))
-        .saturating_mul(extent(region.min.z, region.max.z, 0));
+    let total = extent(
+        region.min.x - MAX_BLOCK_SHAPE_OFFSET,
+        region.max.x + MAX_BLOCK_SHAPE_OFFSET,
+    )
+    .saturating_mul(extent(region.min.y - 1.0, region.max.y))
+    .saturating_mul(extent(
+        region.min.z - MAX_BLOCK_SHAPE_OFFSET,
+        region.max.z + MAX_BLOCK_SHAPE_OFFSET,
+    ));
     let omitted_cells = total.saturating_sub(cells.len() as u64);
     (cells, boxes, omitted_cells, omitted_boxes)
 }
@@ -552,15 +557,48 @@ mod tests {
         let region = Aabb::new(dvec3(0.0, 1.0, 0.0), dvec3(4.0, 4.0, 2.0));
         let (cells, boxes, omitted_cells, omitted_boxes) =
             diagnostic_block_shapes(&chunks, &region, (10.0, false, false, 0.0));
-        assert_eq!(cells.len(), 32);
-        assert_eq!(boxes.len(), 128);
-        assert_eq!(omitted_cells, 0);
-        assert_eq!(omitted_boxes, 32);
+        let mut raw_cells = Vec::new();
+        let mut raw_boxes = Vec::new();
+        let mut prefix_boxes = Vec::new();
+        let scanned_cells = std::cell::Cell::new(0usize);
+        visit_block_aabbs_bounded(
+            &region,
+            Some((10.0, false, false, 0.0)),
+            usize::MAX,
+            |x, y, z| {
+                let result = collision_cell(&chunks, x, y, z);
+                raw_cells.push((BlockPos::new(x, y, z), result.0));
+                scanned_cells.set(scanned_cells.get() + 1);
+                result
+            },
+            |pos, shape| {
+                raw_boxes.push((pos, shape));
+                if scanned_cells.get() <= 32 {
+                    prefix_boxes.push((pos, shape));
+                }
+            },
+        );
+        assert_eq!(raw_cells.len(), 96, "full padded query cell scan");
+        assert_eq!(
+            cells,
+            raw_cells[..32],
+            "diagnostic reports first 32 raw cells"
+        );
+        assert_eq!(boxes.len(), prefix_boxes.len());
+        for ((pos, shape), (raw_pos, raw_shape)) in boxes.iter().zip(&prefix_boxes) {
+            assert_eq!(pos, raw_pos);
+            assert_eq!(shape.min, raw_shape.min);
+            assert_eq!(shape.max, raw_shape.max);
+        }
+        assert_eq!(boxes.len(), 45);
+        assert_eq!(raw_boxes.len(), 160, "uncapped full query shape scan");
+        assert_eq!(omitted_cells, raw_cells.len() as u64 - cells.len() as u64);
+        assert_eq!(omitted_boxes, 0);
         let huge = Aabb::new(DVec3::ZERO, dvec3(100.0, 100.0, 100.0));
         let (cells, _, omitted_cells, _) =
             diagnostic_block_shapes(&chunks, &huge, (10.0, false, false, 0.0));
         assert_eq!(cells.len(), 32);
-        assert_eq!(omitted_cells, 1_010_000 - 32);
+        assert_eq!(omitted_cells, 1_050_804 - 32);
         let player = Aabb::from_center(dvec3(0.5, 5.0, 0.5), 0.3, 0.9);
         let resolve = || {
             resolve_collision_for_player(

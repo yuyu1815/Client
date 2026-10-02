@@ -906,8 +906,11 @@ fn apply_bubble_column_effect(
     let center_offset = (aabb.max + aabb.min) * 0.5 - *player.position;
     let start = from + center_offset;
     let end = to + center_offset;
-    let min = (aabb.min.min(aabb.min + (to - from))).floor().as_ivec3();
-    let max = (aabb.max.max(aabb.max + (to - from))).ceil().as_ivec3();
+    let movement = to - from;
+    // `aabb` is at the post-move position; extend it backward to cover the
+    // starting box as well as the end box.
+    let min = (aabb.min.min(aabb.min - movement)).floor().as_ivec3();
+    let max = (aabb.max.max(aabb.max - movement)).ceil().as_ivec3();
     let mut visited = Vec::new();
     for x in min.x..max.x {
         for y in min.y..max.y {
@@ -2904,7 +2907,7 @@ mod tests {
         chunks.set_block_state(0, 64, 0, ladder);
 
         let mut colliding = LocalPlayer::new();
-        colliding.position = dvec3(0.5, 64.0, 0.5).into();
+        colliding.position = dvec3(0.6, 64.0, 0.5).into();
         colliding.velocity.x = 1.0;
         apply_collision_with_context(
             &mut colliding,
@@ -2949,7 +2952,9 @@ mod tests {
         );
 
         let mut sneaking = LocalPlayer::new();
-        sneaking.position = dvec3(0.5, 64.0, 0.5).into();
+        // Start one tenth of a block from the adjacent wall; ladder travel
+        // clamps horizontal movement to 0.15 before collision resolution.
+        sneaking.position = dvec3(0.6, 64.0, 0.5).into();
         sneaking.velocity.x = 1.0;
         let mut sneak = InputState::released();
         sneak.set_test_key(KeyCode::ShiftLeft, true);
@@ -3044,8 +3049,14 @@ mod tests {
             traversing.position.y > 68.0,
             "fast movement crosses the full column"
         );
-        let expected_vy = (4.5 + 0.06 - 0.03 + 0.1 - GRAVITY) * f64::from(VERTICAL_DRAG);
-        assert!((traversing.velocity.y - expected_vy).abs() < 1.0e-12);
+        // First cell caps to 0.7, the drag cell lowers it to 0.67, and
+        // the open-top cell raises it to 0.77 before water drag/gravity.
+        let expected_vy = (0.7 - 0.03 + 0.1) * f64::from(WATER_VERTICAL_DRAG) - GRAVITY / 16.0;
+        assert!(
+            (traversing.velocity.y - expected_vy).abs() < 1.0e-12,
+            "velocity={} expected={expected_vy}",
+            traversing.velocity.y
+        );
         assert_eq!(
             traversing.fall_distance, 0.0,
             "inside hooks reset fall distance"
@@ -3088,8 +3099,13 @@ mod tests {
                 player.position.y, 100.0,
                 "first-tick movement uses initial vy=0"
             );
-            let target_vy = 0.05 * (f64::from(amplifier) + 1.0) * f64::from(VERTICAL_DRAG);
-            assert!((player.velocity.y - target_vy).abs() < 1.0e-12);
+            // Levitation changes velocity 20% toward its target before drag.
+            let target_vy = 0.05 * (f64::from(amplifier) + 1.0) * 0.2 * f64::from(VERTICAL_DRAG);
+            assert!(
+                (player.velocity.y - target_vy).abs() < 1.0e-12,
+                "amplifier={amplifier} velocity={} target={target_vy}",
+                player.velocity.y
+            );
             let first_vy = player.velocity.y;
             tick(&mut player, &input, &chunks, 1.0, false);
             assert!((player.position.y - 100.0 - first_vy).abs() < 1.0e-12);
