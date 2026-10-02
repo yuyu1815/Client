@@ -1806,6 +1806,43 @@ impl Renderer {
                 info
             })
             .collect();
+        let mut equipment_definitions = HashMap::new();
+        let mut frame_entities = entities.to_vec();
+        for info in &mut frame_entities {
+            if info.entity_kind != azalea_registry::builtin::EntityKind::HappyGhast {
+                continue;
+            }
+            let azalea_inventory::ItemStack::Present(stack) = &info.body_equipment else {
+                continue;
+            };
+            let Some(equippable) = crate::player::menu_click::component::<
+                azalea_inventory::components::Equippable,
+            >(stack) else {
+                continue;
+            };
+            let Some(asset_id) = equippable.asset_id.map(|id| id.to_string()) else {
+                continue;
+            };
+            let layers = equipment_definitions
+                .entry(asset_id.clone())
+                .or_insert_with(|| {
+                    pipelines::equipment::resolve_equipment_layers_with_pack_dirs(
+                        &self.jar_assets_dir,
+                        &self.asset_index,
+                        &self.activation_pack_dirs,
+                        &asset_id,
+                        "happy_ghast_body",
+                    )
+                });
+            let dyed_rgb = crate::player::menu_click::component::<
+                azalea_inventory::components::DyedColor,
+            >(stack)
+            .map(|color| color.rgb);
+            if let Some(layers) = layers {
+                info.happy_ghast_equipment_layers =
+                    pipelines::equipment::resolve_happy_ghast_layer_inputs(layers, dyed_rgb);
+            }
+        }
         if let Some(start) = prepare_start {
             self.last_timings.render_prepare_ms = start.elapsed().as_secs_f32() * 1000.0;
         }
@@ -1825,7 +1862,7 @@ impl Renderer {
                 dimension,
                 sky,
                 fog_color: clear_col,
-                entities,
+                entities: &frame_entities,
                 text_display_source,
                 item_entities: &item_entities,
                 block_entities,

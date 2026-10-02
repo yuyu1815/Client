@@ -24,6 +24,44 @@ pub struct Dyeable {
     pub color_when_undyed: Option<u32>,
 }
 
+/// Frame-ready Happy Ghast layer input for the renderer/GPU owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedEquipmentLayer {
+    pub texture_key: String,
+    pub tint_rgb: [u8; 3],
+}
+
+/// Apply Native EquipmentLayerRenderer.getColorForLayer and resolve ordered
+/// layer texture identifiers without loading GPU resources.
+pub fn resolve_happy_ghast_layer_inputs(
+    layers: &[EquipmentLayer],
+    dyed_rgb: Option<i32>,
+) -> Vec<ResolvedEquipmentLayer> {
+    layers
+        .iter()
+        .filter_map(|layer| {
+            let color = match &layer.dyeable {
+                Some(dyeable) => {
+                    let color = dyed_rgb
+                        .filter(|&color| color != 0)
+                        .map(|color| color as u32)
+                        .or(dyeable.color_when_undyed)
+                        .unwrap_or(0);
+                    if color == 0 {
+                        return None;
+                    }
+                    color | 0xff00_0000
+                }
+                None => u32::MAX,
+            };
+            Some(ResolvedEquipmentLayer {
+                texture_key: equipment_layer_asset_key("happy_ghast_body", &layer.texture)?,
+                tint_rgb: [(color >> 16) as u8, (color >> 8) as u8, color as u8],
+            })
+        })
+        .collect()
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EquipmentDefinition {
@@ -53,6 +91,34 @@ pub fn resolve_equipment_layers(
     }
     let key = format!("{}/equipment/{}.json", id.namespace, id.path);
     let path = resolve_asset_path_with_packs(jar_assets, index, &key, packs);
+    load_equipment_layers(&path, layer_type)
+}
+
+/// Resolve against Renderer’s active-pack snapshot for this frame.
+pub fn resolve_equipment_layers_with_pack_dirs(
+    jar_assets: &Path,
+    index: &Option<AssetIndex>,
+    pack_dirs: &[PathBuf],
+    asset_id: &str,
+    layer_type: &str,
+) -> Option<Vec<EquipmentLayer>> {
+    let id = AssetId::parse(asset_id);
+    if !crate::assets::identifier_chars(id.namespace, false)
+        || !crate::assets::identifier_chars(id.path, true)
+        || id
+            .path
+            .split('/')
+            .any(|part| matches!(part, "" | "." | ".."))
+        || !crate::assets::identifier_chars(layer_type, false)
+    {
+        return None;
+    }
+    let key = format!("{}/equipment/{}.json", id.namespace, id.path);
+    let path = crate::assets::resolve_asset_path_with_pack_dirs(jar_assets, index, &key, pack_dirs);
+    load_equipment_layers(&path, layer_type)
+}
+
+fn load_equipment_layers(path: &Path, layer_type: &str) -> Option<Vec<EquipmentLayer>> {
     let bytes = std::fs::read(path).ok()?;
     if bytes.len() > MAX_EQUIPMENT_JSON_BYTES {
         return None;
@@ -125,6 +191,90 @@ mod tests {
                 .is_none()
         );
         std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn frame_resolver_uses_pack_override_and_observes_reload_paths() {
+        let temp = std::env::temp_dir().join(format!("equipment-pack-{}", uuid::Uuid::new_v4()));
+        let jar = temp.join("jar");
+        let pack = temp.join("pack");
+        let write = |root: &Path, texture: &str| {
+            let path = root.join("assets/example/equipment/harness.json");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                format!(r#"{{"layers":{{"happy_ghast_body":[{{"texture":"{texture}"}}]}}}}"#),
+            )
+            .unwrap();
+        };
+        write(&jar, "example:default");
+        write(&pack, "custom:override");
+        let base = resolve_equipment_layers_with_pack_dirs(
+            &jar,
+            &None,
+            &[],
+            "example:harness",
+            "happy_ghast_body",
+        )
+        .unwrap();
+        let overridden = resolve_equipment_layers_with_pack_dirs(
+            &jar,
+            &None,
+            std::slice::from_ref(&pack),
+            "example:harness",
+            "happy_ghast_body",
+        )
+        .unwrap();
+        assert_eq!(base[0].texture, "example:default");
+        assert_eq!(overridden[0].texture, "custom:override");
+        write(&pack, "custom:reloaded");
+        let reloaded = resolve_equipment_layers_with_pack_dirs(
+            &jar,
+            &None,
+            std::slice::from_ref(&pack),
+            "example:harness",
+            "happy_ghast_body",
+        )
+        .unwrap();
+        assert_eq!(reloaded[0].texture, "custom:reloaded");
+        assert!(resolve_happy_ghast_layer_inputs(&[], None).is_empty());
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn happy_ghast_layer_inputs_keep_order_and_native_tints() {
+        let colors = [
+            0x000000, 0xffffff, 0xff0000, 0x00ff00, 0x0000ff, 0x123456, 0x654321, 0xabcdef,
+            0x010203, 0x102030, 0x203040, 0x304050, 0x405060, 0x506070, 0x607080, 0x708090,
+        ];
+        let mut layers: Vec<_> = colors
+            .iter()
+            .map(|color| EquipmentLayer {
+                texture: format!("custom:body/{color:06x}"),
+                dyeable: Some(Dyeable {
+                    color_when_undyed: Some(*color),
+                }),
+                use_player_texture: false,
+            })
+            .collect();
+        layers.push(EquipmentLayer {
+            texture: "minecraft:body/white".into(),
+            dyeable: None,
+            use_player_texture: false,
+        });
+        let resolved = resolve_happy_ghast_layer_inputs(&layers, None);
+        assert_eq!(resolved.len(), 16, "native color 0 skips its layer");
+        assert_eq!(resolved[0].tint_rgb, [255, 255, 255]);
+        assert_eq!(
+            resolved[0].texture_key,
+            "custom/textures/entity/equipment/happy_ghast_body/body/ffffff.png"
+        );
+        assert_eq!(resolved[15].tint_rgb, [255, 255, 255]);
+        assert_eq!(
+            resolve_happy_ghast_layer_inputs(&layers[1..2], Some(0x123456))[0].tint_rgb,
+            [0x12, 0x34, 0x56],
+        );
+        assert!(resolve_happy_ghast_layer_inputs(&layers[0..1], None).is_empty());
     }
 
     #[test]

@@ -5061,6 +5061,7 @@ pub fn update_game(
                     entity_extras(entity_id, e, partial_tick, game.sky_state.game_time as i64);
 
                 Some(EntityRenderInfo {
+                    happy_ghast_equipment_layers: Vec::new(),
                     position: render_pos + extras.render_offset,
                     simulation_position: e.position,
                     head_y_rot_deg: lerp_angle(
@@ -5235,6 +5236,7 @@ pub fn update_game(
         );
 
         entity_renders.push(EntityRenderInfo {
+            happy_ghast_equipment_layers: Vec::new(),
             position: interp_pos,
             simulation_position: game.player.position,
             head_y_rot_deg: interp_y_rot_deg,
@@ -6209,6 +6211,7 @@ fn boat_render_infos(
             let bubble_angle = vehicle.boat_prev_bubble_angle
                 + (vehicle.boat_bubble_angle - vehicle.boat_prev_bubble_angle) * partial_tick;
             Some(EntityRenderInfo {
+                happy_ghast_equipment_layers: Vec::new(),
                 position,
                 simulation_position: vehicle.position,
                 body_y_rot_deg: yaw,
@@ -6390,6 +6393,7 @@ fn end_crystal_render_infos(
                 .prev_position
                 .lerp(entity.position, partial_tick as f64);
             Some(EntityRenderInfo {
+                happy_ghast_equipment_layers: Vec::new(),
                 position,
                 simulation_position: entity.position,
                 entity_kind: azalea_registry::builtin::EntityKind::EndCrystal,
@@ -6435,6 +6439,7 @@ fn armor_stand_render_infos(
                 _ => 0.0,
             };
             Some(EntityRenderInfo {
+                happy_ghast_equipment_layers: Vec::new(),
                 position,
                 simulation_position: stand.position,
                 entity_kind: EntityKind::ArmorStand,
@@ -6484,6 +6489,7 @@ fn mannequin_render_infos(
             // whose partial GameProfile id is Util.NIL_UUID (not the entity UUID).
             let skin_uuid = profile_uuid.unwrap_or_else(uuid::Uuid::nil);
             Some(EntityRenderInfo {
+                happy_ghast_equipment_layers: Vec::new(),
                 position: mannequin
                     .prev_position
                     .lerp(mannequin.position, f64::from(partial_tick)),
@@ -6560,6 +6566,7 @@ fn experience_orb_render_infos(
             let mut overlay_tints = [None; MAX_OVERLAYS];
             overlay_tints[0] = Some(experience_orb_color(age, light));
             Some(EntityRenderInfo {
+                happy_ghast_equipment_layers: Vec::new(),
                 position: orb.prev_position.lerp(orb.position, partial_tick as f64),
                 simulation_position: orb.position,
                 entity_kind: EntityKind::ExperienceOrb,
@@ -6624,6 +6631,7 @@ fn minecart_render_infos(
                 0.0
             };
             Some(EntityRenderInfo {
+                happy_ghast_equipment_layers: Vec::new(),
                 position,
                 simulation_position: vehicle.position,
                 body_y_rot_deg: yaw,
@@ -6672,6 +6680,7 @@ fn arrow_render_infos(
                 (look.y_rot_deg(), look.x_rot_deg())
             };
             Some(EntityRenderInfo {
+                happy_ghast_equipment_layers: Vec::new(),
                 position: pos,
                 simulation_position: pos,
                 body_y_rot_deg: yaw,
@@ -7174,6 +7183,7 @@ fn projectile_render_infos(
                 (look.y_rot_deg(), look.x_rot_deg())
             };
             Some(EntityRenderInfo {
+                happy_ghast_equipment_layers: Vec::new(),
                 position,
                 simulation_position: vehicle.position,
                 entity_kind: kind,

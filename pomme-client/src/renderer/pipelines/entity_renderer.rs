@@ -221,6 +221,7 @@ struct EntityInstance {
     uv_params: [f32; 4],
 }
 
+#[derive(Clone)]
 pub struct EntityRenderInfo {
     /// Interpolated/visually offset position for the model and frustum.
     pub position: Position,
@@ -256,6 +257,8 @@ pub struct EntityRenderInfo {
     >,
     /// BODY equipment snapshot for Happy Ghast's native equipment layer.
     pub body_equipment: azalea_inventory::ItemStack,
+    /// Ordered CPU-resolved equipment input for the GPU renderer owner.
+    pub happy_ghast_equipment_layers: Vec<super::equipment::ResolvedEquipmentLayer>,
     /// Happy Ghast is ridden when it has a passenger (not when saddle is
     /// present).
     pub is_ridden: bool,
@@ -382,6 +385,7 @@ impl Default for EntityRenderInfo {
             armor_stand_pose: [[0.0; 3]; 6],
             armor_stand_equipment: std::collections::HashMap::new(),
             body_equipment: azalea_inventory::ItemStack::Empty,
+            happy_ghast_equipment_layers: Vec::new(),
             is_ridden: false,
             overlay_tints: [None; MAX_OVERLAYS],
             overlay_variants: [0; MAX_OVERLAYS],
@@ -5438,6 +5442,7 @@ mod tests {
 
         let orientation = Quat::from_euler(glam::EulerRot::XYZ, 0.3, -0.7, 0.8);
         let info = super::EntityRenderInfo {
+            happy_ghast_equipment_layers: Vec::new(),
             entity_kind: EntityKind::DragonFireball,
             camera_orientation: Some(orientation),
             ..Default::default()
@@ -5464,6 +5469,7 @@ mod tests {
 
         let age = 7.25;
         let info = super::EntityRenderInfo {
+            happy_ghast_equipment_layers: Vec::new(),
             entity_kind: EntityKind::ShulkerBullet,
             age_in_ticks: age,
             ..Default::default()
@@ -5518,6 +5524,7 @@ mod tests {
         use crate::entity::components::Position;
 
         let info = EntityRenderInfo {
+            happy_ghast_equipment_layers: Vec::new(),
             position: Position::new(2.0, 3.0, 4.0),
             entity_kind: EntityKind::ExperienceOrb,
             body_y_rot_deg: 0.0,
@@ -5549,6 +5556,7 @@ mod tests {
         let tip = Vec3::new(4.0 / 16.0, 0.0, 0.0);
         for (yaw, axis) in [(0.0, -Vec3::Z), (90.0, -Vec3::X)] {
             let info = EntityRenderInfo {
+                happy_ghast_equipment_layers: Vec::new(),
                 entity_kind: EntityKind::Arrow,
                 body_y_rot_deg: yaw,
                 ..Default::default()
@@ -5561,6 +5569,7 @@ mod tests {
             );
         }
         let info = EntityRenderInfo {
+            happy_ghast_equipment_layers: Vec::new(),
             entity_kind: EntityKind::Arrow,
             head_x_rot_deg: 30.0,
             ..Default::default()
@@ -5621,6 +5630,7 @@ mod tests {
 
         let frustum = [[0.0, 0.0, 0.0, 1000.0]; 6];
         let mut slime = EntityRenderInfo {
+            happy_ghast_equipment_layers: Vec::new(),
             entity_kind: EntityKind::Slime,
             position: Position::new(100.0, 0.0, 0.0),
             simulation_position: Position::new(100.0, 0.0, 0.0),
@@ -5650,6 +5660,7 @@ mod tests {
         let visible = |kind, x, percent| {
             entity_visible(
                 &EntityRenderInfo {
+                    happy_ghast_equipment_layers: Vec::new(),
                     entity_kind: kind,
                     position: Position::new(x, 0.0, 0.0),
                     simulation_position: Position::new(x, 0.0, 0.0),
@@ -5727,6 +5738,7 @@ mod tests {
         let frustum = [[0.0, 0.0, 0.0, 1000.0]; 6];
         let scale = entity_view_scale(8, 100);
         let mut player = EntityRenderInfo {
+            happy_ghast_equipment_layers: Vec::new(),
             entity_kind: EntityKind::Player,
             position: prev.lerp(now, 0.0) + DVec3::new(0.5, 0.0, 0.0),
             simulation_position: now,
@@ -5757,6 +5769,7 @@ mod tests {
 
         let frustum = [[0.0, 0.0, 0.0, 1000.0]; 6];
         let mut zombie = EntityRenderInfo {
+            happy_ghast_equipment_layers: Vec::new(),
             entity_kind: EntityKind::Zombie,
             position: Position::new(80.0, 0.0, 0.0),
             simulation_position: Position::new(80.0, 0.0, 0.0),
@@ -5879,6 +5892,7 @@ mod tests {
         ));
 
         let info = EntityRenderInfo {
+            happy_ghast_equipment_layers: Vec::new(),
             entity_kind: EntityKind::ArmorStand,
             body_y_rot_deg: 90.0,
             armor_stand_pose: [
