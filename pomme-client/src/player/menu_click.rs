@@ -715,6 +715,8 @@ fn same_item(a: &ItemStack, b: &ItemStack) -> bool {
     }
 }
 
+/// Resolves a patch override without reviving a component explicitly removed
+/// from the item prototype.
 pub(crate) fn component<T: azalea_inventory::default_components::DefaultableComponent + Clone>(
     stack: &ItemStackData,
 ) -> Option<T> {

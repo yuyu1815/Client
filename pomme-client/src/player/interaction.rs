@@ -1898,8 +1898,6 @@ pub fn play_break_sound(audio: &mut AudioEngine, state: BlockState, pos: BlockPo
     );
 }
 
-/// The stack's component override if the server set one, else the item's
-/// default.
 /// Vanilla `Consumable.emitParticlesAndSounds`: the shared bite / final-gulp
 /// burst of item crumbs plus the consume sound. The sound plays locally here
 /// and again from the server's broadcast, doubling up for the eater exactly
