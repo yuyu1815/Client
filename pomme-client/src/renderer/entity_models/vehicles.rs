@@ -115,7 +115,7 @@ pub fn bake_boat_model(chest: bool) -> BakedEntityModel {
 
 /// Native `ModelLayers.BOAT_WATER_PATCH` geometry for the 18 boat variants.
 /// `RaftRenderer` does not submit a water patch. The root pose is baked here;
-/// the renderer applies the same boat root matrix as the body.
+/// the GPU pass must apply the same boat root matrix as the body.
 pub fn bake_boat_water_patch_model() -> BakedEntityModel {
     bake_model(
         vec![part(
