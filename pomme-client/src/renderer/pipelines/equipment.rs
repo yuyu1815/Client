@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn equipment_layers_and_texture_paths_follow_vanilla_identifiers() {
         let temp = std::env::temp_dir().join(format!("equipment-{}", uuid::Uuid::new_v4()));
-        let definition = temp.join("assets/example/equipment/harness.json");
+        let definition = temp.join("example/equipment/harness.json");
         std::fs::create_dir_all(definition.parent().unwrap()).unwrap();
         std::fs::write(
             &definition,
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn native_cape_predicate_uses_each_custom_assets_layer_list() {
         let temp = std::env::temp_dir().join(format!("equipment-cape-{}", uuid::Uuid::new_v4()));
-        let path = temp.join("assets/custom/equipment/cape.json");
+        let path = temp.join("custom/equipment/cape.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let definition = |layers: &str| format!(r#"{{"layers":{{{layers}}}}}"#);
         std::fs::write(
@@ -222,8 +222,8 @@ mod tests {
         let temp = std::env::temp_dir().join(format!("equipment-pack-{}", uuid::Uuid::new_v4()));
         let jar = temp.join("jar");
         let pack = temp.join("pack");
-        let write = |root: &Path, texture: &str| {
-            let path = root.join("assets/example/equipment/harness.json");
+        let write = |path: &Path, texture: &str| {
+            let path = path.join("example/equipment/harness.json");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(
                 path,
@@ -232,7 +232,7 @@ mod tests {
             .unwrap();
         };
         write(&jar, "example:default");
-        write(&pack, "custom:override");
+        write(&pack.join("assets"), "custom:override");
         let base = resolve_equipment_layers_with_pack_dirs(
             &jar,
             &None,
@@ -251,7 +251,7 @@ mod tests {
         .unwrap();
         assert_eq!(base[0].texture, "example:default");
         assert_eq!(overridden[0].texture, "custom:override");
-        write(&pack, "custom:reloaded");
+        write(&pack.join("assets"), "custom:reloaded");
         let reloaded = resolve_equipment_layers_with_pack_dirs(
             &jar,
             &None,
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn malformed_equipment_json_is_unknown_and_safe() {
         let temp = std::env::temp_dir().join(format!("equipment-{}", uuid::Uuid::new_v4()));
-        let path = temp.join("assets/minecraft/equipment/test.json");
+        let path = temp.join("minecraft/equipment/test.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
