@@ -5100,6 +5100,7 @@ pub fn update_game(
                     variant_index: extras.variant_index,
                     armor_stand_flags: 0,
                     armor_stand_pose: [[0.0; 3]; 6],
+                    armor_stand_equipment: std::collections::HashMap::new(),
                     overlay_tints: extras.overlay_tints,
                     overlay_variants: extras.overlay_variants,
                     is_unhappy: e.unhappy_counter > 0,
@@ -6280,6 +6281,7 @@ fn armor_stand_render_infos(
                 body_y_rot_deg: yaw,
                 armor_stand_flags: stand.armor_stand_flags,
                 armor_stand_pose: stand.armor_stand_pose,
+                armor_stand_equipment: stand.armor_stand_equipment.clone(),
                 body_transform: (stand.armor_stand_flags & 0x01 != 0)
                     .then(|| glam::Mat4::from_scale(glam::Vec3::splat(0.5))),
                 ..Default::default()
@@ -7995,10 +7997,18 @@ mod tests {
         store.set_vehicle_kind(1, EntityKind::ArmorStand);
         store.apply_vehicle_metadata(1, 15, MetaValue::Byte(0x11));
         store.set_armor_stand_rotation(1, 16, [0.0, 45.0, 0.0]);
+        store.set_armor_stand_equipment(
+            1,
+            vec![(
+                azalea_inventory::components::EquipmentSlot::Mainhand,
+                azalea_inventory::ItemStack::Empty,
+            )],
+        );
         let renders = armor_stand_render_infos(&store, 0.5);
         assert_eq!(renders.len(), 1);
         assert_eq!(renders[0].armor_stand_flags, 0x11);
         assert_eq!(renders[0].armor_stand_pose[0], [0.0, 45.0, 0.0]);
+        assert_eq!(renders[0].armor_stand_equipment.len(), 1);
         store.apply_vehicle_metadata(1, 15, MetaValue::Byte(0x01));
         let renders = armor_stand_render_infos(&store, 0.5);
         assert_eq!(renders[0].body_transform.unwrap().x_axis.x, 0.5);

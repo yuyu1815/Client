@@ -89,6 +89,11 @@ pub struct EntityRenderInfo {
     pub armor_stand_flags: u8,
     /// head, body, left/right arm, left/right leg; native Euler degrees.
     pub armor_stand_pose: [[f32; 3]; 6],
+    /// Retained stacks for a later armor/hand equipment layer.
+    pub armor_stand_equipment: std::collections::HashMap<
+        azalea_inventory::components::EquipmentSlot,
+        azalea_inventory::ItemStack,
+    >,
     pub overlay_tints: [Option<[f32; 4]>; MAX_OVERLAYS],
     /// Per-slot overlay texture variant (villager type/profession/level).
     pub overlay_variants: [u32; MAX_OVERLAYS],
@@ -190,6 +195,7 @@ impl Default for EntityRenderInfo {
             variant_index: 0,
             armor_stand_flags: 0,
             armor_stand_pose: [[0.0; 3]; 6],
+            armor_stand_equipment: std::collections::HashMap::new(),
             overlay_tints: [None; MAX_OVERLAYS],
             overlay_variants: [0; MAX_OVERLAYS],
             is_unhappy: false,
