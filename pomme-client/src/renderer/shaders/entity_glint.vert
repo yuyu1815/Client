@@ -1,5 +1,6 @@
 #version 450
 
+#include "fog.glsl"
 #include "camera_ubo.glsl"
 
 layout(location = 0) in vec3 position;
@@ -14,6 +15,8 @@ layout(location = 8) in vec4 i_overlay;
 layout(location = 9) in vec4 i_uv;
 
 layout(location = 0) out vec2 v_tex_coords;
+layout(location = 1) out vec4 v_color_modulator;
+layout(location = 2) out float v_fog;
 
 void main() {
     mat4 model = mat4(i_model_0, i_model_1, i_model_2, i_model_3);
@@ -26,4 +29,6 @@ void main() {
     float s = sin(0.1745329252);
     mat2 rotation = mat2(c, s, -s, c);
     v_tex_coords = rotation * (tex_coords * 0.5) + i_uv.xy;
+    v_color_modulator = i_tint;
+    v_fog = total_fog_value(rel, fog_env, camera_pos.w, fog_color.w);
 }

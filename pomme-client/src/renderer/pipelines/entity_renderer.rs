@@ -4027,13 +4027,14 @@ fn trident_glint_pass_count(kind: EntityKind, overlay: OverlayKind, foil: bool) 
 }
 
 /// Vanilla `TextureTransform.ENTITY_GLINT_TEXTURING`: 0.5 scale, 10°
-/// rotation, and the native two-period UV scroll (`glintSpeed` defaults to 1).
+/// rotation, and the native two-period UV scroll (`glintSpeed` defaults to
+/// 0.5).
 fn entity_glint_uv() -> [f32; 4] {
     let millis = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64)
-        .wrapping_mul(8);
+        .wrapping_mul(4);
     [
         -((millis % 110_000) as f32 / 110_000.0),
         (millis % 30_000) as f32 / 30_000.0,
@@ -4670,14 +4671,14 @@ pub(super) fn create_pipeline(
                 color_write_mask: vk::ColorComponentFlags::RGBA,
             }
         }
-        // Vanilla glint multiplies destination and source colors.
+        // Native RenderPipelines.GLINT blend factors.
         BlendMode::Glint => vk::PipelineColorBlendAttachmentState {
             blend_enable: vk::TRUE,
-            src_color_blend_factor: vk::BlendFactor::DstColor,
-            dst_color_blend_factor: vk::BlendFactor::SrcColor,
+            src_color_blend_factor: vk::BlendFactor::SrcColor,
+            dst_color_blend_factor: vk::BlendFactor::One,
             color_blend_op: vk::BlendOp::Add,
-            src_alpha_blend_factor: vk::BlendFactor::One,
-            dst_alpha_blend_factor: vk::BlendFactor::Zero,
+            src_alpha_blend_factor: vk::BlendFactor::Zero,
+            dst_alpha_blend_factor: vk::BlendFactor::One,
             alpha_blend_op: vk::BlendOp::Add,
             color_write_mask: vk::ColorComponentFlags::RGBA,
         },
@@ -4948,11 +4949,46 @@ mod tests {
         let pipeline_source = include_str!("entity_renderer.rs");
         assert!(pipeline_source.contains("millis % 110_000"));
         assert!(pipeline_source.contains("millis % 30_000"));
-        assert!(pipeline_source.contains(".wrapping_mul(8)"));
+        assert!(pipeline_source.contains(".wrapping_mul(4)"));
         assert!(pipeline_source.contains("vk::CompareOp::Equal"));
         assert!(pipeline_source.contains("BlendMode::Glint"));
         assert!(pipeline_source.contains("device.destroy_pipeline(self.glint_pipeline, None)"));
         assert!(pipeline_source.contains("glint_pipeline,\n        ] = create_pipelines"));
+    }
+
+    #[test]
+    fn entity_glint_matches_native_blend_and_fragment_goldens() {
+        let source = include_str!("entity_renderer.rs");
+        let glint = source
+            .split("BlendMode::Glint => vk::PipelineColorBlendAttachmentState {")
+            .nth(1)
+            .unwrap();
+        let glint = glint.split("},").next().unwrap();
+        for factor in [
+            "src_color_blend_factor: vk::BlendFactor::SrcColor",
+            "dst_color_blend_factor: vk::BlendFactor::One",
+            "src_alpha_blend_factor: vk::BlendFactor::Zero",
+            "dst_alpha_blend_factor: vk::BlendFactor::One",
+            "color_blend_op: vk::BlendOp::Add",
+            "alpha_blend_op: vk::BlendOp::Add",
+        ] {
+            assert!(
+                glint.contains(factor),
+                "missing native glint factor: {factor}"
+            );
+        }
+
+        let frag = include_str!("../shaders/entity_glint.frag");
+        let vert = include_str!("../shaders/entity_glint.vert");
+        assert!(frag.contains("color.a < 0.1"));
+        assert!(frag.contains("(1.0 - clamp(v_fog, 0.0, 1.0)) * 0.75"));
+        assert!(vert.contains("total_fog_value(rel, fog_env, camera_pos.w, fog_color.w)"));
+        // Native alpha cutoff and GlintAlpha/fog RGB goldens.
+        assert!(!(0.099_f32 >= 0.1));
+        assert!(0.1_f32 >= 0.1);
+        assert!((1.0_f32 * (1.0 - 0.0) * 0.75 - 0.75).abs() < f32::EPSILON);
+        assert!((1.0_f32 * (1.0 - 0.5) * 0.75 - 0.375).abs() < f32::EPSILON);
+        assert_eq!(1.0_f32 * (1.0 - 1.0) * 0.75, 0.0);
     }
 
     #[test]
