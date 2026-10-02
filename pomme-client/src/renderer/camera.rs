@@ -442,6 +442,14 @@ impl Camera {
         self.top_down = None;
     }
 
+    /// World-space camera quaternion, including native view effects (hurt/bob
+    /// roll).
+    pub fn orientation(&self) -> glam::Quat {
+        let (forward, up) = self.view_basis();
+        let view = self.view_effect_matrix() * view::look_to_mat4(Vec3::ZERO, forward, up);
+        view.inverse().to_scale_rotation_translation().1
+    }
+
     pub fn view_projection(&self) -> Mat4 {
         self.view_projection_with_fov(self.fov_radians(self.render_partial_tick))
     }

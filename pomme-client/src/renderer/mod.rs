@@ -7,13 +7,20 @@ pub(crate) mod entity_models {
     pub mod aquatic;
     pub mod flying;
     pub mod humanoid;
+    pub mod nonliving_special;
+    pub mod projectiles;
     pub mod terrestrial;
+    pub mod vehicles;
 }
 pub(crate) mod item_activation_math;
 pub mod map_texture;
 pub(crate) mod packing;
 pub mod pipelines;
+
 mod placed_head_skin;
+#[cfg(test)]
+#[path = "player_skin_parts_tests.rs"]
+mod player_skin_parts_tests;
 mod screenshot;
 pub(crate) mod world_shadow;
 pub use screenshot::ProbeScreenshotReply;
@@ -155,6 +162,7 @@ pub(crate) fn entity_distance_visible(
 enum RenderMode<'a> {
     World {
         show_hand: bool,
+        main_hand_right: bool,
         overlay: Vec<MenuElement>,
         hand_animation: pipelines::hand::HandAnimation,
         use_anim: Option<pipelines::held_item::UseAnim>,
@@ -396,6 +404,8 @@ impl Renderer {
             .chain(generated_item_textures.iter().copied())
             .chain(crate::particle::END_ROD_SPRITES)
             .chain(crate::particle::GENERIC_PARTICLE_SPRITES)
+            .chain(crate::particle::CAMPFIRE_COSY_SMOKE_SPRITES)
+            .chain(crate::particle::CAMPFIRE_SIGNAL_SMOKE_SPRITES)
             .chain(crate::particle::EXPLOSION_SPRITES)
             .chain([
                 crate::particle::CRIT_SPRITE,
@@ -564,6 +574,7 @@ impl Renderer {
             jar_assets_dir,
             asset_index,
             christmas_chests,
+            &activation_pack_dirs,
         );
 
         let chunk_border_pipeline = pipelines::chunk_borders::ChunkBorderPipeline::new(
@@ -1194,6 +1205,10 @@ impl Renderer {
         self.camera.look_dir
     }
 
+    pub fn camera_orientation(&self) -> glam::Quat {
+        self.camera.orientation()
+    }
+
     /// Rotation-only view-projection for the locator bar's waypoint pitch test.
     pub fn locator_projection(&self) -> glam::Mat4 {
         self.camera.view_rotation_projection()
@@ -1668,6 +1683,7 @@ impl Renderer {
         window: &Window,
         hide_cursor: bool,
         show_hand: bool,
+        main_hand_right: bool,
         overlay: Vec<MenuElement>,
         hand_animation: pipelines::hand::HandAnimation,
         use_anim: Option<pipelines::held_item::UseAnim>,
@@ -1799,6 +1815,7 @@ impl Renderer {
             [clear_col[0], clear_col[1], clear_col[2], 1.0],
             RenderMode::World {
                 show_hand,
+                main_hand_right,
                 overlay,
                 hand_animation,
                 use_anim,
@@ -1864,11 +1881,23 @@ impl Renderer {
         packs: &crate::resource_pack::ResourcePackManager,
     ) {
         self.ctx.device.wait_idle().unwrap();
-        self.block_entity_pipeline
-            .invalidate_player_head_textures(&self.ctx.device, &self.ctx.allocator);
         self.item_entity_pipeline
             .clear_head_textures(&self.ctx.device, &self.ctx.allocator);
         self.activation_pack_dirs = packs.active_pack_dirs().map(Path::to_path_buf).collect();
+        let replacement = BlockEntityPipeline::new(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            self.swapchain.render_pass,
+            &self.ctx.allocator,
+            &self.jar_assets_dir,
+            &self.asset_index,
+            self.christmas_chests,
+            &self.activation_pack_dirs,
+        );
+        self.block_entity_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.block_entity_pipeline = replacement;
         if let Err(error) = self.placed_head_skins.reload(
             &self.jar_assets_dir,
             &self.asset_index,
@@ -1911,6 +1940,8 @@ impl Renderer {
             .chain(generated_item_textures.iter().copied())
             .chain(crate::particle::END_ROD_SPRITES)
             .chain(crate::particle::GENERIC_PARTICLE_SPRITES)
+            .chain(crate::particle::CAMPFIRE_COSY_SMOKE_SPRITES)
+            .chain(crate::particle::CAMPFIRE_SIGNAL_SMOKE_SPRITES)
             .chain(crate::particle::EXPLOSION_SPRITES)
             .chain([
                 crate::particle::CRIT_SPRITE,
@@ -2516,6 +2547,7 @@ impl Renderer {
         match &mode {
             RenderMode::World {
                 show_hand,
+                main_hand_right,
                 overlay,
                 hand_animation,
                 use_anim,
@@ -2808,6 +2840,7 @@ impl Renderer {
                             hand_animation.inverse_height[0],
                             *use_anim,
                             false,
+                            *main_hand_right,
                             item,
                             &self.item_entity_pipeline,
                             view_effect,
@@ -2823,12 +2856,13 @@ impl Renderer {
                             hand_animation.inverse_height[1],
                             *use_anim,
                             true,
+                            *main_hand_right,
                             item,
                             &self.item_entity_pipeline,
                             view_effect,
                         );
                     }
-                    if held_item.0.is_none() && held_item.1.is_none() {
+                    if held_item.0.is_none() {
                         self.hand_pipeline.update_and_draw(
                             cmd,
                             frame,
@@ -2837,6 +2871,7 @@ impl Renderer {
                             hand_animation.swing_progress[0],
                             hand_animation.inverse_height[0],
                             view_effect,
+                            !main_hand_right,
                         );
                     }
                 }
@@ -3233,6 +3268,13 @@ pub(crate) struct SkinData {
     pub width: u32,
     pub height: u32,
     pub slim: bool,
+    pub cape: Option<CapeData>,
+}
+
+pub(crate) struct CapeData {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
 pub(crate) async fn fetch_skin_texture_by_name(name: &str) -> Result<SkinData, String> {
@@ -3308,19 +3350,31 @@ pub(crate) async fn fetch_skin_texture(uuid: &str) -> Result<SkinData, String> {
 pub(crate) async fn fetch_skin_texture_from_profile_property(
     value: &str,
 ) -> Result<SkinData, String> {
-    let (skin_url, slim) = skin_url_from_texture_property(value)?;
+    let (skin_url, slim, cape_url) = skin_urls_from_texture_property(value)?;
     let (pixels, width, height) = fetch_skin_image(&skin_url).await?;
+    let cape = match cape_url {
+        Some(url) => fetch_cape_image(&url)
+            .await
+            .map(|(pixels, width, height)| CapeData {
+                pixels,
+                width,
+                height,
+            })
+            .ok(),
+        None => None,
+    };
     Ok(SkinData {
         pixels,
         width,
         height,
         slim,
+        cape,
     })
 }
 
 const MAX_TEXTURE_PROPERTY_BYTES: usize = 64 * 1024;
 
-fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String> {
+fn skin_urls_from_texture_property(value: &str) -> Result<(String, bool, Option<String>), String> {
     #[derive(serde::Deserialize)]
     struct TexturesPayload {
         textures: Textures,
@@ -3329,11 +3383,17 @@ fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String>
     struct Textures {
         #[serde(rename = "SKIN")]
         skin: Option<SkinTexture>,
+        #[serde(rename = "CAPE")]
+        cape: Option<ProfileTexture>,
     }
     #[derive(serde::Deserialize)]
     struct SkinTexture {
         url: String,
         metadata: Option<SkinMetadata>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ProfileTexture {
+        url: String,
     }
     #[derive(serde::Deserialize)]
     struct SkinMetadata {
@@ -3355,7 +3415,7 @@ fn skin_url_from_texture_property(value: &str) -> Result<(String, bool), String>
         .skin
         .map(|s| {
             let slim = s.metadata.as_ref().and_then(|m| m.model.as_deref()) == Some("slim");
-            (s.url, slim)
+            (s.url, slim, payload.textures.cape.map(|cape| cape.url))
         })
         .ok_or_else(|| "No skin texture".to_string())
 }
@@ -3434,6 +3494,50 @@ async fn fetch_skin_image(skin_url: &str) -> Result<(Vec<u8>, u32, u32), String>
     let w = rgba.width();
     let h = rgba.height();
     process_legacy_skin(rgba.into_raw(), w, h)
+}
+
+async fn fetch_cape_image(url: &str) -> Result<(Vec<u8>, u32, u32), String> {
+    let (pixels, width, height) = fetch_image_rgba(url).await?;
+    if width == 0 || height == 0 || width > 1024 || height > 1024 {
+        return Err(format!("invalid cape dimensions {width}x{height}"));
+    }
+    Ok((pixels, width, height))
+}
+
+async fn fetch_image_rgba(url: &str) -> Result<(Vec<u8>, u32, u32), String> {
+    const MAX_TEXTURE_BYTES: usize = 2 * 1024 * 1024;
+    let url = validate_minecraft_skin_url(url)?;
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("valid skin HTTP client configuration")
+    });
+    let mut response = client.get(url).send().await.map_err(error_chain)?;
+    if response.status().is_redirection() {
+        return Err(format!("cape URL redirect rejected: {}", response.status()));
+    }
+    response.error_for_status_ref().map_err(error_chain)?;
+    if response
+        .content_length()
+        .is_some_and(|n| n > MAX_TEXTURE_BYTES as u64)
+    {
+        return Err("cape image exceeds 2 MiB limit".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(error_chain)? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_TEXTURE_BYTES {
+            return Err("cape image exceeds 2 MiB limit".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let rgba = image::load_from_memory(&bytes)
+        .map_err(error_chain)?
+        .to_rgba8();
+    let (width, height) = (rgba.width(), rgba.height());
+    Ok((rgba.into_raw(), width, height))
 }
 
 const SKIN_W: u32 = 64;
@@ -3637,10 +3741,11 @@ mod tests {
         let value = base64::engine::general_purpose::STANDARD.encode(payload);
 
         assert_eq!(
-            skin_url_from_texture_property(&value).unwrap(),
+            skin_urls_from_texture_property(&value).unwrap(),
             (
                 "https://textures.minecraft.net/texture/testskin".into(),
-                false
+                false,
+                None
             )
         );
     }
@@ -3655,10 +3760,11 @@ mod tests {
         let value = value.trim_end_matches('=');
 
         assert_eq!(
-            skin_url_from_texture_property(value).unwrap(),
+            skin_urls_from_texture_property(value).unwrap(),
             (
                 "https://textures.minecraft.net/texture/testskin".into(),
-                false
+                false,
+                None
             )
         );
     }
@@ -3671,12 +3777,32 @@ mod tests {
         let value = base64::engine::general_purpose::STANDARD.encode(payload);
 
         assert_eq!(
-            skin_url_from_texture_property(&value).unwrap(),
+            skin_urls_from_texture_property(&value).unwrap(),
             (
                 "https://textures.minecraft.net/texture/testskin".into(),
-                true
+                true,
+                None
             )
         );
+    }
+
+    #[test]
+    fn decodes_optional_cape_url_and_omits_absent_cape() {
+        use base64::Engine;
+        let payload = r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/skin"},"CAPE":{"url":"https://textures.minecraft.net/texture/cape"}}}"#;
+        let value = base64::engine::general_purpose::STANDARD.encode(payload);
+        assert_eq!(
+            skin_urls_from_texture_property(&value).unwrap(),
+            (
+                "https://textures.minecraft.net/texture/skin".into(),
+                false,
+                Some("https://textures.minecraft.net/texture/cape".into()),
+            )
+        );
+        let no_cape = base64::engine::general_purpose::STANDARD.encode(
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/skin"}}}"#,
+        );
+        assert_eq!(skin_urls_from_texture_property(&no_cape).unwrap().2, None);
     }
 
     fn set_px(img: &mut [u8], x: u32, y: u32, rgba: [u8; 4]) {

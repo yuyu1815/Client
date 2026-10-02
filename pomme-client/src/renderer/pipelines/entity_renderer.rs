@@ -158,7 +158,9 @@ pub struct EntityRenderInfo {
     /// Extra scale applied after the entity rotation (slime size + squish),
     /// shared by base and overlay draws.
     pub body_transform: Option<glam::Mat4>,
-    /// Interpolated entity age in ticks; drives the undead idle arm bob.
+    /// Camera orientation for native camera-facing projectile quads.
+    pub camera_orientation: Option<glam::Quat>,
+    /// Interpolated entity age in ticks; drives entity animations/projectiles.
     pub age_in_ticks: f32,
     /// Per-entity deterministic phase used by vanilla's Phantom flap clock.
     pub animation_phase: f32,
@@ -233,6 +235,7 @@ impl Default for EntityRenderInfo {
             golem_offer_flower_ticks: 0,
             base_tint: WHITE_TINT,
             body_transform: None,
+            camera_orientation: None,
             age_in_ticks: 0.0,
             animation_phase: 0.0,
             attack_time: 0.0,
@@ -243,7 +246,7 @@ impl Default for EntityRenderInfo {
 }
 
 /// How an overlay layer is blended. Base/baby variants are always `Opaque`.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OverlayKind {
     /// Cutout, depth-writing — sheep wool and all base models.
     Opaque,
@@ -257,6 +260,8 @@ enum OverlayKind {
     WindScroll,
     /// Translucent, full-bright, depth-write off — spider glowing eyes.
     EyesTranslucent,
+    /// ShulkerBullet's enlarged alpha-0.15 copy.
+    ShulkerBulletOverlay,
     /// Additive, full-bright, depth-writing, scrolling UV — charged creeper
     /// swirl.
     SwirlAdditive,
@@ -2310,6 +2315,10 @@ fn mob_definitions() -> Vec<MobDef> {
     }
     for (kind, model, _texture, size, overlay_kind) in [
         (
+            // Native getBlockLightLevel is 15. This entity pipeline's existing
+            // lighting contract is fixed white vertex light (no sampled sky
+            // term), so don't multiply it by world sky at night or add cube-face
+            // AO to the native single quad.
             EntityKind::DragonFireball,
             entity_models::projectiles::bake_dragon_fireball_model(),
             "minecraft/textures/entity/enderdragon/dragon_fireball.png",
@@ -2328,7 +2337,7 @@ fn mob_definitions() -> Vec<MobDef> {
             entity_models::projectiles::bake_shulker_bullet_model(),
             "minecraft/textures/entity/shulker/spark.png",
             64,
-            OverlayKind::BodyTranslucent,
+            OverlayKind::Opaque,
         ),
         (
             EntityKind::WitherSkull,
@@ -2368,7 +2377,16 @@ fn mob_definitions() -> Vec<MobDef> {
                 overlay_kind,
             }],
             baby: None,
-            adult_overlays: vec![],
+            adult_overlays: if kind == EntityKind::ShulkerBullet {
+                vec![VariantDef {
+                    model: entity_models::projectiles::bake_shulker_bullet_model(),
+                    tex_variants: &[&["minecraft/textures/entity/shulker/spark.png"]],
+                    tex_size: 64,
+                    overlay_kind: OverlayKind::ShulkerBulletOverlay,
+                }]
+            } else {
+                vec![]
+            },
             baby_overlays: vec![],
         });
     }
@@ -3093,8 +3111,7 @@ impl EntityRenderer {
             let (yaw, pitch) = (info.body_y_rot_deg, info.head_x_rot_deg);
             let rotation = match info.entity_kind {
                 EntityKind::DragonFireball => {
-                    glam::Mat4::from_rotation_y((180.0 - yaw).to_radians())
-                        * glam::Mat4::from_rotation_x((-pitch).to_radians())
+                    glam::Mat4::from_quat(info.camera_orientation.unwrap_or(glam::Quat::IDENTITY))
                 }
                 EntityKind::Trident => {
                     glam::Mat4::from_rotation_y((yaw - 90.0).to_radians())
@@ -3111,21 +3128,23 @@ impl EntityRenderer {
                         * glam::Mat4::from_rotation_x(pitch.to_radians())
                 }
                 EntityKind::ShulkerBullet => {
-                    glam::Mat4::from_rotation_y((180.0 - yaw).to_radians())
-                        * glam::Mat4::from_rotation_x(pitch.to_radians())
-                        * glam::Mat4::from_rotation_z((info.age_in_ticks * 4.0).to_radians())
+                    let age = info.age_in_ticks;
+                    glam::Mat4::from_translation(glam::Vec3::Y * 0.15)
+                        * glam::Mat4::from_rotation_y((age * 0.1).sin() * std::f32::consts::PI)
+                        * glam::Mat4::from_rotation_x((age * 0.1).cos() * std::f32::consts::PI)
+                        * glam::Mat4::from_rotation_z((age * 0.15).sin() * std::f32::consts::TAU)
                 }
                 _ => glam::Mat4::IDENTITY,
             };
             let scale = match info.entity_kind {
-                EntityKind::DragonFireball => 2.0,
-                EntityKind::Trident => 1.0 / 16.0,
-                EntityKind::ShulkerBullet => 0.5 / 16.0,
-                EntityKind::WitherSkull => 1.0 / 16.0,
-                EntityKind::LlamaSpit => 1.0 / 16.0,
-                _ => 1.0,
+                EntityKind::DragonFireball => glam::Vec3::splat(2.0),
+                EntityKind::Trident => glam::Vec3::splat(1.0 / 16.0),
+                EntityKind::ShulkerBullet => glam::Vec3::new(-0.5, -0.5, 0.5),
+                EntityKind::WitherSkull => glam::Vec3::splat(1.0 / 16.0),
+                EntityKind::LlamaSpit => glam::Vec3::splat(1.0 / 16.0),
+                _ => glam::Vec3::ONE,
             };
-            return position * rotation * glam::Mat4::from_scale(glam::Vec3::splat(scale));
+            return position * rotation * glam::Mat4::from_scale(scale);
         }
         if info.entity_kind == EntityKind::Arrow {
             // ArrowModel's arrowhead is at x=-12; the entity-model root flip
@@ -3646,7 +3665,10 @@ impl<'a> VariantGroups<'a> {
                         Some(own) => own[k][p],
                         None => vis[*vi].part_transforms[p],
                     };
-                    let model = vis[*vi].entity_mat * part;
+                    let mut model = vis[*vi].entity_mat * part;
+                    if variant.overlay_kind == OverlayKind::ShulkerBulletOverlay {
+                        model *= glam::Mat4::from_scale(glam::Vec3::splat(1.5));
+                    }
                     instances.push(EntityInstance {
                         model: model.to_cols_array_2d(),
                         tint: *tint,
@@ -3682,7 +3704,9 @@ fn collect_overlays<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGrou
                     .overlay_variant(v.info.is_baby, slot, v.info.overlay_variants[slot]);
             let wind_in_body_pass = kind == OverlayKind::BodyTranslucent
                 && overlay.overlay_kind == OverlayKind::WindScroll;
-            if overlay.overlay_kind != kind && !wind_in_body_pass {
+            let bullet_in_body_pass = kind == OverlayKind::BodyTranslucent
+                && overlay.overlay_kind == OverlayKind::ShulkerBulletOverlay;
+            if overlay.overlay_kind != kind && !wind_in_body_pass && !bullet_in_body_pass {
                 continue;
             }
             let uv = if v.info.entity_kind == EntityKind::ExperienceOrb {
@@ -4312,6 +4336,70 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dragon_fireball_uses_camera_quaternion_and_full_native_scale() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::{DVec3, Quat, Vec3};
+
+        let orientation = Quat::from_euler(glam::EulerRot::XYZ, 0.3, -0.7, 0.8);
+        let info = super::EntityRenderInfo {
+            entity_kind: EntityKind::DragonFireball,
+            camera_orientation: Some(orientation),
+            ..Default::default()
+        };
+        let matrix = super::EntityRenderer::entity_matrix(&info, DVec3::ZERO);
+        let expected =
+            glam::Mat4::from_quat(orientation) * glam::Mat4::from_scale(Vec3::splat(2.0));
+        assert!(matrix.abs_diff_eq(expected, 1.0e-6));
+        assert!(
+            matrix.abs_diff_eq(
+                glam::Mat4::from_rotation_y(-0.7)
+                    * glam::Mat4::from_rotation_x(0.3)
+                    * glam::Mat4::from_scale(Vec3::splat(2.0)),
+                1.0e-3
+            ) == false,
+            "camera roll must not be replaced by yaw/pitch"
+        );
+    }
+
+    #[test]
+    fn shulker_bullet_native_pose_and_overlay_share_the_body_mesh() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::{DVec3, Vec3};
+
+        let age = 7.25;
+        let info = super::EntityRenderInfo {
+            entity_kind: EntityKind::ShulkerBullet,
+            age_in_ticks: age,
+            ..Default::default()
+        };
+        let matrix = super::EntityRenderer::entity_matrix(&info, DVec3::ZERO);
+        let expected = glam::Mat4::from_translation(Vec3::Y * 0.15)
+            * glam::Mat4::from_rotation_y((age * 0.1).sin() * std::f32::consts::PI)
+            * glam::Mat4::from_rotation_x((age * 0.1).cos() * std::f32::consts::PI)
+            * glam::Mat4::from_rotation_z((age * 0.15).sin() * std::f32::consts::TAU)
+            * glam::Mat4::from_scale(Vec3::new(-0.5, -0.5, 0.5));
+        assert!(matrix.abs_diff_eq(expected, 1.0e-6));
+        let defs = super::mob_definitions();
+        let bullet = defs
+            .iter()
+            .find(|d| d.kind == EntityKind::ShulkerBullet)
+            .unwrap();
+        assert_eq!(bullet.adult[0].overlay_kind, super::OverlayKind::Opaque);
+        assert_eq!(bullet.adult_overlays.len(), 1);
+        let base = &bullet.adult[0].model;
+        let overlay = &bullet.adult_overlays[0].model;
+        assert_eq!(base.vertices, overlay.vertices);
+        assert_eq!(
+            bullet.adult_overlays[0].overlay_kind,
+            super::OverlayKind::ShulkerBulletOverlay
+        );
+        assert_eq!(
+            bullet.adult_overlays[0].tex_variants[0][0],
+            "minecraft/textures/entity/shulker/spark.png"
+        );
+    }
+
     #[test]
     fn experience_orb_uv_stays_within_its_16_pixel_sheet_cell() {
         use super::experience_orb_uv;

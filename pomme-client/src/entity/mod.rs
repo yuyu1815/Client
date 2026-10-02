@@ -1372,6 +1372,10 @@ pub struct VehicleState {
     /// ExperienceOrb metadata 8 and its client-side visual age.
     pub experience_orb_value: i32,
     pub experience_orb_age: u32,
+    /// Native projectile-renderer tick clock, interpolated with the frame
+    /// partial.
+    pub projectile_age: u32,
+    pub projectile_prev_age: u32,
     /// Synced Mannequin profile (metadata index 17); its UUID is the
     /// texture-cache identity.
     pub mannequin_profile: Option<azalea_inventory::components::Profile>,
@@ -1538,6 +1542,8 @@ impl EntityStore {
             crystal_age: 0,
             experience_orb_value: 0,
             experience_orb_age: 0,
+            projectile_age: 0,
+            projectile_prev_age: 0,
             mannequin_profile: None,
             mannequin_skin_parts_mask: 0x7f,
             mannequin_main_arm_right: true,
@@ -1619,6 +1625,8 @@ impl EntityStore {
             crystal_age: 0,
             experience_orb_value: 0,
             experience_orb_age: 0,
+            projectile_age: 0,
+            projectile_prev_age: 0,
             mannequin_profile: None,
             mannequin_skin_parts_mask: 0x7f,
             mannequin_main_arm_right: true,
@@ -1863,6 +1871,8 @@ impl EntityStore {
     pub fn set_vehicle_kind(&mut self, id: i32, kind: EntityKind) {
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.kind = Some(kind);
+            vehicle.projectile_age = 0;
+            vehicle.projectile_prev_age = 0;
             if kind == EntityKind::ChestMinecart {
                 vehicle.minecart_display_offset = 8;
             } else if kind == EntityKind::HopperMinecart {
@@ -1900,6 +1910,10 @@ impl EntityStore {
             }
             if vehicle.kind == Some(EntityKind::ExperienceOrb) {
                 vehicle.experience_orb_age = vehicle.experience_orb_age.wrapping_add(1);
+            }
+            if vehicle.kind == Some(EntityKind::ShulkerBullet) {
+                vehicle.projectile_prev_age = vehicle.projectile_age;
+                vehicle.projectile_age = vehicle.projectile_age.wrapping_add(1);
             }
             if matches!(
                 vehicle.kind,
@@ -3074,6 +3088,37 @@ fn probes_water(kind: &EntityKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shulker_bullet_renderer_age_is_fixed_tick_interpolatable_and_resets_on_reuse() {
+        let chunks = ChunkStore::new(1);
+        let mut store = projectile(EntityKind::ShulkerBullet, Position::default(), DVec3::ZERO);
+        assert_eq!(store.vehicles[&1].projectile_age, 0);
+        store.tick_projectile_displays(&chunks);
+        assert_eq!(
+            (
+                store.vehicles[&1].projectile_prev_age,
+                store.vehicles[&1].projectile_age
+            ),
+            (0, 1)
+        );
+        store.tick_projectile_displays(&chunks);
+        assert_eq!(
+            (
+                store.vehicles[&1].projectile_prev_age,
+                store.vehicles[&1].projectile_age
+            ),
+            (1, 2)
+        );
+        store.set_vehicle_kind(1, EntityKind::ShulkerBullet);
+        assert_eq!(
+            (
+                store.vehicles[&1].projectile_prev_age,
+                store.vehicles[&1].projectile_age
+            ),
+            (0, 0)
+        );
+    }
 
     fn projectile(kind: EntityKind, position: Position, velocity: DVec3) -> EntityStore {
         let mut store = EntityStore::new();

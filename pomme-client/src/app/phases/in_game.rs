@@ -5252,6 +5252,7 @@ pub fn update_game(
             partial_tick,
             camera_look.y_rot_deg(),
             camera_look.x_rot_deg(),
+            gfx.renderer.camera_orientation(),
         ));
         entity_renders.extend(boat_render_infos(&game.entity_store, partial_tick));
         entity_renders.extend(minecart_render_infos(&game.entity_store, partial_tick));
@@ -6974,6 +6975,7 @@ fn projectile_render_infos(
     partial_tick: f32,
     camera_yaw: f32,
     camera_pitch: f32,
+    camera_orientation: glam::Quat,
 ) -> Vec<EntityRenderInfo> {
     use azalea_registry::builtin::EntityKind as K;
     store
@@ -7018,6 +7020,15 @@ fn projectile_render_infos(
                 body_y_rot_deg: yaw,
                 head_x_rot_deg: pitch,
                 variant_index: u32::from(kind == K::WitherSkull && vehicle.projectile_dangerous),
+                camera_orientation: (kind == K::DragonFireball).then_some(camera_orientation),
+                overlay_tints: if kind == K::ShulkerBullet {
+                    [Some([1.0, 1.0, 1.0, 0.15]), None, None, None]
+                } else {
+                    [None; crate::renderer::pipelines::entity_renderer::MAX_OVERLAYS]
+                },
+                age_in_ticks: vehicle.projectile_prev_age as f32
+                    + (vehicle.projectile_age as f32 - vehicle.projectile_prev_age as f32)
+                        * partial_tick,
                 ..Default::default()
             })
         })
