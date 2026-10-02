@@ -6394,6 +6394,18 @@ fn end_crystal_render_infos(
                 simulation_position: entity.position,
                 entity_kind: azalea_registry::builtin::EntityKind::EndCrystal,
                 age_in_ticks: entity.crystal_age as f32 + partial_tick,
+                crystal_beam: entity.crystal_beam_target.map(|target| {
+                    let target_center = glam::DVec3::new(
+                        f64::from(target.x) + 0.5,
+                        f64::from(target.y) + 0.5,
+                        f64::from(target.z) + 0.5,
+                    );
+                    crate::renderer::pipelines::entity_renderer::CrystalBeamRenderInfo {
+                        target_offset: target_center - *position,
+                        age_in_ticks: entity.crystal_age as f32 + partial_tick,
+                        light_coords: 0,
+                    }
+                }),
                 variant_index: u32::from(!entity.crystal_show_bottom),
                 ..Default::default()
             })
@@ -6464,6 +6476,13 @@ fn mannequin_render_infos(
                 (_, Some(now)) => now.y_rot_deg(),
                 _ => 0.0,
             };
+            let profile_uuid = mannequin
+                .mannequin_profile
+                .as_ref()
+                .and_then(mannequin_profile_id);
+            // Native Mannequin.DEFAULT_PROFILE is ResolvableProfile.Static.EMPTY,
+            // whose partial GameProfile id is Util.NIL_UUID (not the entity UUID).
+            let skin_uuid = profile_uuid.unwrap_or_else(uuid::Uuid::nil);
             Some(EntityRenderInfo {
                 position: mannequin
                     .prev_position
@@ -6471,10 +6490,11 @@ fn mannequin_render_infos(
                 simulation_position: mannequin.position,
                 entity_kind: EntityKind::Mannequin,
                 body_y_rot_deg: yaw,
-                player_uuid: mannequin
-                    .mannequin_profile
-                    .as_ref()
-                    .and_then(mannequin_profile_id),
+                player_uuid: Some(skin_uuid),
+                variant_index:
+                    crate::renderer::pipelines::entity_renderer::default_player_skin_index(
+                        skin_uuid,
+                    ) as u32,
                 skin_parts_mask: mannequin.mannequin_skin_parts_mask,
                 is_crouching: mannequin.mannequin_pose == crate::entity::EntityPose::Crouching,
                 is_sleeping: mannequin.mannequin_pose == crate::entity::EntityPose::Sleeping,

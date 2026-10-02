@@ -46,10 +46,169 @@ fn end_crystal_y(age: f32) -> f32 {
     (h * h + h) * 0.4 - 1.4
 }
 
+fn crystal_beam_uv(beam: CrystalBeamRenderInfo) -> [f32; 4] {
+    [
+        0.0,
+        -beam.age_in_ticks * 0.01,
+        1.0,
+        crystal_beam_delta(beam).length() / 32.0,
+    ]
+}
+
+fn crystal_beam_delta(beam: CrystalBeamRenderInfo) -> glam::Vec3 {
+    glam::Vec3::new(
+        -beam.target_offset.x as f32,
+        -beam.target_offset.y as f32 + end_crystal_y(beam.age_in_ticks),
+        -beam.target_offset.z as f32,
+    )
+}
+
+fn crystal_beam_matrix(
+    position: Position,
+    beam: CrystalBeamRenderInfo,
+    anchor: glam::DVec3,
+) -> glam::Mat4 {
+    let delta = crystal_beam_delta(beam);
+    let horizontal = delta.x.hypot(delta.z);
+    let length = delta.length();
+    let start = *position + beam.target_offset + glam::DVec3::new(0.0, 2.0, 0.0) - anchor;
+    glam::Mat4::from_translation(start.as_vec3())
+        * glam::Mat4::from_rotation_y(-delta.z.atan2(delta.x) - std::f32::consts::FRAC_PI_2)
+        * glam::Mat4::from_rotation_x(-horizontal.atan2(delta.y) - std::f32::consts::FRAC_PI_2)
+        * glam::Mat4::from_scale(glam::Vec3::new(1.0, 1.0, length))
+}
+
+fn crystal_beam_visible(
+    position: Position,
+    beam: CrystalBeamRenderInfo,
+    frustum: &[[f32; 4]; 6],
+    eye: glam::DVec3,
+) -> bool {
+    let delta = crystal_beam_delta(beam);
+    let start = *position + beam.target_offset + glam::DVec3::new(0.0, 2.0, 0.0);
+    let center = (start
+        + glam::DVec3::new(
+            f64::from(delta.x) * 0.5,
+            f64::from(delta.y) * 0.5,
+            f64::from(delta.z) * 0.5,
+        )
+        - eye)
+        .as_vec3();
+    let radius = delta.length() * 0.5 + 0.75;
+    frustum
+        .iter()
+        .all(|p| p[0] * center.x + p[1] * center.y + p[2] * center.z + p[3] >= -radius)
+}
+
+fn bake_crystal_beam_model() -> BakedEntityModel {
+    let mut vertices = Vec::with_capacity(48);
+    let mut push = |x: f32, y: f32, z: f32, u: f32, v: f32, white: bool| {
+        vertices.push(ChunkVertex {
+            position: [x, y, z],
+            tex_coords: [(u * u16::MAX as f32) as u16, (v * u16::MAX as f32) as u16],
+            light_tint: if white { u32::MAX } else { 0xff00_0000 },
+        });
+    };
+    let ring = |i: usize, radius: f32| {
+        let a = i as f32 * std::f32::consts::TAU / 8.0;
+        (a.sin() * radius, a.cos() * radius)
+    };
+    for i in 0..8 {
+        let (x0, y0) = ring(i, 0.15);
+        let (x1, y1) = ring(i, 0.75);
+        let (x2, y2) = ring(i + 1, 0.75);
+        let (x3, y3) = ring(i + 1, 0.15);
+        let u0 = i as f32 / 8.0;
+        let u1 = (i + 1) as f32 / 8.0;
+        for (x, y, z, u, end) in [
+            (x0, y0, 0.0, u0, false),
+            (x1, y1, 1.0, u0, true),
+            (x2, y2, 1.0, u1, true),
+            (x0, y0, 0.0, u0, false),
+            (x2, y2, 1.0, u1, true),
+            (x3, y3, 0.0, u1, false),
+        ] {
+            push(x, y, z, u, end as u8 as f32, end);
+        }
+    }
+    BakedEntityModel {
+        parts: Vec::new(),
+        vertices,
+        part_ranges: vec![(0, 48)],
+        convention: Default::default(),
+        part_scales: Vec::new(),
+    }
+}
+
 /// Per-frame instance buffer capacity, in (entity, part) draws. Far above any
 /// realistic on-screen entity count; excess is dropped with a warning.
 const MAX_INSTANCES: usize = 16384;
 const MAX_PLAYER_SKINS: usize = 128;
+
+const DEFAULT_PLAYER_SKINS: [(&[&[&str]], bool); 18] = [
+    (&[&["minecraft/textures/entity/player/slim/alex.png"]], true),
+    (&[&["minecraft/textures/entity/player/slim/ari.png"]], true),
+    (&[&["minecraft/textures/entity/player/slim/efe.png"]], true),
+    (&[&["minecraft/textures/entity/player/slim/kai.png"]], true),
+    (
+        &[&["minecraft/textures/entity/player/slim/makena.png"]],
+        true,
+    ),
+    (&[&["minecraft/textures/entity/player/slim/noor.png"]], true),
+    (
+        &[&["minecraft/textures/entity/player/slim/steve.png"]],
+        true,
+    ),
+    (
+        &[&["minecraft/textures/entity/player/slim/sunny.png"]],
+        true,
+    ),
+    (&[&["minecraft/textures/entity/player/slim/zuri.png"]], true),
+    (
+        &[&["minecraft/textures/entity/player/wide/alex.png"]],
+        false,
+    ),
+    (&[&["minecraft/textures/entity/player/wide/ari.png"]], false),
+    (&[&["minecraft/textures/entity/player/wide/efe.png"]], false),
+    (&[&["minecraft/textures/entity/player/wide/kai.png"]], false),
+    (
+        &[&["minecraft/textures/entity/player/wide/makena.png"]],
+        false,
+    ),
+    (
+        &[&["minecraft/textures/entity/player/wide/noor.png"]],
+        false,
+    ),
+    (
+        &[&["minecraft/textures/entity/player/wide/steve.png"]],
+        false,
+    ),
+    (
+        &[&["minecraft/textures/entity/player/wide/sunny.png"]],
+        false,
+    ),
+    (
+        &[&["minecraft/textures/entity/player/wide/zuri.png"]],
+        false,
+    ),
+];
+
+pub(crate) fn default_player_skin_index(uuid: uuid::Uuid) -> usize {
+    let value = uuid.as_u128();
+    let hash = (value as u32) ^ (value >> 32) as u32 ^ (value >> 64) as u32 ^ (value >> 96) as u32;
+    (hash as i32).rem_euclid(DEFAULT_PLAYER_SKINS.len() as i32) as usize
+}
+
+fn mannequin_variant_index(fallback_index: usize, loaded_slim: Option<bool>) -> u32 {
+    loaded_slim.map_or(fallback_index as u32, |slim| if slim { 0 } else { 9 })
+}
+
+fn preferred_player_texture(
+    fallback: vk::DescriptorSet,
+    loaded: Option<vk::DescriptorSet>,
+) -> vk::DescriptorSet {
+    loaded.unwrap_or(fallback)
+}
 
 /// Per-instance data for one (entity, part) draw, fed as instance-rate vertex
 /// attributes (binding 1) — the four model-matrix columns, tint, overlay, uv.
@@ -173,6 +332,9 @@ pub struct EntityRenderInfo {
     pub projectile_foil: bool,
     /// Interpolated entity age in ticks; drives entity animations/projectiles.
     pub age_in_ticks: f32,
+    /// Native EndCrystal beam target offset from the crystal, in world
+    /// coordinates.
+    pub crystal_beam: Option<CrystalBeamRenderInfo>,
     /// Per-entity deterministic phase used by vanilla's Phantom flap clock.
     pub animation_phase: f32,
     /// Arm-swing progress 0..1; drives the zombie attack swing.
@@ -181,6 +343,16 @@ pub struct EntityRenderInfo {
     /// Skip frustum/distance culling (the 3rd-person self entity, which sits at
     /// the camera and must never blink out).
     pub skip_cull: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CrystalBeamRenderInfo {
+    /// Target block center relative to interpolated crystal position.
+    pub target_offset: glam::DVec3,
+    pub age_in_ticks: f32,
+    /// Native packed draw light; currently retained until entity lightmaps
+    /// exist.
+    pub light_coords: u32,
 }
 
 /// Everything inert: mob-family animation inputs zeroed, no overlays, white
@@ -253,6 +425,7 @@ impl Default for EntityRenderInfo {
             camera_orientation: None,
             projectile_foil: false,
             age_in_ticks: 0.0,
+            crystal_beam: None,
             animation_phase: 0.0,
             attack_time: 0.0,
             vex_charging: false,
@@ -483,6 +656,8 @@ pub struct EntityRenderer {
     swirl_pipeline: vk::Pipeline,
     glint_pipeline: vk::Pipeline,
     water_patch_depth_pipeline: vk::Pipeline,
+    beam_pipeline: vk::Pipeline,
+    beam: MobVariant,
     water_patch_vertex_buffer: vk::Buffer,
     water_patch_vertex_allocation: Allocation,
     water_patch_range: (u32, u32),
@@ -523,6 +698,8 @@ pub(super) enum BlendMode {
     Glint,
     /// WATER_MASK: depth-tested/writing patch, no color attachment writes.
     DepthOnly,
+    /// Native end-crystal beam: alpha cutout, depth-writing, no culling.
+    Beam,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -965,10 +1142,10 @@ fn mob_definitions() -> Vec<MobDef> {
         MobDef {
             kind: EntityKind::Mannequin,
             anim: AnimationType::Humanoid,
-            adult: vec![
-                opaque(entity_model::bake_player_model(false), PLAYER_TEX, 64),
-                opaque(entity_model::bake_player_model(true), PLAYER_TEX, 64),
-            ],
+            adult: DEFAULT_PLAYER_SKINS
+                .iter()
+                .map(|(texture, slim)| opaque(entity_model::bake_player_model(*slim), texture, 64))
+                .collect(),
             baby: None,
             adult_overlays: vec![],
             baby_overlays: vec![],
@@ -2544,7 +2721,7 @@ impl EntityRenderer {
                 n
             })
             .sum();
-        let tex_count = tex_count + (MAX_PLAYER_SKINS * 2) as u32;
+        let tex_count = tex_count + (MAX_PLAYER_SKINS * 2) as u32 + 1;
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -2582,6 +2759,35 @@ impl EntityRenderer {
         let texture_sampler = unsafe { util::create_nearest_sampler(device) };
         let texture_sampler_repeat = unsafe { util::create_nearest_repeat_sampler(device) };
 
+        let beam_model = bake_crystal_beam_model();
+        let beam = build_variants(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            descriptor_pool,
+            texture_layout,
+            texture_sampler,
+            texture_sampler_repeat,
+            jar_assets_dir,
+            asset_index,
+            VariantDef {
+                model: beam_model,
+                tex_variants: &[&["minecraft/textures/entity/end_crystal/end_crystal_beam.png"]],
+                tex_size: 64,
+                overlay_kind: OverlayKind::WindScroll,
+            },
+        )
+        .into_iter()
+        .next()
+        .expect("one beam texture variant");
+        let beam_pipeline = create_pipeline(
+            device,
+            render_pass,
+            pipeline_layout,
+            BlendMode::Beam,
+            ModelInput::Instanced,
+        );
         let water_patch_model = entity_models::vehicles::bake_boat_water_patch_model();
         let (water_patch_vertex_buffer, water_patch_vertex_allocation) = util::create_mapped_buffer(
             device,
@@ -2669,6 +2875,8 @@ impl EntityRenderer {
             swirl_pipeline,
             glint_pipeline,
             water_patch_depth_pipeline,
+            beam_pipeline,
+            beam,
             water_patch_vertex_buffer,
             water_patch_vertex_allocation,
             water_patch_range,
@@ -2855,14 +3063,19 @@ impl EntityRenderer {
         info: &EntityRenderInfo,
         fallback: vk::DescriptorSet,
     ) -> vk::DescriptorSet {
-        self.player_skin(info).map_or(fallback, |skin| skin.set)
+        preferred_player_texture(fallback, self.player_skin(info).map(|skin| skin.set))
     }
 
     /// Players pick their model variant (0 = wide, 1 = slim) from the fetched
     /// skin's metadata rather than the caller-supplied index.
     fn effective_variant_index(&self, info: &EntityRenderInfo) -> u32 {
-        self.player_skin(info)
-            .map_or(info.variant_index, |skin| skin.slim as u32)
+        self.player_skin(info).map_or(info.variant_index, |skin| {
+            if info.entity_kind == EntityKind::Mannequin {
+                mannequin_variant_index(info.variant_index as usize, Some(skin.slim))
+            } else {
+                skin.slim as u32
+            }
+        })
     }
 
     fn compute_anim(
@@ -3355,13 +3568,18 @@ impl EntityRenderer {
         // part) becomes a single instanced draw. `vis`/`groups` borrow self.mobs
         // and are dropped at the end of this block, before the buffer write below.
         let mut instances: Vec<EntityInstance> = Vec::new();
-        let (opaque, culled, body, eyes, swirl, glint, water_patch) = {
+        let (opaque, culled, body, eyes, swirl, glint, water_patch, beam_records) = {
             let mut vis: Vec<VisEntity> = Vec::new();
             for info in entities {
                 let Some(entry) = self.mobs.get(&info.entity_kind) else {
                     continue;
                 };
-                if !info.skip_cull && !entity_visible(info, frustum, eye, entity_view_scale) {
+                if !info.skip_cull
+                    && !entity_visible(info, frustum, eye, entity_view_scale)
+                    && !info
+                        .crystal_beam
+                        .is_some_and(|beam| crystal_beam_visible(info.position, beam, frustum, eye))
+                {
                     continue;
                 }
                 let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
@@ -3454,6 +3672,33 @@ impl EntityRenderer {
             let swirl = collect_overlays(&vis, OverlayKind::SwirlAdditive);
             let glint = collect_overlays(&vis, OverlayKind::TridentGlint);
             let mut water_patch = Vec::new();
+            let mut beam_records = Vec::new();
+            for v in &vis {
+                if v.info.is_invisible {
+                    continue;
+                }
+                let Some(beam) = v.info.crystal_beam else {
+                    continue;
+                };
+                let model = crystal_beam_matrix(v.info.position, beam, anchor);
+                let first_instance = instances.len() as u32;
+                instances.push(EntityInstance {
+                    model: model.to_cols_array_2d(),
+                    tint: [1.0; 4],
+                    overlay_color: [0.0; 4],
+                    uv_params: crystal_beam_uv(beam),
+                });
+                let (part_start, part_count) = self.beam.model.part_ranges[0];
+                beam_records.push(DrawRecord {
+                    texture_set: self.beam.texture_set,
+                    vertex_buffer: self.beam.vertex_buffer,
+                    part_start,
+                    part_count,
+                    first_instance,
+                    instance_count: 1,
+                    light_coords_override: Some(beam.light_coords),
+                });
+            }
             for v in &vis {
                 if !boat_water_patch_visible(
                     v.info.entity_kind,
@@ -3481,6 +3726,7 @@ impl EntityRenderer {
                     part_count,
                     first_instance,
                     instance_count: 1,
+                    light_coords_override: None,
                 });
             }
 
@@ -3492,6 +3738,7 @@ impl EntityRenderer {
                 swirl.emit(&vis, &mut instances),
                 glint.emit(&vis, &mut instances),
                 water_patch,
+                beam_records,
             )
         };
 
@@ -3522,6 +3769,7 @@ impl EntityRenderer {
             &water_patch,
             count,
         );
+        self.record_pass(cmd, frame, self.beam_pipeline, &beam_records, count);
         (entity_pose_ms, entity_pose_count)
     }
 
@@ -3543,6 +3791,9 @@ impl EntityRenderer {
         let mut last_vb = vk::Buffer::null();
         let mut last_texture_set = vk::DescriptorSet::null();
         for r in records {
+            // Retain the native typed override in DrawRecord; this pipeline has no lightmap
+            // input yet.
+            let _light_coords_override = r.light_coords_override;
             if r.first_instance as usize + r.instance_count as usize > count {
                 continue; // dropped by the capacity clamp above
             }
@@ -3575,6 +3826,7 @@ impl EntityRenderer {
         device.destroy_pipeline(self.swirl_pipeline, None);
         device.destroy_pipeline(self.glint_pipeline, None);
         device.destroy_pipeline(self.water_patch_depth_pipeline, None);
+        device.destroy_pipeline(self.beam_pipeline, None);
         [
             self.pipeline,
             self.culled_pipeline,
@@ -3584,6 +3836,13 @@ impl EntityRenderer {
             self.glint_pipeline,
             self.water_patch_depth_pipeline,
         ] = create_pipelines(device, render_pass, self.pipeline_layout);
+        self.beam_pipeline = create_pipeline(
+            device,
+            render_pass,
+            self.pipeline_layout,
+            BlendMode::Beam,
+            ModelInput::Instanced,
+        );
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
@@ -3639,6 +3898,24 @@ impl EntityRenderer {
             }
             destroy_player_skin_texture(device, &mut alloc, skin);
         }
+        device.destroy_buffer(self.beam.vertex_buffer, None);
+        alloc
+            .free(std::mem::replace(
+                &mut self.beam.vertex_allocation,
+                unsafe { std::mem::zeroed() },
+            ))
+            .ok();
+        device.destroy_image_view(self.beam.texture_view, None);
+        alloc
+            .free(std::mem::replace(
+                &mut self.beam.texture_allocation,
+                unsafe { std::mem::zeroed() },
+            ))
+            .ok();
+        device.destroy_image(self.beam.texture_image, None);
+        device
+            .free_descriptor_sets(self.descriptor_pool, &[self.beam.texture_set])
+            .ok();
         device.destroy_buffer(self.water_patch_vertex_buffer, None);
         alloc
             .free(std::mem::replace(
@@ -3663,6 +3940,7 @@ impl EntityRenderer {
         device.destroy_pipeline(self.swirl_pipeline, None);
         device.destroy_pipeline(self.glint_pipeline, None);
         device.destroy_pipeline(self.water_patch_depth_pipeline, None);
+        device.destroy_pipeline(self.beam_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);
@@ -3753,6 +4031,8 @@ struct DrawRecord {
     part_count: u32,
     first_instance: u32,
     instance_count: u32,
+    /// Native packed light input retained until an entity lightmap is wired.
+    light_coords_override: Option<u32>,
 }
 
 /// (visible-entity index, tint, overlay color, uv offset+scale) for one
@@ -3888,6 +4168,7 @@ impl<'a> VariantGroups<'a> {
                     part_count: *part_count,
                     first_instance,
                     instance_count,
+                    light_coords_override: None,
                 });
             }
         }
@@ -3961,6 +4242,7 @@ fn collect_player_capes(
             part_count: model.vertices.len() as u32,
             first_instance,
             instance_count: 1,
+            light_coords_override: None,
         });
     }
     records
@@ -4548,10 +4830,10 @@ pub(super) fn create_pipeline(
             ModelInput::PushConstant => shader::include_spirv!("block_entity.vert.spv").as_slice(),
         }
     };
-    let frag_spv: &[u8] = if blend == BlendMode::Glint {
-        shader::include_spirv!("entity_glint.frag.spv").as_slice()
-    } else {
-        shader::include_spirv!("entity.frag.spv").as_slice()
+    let frag_spv: &[u8] = match blend {
+        BlendMode::Glint => shader::include_spirv!("entity_glint.frag.spv").as_slice(),
+        BlendMode::Beam => shader::include_spirv!("crystal_beam.frag.spv").as_slice(),
+        _ => shader::include_spirv!("entity.frag.spv").as_slice(),
     };
 
     let vert_module = shader::create_shader_module(device, vert_spv);
@@ -4653,11 +4935,13 @@ pub(super) fn create_pipeline(
             color_write_mask: vk::ColorComponentFlags::empty(),
             ..Default::default()
         },
-        BlendMode::Opaque | BlendMode::OpaqueCulled => vk::PipelineColorBlendAttachmentState {
-            blend_enable: vk::FALSE,
-            color_write_mask: vk::ColorComponentFlags::RGBA,
-            ..Default::default()
-        },
+        BlendMode::Opaque | BlendMode::OpaqueCulled | BlendMode::Beam => {
+            vk::PipelineColorBlendAttachmentState {
+                blend_enable: vk::FALSE,
+                color_write_mask: vk::ColorComponentFlags::RGBA,
+                ..Default::default()
+            }
+        }
         // Standard src-alpha over (glowing eyes, slime shell).
         BlendMode::Translucent | BlendMode::TranslucentDepthWrite => {
             vk::PipelineColorBlendAttachmentState {
@@ -4742,6 +5026,162 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mannequin_default_skin_hash_order_and_variant_selection_match_native() {
+        use super::{DEFAULT_PLAYER_SKINS, default_player_skin_index, mannequin_variant_index};
+
+        let nil = uuid::Uuid::nil();
+        assert_eq!(default_player_skin_index(nil), 0);
+        let random = uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        assert_eq!(default_player_skin_index(random), 6);
+        let negative_hash = uuid::Uuid::from_u128(0xffff_ffff_0000_0000_0000_0000_0000_0000);
+        assert_eq!(default_player_skin_index(negative_hash), 17);
+        assert_eq!(
+            DEFAULT_PLAYER_SKINS.map(|(texture, _)| texture[0][0]),
+            [
+                "minecraft/textures/entity/player/slim/alex.png",
+                "minecraft/textures/entity/player/slim/ari.png",
+                "minecraft/textures/entity/player/slim/efe.png",
+                "minecraft/textures/entity/player/slim/kai.png",
+                "minecraft/textures/entity/player/slim/makena.png",
+                "minecraft/textures/entity/player/slim/noor.png",
+                "minecraft/textures/entity/player/slim/steve.png",
+                "minecraft/textures/entity/player/slim/sunny.png",
+                "minecraft/textures/entity/player/slim/zuri.png",
+                "minecraft/textures/entity/player/wide/alex.png",
+                "minecraft/textures/entity/player/wide/ari.png",
+                "minecraft/textures/entity/player/wide/efe.png",
+                "minecraft/textures/entity/player/wide/kai.png",
+                "minecraft/textures/entity/player/wide/makena.png",
+                "minecraft/textures/entity/player/wide/noor.png",
+                "minecraft/textures/entity/player/wide/steve.png",
+                "minecraft/textures/entity/player/wide/sunny.png",
+                "minecraft/textures/entity/player/wide/zuri.png",
+            ]
+        );
+        assert_eq!(DEFAULT_PLAYER_SKINS.len(), 18);
+        assert!(DEFAULT_PLAYER_SKINS[..9].iter().all(|(_, slim)| *slim));
+        assert!(DEFAULT_PLAYER_SKINS[9..].iter().all(|(_, slim)| !*slim));
+        for index in 0..18 {
+            assert_eq!(
+                default_player_skin_index(uuid::Uuid::from_u128(index as u128)),
+                index
+            );
+            assert!(DEFAULT_PLAYER_SKINS[index].0[0][0].contains(if index < 9 {
+                "/slim/"
+            } else {
+                "/wide/"
+            }));
+        }
+        assert_eq!(mannequin_variant_index(3, None), 3);
+        assert_eq!(mannequin_variant_index(3, Some(true)), 0);
+        assert_eq!(mannequin_variant_index(3, Some(false)), 9);
+        assert_eq!(
+            super::preferred_player_texture(
+                pyronyx::vk::DescriptorSet(1),
+                Some(pyronyx::vk::DescriptorSet(2))
+            ),
+            pyronyx::vk::DescriptorSet(2)
+        );
+        assert_eq!(
+            super::preferred_player_texture(pyronyx::vk::DescriptorSet(1), None),
+            pyronyx::vk::DescriptorSet(1)
+        );
+    }
+    #[test]
+    fn end_crystal_beam_mesh_and_instance_match_native_geometry() {
+        use glam::{DVec3, Vec3};
+
+        use super::{
+            CrystalBeamRenderInfo, DrawRecord, bake_crystal_beam_model, crystal_beam_matrix,
+            crystal_beam_uv, crystal_beam_visible,
+        };
+        use crate::entity::components::Position;
+        let model = bake_crystal_beam_model();
+        assert_eq!(model.vertices.len(), 48);
+        assert_eq!(model.part_ranges, [(0, 48)]);
+        let first = &model.vertices;
+        assert_eq!(first[0].light_tint, 0xff00_0000);
+        assert_eq!(first[1].light_tint, u32::MAX);
+        assert_eq!(first[0].tex_coords[1], 0);
+        assert_eq!(first[1].tex_coords[1], u16::MAX);
+        for i in 0..8 {
+            assert_eq!(
+                first[i * 6].tex_coords[0],
+                (i as f32 / 8.0 * u16::MAX as f32) as u16
+            );
+            assert_eq!(
+                first[i * 6 + 2].tex_coords[0],
+                ((i + 1) as f32 / 8.0 * u16::MAX as f32) as u16
+            );
+        }
+        assert!((first[0].position[0].hypot(first[0].position[1]) - 0.15).abs() < 1e-6);
+        assert!((first[1].position[0].hypot(first[1].position[1]) - 0.75).abs() < 1e-6);
+
+        let info = CrystalBeamRenderInfo {
+            target_offset: DVec3::new(3.0, 4.0, -2.0),
+            age_in_ticks: 10.0,
+            light_coords: 0,
+        };
+        let p = Position::new(20.0, 30.0, 40.0);
+        let anchor = DVec3::new(19.0, 29.0, 39.0);
+        let uv = crystal_beam_uv(info);
+        assert_eq!([uv[0], uv[1], uv[2]], [0.0, -0.1, 1.0]);
+        let expected_length = Vec3::new(-3.0, -4.0 + super::end_crystal_y(10.0), 2.0).length();
+        assert!((uv[3] - expected_length / 32.0).abs() < 1e-6);
+        let matrix = crystal_beam_matrix(p, info, anchor);
+        let end = matrix.transform_point3(Vec3::Z);
+        let target =
+            (DVec3::new(20.0, 30.0, 40.0) + info.target_offset + DVec3::new(0.0, 2.0, 0.0)
+                - anchor)
+                .as_vec3();
+        let delta = Vec3::new(-3.0, -4.0 + super::end_crystal_y(10.0), 2.0);
+        assert!(
+            matrix
+                .transform_point3(Vec3::ZERO)
+                .abs_diff_eq(target, 1e-5)
+        );
+        assert!(end.abs_diff_eq(target + delta, 1e-4));
+        assert!(!crystal_beam_visible(
+            p,
+            info,
+            &[[0.0, 0.0, 0.0, -1000.0]; 6],
+            DVec3::ZERO
+        ));
+        assert!(crystal_beam_visible(
+            p,
+            info,
+            &[[0.0, 0.0, 0.0, 1000.0]; 6],
+            DVec3::ZERO
+        ));
+        let record = DrawRecord {
+            texture_set: pyronyx::vk::DescriptorSet(1),
+            vertex_buffer: pyronyx::vk::Buffer(2),
+            part_start: 0,
+            part_count: 48,
+            first_instance: 0,
+            instance_count: 1,
+            light_coords_override: Some(0),
+        };
+        assert_eq!(record.part_count, 48);
+        assert_eq!(record.light_coords_override, Some(0));
+        assert_eq!(record.instance_count, 1);
+        assert!(!record.texture_set.is_null());
+        assert!(!record.vertex_buffer.is_null());
+        assert!(super::EntityRenderInfo::default().crystal_beam.is_none());
+        let zero_target = CrystalBeamRenderInfo {
+            target_offset: DVec3::ZERO,
+            age_in_ticks: 0.0,
+            light_coords: 0,
+        };
+        assert!(
+            crystal_beam_matrix(p, zero_target, anchor)
+                .to_cols_array()
+                .iter()
+                .all(|value| value.is_finite())
+        );
+    }
+
     #[test]
     fn water_patch_scope_geometry_transform_and_visibility_match_native_boats() {
         use azalea_registry::builtin::EntityKind as K;
