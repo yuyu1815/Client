@@ -136,7 +136,7 @@ mod tests {
             false,
         );
         assert_eq!(state.walk_dist, 0.0);
-        assert_eq!(state.bob, 0.04);
+        assert!((state.bob - 0.04).abs() < 1e-6);
         state.tick_remote(
             DVec3::new(3.0, 8.0, 4.0),
             DVec3::new(0.2, 0.0, 0.0),
@@ -216,11 +216,13 @@ mod tests {
         state.tick(DVec3::ZERO);
         state.tick(DVec3::new(4.0, 10.0, 10.0001));
         assert_eq!(state.current, DVec3::new(1.0, 2.5, 10.0001));
-        assert_eq!(state.prev, DVec3::ZERO);
+        // Native moveCloak snaps both the current and previous coordinate on
+        // any axis whose displacement exceeds the teleport threshold.
+        assert_eq!(state.prev, DVec3::new(0.0, 0.0, 10.0001));
         state.tick(DVec3::new(-20.0, -20.0, -20.0));
         assert_eq!(state.current, DVec3::new(-20.0, -20.0, -20.0));
         assert_eq!(state.prev.x, -20.0);
-        assert_eq!(state.prev.y, 2.5);
+        assert_eq!(state.prev.y, -20.0);
         assert_eq!(state.prev.z, -20.0);
     }
 

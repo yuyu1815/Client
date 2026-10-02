@@ -479,7 +479,8 @@ mod tests {
             ..sample
         };
         reverse.advance_game_time(1);
-        assert_eq!((reverse.total_ticks, reverse.partial_tick), (0, 0.5));
+        // Native floor(-0.25 + 0.75) is zero; the signed cursor remains -1.
+        assert_eq!((reverse.total_ticks, reverse.partial_tick), (-1, 0.5));
         let mut huge = ClockSample {
             partial_tick: 0.0,
             rate: f32::MAX,
@@ -704,17 +705,20 @@ mod tests {
             NbtList::from(vec![frame(0, 1.0f32), frame(10, 0.25f32)]),
         );
         assert_eq!(float_track(&track).unwrap().keyframes.len(), 2);
-        track.insert(
-            "keyframes",
-            NbtList::from(vec![frame(10, 1.0f32), frame(0, 0.25f32)]),
+        let invalid_track = |keyframes| {
+            let mut track = NbtCompound::new();
+            track.insert("keyframes", NbtList::from(keyframes));
+            track
+        };
+        assert!(float_track(&invalid_track(vec![frame(10, 1.0f32), frame(0, 0.25f32)])).is_none());
+        assert!(float_track(&invalid_track(vec![frame(0, f32::NAN)])).is_none());
+        assert!(
+            float_track(&invalid_track(vec![
+                frame(0, 1.0f32),
+                frame(0, 0.5),
+                frame(0, 0.25),
+            ]))
+            .is_none()
         );
-        assert!(float_track(&track).is_none());
-        track.insert("keyframes", NbtList::from(vec![frame(0, f32::NAN)]));
-        assert!(float_track(&track).is_none());
-        track.insert(
-            "keyframes",
-            NbtList::from(vec![frame(0, 1.0f32), frame(0, 0.5), frame(0, 0.25)]),
-        );
-        assert!(float_track(&track).is_none());
     }
 }

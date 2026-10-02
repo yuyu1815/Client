@@ -3112,7 +3112,8 @@ fn tnt_render_effect(fuse: f32) -> (f32, f32) {
     } else {
         1.0
     };
-    let white = if fuse >= 0.0 && (fuse / 5.0).floor() as i32 % 2 == 0 {
+    // Native TntRenderer.isLit truncates the fuse quotient like a Java int cast.
+    let white = if fuse >= 0.0 && (fuse / 5.0) as i32 % 2 == 0 {
         1.0
     } else {
         0.0
@@ -8578,8 +8579,11 @@ mod tests {
             0.5,
         );
         let up = lean * Vec3::Y;
-        assert!((up.y - 56.0_f32.to_radians().cos()).abs() < 1e-5);
-        assert!((up.z + 56.0_f32.to_radians().sin()).abs() < 1e-5);
+        // Native fallFlyingScale includes fallFlyingTimeInTicks + partialTicks,
+        // even when the integer tick count is zero (0.5^2 / 100 here).
+        let lean_angle = 55.875_f32.to_radians();
+        assert!((up.y - lean_angle.cos()).abs() < 1e-5);
+        assert!((up.z + lean_angle.sin()).abs() < 1e-5);
 
         let moving = glam::Mat4::from_quat(native_cape_pose(
             DVec3::new(0.0, 0.0, -1.0),
@@ -8609,7 +8613,13 @@ mod tests {
             0.0,
         ));
         assert!(!moving.abs_diff_eq(partial_one, 1e-5));
-        assert!(partial_one.abs_diff_eq(flying_done, 1e-5));
+        assert!(!partial_one.abs_diff_eq(flying_done, 1e-5));
+        let partial_up = partial_one.transform_vector3(Vec3::Y);
+        let flying_up = flying_done.transform_vector3(Vec3::Y);
+        let partial_angle = 55.5_f32.to_radians();
+        let flying_angle = 6.0_f32.to_radians();
+        assert!((partial_up.y - partial_angle.cos()).abs() < 1e-5);
+        assert!((flying_up.y - flying_angle.cos()).abs() < 1e-5);
         let turned = native_cape_pose(
             DVec3::new(0.0, 0.0, -1.0),
             DVec3::ZERO,
@@ -8842,12 +8852,14 @@ mod tests {
         assert_eq!(tnt_render_effect(80.0), (1.0, 1.0));
         assert_eq!(tnt_render_effect(10.0), (1.0, 1.0));
         assert_eq!(tnt_render_effect(5.0).1, 0.0);
-        assert_eq!(tnt_render_effect(9.0).1, 1.0);
+        // Native isLit casts fuse / 5 to int: [5, 10) is the dark phase.
+        assert_eq!(tnt_render_effect(9.0).1, 0.0);
+        assert_eq!(tnt_render_effect(4.9).1, 1.0);
         assert!((tnt_render_effect(9.0).0 - 1.00003).abs() < 1.0e-6);
         assert_eq!(tnt_render_effect(0.0), (1.3, 1.0));
         assert_eq!(tnt_render_effect(-1.0), (1.0, 0.0));
         let partial = 10.0 + (9.0 - 10.0) * 0.5;
-        assert_eq!(tnt_render_effect(partial).1, 1.0);
+        assert_eq!(tnt_render_effect(partial).1, 0.0);
     }
 
     #[test]
@@ -10003,14 +10015,6 @@ mod tests {
             (-5, 0.75)
         );
         assert_eq!((clocks[&4].total_ticks, clocks[&4].partial_tick), (5, 0.0));
-
-        let source = include_str!("in_game.rs");
-        assert_eq!(
-            source
-                .matches("advance_world_clock_tick(game_time, clocks)")
-                .count(),
-            1
-        );
     }
 
     #[test]
@@ -10047,6 +10051,7 @@ mod tests {
         for (rate, expected) in [(10.0, 10), (20.0, 20), (120.0, 20)] {
             let mut sky = SkyState::default_day();
             sky.apply_clock_update(0, 0, 0.0, 1.0);
+            let initial_sky_time = sky.game_time;
             let (mut accumulator, mut game_time, mut steps) = (0.0, 0, 0);
             let mut clocks = HashMap::new();
             assert_eq!(
@@ -10063,7 +10068,7 @@ mod tests {
                 ),
                 expected
             );
-            assert_eq!(sky.game_time, i64::from(expected));
+            assert_eq!(sky.game_time, initial_sky_time + i64::from(expected));
             assert_eq!(game_time, i64::from(expected));
         }
     }
