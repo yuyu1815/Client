@@ -6041,6 +6041,20 @@ pub(crate) fn generate_cube_vertices(
     y_down: bool,
     vertices: &mut Vec<ChunkVertex>,
 ) {
+    debug_assert_eq!(
+        tex_w == 0,
+        tex_h == 0,
+        "texture sheet dimensions must both be zero or nonzero"
+    );
+    if tex_w == 0 && tex_h == 0 {
+        for (slot, (pos, _)) in cube_faces(cube, y_down).iter().enumerate() {
+            if faces & (1 << slot) != 0 {
+                push_face(pos, 0.0, 0.0, 0.0, 0.0, cube.mirror, vertices);
+            }
+        }
+        return;
+    }
+
     let tw = tex_w as f32;
     let th = tex_h as f32;
 

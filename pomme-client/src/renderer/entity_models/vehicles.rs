@@ -4,7 +4,9 @@
 //! `docs/report-audit/vehicle-models.md`).
 use glam::Vec3;
 
-use crate::renderer::entity_model::{BakedEntityModel, EntityPart, ModelCube, bake_model};
+use crate::renderer::entity_model::{
+    BakedEntityModel, EntityPart, ModelCube, bake_model, generate_cube_vertices,
+};
 
 const BOAT_TEXTURE_SIZE: (u32, u32) = (128, 64);
 const CHEST_BOAT_TEXTURE_SIZE: (u32, u32) = (128, 128);
@@ -284,6 +286,23 @@ mod tests {
         assert_eq!(part.cubes.len(), 1);
         assert_eq!(part.cubes[0].origin, Vec3::new(-14.0, -9.0, -3.0));
         assert_eq!(part.cubes[0].size, Vec3::new(28.0, 16.0, 3.0));
+        assert_eq!(patch.vertices.len(), 36);
+        assert!(patch.vertices.iter().all(|vertex| {
+            vertex.tex_coords == [0, 0] && vertex.position.iter().all(|value| value.is_finite())
+        }));
+        assert_vertex_bounds(&patch, 0, [-0.875, -0.4375, -0.1875], [0.875, 0.5625, 0.0]);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn cube_bake_rejects_mixed_zero_texture_dimensions() {
+        let cube = cube([0.0; 3], [1.0; 3], (0, 0));
+        assert!(
+            std::panic::catch_unwind(|| {
+                generate_cube_vertices(&cube, 0, 16, 0x3f, true, &mut Vec::new());
+            })
+            .is_err()
+        );
     }
 
     #[test]
