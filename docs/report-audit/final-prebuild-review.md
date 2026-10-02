@@ -1,7 +1,7 @@
 # Final pre-build independent review (source-only)
 
-Repo: `C:/Users/yuzum/Desktop/mine_rust/Client`  
-HEAD: `ff6ee95fb5718252fece9a8d83680e0e2213df25` (`ff6ee95 Extract ordered banner pattern block entity data`)  
+Repo: `C:/Users/yuzum/Desktop/mine_rust/Client`
+HEAD: `ff6ee95fb5718252fece9a8d83680e0e2213df25` (`ff6ee95 Extract ordered banner pattern block entity data`)
 Branch: `master`, ahead 63. Existing worktree changes/untracked files were preserved. This is a static source/caller review plus test-target compilation checks, **not** test execution, executable build, or runtime/GPU verification.
 
 ## Findings

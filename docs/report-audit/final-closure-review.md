@@ -1,7 +1,7 @@
 # 全writer完了後・最終独立確認（read-only）
 
-対象repo: `C:/Users/yuzum/Desktop/mine_rust/Client`  
-確認HEAD: `c7dc8c3f9c6c52ddbd143dc7c599293458677d77` (`Implement 26.2 offset block shapes`)  
+対象repo: `C:/Users/yuzum/Desktop/mine_rust/Client`
+確認HEAD: `c7dc8c3f9c6c52ddbd143dc7c599293458677d77` (`Implement 26.2 offset block shapes`)
 確認方法: Git履歴/status、Rustソース検索・読取、既存JSONのread-only解析、26.2 decompiled source読取。source/build/test/check/format/commitは実施していない。
 
 ## Findings

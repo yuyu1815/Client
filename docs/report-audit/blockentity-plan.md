@@ -1,8 +1,8 @@
 # Block entity 未描画: 最小実装案（調査のみ）
 
-調査日: 2026-10-14（作業環境の日時）  
-対象コード: `C:/Users/yuzum/Desktop/mine_rust/Client`  
-根拠レポート: `C:/Users/yuzum/Downloads/Pomme_0a1aee9_全文と対象別詳細報告/Pomme_0a1aee9_full_report`  
+調査日: 2026-10-14（作業環境の日時）
+対象コード: `C:/Users/yuzum/Desktop/mine_rust/Client`
+根拠レポート: `C:/Users/yuzum/Downloads/Pomme_0a1aee9_全文と対象別詳細報告/Pomme_0a1aee9_full_report`
 対象: batch-01 の bell 本体・campfire 煙、batch-02 の decorated_pot 本体・enchanting_table 上の本。
 
 > 制約: 調査・提案のみ。Skull担当が共有ファイルを編集中のため、Rustコードは変更していない。campfire煙の原因は特定扱いしない。
