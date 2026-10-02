@@ -58,6 +58,7 @@ public final class MovementObserver implements ClientModInitializer {
     private static volatile long startedNanos, startWall;
     private static volatile String stopReason = "stop";
     private static volatile Minecraft client;
+    private static volatile Integer currentLocalTick;
 
     @Override public void onInitializeClient() {
         client = Minecraft.getInstance();
@@ -84,7 +85,7 @@ public final class MovementObserver implements ClientModInitializer {
             Files.createDirectories(dir);
             path = dir.resolve("movement-" + UUID.randomUUID() + ".jsonl");
             startedNanos = System.nanoTime(); startWall = System.currentTimeMillis(); stopReason = "stop";
-            SEQ.set(0); DROPPED.set(0); RAW_OMITTED_BYTES.set(0); ROWS.clear(); WRITER_RUNNING.set(true); ACTIVE.set(true);
+            SEQ.set(0); DROPPED.set(0); RAW_OMITTED_BYTES.set(0); ROWS.clear(); currentLocalTick = null; WRITER_RUNNING.set(true); ACTIVE.set(true);
             WRITER.execute(() -> { try { writeFile(path, mc); } finally { WRITER_RUNNING.set(false); } });
             mc.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.literal("Movement observer recording: " + path));
         } catch (IOException e) { mc.gui.hud.getChat().addClientSystemMessage(net.minecraft.network.chat.Component.literal("Movement observer start failed: " + e)); }
@@ -118,6 +119,9 @@ public final class MovementObserver implements ClientModInitializer {
             if (id >= 0) d.addProperty("native_id", id); else d.add("native_id", null);
             if (packetType != null || s.packetType() != null) d.addProperty("packet_type", packetType == null ? s.packetType() : packetType);
             d.add("frame_id", frameId == 0 ? com.google.gson.JsonNull.INSTANCE : new com.google.gson.JsonPrimitive(frameId));
+            Integer tick = currentLocalTick;
+            if (tick == null) { d.add("tick", com.google.gson.JsonNull.INSTANCE); d.add("tick_context", com.google.gson.JsonNull.INSTANCE); }
+            else { d.addProperty("tick", tick); d.addProperty("tick_context", "latest_observed_local_player_tick"); }
             d.addProperty("payload_base64", Base64.getEncoder().encodeToString(bytes)); d.addProperty("raw_length", length);
             d.addProperty("capture_point", "wire_plaintext"); d.addProperty("payload_layout", "id_plus_payload");
             offer(s.direction(), "packet_raw", d);
@@ -130,7 +134,11 @@ public final class MovementObserver implements ClientModInitializer {
         d.addProperty("action", action); d.addProperty("code", code); d.addProperty("code_name", inputCodeName(kind, code)); d.addProperty("scancode", scan); d.addProperty("modifiers", modifiers);
         if (kind.equals("cursor") || kind.equals("scroll")) { d.addProperty("x", x); d.addProperty("y", y); }
         d.addProperty("screen", client.gui.screen() == null ? "none" : client.gui.screen().getClass().getSimpleName());
-        d.addProperty("frame_id", frameId); offer("local", "input_event", d);
+        d.addProperty("frame_id", frameId);
+        Integer tick = currentLocalTick;
+        if (tick == null) { d.add("tick", com.google.gson.JsonNull.INSTANCE); d.add("tick_context", com.google.gson.JsonNull.INSTANCE); }
+        else { d.addProperty("tick", tick); d.addProperty("tick_context", "latest_observed_local_player_tick"); }
+        offer("local", "input_event", d);
     }
     private static String inputCodeName(String kind, int code) {
         if (kind.equals("button")) return switch (code) { case GLFW.GLFW_MOUSE_BUTTON_LEFT -> "mouse_left"; case GLFW.GLFW_MOUSE_BUTTON_RIGHT -> "mouse_right"; case GLFW.GLFW_MOUSE_BUTTON_MIDDLE -> "mouse_middle"; default -> "unknown"; };
@@ -383,6 +391,7 @@ public final class MovementObserver implements ClientModInitializer {
         return o;
     }
     public static void tick(LocalPlayer p, String stage) {
+        currentLocalTick = p.tickCount;
         if (!ACTIVE.get()) return;
         if (stage.equals("before_tick")) TICK_TRAVEL = emptyTravel();
         if (stage.equals("before_tick") && ACTIVE.get()) framePlayerTicks++;

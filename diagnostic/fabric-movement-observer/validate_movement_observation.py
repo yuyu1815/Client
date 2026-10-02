@@ -48,6 +48,12 @@ def validate(text: str) -> tuple[int, dict]:
                         assert "physics" in reason.lower() and ("branch" in reason.lower() or "call site" in reason.lower()), "native physics null needs a call-site reason"
                     if key in {"frame_nanos", "frame_elapsed_sec"}:
                         assert "frame_observation" in reason, f"{key} null must identify the separate frame observation"
+        if row["stage"] in {"packet_raw", "input_event"} and h.get("client_kind") == "fabric":
+            assert "tick" in data and "tick_context" in data, "Fabric frame/tick context must be explicit"
+            if data["tick"] is None:
+                assert data["tick_context"] is None, "unobserved tick must not be synthesized"
+            else:
+                assert isinstance(data["tick"], int) and data["tick_context"] == "latest_observed_local_player_tick"
         if row["stage"] == "packet_raw":
             assert data.get("protocol_state") in {"play", "configuration"}
             assert data.get("payload_layout") == "id_plus_payload" and data.get("capture_point") == "wire_plaintext"
@@ -99,11 +105,15 @@ def self_test():
         {"seq":3,"offset_us":5,"direction":"outbound","stage":"transport_write_attempt","data":{"packet":"move_player_rot","native_id":None,"fields":{"position":None,"yaw_pitch":[90.0,10.0],"on_ground":True,"horizontal_collision":False}}},
         {"seq":4,"offset_us":5,"direction":"inbound","stage":"apply_before","data":{"packet":"block_ack","native_id":None,"fields":{"sequence":17},"applied_state":{"prediction_state":None}}},
         {"seq":5,"offset_us":5,"direction":"outbound","stage":"transport_write_failure","data":{"packet":"use_item","native_id":None,"fields":{"hand":0,"sequence":2,"yaw_pitch":[0.0,0.0]},"error_class":"java.io.IOException"}},
-        {"seq":6,"offset_us":5,"direction":"inbound","stage":"packet_raw","data":{"protocol_state":"play","wire_protocol":776,"connection_epoch":1,"packet_trace_id":"fixture-1","native_id":4,"packet_type":"minecraft:cookie_request","raw_length":8,"payload_base64":base64.b64encode(b"cookie!!").decode(),"capture_point":"wire_plaintext","payload_layout":"id_plus_payload"}},
-        {"seq":7,"offset_us":5,"direction":"local","stage":"input_event","data":{"event":"input_event","kind":"key","action":1,"code":87,"code_name":"W","scancode":17,"modifiers":0,"frame_id":2}},
+        {"seq":6,"offset_us":5,"direction":"inbound","stage":"packet_raw","data":{"protocol_state":"play","wire_protocol":776,"connection_epoch":1,"packet_trace_id":"fixture-1","native_id":4,"packet_type":"minecraft:cookie_request","raw_length":8,"payload_base64":base64.b64encode(b"cookie!!").decode(),"capture_point":"wire_plaintext","payload_layout":"id_plus_payload","tick":None,"tick_context":None}},
+        {"seq":7,"offset_us":5,"direction":"local","stage":"input_event","data":{"event":"input_event","kind":"key","action":1,"code":87,"code_name":"W","scancode":17,"modifiers":0,"frame_id":2,"tick":120,"tick_context":"latest_observed_local_player_tick"}},
         {"type":"footer","written":7,"dropped":1,"oversize_omitted":0,"last_seq":7,"complete":False},
     ]
     assert validate("\n".join(map(json.dumps, rows)))[0] == 7
+    missing_tick_context = json.loads(json.dumps(rows)); del missing_tick_context[6]["data"]["tick_context"]
+    try: validate("\n".join(map(json.dumps, missing_tick_context)))
+    except AssertionError: pass
+    else: raise AssertionError("validator accepted missing Fabric tick context")
     bad_reasons = json.loads(json.dumps(rows)); del bad_reasons[2]["data"]["travel_observation"]["unavailable_reasons"]["actual_gravity_f64"]
     try: validate("\n".join(map(json.dumps, bad_reasons)))
     except AssertionError: pass

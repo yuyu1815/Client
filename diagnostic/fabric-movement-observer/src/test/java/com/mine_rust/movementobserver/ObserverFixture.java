@@ -39,6 +39,7 @@ public final class ObserverFixture {
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
         packets();
+        nativeContainerClickCodec();
         promises();
         outboundDirection();
         collisionShapes();
@@ -128,6 +129,34 @@ public final class ObserverFixture {
         JsonObject teleport = PacketFields.capture(new ServerboundAcceptTeleportationPacket(23));
         assert teleport.get("packet").getAsString().equals("accept_teleportation");
         assert teleport.getAsJsonObject("fields").get("teleport_id").getAsInt() == 23;
+    }
+
+    private static void nativeContainerClickCodec() {
+        var packet = new net.minecraft.network.protocol.game.ServerboundContainerClickPacket(
+                3, 19, (short) 7, (byte) 1,
+                net.minecraft.world.inventory.ContainerInput.PICKUP,
+                new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>(),
+                net.minecraft.network.HashedStack.EMPTY);
+        var protocol = net.minecraft.network.protocol.game.GameProtocols.SERVERBOUND_TEMPLATE.bind(
+                net.minecraft.network.RegistryFriendlyByteBuf.decorator(net.minecraft.core.RegistryAccess.EMPTY),
+                new net.minecraft.network.protocol.game.GameProtocols.Context() {
+                    @Override public boolean hasInfiniteMaterials() { return false; }
+                });
+        ByteBuf wire = io.netty.buffer.Unpooled.buffer();
+        protocol.codec().encode(wire, packet);
+        byte[] original = new byte[wire.readableBytes()];
+        wire.getBytes(wire.readerIndex(), original);
+        String base64 = java.util.Base64.getEncoder().encodeToString(original);
+        byte[] restored = java.util.Base64.getDecoder().decode(base64);
+        assert java.util.Arrays.equals(original, restored);
+        Packet<?> decoded = protocol.codec().decode(io.netty.buffer.Unpooled.wrappedBuffer(restored));
+        assert decoded instanceof net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
+        var click = (net.minecraft.network.protocol.game.ServerboundContainerClickPacket) decoded;
+        assert click.containerId() == 3 && click.stateId() == 19;
+        assert click.slotNum() == 7 && click.buttonNum() == 1;
+        assert click.containerInput() == net.minecraft.world.inventory.ContainerInput.PICKUP;
+        assert click.changedSlots().isEmpty() && click.carriedItem() == net.minecraft.network.HashedStack.EMPTY;
+        wire.release();
     }
 
     private static void outboundDirection() {
