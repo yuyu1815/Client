@@ -2509,6 +2509,9 @@ impl AppCore {
                 NetworkEvent::Registries(registries) => {
                     game.registries = registries;
                 }
+                NetworkEvent::TimelineTags(tags) => {
+                    game.timeline_tags = tags;
+                }
                 NetworkEvent::DialogRegistry(registry) => {
                     game.dialog_registry = registry;
                 }
@@ -4295,6 +4298,7 @@ impl AppCore {
                 NetworkEvent::Reconfiguring => {
                     tracing::info!("Server re-entered configuration");
                     self.audio.stop_all_sounds();
+                    game.timeline_tags.clear();
                     game.entity_store = crate::entity::EntityStore::new();
                     game.item_entity_store = crate::entity::ItemEntityStore::new();
                     game.entity_positions.clear();

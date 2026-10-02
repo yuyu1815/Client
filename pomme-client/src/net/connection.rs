@@ -312,8 +312,102 @@ struct Joined {
 /// What a configuration phase leaves the session with.
 struct Configured {
     registries: std::sync::Arc<azalea_core::registry_holder::RegistryHolder>,
+    timeline_ids: Option<Vec<azalea_registry::identifier::Identifier>>,
+    timeline_tags: std::collections::HashMap<
+        azalea_registry::identifier::Identifier,
+        Vec<azalea_registry::identifier::Identifier>,
+    >,
     dialogs: std::sync::Arc<DialogRegistry>,
     loom_patterns: std::sync::Arc<crate::ui::loom::PatternData>,
+}
+
+fn timeline_ids_from_entries<T>(
+    entries: &[(azalea_registry::identifier::Identifier, Option<T>)],
+) -> Result<Vec<azalea_registry::identifier::Identifier>, ConnectionError> {
+    validate_timeline_ids(entries.iter().map(|(key, _)| key.clone()).collect())
+}
+
+fn validate_timeline_ids(
+    ids: Vec<azalea_registry::identifier::Identifier>,
+) -> Result<Vec<azalea_registry::identifier::Identifier>, ConnectionError> {
+    use std::collections::HashSet;
+    if ids.len() > i32::MAX as usize {
+        return Err(ConnectionError::Disconnected(
+            "minecraft:timeline registry exceeds numeric ID limit".into(),
+        ));
+    }
+    let mut seen = HashSet::with_capacity(ids.len());
+    if ids.iter().any(|id| !seen.insert(id)) {
+        return Err(ConnectionError::Disconnected(
+            "minecraft:timeline registry contains duplicate IDs".into(),
+        ));
+    }
+    Ok(ids)
+}
+
+fn resolve_timeline_tags(
+    tags: &azalea_protocol::common::tags::TagMap,
+    ids: Option<&[azalea_registry::identifier::Identifier]>,
+) -> Result<
+    std::collections::HashMap<
+        azalea_registry::identifier::Identifier,
+        Vec<azalea_registry::identifier::Identifier>,
+    >,
+    ConnectionError,
+> {
+    let registry: azalea_registry::identifier::Identifier = "minecraft:timeline".into();
+    let Some(tags) = tags.0.get(&registry) else {
+        return Ok(Default::default());
+    };
+    let ids = ids.ok_or_else(|| {
+        ConnectionError::Disconnected(
+            "minecraft:timeline tags received without minecraft:timeline registry".into(),
+        )
+    })?;
+    let entries: Vec<_> = tags
+        .iter()
+        .map(|tag| (tag.name.clone(), tag.elements.clone()))
+        .collect();
+    resolve_timeline_tag_entries(&entries, Some(ids))
+}
+
+fn resolve_timeline_tag_entries(
+    tags: &[(azalea_registry::identifier::Identifier, Vec<i32>)],
+    ids: Option<&[azalea_registry::identifier::Identifier]>,
+) -> Result<
+    std::collections::HashMap<
+        azalea_registry::identifier::Identifier,
+        Vec<azalea_registry::identifier::Identifier>,
+    >,
+    ConnectionError,
+> {
+    if tags.is_empty() {
+        return Ok(Default::default());
+    }
+    let ids = ids.ok_or_else(|| {
+        ConnectionError::Disconnected(
+            "minecraft:timeline tags received without minecraft:timeline registry".into(),
+        )
+    })?;
+    let mut resolved = std::collections::HashMap::with_capacity(tags.len());
+    for (name, tag_elements) in tags {
+        let mut elements = Vec::with_capacity(tag_elements.len());
+        for &id in tag_elements {
+            let index = usize::try_from(id).map_err(|_| {
+                ConnectionError::Disconnected(format!(
+                    "minecraft:timeline tag {name} has negative numeric ID {id}"
+                ))
+            })?;
+            elements.push(ids.get(index).cloned().ok_or_else(|| {
+                ConnectionError::Disconnected(format!(
+                    "minecraft:timeline tag {name} numeric ID {id} is out of range ({} entries)",
+                    ids.len()
+                ))
+            })?);
+        }
+        resolved.insert(name.clone(), elements);
+    }
+    Ok(resolved)
 }
 
 /// Reads the registries a pre-configuration-phase server ships inside its game
@@ -342,6 +436,7 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
     };
 
     let mut registry_holder = RegistryHolder::default();
+    let mut timeline_ids = None;
     let mut loom_patterns = crate::ui::loom::PatternData::default();
     translation.clear_dynamic_registries();
     for frame in frames {
@@ -359,6 +454,9 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
                             .collect(),
                     );
                 }
+                if p.registry_id.to_string() == "minecraft:timeline" {
+                    timeline_ids = Some(timeline_ids_from_entries(&p.entries)?);
+                }
                 registry_holder.append(p.registry_id, p.entries);
             }
             Ok(_) => {}
@@ -368,6 +466,8 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
     Ok(Joined {
         configured: Configured {
             registries: std::sync::Arc::new(registry_holder),
+            timeline_ids,
+            timeline_tags: Default::default(),
             dialogs: Default::default(),
             loom_patterns: std::sync::Arc::new(loom_patterns),
         },
@@ -581,6 +681,10 @@ async fn config_sequence(
     use azalea_protocol::packets::config::*;
 
     let mut registry_holder = RegistryHolder::default();
+    let mut timeline_ids = previous.and_then(|p| p.timeline_ids.clone());
+    let mut timeline_tags = previous
+        .map(|p| p.timeline_tags.clone())
+        .unwrap_or_default();
     let mut loom_patterns = previous
         .map(|p| (*p.loom_patterns).clone())
         .unwrap_or_default();
@@ -642,6 +746,8 @@ async fn config_sequence(
             return Ok(match previous {
                 Some(previous) if !received_registry_data => Configured {
                     registries: previous.registries.clone(),
+                    timeline_ids,
+                    timeline_tags,
                     loom_patterns: std::sync::Arc::new(loom_patterns),
                     dialogs: match received_dialog_tags {
                         Some(tags) => std::sync::Arc::new(previous.dialogs.with_tags(tags)),
@@ -654,6 +760,8 @@ async fn config_sequence(
                         received_dialog_tags.unwrap_or_default(),
                     )),
                     registries: std::sync::Arc::new(registry_holder),
+                    timeline_ids,
+                    timeline_tags,
                     loom_patterns: std::sync::Arc::new(loom_patterns),
                 },
             });
@@ -715,6 +823,8 @@ async fn config_sequence(
                         )
                     });
                     loom_patterns = crate::ui::loom::PatternData::default();
+                    timeline_ids = None;
+                    timeline_tags.clear();
                     if let Some((tags, item_tags)) = new_tags {
                         loom_patterns.replace_tags(tags, item_tags);
                     }
@@ -737,6 +847,10 @@ async fn config_sequence(
                         entries.iter().map(|(name, _)| name.to_string()).collect(),
                     );
                 }
+                if p.registry_id.to_string() == "minecraft:timeline" {
+                    timeline_ids = Some(timeline_ids_from_entries(&entries)?);
+                    timeline_tags.clear();
+                }
                 if p.registry_id.to_string() == "minecraft:banner_pattern" {
                     loom_patterns.replace_registry(
                         entries
@@ -752,6 +866,7 @@ async fn config_sequence(
                 if let Some(tags) = dialog_tags(&p.tags) {
                     received_dialog_tags = Some(tags);
                 }
+                timeline_tags = resolve_timeline_tags(&p.tags, timeline_ids.as_deref())?;
                 let (patterns, items) = loom_pattern_tags(&p.tags);
                 loom_patterns.replace_tags(patterns, items);
                 received_loom_tags = true;
@@ -1332,6 +1447,10 @@ async fn game_loop(
     ))?;
     pump!(send_event(
         event_tx,
+        NetworkEvent::TimelineTags(configured.timeline_tags.clone())
+    ))?;
+    pump!(send_event(
+        event_tx,
         NetworkEvent::DialogRegistry(configured.dialogs.clone())
     ))?;
     pump!(send_event(
@@ -1548,6 +1667,10 @@ async fn game_loop(
                             }
                         ))?;
                     }
+                    pump!(send_event(
+                        event_tx,
+                        NetworkEvent::TimelineTags(next.timeline_tags.clone())
+                    ))?;
                     if !std::sync::Arc::ptr_eq(&next.dialogs, &configured.dialogs) {
                         pump!(send_event(
                             event_tx,
@@ -1565,6 +1688,14 @@ async fn game_loop(
                     && !t.remap_inbound(&mut packet)
                 {
                     continue;
+                }
+                if let ClientboundGamePacket::UpdateTags(p) = &packet {
+                    let timeline_tags =
+                        resolve_timeline_tags(&p.tags, configured.timeline_ids.as_deref())?;
+                    pump!(send_event(
+                        event_tx,
+                        NetworkEvent::TimelineTags(timeline_tags)
+                    ))?;
                 }
                 if let ClientboundGamePacket::UpdateTags(p) = &packet
                     && let Some(tags) = dialog_tags(&p.tags)
@@ -1944,6 +2075,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn timeline_wire_ids_and_numeric_tags_preserve_protocol_order() {
+        let entries = vec![
+            ("minecraft:day".into(), Some(())),
+            ("minecraft:moon".into(), None),
+            ("minecraft:early_game".into(), Some(())),
+        ];
+        let ids = timeline_ids_from_entries(&entries).unwrap();
+        assert_eq!(
+            ids,
+            [
+                "minecraft:day".into(),
+                "minecraft:moon".into(),
+                "minecraft:early_game".into()
+            ]
+        );
+        let tags = vec![("custom:cycle".into(), vec![2, 0, 1])];
+        let resolved = resolve_timeline_tag_entries(&tags, Some(&ids)).unwrap();
+        assert_eq!(
+            resolved[&"custom:cycle".into()],
+            [ids[2].clone(), ids[0].clone(), ids[1].clone()]
+        );
+        let replaced =
+            resolve_timeline_tag_entries(&[("custom:cycle".into(), vec![1])], Some(&ids)).unwrap();
+        assert_eq!(replaced[&"custom:cycle".into()], [ids[1].clone()]);
+    }
+
+    #[test]
+    fn timeline_ids_and_tags_reject_invalid_wire_references() {
+        assert!(
+            validate_timeline_ids(vec!["minecraft:day".into(), "minecraft:day".into()]).is_err()
+        );
+        let ids = vec!["minecraft:day".into()];
+        assert!(
+            resolve_timeline_tag_entries(&[("custom:tag".into(), vec![-1])], Some(&ids)).is_err()
+        );
+        assert!(
+            resolve_timeline_tag_entries(&[("custom:tag".into(), vec![1])], Some(&ids)).is_err()
+        );
+        assert!(resolve_timeline_tag_entries(&[("custom:tag".into(), vec![0])], None).is_err());
+    }
+
+    #[test]
     fn configuration_cookie_response_records_the_exact_written_frame() {
         use azalea_protocol::packets::config::s_cookie_response::ServerboundCookieResponse;
         use base64::Engine;
@@ -2173,6 +2346,8 @@ mod tests {
                     joined: Joined {
                         configured: Configured {
                             registries: Arc::default(),
+                            timeline_ids: None,
+                            timeline_tags: Default::default(),
                             dialogs: Arc::default(),
                             loom_patterns: Arc::default(),
                         },

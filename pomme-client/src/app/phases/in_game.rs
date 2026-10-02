@@ -304,6 +304,11 @@ pub struct GameState {
     pub inv_last_click: Option<(u16, Instant)>,
     /// Server registries, for hashing predicted container clicks.
     pub registries: Arc<azalea_core::registry_holder::RegistryHolder>,
+    /// Timeline tags with server numeric IDs resolved to timeline identifiers.
+    pub timeline_tags: std::collections::HashMap<
+        azalea_registry::identifier::Identifier,
+        Vec<azalea_registry::identifier::Identifier>,
+    >,
     pub chat: ChatState,
     pub server_dialog: Option<crate::ui::server_dialog::ServerDialogState>,
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
@@ -585,6 +590,14 @@ pub struct MeshedCol {
 }
 
 impl GameState {
+    /// Return identifiers in the server's native order for a timeline tag.
+    pub fn timeline_tag(
+        &self,
+        tag: &azalea_registry::identifier::Identifier,
+    ) -> Option<&[azalea_registry::identifier::Identifier]> {
+        self.timeline_tags.get(tag).map(Vec::as_slice)
+    }
+
     /// Resolve a timeline's named world clock against the server registry and
     /// return the sampled tick position for pure evaluators.
     pub fn timeline_clock_sample(
@@ -765,6 +778,7 @@ impl GameState {
             inv_drag: None,
             inv_last_click: None,
             registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
+            timeline_tags: Default::default(),
             chat: {
                 let mut chat = ChatState::new();
                 chat.set_options(chat_options);

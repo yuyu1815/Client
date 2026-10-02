@@ -128,6 +128,14 @@ pub enum NetworkEvent {
         profile_name: String,
     },
     Registries(Arc<azalea_core::registry_holder::RegistryHolder>),
+    /// Resolved `minecraft:timeline` tags; tag numeric IDs are wire registry
+    /// IDs.
+    TimelineTags(
+        std::collections::HashMap<
+            azalea_registry::identifier::Identifier,
+            Vec<azalea_registry::identifier::Identifier>,
+        >,
+    ),
     /// The `minecraft:dialog` registry with its tags, sent with `Registries`
     /// and again whenever a tag update replaces the dialog tags.
     DialogRegistry(Arc<crate::ui::server_dialog::DialogRegistry>),
