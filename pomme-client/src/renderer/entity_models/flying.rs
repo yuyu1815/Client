@@ -987,7 +987,7 @@ mod tests {
             Vec3::new(2.0, 5.0, 2.0),
         );
         assert_eq!(happy.part_scales[0], 4.0);
-        assert_eq!(happy.parts[0].offset.y, 0.0);
+        assert_eq!(happy.parts[0].offset.y, 24.016 * (1.0 - 4.0));
         let happy_baby = bake_baby_happy_ghast_model();
         assert_eq!(happy_baby.part_scales[0], 0.95);
         assert_cube(

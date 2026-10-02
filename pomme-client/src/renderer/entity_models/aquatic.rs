@@ -3,7 +3,9 @@
 //! `docs/report-audit/aquatic-models.md`.
 use glam::Vec3;
 
-use crate::renderer::entity_model::{BakedEntityModel, EntityPart, ModelCube, bake_model};
+use crate::renderer::entity_model::{
+    BakedEntityModel, EntityPart, ModelCube, bake_independent_roots_scaled, bake_model,
+};
 
 fn cube(uv: (i32, i32), origin: (f32, f32, f32), size: (f32, f32, f32)) -> ModelCube {
     ModelCube {
@@ -46,18 +48,6 @@ fn one(
         (0.0, 0.0, 0.0),
         vec![cube(uv, origin, size)],
     )
-}
-
-fn scaled(mut model: BakedEntityModel, factor: f32) -> BakedEntityModel {
-    for p in &mut model.parts {
-        p.offset *= factor;
-        for c in &mut p.cubes {
-            c.origin *= factor;
-            c.size *= factor;
-            c.deformation *= factor;
-        }
-    }
-    model
 }
 
 /// `AdultAxolotlModel.createBodyLayer` (64x64): head and gills are children of
@@ -526,8 +516,7 @@ pub fn bake_guardian_model(elder: bool) -> BakedEntityModel {
             cube((25, 19), (1.0, 10.5, 3.0), (1.0, 9.0, 9.0)),
         ],
     ));
-    let model = bake_model(parts, 64, 64);
-    if elder { scaled(model, 2.35) } else { model }
+    bake_independent_roots_scaled(parts, if elder { 2.35 } else { 1.0 }, 64, 64)
 }
 
 /// `AdultTurtleModel.createBodyLayer` (128x64), egg and belly are separate
@@ -778,9 +767,10 @@ mod tests {
             "head",
             0,
             (0, 0),
-            (-6.0 * 2.35, 10.0 * 2.35, -8.0 * 2.35),
-            (12.0 * 2.35, 12.0 * 2.35, 16.0 * 2.35),
+            (-6.0, 10.0, -8.0),
+            (12.0, 12.0, 16.0),
         );
+        assert_eq!(elder_guardian.part_scales[0], 2.35);
         assert_cube(
             &turtle,
             "body",

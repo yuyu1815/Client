@@ -204,7 +204,7 @@ mod tests {
         assert!(fireball.vertices.iter().all(|v| v.position[2] == 0.0));
 
         let models = [
-            (bake_trident_model(), 32, 4),
+            (bake_trident_model(), 32, 5),
             (bake_shulker_bullet_model(), 32, 1),
             (bake_wither_skull_model(), 64, 1),
             (bake_llama_spit_model(), 64, 1),

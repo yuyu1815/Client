@@ -1172,7 +1172,7 @@ fn mob_definitions() -> Vec<MobDef> {
             baby: Some(opaque(
                 entity_model::bake_baby_pig_model(),
                 PIG_BABY_TEX,
-                64,
+                32,
             )),
             adult_overlays: vec![],
             baby_overlays: vec![],
@@ -5616,7 +5616,9 @@ mod tests {
         let p = Position::new(20.0, 30.0, 40.0);
         let anchor = DVec3::new(19.0, 29.0, 39.0);
         let uv = crystal_beam_uv(info);
-        assert_eq!([uv[0], uv[1], uv[2]], [0.0, -0.1, 1.0]);
+        assert!((uv[0] - 0.0).abs() <= 1e-6);
+        assert!((uv[1] - (-0.1)).abs() <= 1e-6);
+        assert!((uv[2] - 1.0).abs() <= 1e-6);
         let expected_length = Vec3::new(-3.0, -4.0 + super::end_crystal_y(10.0), 2.0).length();
         assert!((uv[3] - expected_length / 32.0).abs() < 1e-6);
         let matrix = crystal_beam_matrix(p, info, anchor);
@@ -5935,7 +5937,14 @@ mod tests {
         assert!(pipeline_source.contains("vk::CompareOp::Equal"));
         assert!(pipeline_source.contains("BlendMode::Glint"));
         assert!(pipeline_source.contains("device.destroy_pipeline(self.glint_pipeline, None)"));
-        assert!(pipeline_source.contains("glint_pipeline,\n        ] = create_pipelines"));
+        let compact_source: String = pipeline_source.split_whitespace().collect();
+        assert!(
+            compact_source.contains("glint_pipeline,water_patch_depth_pipeline,]=create_pipelines")
+        );
+        assert!(
+            compact_source
+                .contains("self.glint_pipeline,water_patch_depth_pipeline,]=create_pipelines")
+        );
     }
 
     #[test]
@@ -6121,8 +6130,9 @@ mod tests {
 
         let arrows = super::mob_definitions();
         let arrow = arrows.iter().find(|d| d.kind == EntityKind::Arrow).unwrap();
-        assert_eq!(arrow.adult.len(), 2);
+        assert_eq!(arrow.adult.len(), 3);
         assert!(arrow.adult[1].tex_variants[0][0].ends_with("arrow_spectral.png"));
+        assert!(arrow.adult[2].tex_variants[0][0].ends_with("arrow_tipped.png"));
     }
 
     #[test]

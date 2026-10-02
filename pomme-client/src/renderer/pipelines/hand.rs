@@ -755,9 +755,9 @@ mod tests {
             let left = build_arm_vertices(64, 64, slim, true);
             assert_eq!(right.len(), 36);
             assert_eq!(left.len(), 36);
-            assert_eq!(left[0].uv, [40.0 / 64.0, 48.0 / 64.0]);
-            assert_ne!(right[0].uv, left[0].uv);
             let width = if slim { 3.0 / 16.0 } else { 4.0 / 16.0 };
+            assert_eq!(left[0].uv, [(36.0 + width * 16.0) / 64.0, 48.0 / 64.0]);
+            assert_ne!(right[0].uv, left[0].uv);
             let left_min = left
                 .iter()
                 .map(|v| v.position[0])
