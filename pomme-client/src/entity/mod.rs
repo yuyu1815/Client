@@ -3306,8 +3306,9 @@ mod tests {
             LookDirection::default(),
         );
         store.set_vehicle_kind(8, EntityKind::Minecart);
+        // VehicleEntity owns hurt-time metadata at index 8 for minecarts too.
         store.apply_vehicle_metadata(8, 8, MetaValue::Int(99));
-        assert_eq!(store.vehicles[&8].boat_hurt_time, 0);
+        assert_eq!(store.vehicles[&8].boat_hurt_time, 99);
     }
 
     #[test]
@@ -4432,6 +4433,7 @@ mod tests {
     fn end_crystal_metadata_defaults_and_indices_are_kind_specific() {
         let mut store = EntityStore::new();
         store.set_passengers(1, &[]);
+        store.set_vehicle_transform(1, Position::default(), DVec3::ZERO);
         store.set_vehicle_kind(1, EntityKind::EndCrystal);
         assert!(store.vehicles[&1].crystal_beam_target.is_none());
         assert!(store.vehicles[&1].crystal_show_bottom);
@@ -4440,6 +4442,7 @@ mod tests {
         store.apply_vehicle_metadata(1, 9, MetaValue::Bool(false));
         assert_eq!(store.vehicles[&1].crystal_beam_target, Some(pos));
         assert!(!store.vehicles[&1].crystal_show_bottom);
+        store.set_vehicle_transform(2, Position::default(), DVec3::ZERO);
         store.set_vehicle_kind(2, EntityKind::Arrow);
         store.apply_vehicle_metadata(2, 8, MetaValue::OptionalBlockPos(Some(pos)));
         assert!(store.vehicles[&2].crystal_beam_target.is_none());
@@ -4567,7 +4570,7 @@ mod tests {
     #[test]
     fn block_display_metadata_is_typed_and_separate_from_text_content() {
         let mut store = EntityStore::new();
-        store.set_passengers(42, &[]);
+        store.set_vehicle_transform(42, Position::default(), DVec3::ZERO);
         store.set_vehicle_kind(42, EntityKind::BlockDisplay);
         store.set_display_metadata(
             42,
@@ -4589,6 +4592,7 @@ mod tests {
         assert_eq!(store.vehicles[&42].display.scale, [-1.0, 2.0, 3.0]);
         assert_eq!(store.vehicles[&42].display.block_state, Some(1));
         assert!(store.vehicles[&42].text_display_text.is_none());
+        store.set_vehicle_transform(43, Position::default(), DVec3::ZERO);
         store.set_vehicle_kind(43, EntityKind::TextDisplay);
         store.set_display_metadata(43, 23, crate::net::DisplayMetaValue::BlockState(2));
         assert_eq!(store.vehicles[&43].display.block_state, None);
@@ -4597,7 +4601,7 @@ mod tests {
     #[test]
     fn item_display_stack_and_native_context_are_typed_and_separate() {
         let mut store = EntityStore::new();
-        store.set_passengers(1, &[]);
+        store.set_vehicle_transform(1, Position::default(), DVec3::ZERO);
         store.set_vehicle_kind(1, EntityKind::ItemDisplay);
         for (id, expected) in [
             (0, 0),
@@ -4622,6 +4626,7 @@ mod tests {
             store.vehicles[&1].item_display_stack,
             azalea_inventory::ItemStack::Empty
         ));
+        store.set_vehicle_transform(2, Position::default(), DVec3::ZERO);
         store.set_vehicle_kind(2, EntityKind::BlockDisplay);
         store.set_item_display_metadata(2, 24, crate::net::ItemDisplayMetaValue::Context(8));
         assert_eq!(store.vehicles[&2].item_display_context, 0);

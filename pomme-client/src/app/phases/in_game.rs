@@ -8713,11 +8713,15 @@ mod tests {
         store.set_vehicle_kind(1, EntityKind::ArmorStand);
         store.apply_vehicle_metadata(1, 15, MetaValue::Byte(0x11));
         store.set_armor_stand_rotation(1, 16, [0.0, 45.0, 0.0]);
+        let hand = azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData::new(
+            azalea_registry::builtin::ItemKind::Stick,
+            1,
+        ));
         store.set_armor_stand_equipment(
             1,
             vec![(
                 azalea_inventory::components::EquipmentSlot::Mainhand,
-                azalea_inventory::ItemStack::Empty,
+                hand.clone(),
             )],
         );
         let renders = armor_stand_render_infos(&store, 0.5);
@@ -8725,6 +8729,11 @@ mod tests {
         assert_eq!(renders[0].armor_stand_flags, 0x11);
         assert_eq!(renders[0].armor_stand_pose[0], [0.0, 45.0, 0.0]);
         assert_eq!(renders[0].armor_stand_equipment.len(), 1);
+        assert_eq!(
+            renders[0].armor_stand_equipment
+                [&azalea_inventory::components::EquipmentSlot::Mainhand],
+            hand,
+        );
         store.apply_vehicle_metadata(1, 15, MetaValue::Byte(0x01));
         let renders = armor_stand_render_infos(&store, 0.5);
         assert_eq!(renders[0].body_transform.unwrap().x_axis.x, 0.5);
@@ -8767,8 +8776,8 @@ mod tests {
         use crate::entity::components::Position;
 
         let mut store = EntityStore::new();
-        store.set_vehicle_kind(3, EntityKind::Mannequin);
         store.set_vehicle_transform(3, Position::new(1.0, 2.0, 3.0), glam::DVec3::ZERO);
+        store.set_vehicle_kind(3, EntityKind::Mannequin);
         let chest = azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData::new(
             ItemKind::Elytra,
             1,
@@ -9662,16 +9671,20 @@ mod tests {
                 )
             };
         let renders = extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground));
-        assert_eq!(renders.len(), 1);
-        assert_eq!(renders[0].item_name, "snowball");
-        assert_eq!(renders[0].stack_count, 1);
-        assert_eq!(renders[0].position, [0.0, 0.0, 4.0]);
-        assert_eq!(renders[0].light, 0.7);
+        assert_eq!(renders.len(), 2); // Snowball and Egg are both thrown-item draws.
+        let snowball = renders
+            .iter()
+            .find(|render| render.item_name == "snowball")
+            .unwrap();
+        assert_eq!(snowball.stack_count, 1);
+        assert_eq!(snowball.position, [0.0, 0.0, 4.0]);
+        assert_eq!(snowball.light, 0.7);
         assert_eq!(
-            renders[0].model_matrix.transform_point3(Vec3::ZERO),
+            snowball.model_matrix.transform_point3(Vec3::ZERO),
             Vec3::new(-1.0, 0.0, 4.0),
         );
-        assert_eq!(renders[0].model_matrix.x_axis.truncate().length(), 0.5);
+        assert_eq!(snowball.model_matrix.x_axis.truncate().length(), 0.5);
+        assert!(renders.iter().any(|render| render.item_name == "egg"));
         assert_eq!(super::arrow_render_infos(&store, 1.0).len(), 1);
         assert!(extract(&store, DVec3::ZERO, 1.0, &wide, None).is_empty());
         assert!(extract(&store, DVec3::ZERO, 0.0, &wide, Some(ground)).is_empty());
@@ -9682,15 +9695,21 @@ mod tests {
 
         store.set_vehicle_transform(1, Position::new(2.0, 3.0, 5.0), DVec3::ZERO);
         let moved = extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground));
-        assert_eq!(moved.len(), 1);
-        assert_eq!(moved[0].position, [2.0, 3.0, 5.0]);
+        assert_eq!(moved.len(), 2);
+        let moved_snowball = moved
+            .iter()
+            .find(|render| render.item_name == "snowball")
+            .unwrap();
+        assert_eq!(moved_snowball.position, [2.0, 3.0, 5.0]);
         assert_eq!(
-            moved[0].model_matrix.transform_point3(Vec3::ZERO),
+            moved_snowball.model_matrix.transform_point3(Vec3::ZERO),
             Vec3::new(1.0, 3.0, 5.0)
         );
         assert!(!store.remove_impacted_snowball(2)); // Event 3 on another kind
         assert!(store.remove_impacted_snowball(1)); // Event 3 on snowball
-        assert!(extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground)).is_empty());
+        let after_impact = extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground));
+        assert_eq!(after_impact.len(), 1);
+        assert_eq!(after_impact[0].item_name, "egg");
         assert_eq!(super::arrow_render_infos(&store, 1.0).len(), 1);
         assert!(store.vehicles.contains_key(&3));
         store.remove_entity(1); // later RemoveEntities is idempotent
@@ -9702,10 +9721,9 @@ mod tests {
             LookDirection::default(),
         );
         store.set_vehicle_kind(1, EntityKind::Snowball); // fresh id reuse is visible
-        assert_eq!(
-            extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground)).len(),
-            1
-        );
+        let reused = extract(&store, DVec3::ZERO, 1.0, &wide, Some(ground));
+        assert_eq!(reused.len(), 2);
+        assert!(reused.iter().any(|render| render.item_name == "snowball"));
     }
 
     #[test]
