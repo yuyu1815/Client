@@ -143,6 +143,7 @@ impl PlacedHeadSkinCache {
                 width: self.fallback.width,
                 height: self.fallback.height,
                 slim: self.fallback.slim,
+                cape: None,
             };
             rt.spawn(async move {
                 let result = tokio::time::timeout(
@@ -282,6 +283,7 @@ impl PlacedHeadSkinCache {
             width,
             height,
             slim: true,
+            cape: None,
         })
     }
 
@@ -400,6 +402,7 @@ mod tests {
             width: 64,
             height: 64,
             slim: true,
+            cape: None,
         }
     }
 

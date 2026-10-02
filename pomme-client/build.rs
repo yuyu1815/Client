@@ -79,6 +79,7 @@ fn main() {
         ("blur.frag", shaderc::ShaderKind::Fragment),
         ("entity.vert", shaderc::ShaderKind::Vertex),
         ("entity.frag", shaderc::ShaderKind::Fragment),
+        ("crystal_beam.frag", shaderc::ShaderKind::Fragment),
         ("entity_glint.vert", shaderc::ShaderKind::Vertex),
         ("entity_glint.frag", shaderc::ShaderKind::Fragment),
         ("block_entity.vert", shaderc::ShaderKind::Vertex),

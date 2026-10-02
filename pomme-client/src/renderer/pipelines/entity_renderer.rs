@@ -221,6 +221,83 @@ struct EntityInstance {
     uv_params: [f32; 4],
 }
 
+struct EquipmentTexture {
+    image: vk::Image,
+    view: vk::ImageView,
+    allocation: Allocation,
+    descriptor: vk::DescriptorSet,
+}
+
+struct HarnessMesh {
+    model: BakedEntityModel,
+    vertex_buffer: vk::Buffer,
+    vertex_allocation: Allocation,
+}
+
+struct HarnessDraw {
+    texture_key: String,
+    tint: [f32; 4],
+    range: (u32, u32),
+    matrix: glam::Mat4,
+}
+
+const EQUIPMENT_TEXTURE_CACHE_LIMIT: usize = 1024;
+
+fn equipment_texture_cache_allows(is_cached: bool, len: usize) -> bool {
+    is_cached || len < EQUIPMENT_TEXTURE_CACHE_LIMIT
+}
+
+fn descriptor_result_or_cleanup<T, E>(result: Result<T, E>, cleanup: impl FnOnce()) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(_) => {
+            cleanup();
+            None
+        }
+    }
+}
+
+fn happy_ghast_harness_draws(
+    model: &BakedEntityModel,
+    body: glam::Mat4,
+    ridden: bool,
+    layers: &[super::equipment::ResolvedEquipmentLayer],
+) -> Vec<HarnessDraw> {
+    let mut pose = entity_model::PartAnim::default();
+    pose.translation
+        .push((2, glam::Vec3::Y * if ridden { 0.0 } else { -5.0 }));
+    pose.rotation
+        .push((2, glam::Vec3::X * if ridden { 0.0 } else { -0.7854 }));
+    let transforms = model.compute_part_transforms(&pose);
+    let mut draws = Vec::with_capacity(layers.len() * model.parts.len());
+    for layer in layers {
+        let tint = [
+            layer.tint_rgb[0] as f32 / 255.0,
+            layer.tint_rgb[1] as f32 / 255.0,
+            layer.tint_rgb[2] as f32 / 255.0,
+            1.0,
+        ];
+        for (part_index, transform) in transforms.iter().enumerate() {
+            let Some(&range) = model.part_ranges.get(part_index) else {
+                continue;
+            };
+            if range.1 == 0 {
+                continue;
+            }
+            let matrix = body * *transform;
+            if matrix.to_cols_array().iter().all(|value| value.is_finite()) {
+                draws.push(HarnessDraw {
+                    texture_key: layer.texture_key.clone(),
+                    tint,
+                    range,
+                    matrix,
+                });
+            }
+        }
+    }
+    draws
+}
+
 #[derive(Clone)]
 pub struct EntityRenderInfo {
     /// Interpolated/visually offset position for the model and frustum.
@@ -694,6 +771,9 @@ pub struct EntityRenderer {
     texture_sampler_repeat: vk::Sampler,
     mobs: HashMap<EntityKind, MobEntry>,
     player_skins: HashMap<uuid::Uuid, PlayerSkinTexture>,
+    equipment_textures: HashMap<String, EquipmentTexture>,
+    equipment_pack_dirs: Vec<std::path::PathBuf>,
+    happy_ghast_harness: [HarnessMesh; 2],
     cape_model: BakedEntityModel,
     cape_vertex_buffer: vk::Buffer,
     cape_vertex_allocation: Allocation,
@@ -2737,7 +2817,7 @@ impl EntityRenderer {
                 n
             })
             .sum();
-        let tex_count = tex_count + (MAX_PLAYER_SKINS * 2) as u32 + 1;
+        let tex_count = tex_count + (MAX_PLAYER_SKINS * 2) as u32 + 1 + 1024;
 
         let pool_sizes = [
             vk::DescriptorPoolSize {
@@ -2815,6 +2895,21 @@ impl EntityRenderer {
         let water_patch_range = water_patch_model.part_ranges[0];
         let water_patch_part_transform =
             water_patch_model.compute_part_transforms(&entity_model::PartAnim::default())[0];
+        let happy_ghast_harness = [false, true].map(|baby| {
+            let model = entity_models::flying::bake_happy_ghast_harness_model(baby);
+            let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
+                device,
+                allocator,
+                bytemuck::cast_slice(&model.vertices),
+                vk::BufferUsageFlags::VertexBuffer,
+                "happy_ghast_harness_vertices",
+            );
+            HarnessMesh {
+                model,
+                vertex_buffer,
+                vertex_allocation,
+            }
+        });
         let cape_model = entity_model::bake_player_cape_model();
         let (cape_vertex_buffer, cape_vertex_allocation) = util::create_mapped_buffer(
             device,
@@ -2910,6 +3005,9 @@ impl EntityRenderer {
             texture_sampler_repeat,
             mobs,
             player_skins: HashMap::new(),
+            equipment_textures: HashMap::new(),
+            equipment_pack_dirs: Vec::new(),
+            happy_ghast_harness,
             cape_model,
             cape_vertex_buffer,
             cape_vertex_allocation,
@@ -3084,6 +3182,121 @@ impl EntityRenderer {
         for (_, skin) in self.player_skins.drain() {
             free_player_skin_texture(device, allocator, descriptor_pool, skin);
         }
+    }
+
+    pub fn set_equipment_pack_dirs(&mut self, dirs: &[std::path::PathBuf]) {
+        self.equipment_pack_dirs = dirs.to_vec();
+    }
+
+    pub fn clear_equipment_textures(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+    ) {
+        for (_, texture) in self.equipment_textures.drain() {
+            device
+                .free_descriptor_sets(self.descriptor_pool, &[texture.descriptor])
+                .ok();
+            device.destroy_image_view(texture.view, None);
+            device.destroy_image(texture.image, None);
+            allocator.lock().unwrap().free(texture.allocation).ok();
+        }
+    }
+
+    pub fn ensure_equipment_texture(
+        &mut self,
+        device: &vk::Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        allocator: &Arc<Mutex<Allocator>>,
+        jar_assets_dir: &Path,
+        asset_index: &Option<AssetIndex>,
+        key: &str,
+    ) -> vk::DescriptorSet {
+        if !equipment_texture_cache_allows(
+            self.equipment_textures.contains_key(key),
+            self.equipment_textures.len(),
+        ) {
+            // ponytail: equipment descriptor/image cache ceiling is 1024; increase the pool
+            // and cache budget together if packs routinely need more unique
+            // equipment textures.
+            tracing::warn!(
+                "Skipping Happy Ghast equipment texture {key:?}: cache limit is {EQUIPMENT_TEXTURE_CACHE_LIMIT} unique textures"
+            );
+            return vk::DescriptorSet::null();
+        }
+        if let Some(texture) = self.equipment_textures.get(key) {
+            return texture.descriptor;
+        }
+        let path = crate::assets::resolve_asset_path_with_pack_dirs(
+            jar_assets_dir,
+            asset_index,
+            key,
+            &self.equipment_pack_dirs,
+        );
+        let (pixels, width, height) = util::load_png(&path).unwrap_or_else(|| {
+            tracing::warn!("Failed to load Happy Ghast equipment texture {key:?}, using fallback");
+            fallback_texture(64)
+        });
+        let (image, view, allocation) = upload_texture_pixels(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            &pixels,
+            width,
+            height,
+        );
+        let alloc_info = vk::DescriptorSetAllocateInfo {
+            descriptor_pool: self.descriptor_pool,
+            descriptor_set_count: 1,
+            set_layouts: &self.texture_layout,
+            ..Default::default()
+        };
+        let mut descriptor = vk::DescriptorSet::null();
+        let descriptor_result = device
+            .allocate_descriptor_sets(&alloc_info, slice::from_mut(&mut descriptor))
+            .map(|()| descriptor);
+        let mut allocation = Some(allocation);
+        let Some(descriptor) = descriptor_result_or_cleanup(descriptor_result, || {
+            tracing::warn!("Failed to allocate Happy Ghast equipment descriptor for {key:?}");
+            device.destroy_image_view(view, None);
+            device.destroy_image(image, None);
+            allocator
+                .lock()
+                .unwrap()
+                .free(allocation.take().unwrap())
+                .ok();
+        }) else {
+            return vk::DescriptorSet::null();
+        };
+        let allocation = allocation.unwrap();
+        let image_info = vk::DescriptorImageInfo {
+            sampler: self.texture_sampler,
+            image_view: view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        device.update_descriptor_sets(
+            &[vk::WriteDescriptorSet {
+                dst_set: descriptor,
+                dst_binding: 0,
+                descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                descriptor_count: 1,
+                image_info: &image_info,
+                ..Default::default()
+            }],
+            &[],
+        );
+        self.equipment_textures.insert(
+            key.to_owned(),
+            EquipmentTexture {
+                image,
+                view,
+                allocation,
+                descriptor,
+            },
+        );
+        descriptor
     }
 
     fn player_skin(&self, info: &EntityRenderInfo) -> Option<&PlayerSkinTexture> {
@@ -3695,6 +3908,35 @@ impl EntityRenderer {
             }
 
             let mut opaque_records = opaque.emit(&vis, &mut instances);
+            for v in &vis {
+                if v.info.entity_kind != EntityKind::HappyGhast || v.info.is_invisible {
+                    continue;
+                }
+                let mesh = &self.happy_ghast_harness[usize::from(v.info.is_baby)];
+                for draw in happy_ghast_harness_draws(
+                    &mesh.model,
+                    v.entity_mat,
+                    v.info.is_ridden,
+                    &v.info.happy_ghast_equipment_layers,
+                ) {
+                    let Some(texture) = self.equipment_textures.get(&draw.texture_key) else {
+                        continue;
+                    };
+                    let first_instance = instances.len() as u32;
+                    instances.push(EntityInstance {
+                        model: draw.matrix.to_cols_array_2d(),
+                        tint: draw.tint,
+                        overlay_color: [0.0; 4],
+                        uv_params: [0.0, 0.0, 1.0, 1.0],
+                    });
+                    opaque_records.push(happy_ghast_harness_draw_record(
+                        &draw,
+                        texture.descriptor,
+                        mesh.vertex_buffer,
+                        first_instance,
+                    ));
+                }
+            }
             opaque_records.extend(collect_player_capes(
                 &vis,
                 &self.cape_model,
@@ -3881,6 +4123,7 @@ impl EntityRenderer {
     }
 
     pub fn destroy(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        self.clear_equipment_textures(device, allocator);
         let mut alloc = allocator.lock().unwrap();
         for i in 0..MAX_FRAMES_IN_FLIGHT {
             device.destroy_buffer(self.camera_buffers[i], None);
@@ -3901,6 +4144,14 @@ impl EntityRenderer {
         device.destroy_sampler(self.texture_sampler, None);
         device.destroy_sampler(self.texture_sampler_repeat, None);
 
+        for mesh in &mut self.happy_ghast_harness {
+            device.destroy_buffer(mesh.vertex_buffer, None);
+            alloc
+                .free(std::mem::replace(&mut mesh.vertex_allocation, unsafe {
+                    std::mem::zeroed()
+                }))
+                .ok();
+        }
         for entry in self.mobs.values_mut() {
             let variants: Vec<&mut MobVariant> = entry
                 .adult_variants
@@ -4070,6 +4321,23 @@ struct DrawRecord {
     light_coords_override: Option<u32>,
 }
 
+fn happy_ghast_harness_draw_record(
+    draw: &HarnessDraw,
+    texture_set: vk::DescriptorSet,
+    vertex_buffer: vk::Buffer,
+    first_instance: u32,
+) -> DrawRecord {
+    DrawRecord {
+        texture_set,
+        vertex_buffer,
+        part_start: draw.range.0,
+        part_count: draw.range.1,
+        first_instance,
+        instance_count: 1,
+        light_coords_override: None,
+    }
+}
+
 /// (visible-entity index, tint, overlay color, uv offset+scale) for one
 /// instance.
 type Member = (usize, [f32; 4], [f32; 4], [f32; 4]);
@@ -4228,6 +4496,10 @@ fn native_cape_draw_visible(
     !has_wings_layer && player_cape_visible(kind, invisible, mask, has_cape)
 }
 
+fn cape_draw_matrix(attachment: glam::Mat4, pose: glam::Quat) -> glam::Mat4 {
+    attachment * glam::Mat4::from_rotation_y(-std::f32::consts::PI) * glam::Mat4::from_quat(pose)
+}
+
 fn collect_player_capes(
     vis: &[VisEntity<'_>],
     model: &BakedEntityModel,
@@ -4276,9 +4548,7 @@ fn collect_player_capes(
         );
         // The cape mesh owns the baked Y-π pose; native setupAnim replaces it
         // with the complete quaternion extracted from AvatarRenderer.
-        let local_rotation = glam::Mat4::from_rotation_y(-std::f32::consts::PI)
-            * glam::Mat4::from_quat(entity.info.cape_pose);
-        let model_matrix = attachment * local_rotation;
+        let model_matrix = cape_draw_matrix(attachment, entity.info.cape_pose);
         let first_instance = instances.len() as u32;
         instances.push(EntityInstance {
             model: model_matrix.to_cols_array_2d(),
@@ -5081,6 +5351,161 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cape_pose_reaches_draw_matrix_with_yaw_and_attachment() {
+        let attachment = glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0))
+            * glam::Mat4::from_rotation_y(0.7);
+        let pose = glam::Quat::from_rotation_x(0.4) * glam::Quat::from_rotation_z(-0.2);
+        let matrix = super::cape_draw_matrix(attachment, pose);
+        let expected = attachment
+            * glam::Mat4::from_rotation_y(-std::f32::consts::PI)
+            * glam::Mat4::from_quat(pose);
+        assert!(matrix.abs_diff_eq(expected, 1e-6));
+        assert_eq!(matrix.w_axis, attachment.w_axis);
+        let turned =
+            super::cape_draw_matrix(glam::Mat4::from_rotation_y(1.0), glam::Quat::IDENTITY);
+        let unturned = super::cape_draw_matrix(glam::Mat4::IDENTITY, glam::Quat::IDENTITY);
+        assert!(!turned.abs_diff_eq(unturned, 1e-4));
+        let standing = super::cape_draw_matrix(glam::Mat4::IDENTITY, pose);
+        let crouched_attachment = glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.125, 0.0));
+        let crouched = super::cape_draw_matrix(crouched_attachment, pose);
+        assert!((crouched.w_axis.y - standing.w_axis.y + 0.125).abs() < 1e-6);
+    }
+
+    #[test]
+    fn equipment_texture_cache_ceiling_reuses_existing_and_cleans_failed_upload() {
+        use std::cell::Cell;
+
+        use super::{descriptor_result_or_cleanup, equipment_texture_cache_allows};
+
+        assert!(equipment_texture_cache_allows(false, 0));
+        assert!(equipment_texture_cache_allows(false, 1023));
+        assert!(!equipment_texture_cache_allows(false, 1024)); // 1025th unique key is skipped
+        assert!(equipment_texture_cache_allows(true, 1024)); // cached keys remain available
+
+        let image_destroyed = Cell::new(0);
+        let view_destroyed = Cell::new(0);
+        let allocation_freed = Cell::new(0);
+        let result = descriptor_result_or_cleanup::<(), ()>(Err(()), || {
+            image_destroyed.set(image_destroyed.get() + 1);
+            view_destroyed.set(view_destroyed.get() + 1);
+            allocation_freed.set(allocation_freed.get() + 1);
+        });
+        assert!(result.is_none());
+        assert_eq!(image_destroyed.get(), 1);
+        assert_eq!(view_destroyed.get(), 1);
+        assert_eq!(allocation_freed.get(), 1);
+    }
+
+    #[test]
+    fn happy_ghast_harness_draws_real_ranges_pose_tints_and_keep_order() {
+        use super::entity_models::flying;
+        use super::happy_ghast_harness_draws;
+        use crate::renderer::pipelines::equipment::ResolvedEquipmentLayer;
+
+        let adult = flying::bake_happy_ghast_harness_model(false);
+        let baby = flying::bake_happy_ghast_harness_model(true);
+        assert_eq!(adult.part_ranges.len(), 3); // mesh_scale root + harness + goggles
+        assert_eq!(baby.part_ranges.len(), 3);
+        assert_eq!(adult.parts.len(), 3);
+        assert_eq!(baby.parts.len(), 3);
+        assert_eq!(adult.parts[0].name, "mesh_scale");
+        assert_eq!(adult.parts[1].name, "harness");
+        assert_eq!(adult.parts[2].name, "goggles");
+        assert_eq!(
+            adult
+                .part_ranges
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .count(),
+            2
+        );
+        assert_eq!(
+            baby.part_ranges
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .count(),
+            2
+        );
+        assert_eq!(adult.part_ranges[0].1, 0);
+        assert_eq!(adult.part_scales[0], 4.0);
+        assert_eq!(baby.part_scales[0], 0.95);
+
+        let layers = [
+            ResolvedEquipmentLayer {
+                texture_key: "example/first.png".into(),
+                tint_rgb: [255, 0, 1],
+            },
+            ResolvedEquipmentLayer {
+                texture_key: "example/second.png".into(),
+                tint_rgb: [2, 3, 4],
+            },
+        ];
+        assert!(happy_ghast_harness_draws(&adult, glam::Mat4::IDENTITY, false, &[]).is_empty());
+        let draws = happy_ghast_harness_draws(&adult, glam::Mat4::IDENTITY, false, &layers);
+        assert_eq!(draws.len(), 4);
+        let draw_records: Vec<_> = draws
+            .iter()
+            .enumerate()
+            .map(|(i, draw)| {
+                super::happy_ghast_harness_draw_record(
+                    draw,
+                    super::vk::DescriptorSet::null(),
+                    super::vk::Buffer::null(),
+                    i as u32,
+                )
+            })
+            .collect();
+        assert_eq!(draw_records.len(), 4);
+        assert_eq!(draw_records[0].part_start, adult.part_ranges[1].0);
+        assert_eq!(draw_records[0].part_count, adult.part_ranges[1].1);
+        assert_eq!(draw_records[1].part_start, adult.part_ranges[2].0);
+        assert_eq!(draw_records[1].part_count, adult.part_ranges[2].1);
+        assert_eq!(
+            draws.iter().map(|draw| draw.range).collect::<Vec<_>>(),
+            [
+                adult.part_ranges[1],
+                adult.part_ranges[2],
+                adult.part_ranges[1],
+                adult.part_ranges[2]
+            ]
+        );
+        assert_eq!(draws[0].texture_key, layers[0].texture_key);
+        assert_eq!(draws[2].texture_key, layers[1].texture_key);
+        assert_eq!(draws[0].tint, [1.0, 0.0, 1.0 / 255.0, 1.0]);
+        assert!(draws.iter().all(|draw| {
+            draw.matrix
+                .to_cols_array()
+                .iter()
+                .all(|value| value.is_finite())
+        }));
+
+        let standing = happy_ghast_harness_draws(&adult, glam::Mat4::IDENTITY, false, &layers[..1]);
+        let ridden = happy_ghast_harness_draws(&adult, glam::Mat4::IDENTITY, true, &layers[..1]);
+        assert_ne!(standing[1].matrix, ridden[1].matrix);
+        // Nonempty equipment layers generate real draw records without indexing
+        // compact geometry ranges by the three original model-part indices.
+        assert_eq!(
+            happy_ghast_harness_draws(&baby, glam::Mat4::IDENTITY, true, &layers[..1]).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn equipment_texture_cache_is_texture_keyed_and_cleared_after_gpu_idle_on_reload() {
+        let renderer = include_str!("../mod.rs");
+        let reload = renderer.find("pub fn reload_assets(").unwrap();
+        let after_reload = &renderer[reload..];
+        let idle = after_reload
+            .find("self.ctx.device.wait_idle().unwrap()")
+            .unwrap();
+        let clear = after_reload.find("clear_equipment_textures").unwrap();
+        assert!(idle < clear);
+        let source = include_str!("entity_renderer.rs");
+        assert!(source.contains("equipment_textures: HashMap<String, EquipmentTexture>"));
+        assert!(source.contains("for (_, texture) in self.equipment_textures.drain()"));
+    }
+
     #[test]
     fn player_skin_retirement_requires_idle_only_when_resources_exist() {
         use super::player_skin_retirement_safe;

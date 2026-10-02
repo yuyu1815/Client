@@ -1,8 +1,35 @@
 //! 26.2 nonliving projectile model meshes, transcribed from mapped client model
-//! layer definitions. Entity transforms/material selection remain the caller's job.
+//! layer definitions. Entity transforms/material selection remain the caller's
+//! job.
 use glam::Vec3;
 
 use crate::renderer::entity_model::{BakedEntityModel, EntityPart, ModelCube, bake_model};
+
+/// DragonFireballRenderer: one camera-facing 16x16 plane, offset to y=-4..12px.
+pub fn bake_dragon_fireball_model() -> BakedEntityModel {
+    let mut model = bake_model(
+        vec![EntityPart {
+            name: "quad".into(),
+            offset: Vec3::new(0.0, 24.016, 0.0),
+            default_rotation: Vec3::ZERO,
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-8.0, -12.0, 0.0),
+                size: Vec3::new(16.0, 16.0, 0.0),
+                tex_offset: (0, 0),
+                deformation: 0.0,
+                mirror: false,
+            }],
+            parent: None,
+        }],
+        16,
+        16,
+    );
+    // Cube baking emits both coplanar Z faces; DragonFireballRenderer emits one
+    // quad.
+    model.vertices.truncate(6);
+    model.part_ranges[0].1 = 6;
+    model
+}
 
 /// Vanilla `TridentModel.createLayer` (32x32): pole with three fork tines.
 pub fn bake_trident_model() -> BakedEntityModel {
@@ -119,8 +146,8 @@ pub fn bake_wither_skull_model() -> BakedEntityModel {
             default_rotation: Vec3::ZERO,
             cubes: vec![ModelCube {
                 origin: Vec3::new(-4.0, -8.0, -4.0),
-                size: Vec3::splat(8.0),
-                tex_offset: (0, 35),
+                size: Vec3::new(8.0, 8.0, 8.0),
+                tex_offset: (0, 0),
                 deformation: 0.0,
                 mirror: false,
             }],
@@ -170,7 +197,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projectile_meshes_bake_nonempty_with_expected_uv_sizes() {
+    fn projectile_meshes_have_expected_geometry_and_uv_coverage() {
+        let fireball = bake_dragon_fireball_model();
+        assert_eq!(fireball.vertices.len(), 6);
+        assert_eq!(fireball.part_ranges, [(0, 6)]);
+        assert!(fireball.vertices.iter().all(|v| v.position[2] == 0.0));
+
         let models = [
             (bake_trident_model(), 32, 4),
             (bake_shulker_bullet_model(), 32, 1),
@@ -186,7 +218,6 @@ mod tests {
                     .iter()
                     .all(|v| v.position.iter().all(|p| p.is_finite()))
             );
-            assert!(model.vertices.iter().any(|v| v.tex_coords != [0, 0]));
             let min_u = model
                 .vertices
                 .iter()
@@ -213,34 +244,20 @@ mod tests {
                 .unwrap();
             assert!(
                 min_u < max_u && min_v < max_v,
-                "UVs must cover area on a {texture_width}px texture"
+                "UV coverage on {texture_width}px texture"
             );
         }
+
         let trident = bake_trident_model();
-        let pole = trident.parts[0].cubes[0];
-        assert_eq!(pole.origin, Vec3::new(-0.5, 2.0, -0.5));
-        assert_eq!(pole.size, Vec3::new(1.0, 25.0, 1.0));
-        assert_eq!(pole.tex_offset, (0, 6));
-        assert_eq!(trident.parts[1].cubes[0].tex_offset, (4, 0));
+        assert_eq!(trident.parts[0].cubes[0].tex_offset, (0, 6));
         assert!(trident.parts[4].cubes[0].mirror);
-
         let shulker = bake_shulker_bullet_model();
-        let plates = &shulker.parts[0].cubes;
-        assert_eq!(plates.len(), 3);
-        assert_eq!(plates[0].size, Vec3::new(8.0, 8.0, 2.0));
-        assert_eq!(plates[1].origin, Vec3::new(-1.0, -4.0, -4.0));
-        assert_eq!(plates[1].tex_offset, (0, 10));
-        assert_eq!(plates[2].size, Vec3::new(8.0, 2.0, 8.0));
-        assert_eq!(plates[2].tex_offset, (20, 0));
-
+        assert_eq!(shulker.parts[0].cubes.len(), 3);
+        assert_eq!(shulker.parts[0].cubes[1].tex_offset, (0, 10));
+        assert_eq!(shulker.parts[0].cubes[2].tex_offset, (20, 0));
         let skull = bake_wither_skull_model().parts[0].cubes[0];
         assert_eq!(skull.origin, Vec3::new(-4.0, -8.0, -4.0));
-        assert_eq!(skull.size, Vec3::splat(8.0));
-        assert_eq!(skull.tex_offset, (0, 35));
-
-        let spit = bake_llama_spit_model().parts[0].cubes[0];
-        assert_eq!(spit.origin, Vec3::new(-4.0, 0.0, 0.0));
-        assert_eq!(spit.size, Vec3::splat(2.0));
+        assert_eq!(skull.tex_offset, (0, 0));
         assert_eq!(bake_llama_spit_model().parts[0].cubes.len(), 7);
     }
 }

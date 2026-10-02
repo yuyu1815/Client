@@ -46,6 +46,8 @@ pub struct HandPipeline {
     mvp_allocations: Vec<Allocation>,
     vertex_buffer: vk::Buffer,
     vertex_allocation: Allocation,
+    left_vertex_buffer: vk::Buffer,
+    left_vertex_allocation: Allocation,
     vertex_count: u32,
     skin_image: vk::Image,
     skin_view: vk::ImageView,
@@ -175,7 +177,9 @@ impl HandPipeline {
 
         // Wide arms until the profile's skin (and its model flag) is fetched.
         let (vertex_buffer, vertex_allocation, vertex_count) =
-            create_arm_vertex_buffer(device, allocator, skin_w, skin_h, false);
+            create_arm_vertex_buffer(device, allocator, skin_w, skin_h, false, false);
+        let (left_vertex_buffer, left_vertex_allocation, _) =
+            create_arm_vertex_buffer(device, allocator, skin_w, skin_h, false, true);
 
         tracing::info!(
             "Hand pipeline initialized ({vertex_count} vertices, skin {skin_w}x{skin_h})"
@@ -193,6 +197,8 @@ impl HandPipeline {
             mvp_allocations,
             vertex_buffer,
             vertex_allocation,
+            left_vertex_buffer,
+            left_vertex_allocation,
             vertex_count,
             skin_image,
             skin_view,
@@ -210,10 +216,11 @@ impl HandPipeline {
         swing_progress: f32,
         inverse_height: f32,
         bob: Mat4,
+        left_hand: bool,
     ) {
         let proj = projection(aspect, hud_fov);
 
-        let model = first_person_hand_matrix(swing_progress, inverse_height);
+        let model = first_person_hand_matrix(swing_progress, inverse_height, left_hand);
 
         let mvp = proj * bob * model;
         let uniform = HandUniform {
@@ -231,7 +238,12 @@ impl HandPipeline {
             &[self.mvp_sets[frame], self.skin_set],
             &[],
         );
-        cmd.bind_vertex_buffers(0, &[self.vertex_buffer], &[0]);
+        let vertex_buffer = if left_hand {
+            self.left_vertex_buffer
+        } else {
+            self.vertex_buffer
+        };
+        cmd.bind_vertex_buffers(0, &[vertex_buffer], &[0]);
         cmd.draw(self.vertex_count, 1, 0, 0);
     }
 
@@ -284,10 +296,23 @@ impl HandPipeline {
                 std::mem::zeroed()
             }))
             .ok();
+        device.destroy_buffer(self.left_vertex_buffer, None);
+        allocator
+            .lock()
+            .unwrap()
+            .free(std::mem::replace(
+                &mut self.left_vertex_allocation,
+                unsafe { std::mem::zeroed() },
+            ))
+            .ok();
         let (vertex_buffer, vertex_allocation, vertex_count) =
-            create_arm_vertex_buffer(device, allocator, skin.width, skin.height, skin.slim);
+            create_arm_vertex_buffer(device, allocator, skin.width, skin.height, skin.slim, false);
+        let (left_vertex_buffer, left_vertex_allocation, _) =
+            create_arm_vertex_buffer(device, allocator, skin.width, skin.height, skin.slim, true);
         self.vertex_buffer = vertex_buffer;
         self.vertex_allocation = vertex_allocation;
+        self.left_vertex_buffer = left_vertex_buffer;
+        self.left_vertex_allocation = left_vertex_allocation;
         self.vertex_count = vertex_count;
 
         tracing::info!(
@@ -315,10 +340,17 @@ impl HandPipeline {
         }
 
         device.destroy_buffer(self.vertex_buffer, None);
+        device.destroy_buffer(self.left_vertex_buffer, None);
         alloc
             .free(std::mem::replace(&mut self.vertex_allocation, unsafe {
                 std::mem::zeroed()
             }))
+            .ok();
+        alloc
+            .free(std::mem::replace(
+                &mut self.left_vertex_allocation,
+                unsafe { std::mem::zeroed() },
+            ))
             .ok();
 
         device.destroy_sampler(self.skin_sampler, None);
@@ -353,8 +385,9 @@ fn create_arm_vertex_buffer(
     skin_w: u32,
     skin_h: u32,
     slim: bool,
+    left: bool,
 ) -> (vk::Buffer, Allocation, u32) {
-    let vertices = build_arm_vertices(skin_w, skin_h, slim);
+    let vertices = build_arm_vertices(skin_w, skin_h, slim, left);
     let vertex_bytes = bytemuck::cast_slice::<HandVertex, u8>(&vertices);
     let (buffer, allocation) = util::create_mapped_buffer(
         device,
@@ -366,7 +399,7 @@ fn create_arm_vertex_buffer(
     (buffer, allocation, vertices.len() as u32)
 }
 
-fn build_arm_vertices(skin_w: u32, skin_h: u32, slim: bool) -> Vec<HandVertex> {
+fn build_arm_vertices(skin_w: u32, skin_h: u32, slim: bool, left: bool) -> Vec<HandVertex> {
     let sw = skin_w as f32;
     let sh = skin_h as f32;
 
@@ -374,7 +407,13 @@ fn build_arm_vertices(skin_w: u32, skin_h: u32, slim: bool) -> Vec<HandVertex> {
     // addBox(-2, -2, -2, 3, 12, 4), scaled to blocks (1/16).
     // Model space is Y-down: y0 is the shoulder end, y1 the hand end.
     let w = if slim { 3.0 } else { 4.0 };
-    let x0: f32 = if slim { -2.0 } else { -3.0 } / 16.0;
+    let x0: f32 = if left {
+        -1.0 / 16.0
+    } else if slim {
+        -2.0 / 16.0
+    } else {
+        -3.0 / 16.0
+    };
     let x1: f32 = x0 + w / 16.0;
     let y0: f32 = -2.0 / 16.0;
     let y1: f32 = 10.0 / 16.0;
@@ -382,8 +421,10 @@ fn build_arm_vertices(skin_w: u32, skin_h: u32, slim: bool) -> Vec<HandVertex> {
     let z1: f32 = 2.0 / 16.0;
 
     // texOffs(40, 16), box dimensions h=12 d=4
-    let u0 = 40.0;
-    let v0 = 16.0;
+    // PlayerModel.createMesh uses texOffs(32,48) for left_arm and
+    // texOffs(40,16) for right_arm; never mirror the right UV onto the left.
+    let u0 = if left { 32.0 } else { 40.0 };
+    let v0 = if left { 48.0 } else { 16.0 };
     let h = 12.0;
     let d = 4.0;
 
@@ -657,7 +698,7 @@ fn create_pipeline(
     pipeline
 }
 
-fn first_person_hand_matrix(sp: f32, inverse_height: f32) -> Mat4 {
+fn first_person_hand_matrix(sp: f32, inverse_height: f32, left_hand: bool) -> Mat4 {
     let sqrt_sp = sp.sqrt();
     let pi = std::f32::consts::PI;
     let x_off = -0.3 * (sqrt_sp * pi).sin();
@@ -668,7 +709,7 @@ fn first_person_hand_matrix(sp: f32, inverse_height: f32) -> Mat4 {
     let pivot = Vec3::new(-5.0 / 16.0, 2.0 / 16.0, 0.0);
     let arm_local_rot = Mat4::from_translation(pivot) * Mat4::from_rotation_z(0.1);
 
-    Mat4::from_translation(Vec3::new(
+    let matrix = Mat4::from_translation(Vec3::new(
         x_off + 0.64,
         y_off - 0.52 - inverse_height * 0.6,
         z_off - 0.72,
@@ -680,7 +721,13 @@ fn first_person_hand_matrix(sp: f32, inverse_height: f32) -> Mat4 {
         * Mat4::from_rotation_x(200.0_f32.to_radians())
         * Mat4::from_rotation_y((-135.0_f32).to_radians())
         * Mat4::from_translation(Vec3::new(5.6, 0.0, 0.0))
-        * arm_local_rot
+        * arm_local_rot;
+    if left_hand {
+        let mirror = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0));
+        mirror * matrix * mirror
+    } else {
+        matrix
+    }
 }
 
 #[cfg(test)]
@@ -690,10 +737,41 @@ mod tests {
     #[test]
     fn bare_hand_equip_height_lowers_the_whole_pose() {
         for swing in [0.0, 0.5, 1.0] {
-            let raised = first_person_hand_matrix(swing, 0.0);
+            let raised = first_person_hand_matrix(swing, 0.0, false);
             for inverse in [0.25, 1.0] {
                 let lower = Mat4::from_translation(Vec3::new(0.0, -inverse * 0.6, 0.0));
-                assert!(first_person_hand_matrix(swing, inverse).abs_diff_eq(lower * raised, 1e-6));
+                assert!(
+                    first_person_hand_matrix(swing, inverse, false)
+                        .abs_diff_eq(lower * raised, 1e-6)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn left_arm_uses_native_uv_geometry_for_slim_and_wide_skins() {
+        for slim in [false, true] {
+            let right = build_arm_vertices(64, 64, slim, false);
+            let left = build_arm_vertices(64, 64, slim, true);
+            assert_eq!(right.len(), 36);
+            assert_eq!(left.len(), 36);
+            assert_eq!(left[0].uv, [40.0 / 64.0, 48.0 / 64.0]);
+            assert_ne!(right[0].uv, left[0].uv);
+            let width = if slim { 3.0 / 16.0 } else { 4.0 / 16.0 };
+            let left_min = left
+                .iter()
+                .map(|v| v.position[0])
+                .fold(f32::INFINITY, f32::min);
+            let left_max = left
+                .iter()
+                .map(|v| v.position[0])
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert!((left_max - left_min - width).abs() < 1e-6);
+            for swing in [0.0, 0.5, 1.0] {
+                assert!(
+                    glam::Mat3::from_mat4(first_person_hand_matrix(swing, 0.0, true)).determinant()
+                        > 0.0
+                );
             }
         }
     }

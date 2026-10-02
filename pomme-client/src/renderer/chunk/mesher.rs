@@ -1679,19 +1679,28 @@ impl ChunkStoreSnapshot {
         })
     }
 
-    fn get_light(&self, x: i32, y: i32, z: i32) -> f32 {
+    /// Returns the uncombined sky/block levels used by terrain lighting.
+    /// Keeping the nibbles separate is required to apply time-dependent sky
+    /// darkening without dimming block-emitted light.
+    fn get_light_raw(&self, x: i32, y: i32, z: i32) -> (u8, u8) {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        let level = if let Some(light) = self.light.get(&(cx, cz)) {
-            light
-                .get_sky_light(lx, y, lz)
-                .max(light.get_block_light(lx, y, lz))
+        if let Some(light) = self.light.get(&(cx, cz)) {
+            (
+                light.get_sky_light(lx, y, lz),
+                light.get_block_light(lx, y, lz),
+            )
         } else {
-            15
-        };
-        LIGHT_TABLE[level as usize]
+            // Match the previous `get_light` fallback for an absent column.
+            (15, 0)
+        }
+    }
+
+    fn get_light(&self, x: i32, y: i32, z: i32) -> f32 {
+        let (sky, block) = self.get_light_raw(x, y, z);
+        LIGHT_TABLE[sky.max(block) as usize]
     }
 }
 
@@ -4256,6 +4265,42 @@ mod terrain_uv_tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn raw_light_keeps_sky_and_block_separate_and_preserves_legacy_lookup() {
+        let mut sky = Box::new([0; 2048]);
+        let mut block = Box::new([0; 2048]);
+        sky[0] = 8;
+        block[0] = 3;
+        let snapshot = ChunkStoreSnapshot {
+            chunks: Vec::new(),
+            light: HashMap::from([(
+                (0, 0),
+                Arc::new(chunk::ChunkLightData {
+                    sky_sections: vec![None, Some(sky), None],
+                    block_sections: vec![None, Some(block), None],
+                    min_y: 0,
+                    has_sky: true,
+                    sky_top_section: Some(2),
+                }),
+            )]),
+            grass_colormap: Arc::new(Colormap::test_empty()),
+            foliage_colormap: Arc::new(Colormap::test_empty()),
+            dry_foliage_colormap: Arc::new(Colormap::test_empty()),
+            biome_climate: Arc::new(HashMap::new()),
+            cardinal_lighting: CardinalLighting::DEFAULT,
+            min_y: 0,
+            height: 16,
+            debug_world: None,
+            trace: None,
+            moving_blocks: Vec::new(),
+            chests: Vec::new(),
+        };
+
+        assert_eq!(snapshot.get_light_raw(0, 0, 0), (8, 3));
+        assert_eq!(snapshot.get_light(0, 0, 0), LIGHT_TABLE[8]);
+        assert_eq!(snapshot.get_light_raw(16, 0, 0), (15, 0));
+    }
 
     #[test]
     fn block_entity_geometry_only_suppresses_replacement_meshes() {

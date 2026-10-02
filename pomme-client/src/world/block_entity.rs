@@ -37,6 +37,7 @@ pub struct StoredBlockEntity {
     pub kind: BlockEntityKind,
     #[allow(dead_code)]
     pub nbt: NbtCompound,
+    pub campfire_slots: [bool; 4],
     pub sign_front: Option<[String; 4]>,
     pub sign_back: Option<[String; 4]>,
     pub banner_patterns: Vec<BannerPatternLayer>,
@@ -157,11 +158,31 @@ pub(crate) fn wrap_book_angle(mut angle: f32) -> f32 {
     angle
 }
 
+fn campfire_slots(nbt: &NbtCompound) -> [bool; 4] {
+    use simdnbt::owned::{NbtList, NbtTag};
+
+    let mut slots = [false; 4];
+    if let Some(NbtTag::List(NbtList::Compound(items))) = nbt.get("Items") {
+        for item in items {
+            let (Some(slot), Some(id), Some(count)) =
+                (item.byte("Slot"), item.string("id"), item.int("count"))
+            else {
+                continue;
+            };
+            if (0..4).contains(&slot) && !id.to_str().is_empty() && count > 0 {
+                slots[slot as usize] = true;
+            }
+        }
+    }
+    slots
+}
+
 impl StoredBlockEntity {
     pub fn new(kind: BlockEntityKind, nbt: NbtCompound) -> Self {
         let is_sign = is_sign_kind(kind);
         Self {
             kind,
+            campfire_slots: campfire_slots(&nbt),
             sign_front: is_sign.then(|| sign_lines(&nbt, true)),
             sign_back: is_sign.then(|| sign_lines(&nbt, false)),
             banner_patterns: (kind == BlockEntityKind::Banner)
@@ -207,6 +228,7 @@ impl StoredBlockEntity {
     }
 
     pub fn update_nbt(&mut self, nbt: NbtCompound) {
+        self.campfire_slots = campfire_slots(&nbt);
         self.sign_front = is_sign_kind(self.kind).then(|| sign_lines(&nbt, true));
         self.sign_back = is_sign_kind(self.kind).then(|| sign_lines(&nbt, false));
         self.banner_patterns = (self.kind == BlockEntityKind::Banner)
@@ -883,6 +905,37 @@ pub fn is_fluid_block(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn campfire_slot_occupancy_tracks_only_valid_nonempty_item_stacks() {
+        use simdnbt::owned::NbtList;
+
+        let item = |slot: i8, count: i32, with_id: bool| {
+            let mut item = NbtCompound::new();
+            item.insert("Slot", slot);
+            item.insert("count", count);
+            if with_id {
+                item.insert("id", "minecraft:beef");
+            }
+            item
+        };
+        let mut nbt = NbtCompound::new();
+        nbt.insert(
+            "Items",
+            NbtList::Compound(vec![
+                item(0, 1, true),
+                item(1, 0, true),
+                item(2, 1, false),
+                item(4, 1, true),
+                item(-1, 1, true),
+            ]),
+        );
+        let mut entity = StoredBlockEntity::new(BlockEntityKind::Campfire, nbt);
+        assert_eq!(entity.campfire_slots, [true, false, false, false]);
+
+        entity.update_nbt(NbtCompound::new());
+        assert_eq!(entity.campfire_slots, [false; 4]);
+    }
 
     #[test]
     fn bell_action_one_restarts_direction_and_stops_at_fifty_ticks() {

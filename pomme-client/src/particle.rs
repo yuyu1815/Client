@@ -25,6 +25,40 @@ use crate::world::block::registry::{BlockRegistry, Tint};
 use crate::world::block::{block_id, is_air};
 use crate::world::chunk::ChunkStore;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ParticleMode {
+    #[default]
+    All,
+    Decreased,
+    Minimal,
+}
+
+impl ParticleMode {
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Decreased,
+            2 => Self::Minimal,
+            _ => Self::All,
+        }
+    }
+
+    pub const fn to_u8(self) -> u8 {
+        match self {
+            Self::All => 0,
+            Self::Decreased => 1,
+            Self::Minimal => 2,
+        }
+    }
+
+    pub const fn cycle(self) -> Self {
+        match self {
+            Self::All => Self::Decreased,
+            Self::Decreased => Self::Minimal,
+            Self::Minimal => Self::All,
+        }
+    }
+}
+
 /// Vanilla `ParticleGroup.RESERVOIR_START` — above this, new particles are
 /// probabilistically dropped.
 const RESERVOIR_START: usize = 12288;
@@ -32,6 +66,31 @@ const RESERVOIR_START: usize = 12288;
 const MAX_COLLISION_VELOCITY_SQ: f64 = 10000.0;
 /// Terrain particles use the default 0.2-wide, 0.2-tall bounding box.
 const HALF_WIDTH: f64 = 0.1;
+
+fn accept_particle(
+    mode: ParticleMode,
+    bypass: bool,
+    always_visible: bool,
+    distance_squared: f64,
+    rng: &mut impl FnMut() -> u32,
+) -> bool {
+    if !bypass && distance_squared > 1024.0 {
+        return false;
+    }
+    if bypass {
+        return true;
+    }
+    let mode = if mode == ParticleMode::Minimal && always_visible && rng() % 10 == 0 {
+        ParticleMode::Decreased
+    } else {
+        mode
+    };
+    match mode {
+        ParticleMode::All => true,
+        ParticleMode::Decreased => rng() % 3 != 0,
+        ParticleMode::Minimal => false,
+    }
+}
 
 #[derive(PartialEq, Eq)]
 enum Kind {
@@ -56,6 +115,8 @@ enum Kind {
     Explosion,
     /// Standard explosion block effect `SMOKE`.
     Smoke,
+    CampfireCosySmoke,
+    CampfireSignalSmoke,
     Crit,
     Dust,
     Shriek,
@@ -68,7 +129,13 @@ impl Kind {
     fn translucent(&self) -> bool {
         matches!(
             self,
-            Kind::ItemTranslucent | Kind::EndRod | Kind::Totem | Kind::Shriek | Kind::Vibration
+            Kind::ItemTranslucent
+                | Kind::EndRod
+                | Kind::Totem
+                | Kind::CampfireCosySmoke
+                | Kind::CampfireSignalSmoke
+                | Kind::Shriek
+                | Kind::Vibration
         )
     }
 }
@@ -338,6 +405,52 @@ impl Particle {
         };
         p.set_sprite(&frames[0]);
         p
+    }
+
+    fn campfire_smoke(
+        pos: DVec3,
+        signal: bool,
+        frames: &[AtlasRegion; 8],
+        rng: &mut fastrand::Rng,
+    ) -> Self {
+        let size = 0.1 * (rng.f32() * 0.5 + 0.5) * 2.0 * 3.0;
+        let lifetime = rng.i32(0..50) + if signal { 280 } else { 80 };
+        let mut particle = Self {
+            kind: if signal {
+                Kind::CampfireSignalSmoke
+            } else {
+                Kind::CampfireCosySmoke
+            },
+            pos,
+            prev_pos: pos,
+            vel: dvec3(0.0, 0.07 + f64::from(rng.f32() / 500.0), 0.0),
+            age: 0,
+            lifetime,
+            on_ground: false,
+            stopped_by_collision: false,
+            gravity: 3.0e-6,
+            friction: 0.98,
+            size,
+            base_size: size,
+            u0: 0.0,
+            u1: 0.0,
+            v0: 0.0,
+            v1: 0.0,
+            color: [1.0; 3],
+            alpha: if signal { 0.95 } else { 0.9 },
+            light: 1.0,
+            target: None,
+            entity_target: None,
+            delay: 0,
+            rotation: Quat::IDENTITY,
+            second_rotation: None,
+            rot: 0.0,
+            rot_o: 0.0,
+            pitch: 0.0,
+            pitch_o: 0.0,
+        };
+        particle.set_sprite(&frames[rng.usize(0..frames.len())]);
+        particle
     }
 
     fn dust(
@@ -675,7 +788,18 @@ impl Particle {
             return true;
         }
         self.age += 1;
-        self.vel.y -= 0.04 * self.gravity;
+        let campfire_smoke = matches!(
+            self.kind,
+            Kind::CampfireCosySmoke | Kind::CampfireSignalSmoke
+        );
+        if campfire_smoke {
+            let jitter = || fastrand::f64() * 0.0002 * if fastrand::bool() { 1.0 } else { -1.0 };
+            self.vel.x += jitter();
+            self.vel.z += jitter();
+            self.vel.y -= self.gravity;
+        } else {
+            self.vel.y -= 0.04 * self.gravity;
+        }
         match self.kind {
             Kind::Terrain
             | Kind::Item
@@ -683,6 +807,9 @@ impl Particle {
             | Kind::Smoke
             | Kind::Poof
             | Kind::Dust => self.move_with_collision(chunks),
+            Kind::CampfireCosySmoke | Kind::CampfireSignalSmoke => {
+                self.move_with_collision_width(chunks, 0.125)
+            }
             Kind::EndRod | Kind::Crit | Kind::Shriek => self.pos += self.vel,
             Kind::Totem => self.move_with_collision(chunks),
             Kind::Trail | Kind::Vibration => {
@@ -712,7 +839,17 @@ impl Particle {
             self.vel.x *= 1.1;
             self.vel.z *= 1.1;
         }
-        self.vel *= self.friction;
+        if matches!(
+            self.kind,
+            Kind::CampfireCosySmoke | Kind::CampfireSignalSmoke
+        ) && self.age >= self.lifetime - 60
+            && self.alpha > 0.01
+        {
+            self.alpha -= 0.015;
+        }
+        if !campfire_smoke {
+            self.vel *= self.friction;
+        }
         if self.on_ground {
             self.vel.x *= 0.7;
             self.vel.z *= 0.7;
@@ -758,6 +895,14 @@ impl Particle {
                 }
             }
             Kind::Shriek | Kind::Trail | Kind::Vibration => self.light = 1.0,
+            Kind::CampfireCosySmoke | Kind::CampfireSignalSmoke => {
+                self.light = world_brightness(
+                    chunks,
+                    self.pos.x.floor() as i32,
+                    self.pos.y.floor() as i32,
+                    self.pos.z.floor() as i32,
+                );
+            }
         }
         if self.kind == Kind::Shriek {
             self.alpha = 1.0 - (self.age as f32 / self.lifetime as f32).clamp(0.0, 1.0);
@@ -775,13 +920,17 @@ impl Particle {
 
     /// Vanilla `Particle.move`.
     fn move_with_collision(&mut self, chunks: &ChunkStore) {
+        self.move_with_collision_width(chunks, HALF_WIDTH);
+    }
+
+    fn move_with_collision_width(&mut self, chunks: &ChunkStore, half_width: f64) {
         if self.stopped_by_collision {
             return;
         }
         let orig = self.vel;
         let mut delta = orig;
         if delta != DVec3::ZERO && delta.length_squared() < MAX_COLLISION_VELOCITY_SQ {
-            let aabb = Aabb::from_center(self.pos, HALF_WIDTH, HALF_WIDTH);
+            let aabb = Aabb::from_center(self.pos, half_width, half_width);
             (delta, _) = resolve_collision(chunks, aabb, orig.into(), 0.0);
         }
         self.pos += delta;
@@ -862,6 +1011,18 @@ pub const ENCHANTED_HIT_SPRITE: &str = "particle/enchanted_hit";
 
 /// `POOF` and `SMOKE` use the first eight entries. Dust is included last so
 /// the atlas builder also packs its static sprite.
+pub const CAMPFIRE_COSY_SMOKE_SPRITES: [&str; 8] = [
+    "particle/big_smoke_0",
+    "particle/big_smoke_1",
+    "particle/big_smoke_2",
+    "particle/big_smoke_3",
+    "particle/big_smoke_4",
+    "particle/big_smoke_5",
+    "particle/big_smoke_6",
+    "particle/big_smoke_7",
+];
+pub const CAMPFIRE_SIGNAL_SMOKE_SPRITES: [&str; 8] = CAMPFIRE_COSY_SMOKE_SPRITES;
+
 pub const GENERIC_PARTICLE_SPRITES: [&str; 12] = [
     "particle/generic_7",
     "particle/generic_6",
@@ -921,6 +1082,8 @@ pub enum ServerParticleKind {
     Explosion,
     Poof,
     Smoke,
+    CampfireCosySmoke,
+    CampfireSignalSmoke,
     Totem,
     Dust,
     Block,
@@ -975,6 +1138,8 @@ impl ServerParticleKind {
             30 => Some(Self::Explosion),
             66 => Some(Self::Poof),
             69 => Some(Self::Smoke),
+            70 => Some(Self::CampfireCosySmoke),
+            71 => Some(Self::CampfireSignalSmoke),
             75 => Some(Self::Totem),
             21 => Some(Self::Dust),
             1 => Some(Self::Block),
@@ -990,7 +1155,12 @@ impl ServerParticleKind {
     fn override_limiter(self) -> bool {
         matches!(
             self,
-            Self::ExplosionEmitter | Self::Explosion | Self::Poof | Self::Vibration
+            Self::ExplosionEmitter
+                | Self::Explosion
+                | Self::Poof
+                | Self::Vibration
+                | Self::CampfireCosySmoke
+                | Self::CampfireSignalSmoke
         )
     }
 }
@@ -1164,6 +1334,7 @@ fn tracking_sample(
 }
 
 pub struct ParticleStore {
+    mode: ParticleMode,
     particles: Vec<Particle>,
     emitters: Vec<ExplosionEmitter>,
     pending_emitters: Vec<ExplosionEmitter>,
@@ -1179,21 +1350,88 @@ pub struct ParticleStore {
     end_rod_frames: [AtlasRegion; 8],
     generic_frames: [AtlasRegion; 8],
     explosion_frames: [AtlasRegion; 16],
+    campfire_cosy_frames: [AtlasRegion; 8],
+    campfire_signal_frames: [AtlasRegion; 8],
     grass_colormap: Arc<Colormap>,
     foliage_colormap: Arc<Colormap>,
     dry_foliage_colormap: Arc<Colormap>,
 }
 
-/// `CampfireBlock.animateTick` only emits local smoke for dry, lit fires;
-/// block-entity particle packets remain on the server-particle path.
+/// Client `CampfireBlockEntity::particleTick` emits smoke only for lit, dry
+/// fires; server `LevelParticles` packets remain on their typed network path.
 pub(crate) fn campfire_smoke_enabled(lit: bool, waterlogged: bool) -> bool {
     lit && !waterlogged
 }
 
+pub(crate) fn campfire_smoke_count(chance: f32, amount: u32) -> Option<u32> {
+    (chance < 0.11).then_some(amount % 2 + 2)
+}
+
+pub(crate) fn campfire_food_smoke_enabled(chance: f32) -> bool {
+    chance < 0.2
+}
+
+pub(crate) fn campfire_slot_smoke_pos(pos: BlockPos, facing: &str, slot: usize) -> DVec3 {
+    let rotation = match facing {
+        "south" => 0,
+        "west" => 1,
+        "north" => 2,
+        "east" => 3,
+        _ => 0,
+    };
+    let (dx, dz) = match (slot + rotation) % 4 {
+        0 => (0.0, 1.0),
+        1 => (-1.0, 0.0),
+        2 => (0.0, -1.0),
+        _ => (1.0, 0.0),
+    };
+    let (clockwise_x, clockwise_z) = (-dz, dx);
+    dvec3(
+        pos.x as f64 + 0.5 - dx * 0.3125 + clockwise_x * 0.3125,
+        pos.y as f64 + 0.5,
+        pos.z as f64 + 0.5 - dz * 0.3125 + clockwise_z * 0.3125,
+    )
+}
+
 impl ParticleStore {
-    pub fn add_campfire_smoke(&mut self, pos: DVec3) {
-        self.pending
-            .push(Particle::smoke(pos, DVec3::ZERO, &self.generic_frames));
+    pub fn set_mode(&mut self, mode: ParticleMode) {
+        self.mode = mode;
+    }
+
+    fn accepts_normal_spawn(&self, always_visible: bool, rng: &mut impl FnMut() -> u32) -> bool {
+        accept_particle(self.mode, false, always_visible, 0.0, rng)
+    }
+
+    pub fn add_campfire_food_smoke(&mut self, pos: DVec3, camera_pos: DVec3) {
+        if accept_particle(
+            self.mode,
+            false,
+            false,
+            camera_pos.distance_squared(pos),
+            &mut || fastrand::u32(..),
+        ) {
+            self.push(Particle::smoke(
+                pos,
+                dvec3(0.0, 5.0e-4, 0.0),
+                &self.generic_frames,
+            ));
+        }
+    }
+
+    pub fn add_campfire_smoke(&mut self, pos: DVec3, signal: bool) {
+        // Vanilla `CampfireBlock.makeParticles` calls `addAlwaysVisibleParticle`;
+        // preserve that bypass (including its 11% emitter chance in the caller).
+        let frames = if signal {
+            &self.campfire_signal_frames
+        } else {
+            &self.campfire_cosy_frames
+        };
+        self.push(Particle::campfire_smoke(
+            pos,
+            signal,
+            frames,
+            &mut fastrand::Rng::new(),
+        ));
     }
 
     pub fn new(
@@ -1206,9 +1444,12 @@ impl ParticleStore {
         let generic_frames =
             std::array::from_fn(|i| uv_map.get_region(GENERIC_PARTICLE_SPRITES[i]));
         let explosion_frames = EXPLOSION_SPRITES.map(|k| uv_map.get_region(k));
+        let campfire_cosy_frames = CAMPFIRE_COSY_SMOKE_SPRITES.map(|k| uv_map.get_region(k));
+        let campfire_signal_frames = CAMPFIRE_SIGNAL_SMOKE_SPRITES.map(|k| uv_map.get_region(k));
         let crit_sprite = uv_map.get_region(CRIT_SPRITE);
         let enchanted_hit_sprite = uv_map.get_region(ENCHANTED_HIT_SPRITE);
         Self {
+            mode: ParticleMode::All,
             particles: Vec::new(),
             pending: Vec::new(),
             emitters: Vec::new(),
@@ -1221,6 +1462,8 @@ impl ParticleStore {
             end_rod_frames,
             generic_frames,
             explosion_frames,
+            campfire_cosy_frames,
+            campfire_signal_frames,
             grass_colormap,
             foliage_colormap,
             dry_foliage_colormap,
@@ -1457,6 +1700,9 @@ impl ParticleStore {
             eye_pos.z.floor() as i32,
         );
         for _ in 0..count {
+            if !self.accepts_normal_spawn(false, &mut || fastrand::u32(..)) {
+                continue;
+            }
             let d = dvec3(
                 (fastrand::f64() - 0.5) * 0.1,
                 fastrand::f64() * 0.1 + 0.1,
@@ -1500,12 +1746,12 @@ impl ParticleStore {
         let Some(count) = packet_particle_count(count) else {
             return;
         };
-        let bypass_distance_limit = override_limiter || always_show;
+        let bypass_limiter = override_limiter || always_show;
         if count == 0 {
             self.add_server_particle(
                 kind,
                 options,
-                bypass_distance_limit,
+                bypass_limiter,
                 pos,
                 dist * max_speed,
                 camera_pos,
@@ -1525,7 +1771,7 @@ impl ParticleStore {
             self.add_server_particle(
                 kind,
                 options.clone(),
-                bypass_distance_limit,
+                bypass_limiter,
                 pos + scatter,
                 vel,
                 camera_pos,
@@ -1536,14 +1782,14 @@ impl ParticleStore {
         }
     }
 
-    /// Vanilla `ClientLevel.doAddParticle`. Pomme reports
-    /// `ParticleStatus::All` in client information, so the MINIMAL/DECREASED
-    /// branches are unreachable and only the 32-block camera cull applies.
+    /// Vanilla `ClientLevel.doAddParticle`: ordinary particles are culled at
+    /// 32 blocks and filtered by the selected status; override-limiter and
+    /// long-distance packets bypass both checks.
     fn add_server_particle(
         &mut self,
         kind: ServerParticleKind,
         options: ServerParticleOptions,
-        override_limiter: bool,
+        bypass_limiter: bool,
         pos: DVec3,
         vel: DVec3,
         camera_pos: DVec3,
@@ -1551,9 +1797,14 @@ impl ParticleStore {
         chunks: &ChunkStore,
         biome_climate: &HashMap<u32, BiomeClimate>,
     ) {
-        if !(override_limiter || kind.override_limiter())
-            && camera_pos.distance_squared(pos) > 1024.0
-        {
+        let bypass_limiter = bypass_limiter || kind.override_limiter();
+        if !accept_particle(
+            self.mode,
+            bypass_limiter,
+            false,
+            camera_pos.distance_squared(pos),
+            &mut || fastrand::u32(..),
+        ) {
             return;
         }
         match kind {
@@ -1571,6 +1822,20 @@ impl ParticleStore {
             }
             ServerParticleKind::Smoke => {
                 self.push(Particle::smoke(pos, vel, &self.generic_frames));
+            }
+            ServerParticleKind::CampfireCosySmoke | ServerParticleKind::CampfireSignalSmoke => {
+                let signal = matches!(kind, ServerParticleKind::CampfireSignalSmoke);
+                let frames = if signal {
+                    &self.campfire_signal_frames
+                } else {
+                    &self.campfire_cosy_frames
+                };
+                self.push(Particle::campfire_smoke(
+                    pos,
+                    signal,
+                    frames,
+                    &mut fastrand::Rng::new(),
+                ));
             }
             ServerParticleKind::Totem => {
                 self.push(Particle::totem(pos, vel, &self.end_rod_frames));
@@ -1958,9 +2223,9 @@ pub(crate) fn packet_particle_count(count: i32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AtlasUVMap, ExplosionParticleInfo, Particle, ParticleOptions, ServerParticleKind,
-        TrackedExplosion, Weighted, animated_frame_index, dust_quad_size, dvec3,
-        explosion_emitter_child, explosion_frame_index, packet_particle_count,
+        AtlasRegion, AtlasUVMap, ExplosionParticleInfo, Particle, ParticleOptions,
+        ServerParticleKind, TrackedExplosion, Weighted, animated_frame_index, dust_quad_size,
+        dvec3, explosion_emitter_child, explosion_frame_index, packet_particle_count,
         plan_explosion_particles, supports_explosion_particle,
     };
     use crate::world::chunk::ChunkStore;
@@ -1970,6 +2235,122 @@ mod tests {
         assert!(super::campfire_smoke_enabled(true, false));
         assert!(!super::campfire_smoke_enabled(false, false));
         assert!(!super::campfire_smoke_enabled(true, true));
+        assert_eq!(super::campfire_smoke_count(0.0, 0), Some(2));
+        assert_eq!(super::campfire_smoke_count(0.109, 1), Some(3));
+        assert_eq!(super::campfire_smoke_count(0.11, 1), None);
+        assert!(super::campfire_food_smoke_enabled(0.199));
+        assert!(!super::campfire_food_smoke_enabled(0.2));
+    }
+
+    #[test]
+    fn campfire_override_tick_uses_native_gravity_without_base_friction() {
+        let frame = super::AtlasRegion {
+            u_min: 0.0,
+            v_min: 0.0,
+            u_max: 1.0,
+            v_max: 1.0,
+            pixel_rect: [0; 4],
+            sprite: 0,
+            opaque: false,
+            translucent: true,
+            alpha_counts: [0; 3],
+        };
+        let frames = [frame; 8];
+        let mut particle = super::Particle::campfire_smoke(
+            dvec3(0.0, 5.0, 0.0),
+            false,
+            &frames,
+            &mut fastrand::Rng::with_seed(7),
+        );
+        particle.vel = dvec3(0.02, 0.1, -0.03);
+        particle.gravity = 3.0e-6;
+        particle.friction = 0.98;
+        assert!(particle.tick(&ChunkStore::new(2), &frames, &frames, &[frame; 16],));
+        assert!((particle.vel.x - 0.02).abs() <= 0.0002);
+        assert!((particle.vel.z + 0.03).abs() <= 0.0002);
+        assert!((particle.vel.y - (0.1 - 3.0e-6)).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn campfire_food_smoke_uses_native_slot_rotation_and_generic_smoke_species() {
+        use azalea_core::position::BlockPos;
+
+        let pos = BlockPos::new(10, 20, -4);
+        let south = super::campfire_slot_smoke_pos(pos, "south", 0);
+        assert_eq!(south, dvec3(10.1875, 20.5, -3.8125));
+        assert_eq!(
+            super::campfire_slot_smoke_pos(pos, "west", 0),
+            super::campfire_slot_smoke_pos(pos, "south", 1)
+        );
+        assert_eq!(
+            super::campfire_slot_smoke_pos(pos, "north", 0),
+            super::campfire_slot_smoke_pos(pos, "south", 2)
+        );
+        assert_eq!(
+            super::campfire_slot_smoke_pos(pos, "east", 0),
+            super::campfire_slot_smoke_pos(pos, "south", 3)
+        );
+        use std::sync::Arc;
+
+        use crate::renderer::chunk::atlas::AtlasUVMap;
+        use crate::renderer::chunk::mesher::Colormap;
+
+        let colors = Arc::new(Colormap::test_empty());
+        let mut store = super::ParticleStore::new(
+            AtlasUVMap::test_empty(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        for _ in 0..4 {
+            store.add_campfire_food_smoke(south, dvec3(10.5, 20.5, -3.5));
+        }
+        assert_eq!(store.pending.len(), 4);
+        assert!(
+            store
+                .pending
+                .iter()
+                .all(|particle| matches!(particle.kind, super::Kind::Smoke))
+        );
+    }
+
+    #[test]
+    fn campfire_species_keep_native_sprite_lifetime_and_alpha() {
+        let frames = std::array::from_fn(|i| AtlasRegion {
+            u_min: i as f32,
+            v_min: i as f32,
+            u_max: i as f32 + 1.0,
+            v_max: i as f32 + 1.0,
+            pixel_rect: [0; 4],
+            sprite: i as u16,
+            opaque: false,
+            translucent: true,
+            alpha_counts: [0; 3],
+        });
+        let mut cosy_rng = fastrand::Rng::with_seed(1);
+        let mut signal_rng = fastrand::Rng::with_seed(1);
+        let cosy = Particle::campfire_smoke(dvec3(0.0, 1.0, 0.0), false, &frames, &mut cosy_rng);
+        let signal = Particle::campfire_smoke(dvec3(0.0, 1.0, 0.0), true, &frames, &mut signal_rng);
+        assert!(matches!(cosy.kind, super::Kind::CampfireCosySmoke));
+        assert!(matches!(signal.kind, super::Kind::CampfireSignalSmoke));
+        assert!(frames.iter().any(|frame| frame.u_min == cosy.u0));
+        assert!(frames.iter().any(|frame| frame.u_min == signal.u0));
+        assert!((80..130).contains(&cosy.lifetime));
+        assert!((280..330).contains(&signal.lifetime));
+        assert_eq!(cosy.alpha, 0.9);
+        assert_eq!(signal.alpha, 0.95);
+        assert!((0.3..=0.6).contains(&cosy.size));
+        assert!((0.3..=0.6).contains(&signal.size));
+        assert_eq!(cosy.gravity, 3.0e-6);
+        assert_eq!(cosy.friction, 0.98);
+        assert_eq!(super::CAMPFIRE_COSY_SMOKE_SPRITES.len(), 8);
+        assert_eq!(super::CAMPFIRE_SIGNAL_SMOKE_SPRITES.len(), 8);
+        assert_eq!(
+            super::CAMPFIRE_COSY_SMOKE_SPRITES,
+            super::CAMPFIRE_SIGNAL_SMOKE_SPRITES
+        );
+        assert!(cosy.kind.translucent());
+        assert!(signal.kind.translucent());
     }
 
     #[test]
@@ -2198,6 +2579,41 @@ mod tests {
             }),
         );
         assert_eq!(draws, 16);
+    }
+
+    #[test]
+    fn store_mode_change_affects_the_next_filtered_spawn() {
+        use std::sync::Arc;
+
+        use crate::renderer::chunk::atlas::AtlasUVMap;
+        use crate::renderer::chunk::mesher::Colormap;
+
+        let colors = Arc::new(Colormap::test_empty());
+        let mut store = super::ParticleStore::new(
+            AtlasUVMap::test_empty(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        store.set_mode(super::ParticleMode::Minimal);
+        assert!(!store.accepts_normal_spawn(false, &mut || 1));
+        store.set_mode(super::ParticleMode::All);
+        assert!(store.accepts_normal_spawn(false, &mut || 1));
+    }
+
+    #[test]
+    fn campfire_always_visible_spawns_bypass_the_selected_status() {
+        use std::sync::Arc;
+
+        use crate::renderer::chunk::atlas::AtlasUVMap;
+        use crate::renderer::chunk::mesher::Colormap;
+
+        let uv = AtlasUVMap::test_empty();
+        let colors = Arc::new(Colormap::test_empty());
+        let mut store = super::ParticleStore::new(uv, colors.clone(), colors.clone(), colors);
+        store.set_mode(super::ParticleMode::Minimal);
+        store.add_campfire_smoke(dvec3(0.0, 0.0, 0.0), false);
+        assert_eq!(store.pending.len(), 1);
     }
 
     #[test]
@@ -2918,6 +3334,96 @@ mod tests {
     }
 
     #[test]
+    fn particle_mode_roundtrips_and_invalid_values_default_all() {
+        for (value, mode) in [
+            (0, super::ParticleMode::All),
+            (1, super::ParticleMode::Decreased),
+            (2, super::ParticleMode::Minimal),
+        ] {
+            assert_eq!(super::ParticleMode::from_u8(value), mode);
+            assert_eq!(super::ParticleMode::from_u8(value).to_u8(), value);
+        }
+        assert_eq!(
+            super::ParticleMode::from_u8(u8::MAX),
+            super::ParticleMode::All
+        );
+    }
+
+    #[test]
+    fn native_status_filter_respects_sampling_bypass_and_distance() {
+        use super::{ParticleMode as Mode, accept_particle};
+        let mut rolls = [0, 1, 2].into_iter();
+        assert!(accept_particle(
+            Mode::All,
+            false,
+            false,
+            1024.0,
+            &mut || rolls.next().unwrap()
+        ));
+        assert!(!accept_particle(
+            Mode::All,
+            false,
+            false,
+            1024.01,
+            &mut || 1
+        ));
+        assert!(!accept_particle(
+            Mode::Minimal,
+            false,
+            false,
+            0.0,
+            &mut || 1
+        ));
+        // Decreased keeps two of each three deterministic rolls.
+        assert!(accept_particle(
+            Mode::Decreased,
+            false,
+            false,
+            0.0,
+            &mut || 1
+        ));
+        assert!(accept_particle(
+            Mode::Decreased,
+            false,
+            false,
+            0.0,
+            &mut || 2
+        ));
+        assert!(!accept_particle(
+            Mode::Decreased,
+            false,
+            false,
+            0.0,
+            &mut || 0
+        ));
+        // Override/long-distance bypasses both native distance culling and status.
+        assert!(accept_particle(
+            Mode::Minimal,
+            true,
+            false,
+            4096.0,
+            &mut || 0
+        ));
+        // addAlwaysVisibleParticle grants the native 10% Minimal fallback to Decreased.
+        let mut rolls = [0, 1].into_iter();
+        assert!(accept_particle(
+            Mode::Minimal,
+            false,
+            true,
+            0.0,
+            &mut || rolls.next().unwrap()
+        ));
+        let mut rolls = [1].into_iter();
+        assert!(!accept_particle(
+            Mode::Minimal,
+            false,
+            true,
+            0.0,
+            &mut || rolls.next().unwrap()
+        ));
+    }
+
+    #[test]
     fn server_particle_count_keeps_negative_distinct_from_directional_zero() {
         assert_eq!(packet_particle_count(-1), None);
         assert_eq!(packet_particle_count(0), Some(0));
@@ -2933,6 +3439,10 @@ mod tests {
         assert!(matches!(Kind::from_id(30), Some(Kind::Explosion)));
         assert!(matches!(Kind::from_id(66), Some(Kind::Poof)));
         assert!(matches!(Kind::from_id(69), Some(Kind::Smoke)));
+        assert!(matches!(Kind::from_id(70), Some(Kind::CampfireCosySmoke)));
+        assert!(matches!(Kind::from_id(71), Some(Kind::CampfireSignalSmoke)));
+        assert!(Kind::CampfireCosySmoke.override_limiter());
+        assert!(Kind::CampfireSignalSmoke.override_limiter());
         assert!(matches!(Kind::from_id(75), Some(Kind::Totem)));
         assert!(matches!(Kind::from_id(21), Some(Kind::Dust))); // RGB + scale decoded separately.
         assert!(matches!(Kind::from_id(1), Some(Kind::Block))); // Block carries a block-state ID.

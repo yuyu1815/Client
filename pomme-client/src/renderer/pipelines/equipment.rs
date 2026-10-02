@@ -194,6 +194,30 @@ mod tests {
     }
 
     #[test]
+    fn native_cape_predicate_uses_each_custom_assets_layer_list() {
+        let temp = std::env::temp_dir().join(format!("equipment-cape-{}", uuid::Uuid::new_v4()));
+        let path = temp.join("assets/custom/equipment/cape.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let definition = |layers: &str| format!(r#"{{"layers":{{{layers}}}}}"#);
+        std::fs::write(
+            &path,
+            definition(
+                r#""wings":[{"texture":"custom:wings"}],"humanoid":[{"texture":"custom:body"}]"#,
+            ),
+        )
+        .unwrap();
+        let resolve = |kind| resolve_equipment_layers(&temp, &None, None, "custom:cape", kind);
+        assert!(resolve("wings").is_some());
+        assert!(resolve("humanoid").is_some());
+        assert!(resolve("unknown").is_none());
+
+        std::fs::write(&path, definition(r#""other":[{"texture":"custom:other"}]"#)).unwrap();
+        assert!(resolve("wings").is_none());
+        assert!(resolve("humanoid").is_none());
+        std::fs::remove_dir_all(&temp).unwrap();
+    }
+
+    #[test]
     fn frame_resolver_uses_pack_override_and_observes_reload_paths() {
         let temp = std::env::temp_dir().join(format!("equipment-pack-{}", uuid::Uuid::new_v4()));
         let jar = temp.join("jar");

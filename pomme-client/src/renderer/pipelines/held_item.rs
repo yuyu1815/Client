@@ -110,12 +110,13 @@ impl HeldItemPipeline {
         swing_progress: f32,
         inverse_height: f32,
         use_anim: Option<UseAnim>,
-        left_hand: bool,
+        off_hand: bool,
+        main_hand_right: bool,
         item: &HeldItemInfo,
         meshes: &ItemEntityPipeline,
         bob: Mat4,
     ) {
-        let selected_name = selected_item_model_name(&item.name, use_anim, left_hand);
+        let selected_name = selected_item_model_name(&item.name, use_anim, off_hand);
         let selected_name = if meshes.mesh_handle(selected_name).is_some() {
             selected_name
         } else {
@@ -134,24 +135,25 @@ impl HeldItemPipeline {
         let uniform = CameraUniform::with_view_proj(view_projection);
         self.shared.update_camera(frame, &uniform);
 
-        let resolver = if left_hand {
+        let physical_left = physical_left_hand(main_hand_right, off_hand);
+        let resolver = if physical_left {
             &self.left_display
         } else {
             &self.display
         };
-        let display_default = default_first_person(item.has_3d_model, left_hand);
-        let display = if item.name == "shield" && shield_blocking_for_hand(use_anim, left_hand) {
+        let display_default = default_first_person(item.has_3d_model, physical_left);
+        let display = if item.name == "shield" && shield_blocking_for_hand(use_anim, off_hand) {
             resolver.resolve_model_path("minecraft:item/shield_blocking", display_default)
         } else {
             resolver.resolve(&item.name, display_default)
         };
-        let arm = match use_anim.filter(|anim| anim.left_hand == left_hand) {
-            Some(anim) if anim.bow => bow_item_matrix(anim, inverse_height),
+        let arm = match use_anim.filter(|anim| anim.left_hand == off_hand) {
+            Some(anim) if anim.bow => bow_item_matrix(anim, physical_left, inverse_height),
             Some(anim) if anim.shield_blocking => {
-                first_person_item_matrix(swing_progress, left_hand, inverse_height)
+                first_person_item_matrix(swing_progress, physical_left, inverse_height)
             }
-            Some(anim) => eat_item_matrix(anim, inverse_height),
-            None => first_person_item_matrix(swing_progress, left_hand, inverse_height),
+            Some(anim) => eat_item_matrix(anim, physical_left, inverse_height),
+            None => first_person_item_matrix(swing_progress, physical_left, inverse_height),
         };
         // build_item_mesh stores vertices centered at the origin; ItemTransform's
         // final -0.5 translation applies to vanilla's uncentered [0, 1] vertices.
@@ -292,8 +294,12 @@ impl HeldItemPipeline {
 }
 
 /// CPU model selection shared by the draw path and headless interaction tests.
-fn shield_blocking_for_hand(use_anim: Option<UseAnim>, left_hand: bool) -> bool {
-    use_anim.is_some_and(|anim| anim.shield_blocking && anim.left_hand == left_hand)
+fn shield_blocking_for_hand(use_anim: Option<UseAnim>, off_hand: bool) -> bool {
+    use_anim.is_some_and(|anim| anim.shield_blocking && anim.left_hand == off_hand)
+}
+
+fn physical_left_hand(main_hand_right: bool, off_hand: bool) -> bool {
+    off_hand == main_hand_right
 }
 
 pub(crate) fn selected_item_model_name(
@@ -342,12 +348,12 @@ fn first_person_item_matrix(swing_progress: f32, left_hand: bool, inverse_height
 
 // Vanilla ItemInHandRenderer BOW branch (26.2): fixed bow pose plus the
 // 20-tick quadratic draw power, applied after the ordinary arm transform.
-fn bow_item_matrix(anim: UseAnim, inverse_height: f32) -> Mat4 {
+fn bow_item_matrix(anim: UseAnim, left_hand: bool, inverse_height: f32) -> Mat4 {
     let time_held = anim.duration - anim.curr_usage_time;
     let mut power = time_held / 20.0;
     power = ((power * power + power * 2.0) / 3.0).min(1.0);
-    let invert = if anim.left_hand { -1.0 } else { 1.0 };
-    first_person_item_matrix(0.0, anim.left_hand, inverse_height)
+    let invert = if left_hand { -1.0 } else { 1.0 };
+    first_person_item_matrix(0.0, left_hand, inverse_height)
         * Mat4::from_translation(Vec3::new(invert * -0.2785682, 0.18344387, 0.15731531))
         * Mat4::from_rotation_x((-13.935_f32).to_radians())
         * Mat4::from_rotation_y((invert * 35.3_f32).to_radians())
@@ -359,9 +365,9 @@ fn bow_item_matrix(anim: UseAnim, inverse_height: f32) -> Mat4 {
 
 // Vanilla ItemInHandRenderer: applyEatTransform then applyItemArmTransform
 // (EAT/DRINK skip the usual swing pre-transform).
-fn eat_item_matrix(anim: UseAnim, inverse_height: f32) -> Mat4 {
+fn eat_item_matrix(anim: UseAnim, left_hand: bool, inverse_height: f32) -> Mat4 {
     let scaled = anim.curr_usage_time / anim.duration;
-    let invert = if anim.left_hand { -1.0 } else { 1.0 };
+    let invert = if left_hand { -1.0 } else { 1.0 };
     // The chew bob runs after the first 20% of the eat, oscillating every 4
     // ticks; the jiggle shoves the item into the mouth over the last bite.
     let bob = if scaled < 0.8 {
@@ -473,10 +479,10 @@ mod tests {
             bow: true,
             shield_blocking: false,
         };
-        let idle = bow_item_matrix(anim(0.0, false), 0.0);
-        let early = bow_item_matrix(anim(10.0, false), 0.0);
-        let full = bow_item_matrix(anim(20.0, false), 0.0);
-        let left = bow_item_matrix(anim(20.0, true), 0.0);
+        let idle = bow_item_matrix(anim(0.0, false), false, 0.0);
+        let early = bow_item_matrix(anim(10.0, false), false, 0.0);
+        let full = bow_item_matrix(anim(20.0, false), false, 0.0);
+        let left = bow_item_matrix(anim(20.0, true), true, 0.0);
         let base_right = first_person_item_matrix(0.0, false, 0.0);
 
         assert!(idle.abs_diff_eq(
@@ -498,6 +504,26 @@ mod tests {
         assert!((full.transform_vector3(stretch_axis).length() - 1.2).abs() < 1e-5);
         assert!(!full.abs_diff_eq(base_right, 1e-3));
         assert!((left.w_axis.x + full.w_axis.x).abs() < 1e-6);
+    }
+
+    #[test]
+    fn main_offhand_logical_slots_map_to_physical_sides_without_swapping_stacks() {
+        for main_hand_right in [false, true] {
+            assert_eq!(
+                physical_left_hand(main_hand_right, false),
+                main_hand_right == false
+            );
+            assert_eq!(physical_left_hand(main_hand_right, true), main_hand_right);
+        }
+        let logical_anim = UseAnim {
+            curr_usage_time: 1.0,
+            duration: 72_000.0,
+            left_hand: true,
+            bow: false,
+            shield_blocking: true,
+        };
+        assert!(shield_blocking_for_hand(Some(logical_anim), true));
+        assert!(!shield_blocking_for_hand(Some(logical_anim), false));
     }
 
     #[test]
@@ -538,11 +564,11 @@ mod tests {
                     bow: false,
                     shield_blocking: false,
                 };
-                assert!(eat_item_matrix(anim, inverse).abs_diff_eq(idle, 1e-6));
+                assert!(eat_item_matrix(anim, left_hand, inverse).abs_diff_eq(idle, 1e-6));
                 let lower = Mat4::from_translation(Vec3::new(0.0, -inverse * 0.6, 0.0));
                 assert!(
-                    bow_item_matrix(anim, inverse)
-                        .abs_diff_eq(lower * bow_item_matrix(anim, 0.0), 1e-6)
+                    bow_item_matrix(anim, left_hand, inverse)
+                        .abs_diff_eq(lower * bow_item_matrix(anim, left_hand, 0.0), 1e-6)
                 );
                 assert!(
                     first_person_item_matrix(0.5, left_hand, inverse)

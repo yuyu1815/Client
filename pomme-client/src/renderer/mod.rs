@@ -557,7 +557,7 @@ impl Renderer {
             render_finished_per_image.push(ctx.device.create_semaphore(&sem_info, None)?);
         }
 
-        let entity_renderer = EntityRenderer::new(
+        let mut entity_renderer = EntityRenderer::new(
             &ctx.device,
             ctx.graphics_queue,
             ctx.command_pool,
@@ -566,6 +566,7 @@ impl Renderer {
             jar_assets_dir,
             asset_index,
         );
+        entity_renderer.set_equipment_pack_dirs(&activation_pack_dirs);
 
         let christmas_chests = pipelines::block_entity::is_christmas();
         let block_entity_pipeline = BlockEntityPipeline::new(
@@ -1960,6 +1961,14 @@ impl Renderer {
         packs: &crate::resource_pack::ResourcePackManager,
     ) {
         self.ctx.device.wait_idle().unwrap();
+        self.entity_renderer
+            .clear_equipment_textures(&self.ctx.device, &self.ctx.allocator);
+        self.entity_renderer.set_equipment_pack_dirs(
+            &packs
+                .active_pack_dirs()
+                .map(Path::to_path_buf)
+                .collect::<Vec<_>>(),
+        );
         self.item_entity_pipeline
             .clear_head_textures(&self.ctx.device, &self.ctx.allocator);
         self.activation_pack_dirs = packs.active_pack_dirs().map(Path::to_path_buf).collect();
@@ -2707,6 +2716,21 @@ impl Renderer {
                 // Only the entity-model path uses this cull; chunk/BE paths stay unchanged.
                 let entity_view_scale =
                     entity_view_scale(*render_distance, *entity_distance_percent);
+                for info in entities.iter().filter(|info| {
+                    info.entity_kind == azalea_registry::builtin::EntityKind::HappyGhast
+                }) {
+                    for layer in &info.happy_ghast_equipment_layers {
+                        self.entity_renderer.ensure_equipment_texture(
+                            &self.ctx.device,
+                            self.ctx.graphics_queue,
+                            self.ctx.command_pool,
+                            &self.ctx.allocator,
+                            &self.jar_assets_dir,
+                            &self.asset_index,
+                            &layer.texture_key,
+                        );
+                    }
+                }
                 let pass_start = benchmark_timing.then(std::time::Instant::now);
                 let (entity_pose_ms, entity_pose_count) = self.entity_renderer.draw(
                     cmd,
