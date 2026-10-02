@@ -329,6 +329,9 @@ pub struct LivingEntity {
     pub has_chest: bool,
     /// Saddle equipment slot occupied (`SetEquipment`); gates the jump bar.
     pub saddled: bool,
+    /// Latest server equipment updates, including the native body slot.
+    pub equipment:
+        HashMap<azalea_inventory::components::EquipmentSlot, azalea_inventory::ItemStack>,
     /// Local AbstractHorse.onPlayerJump charge, consumed on the next grounded
     /// tick.
     pub horse_jump_pending_scale: f32,
@@ -498,6 +501,7 @@ impl LivingEntity {
             prev_mouth_anim: 0.0,
             has_chest: false,
             saddled: false,
+            equipment: HashMap::new(),
             horse_jump_pending_scale: 0.0,
             velocity: DVec3::ZERO,
             is_in_water: false,
@@ -2106,10 +2110,25 @@ impl EntityStore {
             azalea_inventory::ItemStack,
         )>,
     ) {
-        if let Some(vehicle) = self.vehicles.get_mut(&id)
-            && vehicle.kind == Some(EntityKind::ArmorStand)
-        {
-            vehicle.armor_stand_equipment.extend(slots);
+        for (slot, item) in slots {
+            let equipped = item.is_present();
+            if let Some(entity) = self.living.get_mut(&id) {
+                if equipped {
+                    entity.equipment.insert(slot, item.clone());
+                } else {
+                    entity.equipment.remove(&slot);
+                }
+                if slot == azalea_inventory::components::EquipmentSlot::Saddle {
+                    entity.saddled = equipped;
+                }
+            }
+            if let Some(vehicle) = self.vehicles.get_mut(&id) {
+                if equipped {
+                    vehicle.armor_stand_equipment.insert(slot, item);
+                } else {
+                    vehicle.armor_stand_equipment.remove(&slot);
+                }
+            }
         }
     }
 
@@ -4206,15 +4225,75 @@ mod tests {
         let mut slots = slots;
         slots[0].1 = helmet.clone();
         store.set_armor_stand_equipment(1, slots);
-        assert_eq!(store.vehicles[&1].armor_stand_equipment.len(), 6);
+        assert_eq!(store.vehicles[&1].armor_stand_equipment.len(), 1);
         assert_eq!(
             store.vehicles[&1].armor_stand_equipment
                 [&azalea_inventory::components::EquipmentSlot::Mainhand],
             helmet
         );
+        use azalea_inventory::components::EquipmentSlot::{Body, Saddle};
+        let harness = azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData::new(
+            azalea_registry::builtin::ItemKind::DiamondHelmet,
+            1,
+        ));
+        store
+            .set_armor_stand_equipment(1, vec![(Body, harness.clone()), (Saddle, harness.clone())]);
+        assert_eq!(store.vehicles[&1].armor_stand_equipment[&Body], harness);
+        store.set_armor_stand_equipment(1, vec![(Body, azalea_inventory::ItemStack::Empty)]);
+        assert!(!store.vehicles[&1].armor_stand_equipment.contains_key(&Body));
         store.remove_entity(1);
         assert!(!store.vehicles.contains_key(&1));
         assert!(store.living.is_empty());
+    }
+
+    #[test]
+    fn living_equipment_updates_keep_native_body_and_saddle_slots_and_clear_tombstones() {
+        use azalea_inventory::components::EquipmentSlot as Slot;
+        let mut store = EntityStore::new();
+        store.spawn_living(
+            1,
+            EntityKind::HappyGhast,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        let stack = azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData::new(
+            azalea_registry::builtin::ItemKind::DiamondHelmet,
+            1,
+        ));
+        let slots = [
+            Slot::Mainhand,
+            Slot::Offhand,
+            Slot::Feet,
+            Slot::Legs,
+            Slot::Chest,
+            Slot::Head,
+            Slot::Body,
+            Slot::Saddle,
+        ];
+        store.set_armor_stand_equipment(
+            1,
+            slots
+                .into_iter()
+                .map(|slot| (slot, azalea_inventory::ItemStack::Empty))
+                .collect(),
+        );
+        store.set_armor_stand_equipment(
+            1,
+            vec![(Slot::Body, stack.clone()), (Slot::Saddle, stack.clone())],
+        );
+        assert_eq!(store.living[&1].equipment.len(), 2);
+        assert!(store.living[&1].saddled);
+        store.set_armor_stand_equipment(
+            1,
+            vec![
+                (Slot::Body, azalea_inventory::ItemStack::Empty),
+                (Slot::Saddle, azalea_inventory::ItemStack::Empty),
+            ],
+        );
+        assert!(store.living[&1].equipment.is_empty());
+        assert!(!store.living[&1].saddled);
     }
 
     #[test]

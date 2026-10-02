@@ -5100,7 +5100,7 @@ pub fn update_game(
                     variant_index: extras.variant_index,
                     armor_stand_flags: 0,
                     armor_stand_pose: [[0.0; 3]; 6],
-                    armor_stand_equipment: std::collections::HashMap::new(),
+                    armor_stand_equipment: e.equipment.clone(),
                     overlay_tints: extras.overlay_tints,
                     overlay_variants: extras.overlay_variants,
                     is_unhappy: e.unhappy_counter > 0,
