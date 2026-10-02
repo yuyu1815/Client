@@ -9,9 +9,10 @@ use azalea_protocol::packets::ProtocolPacket;
 use azalea_protocol::packets::game::{ClientboundGamePacket as C, ServerboundGamePacket as S};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-const QUEUE: usize = 128;
-const LIMIT: u64 = 64 * 1024 * 1024;
-const MAX_ROW: usize = 512 * 1024;
+const QUEUE: usize = 16;
+const LIMIT: u64 = 1024 * 1024 * 1024;
+const MAX_RAW: usize = 8 * 1024 * 1024;
+const MAX_ROW: usize = 12 * 1024 * 1024;
 #[derive(Default)]
 pub struct Recorder {
     active: AtomicBool,
@@ -197,6 +198,45 @@ impl Recorder {
                 data
             })
         });
+    }
+
+    /// Record the exact uncompressed plaintext frame (VarInt id + payload).
+    /// LOGIN/authentication frames and transport encryption keys are never
+    /// passed here.
+    pub fn raw_packet(&self, direction: &'static str, protocol_state: &'static str, frame: &[u8]) {
+        if !self.active() {
+            return;
+        }
+        if frame.len() > MAX_RAW {
+            self.record(direction, "packet_raw_omitted_oversize", || {
+                Some(json!({"raw_length":frame.len(),"limit":MAX_RAW}))
+            });
+            return;
+        }
+        let mut cursor = std::io::Cursor::new(frame);
+        let native_id = <u32 as azalea_buf::AzBufVar>::azalea_read_var(&mut cursor).ok();
+        let protocol = crate::version::session_protocol();
+        let direction_enum = if direction == "inbound" {
+            pomme_protocol::Direction::Clientbound
+        } else {
+            pomme_protocol::Direction::Serverbound
+        };
+        let phase = if protocol_state == "configuration" {
+            pomme_protocol::Phase::Configuration
+        } else {
+            pomme_protocol::Phase::Game
+        };
+        let packet_type = native_id.and_then(|id| {
+            pomme_protocol::PacketTable::for_protocol(protocol)?
+                .name_of(phase, direction_enum, id)
+                .map(str::to_owned)
+        });
+        self.record(direction, "packet_raw", || Some(json!({
+            "protocol_state":protocol_state,"wire_protocol":protocol,"connection_epoch":1,
+            "packet_trace_id":null,"native_id":native_id,"packet_type":packet_type,
+            "raw_length":frame.len(),"payload_base64":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, frame),
+            "capture_point":"wire_plaintext","payload_layout":"id_plus_payload"
+        })));
     }
 }
 // Called only by the blocking writer, never by a UI/game-thread producer.
@@ -624,6 +664,30 @@ mod tests {
         assert_eq!(second["data"]["before"], 0);
         assert_eq!(second["data"]["predicted"], stone.id());
         assert_eq!(second["data"]["action_sequence"], 8);
+    }
+
+    #[test]
+    fn raw_packet_keeps_cookie_bytes_and_malformed_ids_safely() {
+        use base64::Engine;
+        let (r, rx) = ready(4);
+        // Native configuration cookie_response ID 5 plus arbitrary cookie bytes.
+        let frame = [5, 3, 0xff, 0x00, 0x42];
+        r.raw_packet("inbound", "configuration", &frame);
+        let row = rx.try_recv().unwrap();
+        assert_eq!(row["stage"], "packet_raw");
+        assert_eq!(row["data"]["protocol_state"], "configuration");
+        assert_eq!(row["data"]["capture_point"], "wire_plaintext");
+        assert_eq!(row["data"]["native_id"], 5);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(row["data"]["payload_base64"].as_str().unwrap())
+                .unwrap(),
+            frame
+        );
+        r.raw_packet("inbound", "play", &[0x80, 0x80, 0x80, 0x80, 0x80]);
+        let malformed = rx.try_recv().unwrap();
+        assert!(malformed["data"]["native_id"].is_null());
+        assert_eq!(malformed["data"]["raw_length"], 5);
     }
 
     #[test]

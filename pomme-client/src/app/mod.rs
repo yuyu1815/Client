@@ -165,6 +165,9 @@ fn transfer_connect_args(
         core.user.access_token.clone(),
         core.view_distance(),
         core.menu.chat_options,
+        core.menu.main_hand_right(),
+        core.menu.particle_status(),
+        core.menu.skin_parts_mask(),
         transfer,
     )
 }
@@ -175,6 +178,9 @@ fn transfer_connect_args_for(
     access_token: Option<String>,
     view_distance: u8,
     chat_options: crate::ui::chat::ChatOptions,
+    main_hand_right: bool,
+    particle_mode: crate::particle::ParticleMode,
+    skin_parts_mask: u8,
     transfer: crate::net::ServerTransfer,
 ) -> Result<ConnectArgs, String> {
     let (server, _) = transfer_server_address(&transfer.host, transfer.port)?;
@@ -189,6 +195,9 @@ fn transfer_connect_args_for(
         access_token,
         view_distance,
         chat_options,
+        main_hand_right,
+        particle_mode,
+        skin_parts_mask: skin_parts_mask & 0x7f,
         server_cookies: transfer.cookies,
     })
 }
@@ -398,6 +407,9 @@ impl ApplicationHandler for App {
                             access_token: self.core.user.access_token.clone(),
                             view_distance: self.core.view_distance(),
                             chat_options: self.core.menu.chat_options,
+                            main_hand_right: self.core.menu.main_hand_right(),
+                            particle_mode: self.core.menu.particle_status(),
+                            skin_parts_mask: self.core.menu.skin_parts_mask(),
                             server_cookies: Default::default(),
                         },
                     );
@@ -408,6 +420,9 @@ impl ApplicationHandler for App {
                         self.core.menu.render_distance,
                         false,
                         self.core.menu.chat_options,
+                        self.core.menu.main_hand_right(),
+                        self.core.menu.particle_status(),
+                        self.core.menu.skin_parts_mask(),
                     );
 
                     let gfx = Gfx {
@@ -956,6 +971,9 @@ impl ApplicationHandler for App {
                                     core.menu.render_distance,
                                     world.is_some(),
                                     core.menu.chat_options,
+                                    core.menu.main_hand_right(),
+                                    core.menu.particle_status(),
+                                    core.menu.skin_parts_mask(),
                                 );
                                 core.apply_cursor_grab(&gfx.window, None);
 
@@ -1055,6 +1073,9 @@ impl ApplicationHandler for App {
                                             core.menu.render_distance,
                                             false,
                                             core.menu.chat_options,
+                                            core.menu.main_hand_right(),
+                                            core.menu.particle_status(),
+                                            core.menu.skin_parts_mask(),
                                         );
                                         AppPhase::Connecting {
                                             gfx,
@@ -1257,6 +1278,9 @@ impl ApplicationHandler for App {
                                             core.menu.render_distance,
                                             false,
                                             core.menu.chat_options,
+                                            core.menu.main_hand_right(),
+                                            core.menu.particle_status(),
+                                            core.menu.skin_parts_mask(),
                                         );
                                         AppPhase::Connecting {
                                             gfx,
@@ -1445,6 +1469,9 @@ mod transfer_tests {
             Some("secret-token".into()),
             12,
             crate::ui::chat::ChatOptions::default(),
+            false,
+            crate::particle::ParticleMode::All,
+            0b101,
             crate::net::ServerTransfer {
                 host: "example.org".into(),
                 port: 25566,
@@ -1462,6 +1489,8 @@ mod transfer_tests {
         assert_eq!(args.uuid, uuid);
         assert_eq!(args.access_token.as_deref(), Some("secret-token"));
         assert_eq!(args.view_distance, 12);
+        assert!(!args.main_hand_right);
+        assert_eq!(args.skin_parts_mask, 0b101);
         assert_eq!(args.server_cookies, cookies);
     }
 }

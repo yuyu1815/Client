@@ -109,6 +109,11 @@ pub enum NetworkEvent {
     /// The `minecraft:dialog` registry with its tags, sent with `Registries`
     /// and again whenever a tag update replaces the dialog tags.
     DialogRegistry(Arc<crate::ui::server_dialog::DialogRegistry>),
+    LoomPatterns(Arc<crate::ui::loom::PatternData>),
+    LoomPatternTags(
+        std::collections::HashMap<String, Vec<usize>>,
+        std::collections::HashMap<String, std::collections::HashSet<u32>>,
+    ),
     BiomeColors {
         colors: std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
     },
@@ -621,6 +626,14 @@ pub enum NetworkEvent {
         index: u8,
         value: MetaValue,
     },
+    EntityProjectileItem {
+        id: i32,
+        stack: azalea_inventory::ItemStackData,
+    },
+    EntityMainArm {
+        id: i32,
+        right: bool,
+    },
     EntityPose {
         id: i32,
         pose: crate::entity::EntityPose,
@@ -775,6 +788,9 @@ pub enum NetworkEvent {
 pub fn client_information(
     view_distance: u8,
     chat_options: crate::ui::chat::ChatOptions,
+    main_hand_right: bool,
+    particle_mode: crate::particle::ParticleMode,
+    skin_parts_mask: u8,
 ) -> azalea_protocol::common::client_information::ClientInformation {
     use azalea_entity::HumanoidArm;
     use azalea_protocol::common::client_information::*;
@@ -789,18 +805,26 @@ pub fn client_information(
         chat_visibility,
         chat_colors: chat_options.colors,
         model_customization: ModelCustomization {
-            cape: true,
-            jacket: true,
-            left_sleeve: true,
-            right_sleeve: true,
-            left_pants: true,
-            right_pants: true,
-            hat: true,
+            cape: skin_parts_mask & 1 != 0,
+            jacket: skin_parts_mask & 2 != 0,
+            left_sleeve: skin_parts_mask & 4 != 0,
+            right_sleeve: skin_parts_mask & 8 != 0,
+            left_pants: skin_parts_mask & 16 != 0,
+            right_pants: skin_parts_mask & 32 != 0,
+            hat: skin_parts_mask & 64 != 0,
         },
-        main_hand: HumanoidArm::Right,
+        main_hand: if main_hand_right {
+            HumanoidArm::Right
+        } else {
+            HumanoidArm::Left
+        },
         text_filtering_enabled: false,
         allows_listing: true,
-        particle_status: ParticleStatus::All,
+        particle_status: match particle_mode {
+            crate::particle::ParticleMode::All => ParticleStatus::All,
+            crate::particle::ParticleMode::Decreased => ParticleStatus::Decreased,
+            crate::particle::ParticleMode::Minimal => ParticleStatus::Minimal,
+        },
     }
 }
 
@@ -810,4 +834,70 @@ pub fn brand_payload() -> Vec<u8> {
     let mut out = Vec::new();
     azalea_core::delta::AzBuf::azalea_write(&String::from("pomme"), &mut out).unwrap();
     out
+}
+
+#[cfg(test)]
+mod main_hand_tests {
+    #[test]
+    fn client_information_reports_selected_main_arm() {
+        use azalea_entity::HumanoidArm;
+        let right = super::client_information(
+            8,
+            crate::ui::chat::ChatOptions::default(),
+            true,
+            crate::particle::ParticleMode::All,
+            127,
+        );
+        let left = super::client_information(
+            8,
+            crate::ui::chat::ChatOptions::default(),
+            false,
+            crate::particle::ParticleMode::All,
+            127,
+        );
+        assert_eq!(right.main_hand, HumanoidArm::Right);
+        assert_eq!(left.main_hand, HumanoidArm::Left);
+        for mask in 0..=u8::MAX {
+            let info = super::client_information(
+                8,
+                crate::ui::chat::ChatOptions::default(),
+                true,
+                crate::particle::ParticleMode::All,
+                mask,
+            );
+            let expected = mask & 0x7f;
+            let parts = info.model_customization;
+            assert_eq!(parts.cape, expected & 1 != 0);
+            assert_eq!(parts.jacket, expected & 2 != 0);
+            assert_eq!(parts.left_sleeve, expected & 4 != 0);
+            assert_eq!(parts.right_sleeve, expected & 8 != 0);
+            assert_eq!(parts.left_pants, expected & 16 != 0);
+            assert_eq!(parts.right_pants, expected & 32 != 0);
+            assert_eq!(parts.hat, expected & 64 != 0);
+        }
+        use azalea_protocol::common::client_information::ParticleStatus;
+        for (mode, expected) in [
+            (crate::particle::ParticleMode::All, ParticleStatus::All),
+            (
+                crate::particle::ParticleMode::Decreased,
+                ParticleStatus::Decreased,
+            ),
+            (
+                crate::particle::ParticleMode::Minimal,
+                ParticleStatus::Minimal,
+            ),
+        ] {
+            assert_eq!(
+                super::client_information(
+                    8,
+                    crate::ui::chat::ChatOptions::default(),
+                    true,
+                    mode,
+                    127
+                )
+                .particle_status,
+                expected
+            );
+        }
+    }
 }

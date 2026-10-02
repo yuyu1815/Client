@@ -116,6 +116,8 @@ pub struct OpenContainer {
     pub merchant: Option<crate::ui::merchant::MerchantModel>,
     /// This menu's latest server state id, echoed in container clicks.
     pub state_id: u32,
+    pub loom_scroll: usize,
+    pub stonecutter_scroll: usize,
 }
 
 impl OpenContainer {
@@ -309,6 +311,7 @@ pub struct GameState {
     pub code_of_conduct_scroll: usize,
     pub pending_server_transfer: Option<crate::net::ServerTransfer>,
     pub dialog_registry: Arc<crate::ui::server_dialog::DialogRegistry>,
+    pub loom_patterns: Arc<crate::ui::loom::PatternData>,
     /// The connection is in the configuration phase (the join, or a
     /// reconfiguration), where dialogs can't run commands.
     pub configuring: bool,
@@ -388,6 +391,11 @@ pub struct GameState {
     pub last_render_distance: u32,
     pub last_chat_visibility: crate::ui::chat::ChatVisibilitySetting,
     pub last_chat_colors: bool,
+    pub last_main_hand_right: bool,
+    pub last_particle_mode: crate::particle::ParticleMode,
+    /// Local desired model parts; remote Avatar masks live on their entities.
+    pub local_skin_parts_mask: u8,
+    pub last_skin_parts_mask: u8,
     pub last_locale: &'static str,
     pub server_render_distance: u32,
     pub server_simulation_distance: u32,
@@ -641,6 +649,9 @@ impl GameState {
         render_distance: u32,
         singleplayer: bool,
         chat_options: crate::ui::chat::ChatOptions,
+        main_hand_right: bool,
+        particle_mode: crate::particle::ParticleMode,
+        skin_parts_mask: u8,
     ) -> Self {
         let biome_climate = Arc::new(HashMap::new());
         // The dimension's shade table arrives with `DimensionInfo`, which
@@ -670,18 +681,24 @@ impl GameState {
             last_render_distance: render_distance,
             last_chat_visibility: chat_options.visibility,
             last_chat_colors: chat_options.colors,
+            last_main_hand_right: main_hand_right,
+            last_particle_mode: particle_mode,
+            local_skin_parts_mask: skin_parts_mask & 0x7f,
+            last_skin_parts_mask: skin_parts_mask & 0x7f,
             last_locale: crate::lang::locale(),
             server_render_distance: 0,
             server_simulation_distance: 0,
             item_entity_store: ItemEntityStore::new(),
             particle_store: {
                 let (grass, foliage, dry_foliage) = mesh_dispatcher.colormaps();
-                crate::particle::ParticleStore::new(
+                let mut store = crate::particle::ParticleStore::new(
                     renderer.atlas_uv_map().clone(),
                     grass,
                     foliage,
                     dry_foliage,
-                )
+                );
+                store.set_mode(particle_mode);
+                store
             },
             item_activation: None,
             block_entity_anim: BlockEntityAnimStore::default(),
@@ -732,6 +749,7 @@ impl GameState {
             code_of_conduct_scroll: 0,
             pending_server_transfer: None,
             dialog_registry: Arc::default(),
+            loom_patterns: Arc::default(),
             configuring: true,
             command_tree: None,
             tab_list: TabList::new(),
@@ -1302,21 +1320,29 @@ impl GameState {
         &self,
         render_distance: u32,
         chat_options: crate::ui::chat::ChatOptions,
+        main_hand_right: bool,
+        particle_mode: crate::particle::ParticleMode,
+        skin_parts_mask: u8,
     ) -> bool {
-        client_information_changed(
-            (
-                self.last_render_distance,
-                self.last_chat_visibility,
-                self.last_chat_colors,
-                self.last_locale,
-            ),
-            (
-                render_distance,
-                chat_options.visibility,
-                chat_options.colors,
-                crate::lang::locale(),
-            ),
-        )
+        self.last_skin_parts_mask != skin_parts_mask & 0x7f
+            || client_information_changed(
+                (
+                    self.last_render_distance,
+                    self.last_chat_visibility,
+                    self.last_chat_colors,
+                    self.last_main_hand_right,
+                    self.last_particle_mode,
+                    self.last_locale,
+                ),
+                (
+                    render_distance,
+                    chat_options.visibility,
+                    chat_options.colors,
+                    main_hand_right,
+                    particle_mode,
+                    crate::lang::locale(),
+                ),
+            )
     }
 
     pub fn sync_client_information(
@@ -1324,6 +1350,9 @@ impl GameState {
         connection: &ConnectionHandle,
         render_distance: u32,
         chat_options: crate::ui::chat::ChatOptions,
+        main_hand_right: bool,
+        particle_mode: crate::particle::ParticleMode,
+        skin_parts_mask: u8,
     ) {
         let render_changed = self.last_render_distance != render_distance;
         let chat_changed = self.last_chat_visibility != chat_options.visibility
@@ -1331,6 +1360,11 @@ impl GameState {
         self.last_render_distance = render_distance;
         self.last_chat_visibility = chat_options.visibility;
         self.last_chat_colors = chat_options.colors;
+        self.last_main_hand_right = main_hand_right;
+        self.last_particle_mode = particle_mode;
+        self.local_skin_parts_mask = skin_parts_mask & 0x7f;
+        self.last_skin_parts_mask = skin_parts_mask & 0x7f;
+        self.particle_store.set_mode(particle_mode);
         self.last_locale = crate::lang::locale();
         if render_changed {
             tracing::info!("Render distance changed to {render_distance}");
@@ -1350,6 +1384,9 @@ impl GameState {
                     client_information: crate::net::client_information(
                         render_distance as u8,
                         chat_options,
+                        main_hand_right,
+                        particle_mode,
+                        skin_parts_mask,
                     ),
                 },
             ));
@@ -2742,7 +2779,14 @@ fn apply_render_distance(
     rd: u32,
 ) {
     core.menu.render_distance = rd;
-    game.sync_client_information(connection, rd, core.menu.chat_options);
+    game.sync_client_information(
+        connection,
+        rd,
+        core.menu.chat_options,
+        core.menu.main_hand_right(),
+        core.menu.particle_status(),
+        core.menu.skin_parts_mask(),
+    );
 }
 
 /// Vanilla HopperScreen: 176x133 texture, five inputs and 36 player slots.
@@ -3017,6 +3061,7 @@ pub fn update_game(
     // align with `raw_dt`, which measures the previous frame's full duration.
     let frame_start = std::time::Instant::now();
     let prev_phases = game.last_update_phases;
+    game.particle_store.set_mode(core.menu.particle_status());
 
     // Position the audio listener at the player's head and push current
     // volumes before draining sound packets this frame.
@@ -3150,14 +3195,40 @@ pub fn update_game(
         game.item_entity_store.tick(&game.chunk_store);
         game.entity_store
             .tick_projectile_displays(&game.chunk_store);
-        // Campfire smoke is client `animateTick` ambience, separate from
-        // LevelParticles packets. Use the existing particle store so packet
-        // particles and local particles share lifetime/render handling.
+        let book_players: Vec<_> = std::iter::once(*game.player.position)
+            .chain(
+                game.entity_store
+                    .living
+                    .values()
+                    .filter_map(|entity| entity.player_uuid.map(|_| *entity.position)),
+            )
+            .collect();
+        for (pos, entity) in &mut game.chunk_store.block_entities {
+            entity.tick_bell_swing();
+            if let Some(book) = entity.book.as_mut() {
+                let center =
+                    glam::DVec3::new(pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5);
+                let nearest = book_players
+                    .iter()
+                    .copied()
+                    .filter(|player| player.distance_squared(center) <= 9.0)
+                    .min_by(|a, b| {
+                        a.distance_squared(center)
+                            .total_cmp(&b.distance_squared(center))
+                    });
+                book.tick(*pos, nearest);
+            }
+        }
+        // Client CampfireBlockEntity::particleTick: 11% chance per fixed tick,
+        // then 2-3 native cosy/signal particles (server packet path stays separate).
+        let mut campfire_rng = fastrand::Rng::new();
+        let mut campfire_food_rng = fastrand::Rng::new();
+        let mut campfire_food_smoke = Vec::new();
         let campfire_smoke: Vec<_> = game
             .chunk_store
             .block_entities
-            .keys()
-            .filter_map(|pos| {
+            .iter()
+            .filter_map(|(pos, entity)| {
                 let state = game.chunk_store.get_block_state(pos.x, pos.y, pos.z);
                 let id = crate::world::block::block_id(state);
                 if !matches!(id, "campfire" | "soul_campfire") {
@@ -3166,18 +3237,45 @@ pub fn update_game(
                 let props = crate::world::block::block_properties(state);
                 let lit = props.get("lit") == Some("true");
                 let waterlogged = props.get("waterlogged") == Some("true");
+                if !crate::particle::campfire_smoke_enabled(lit, waterlogged) {
+                    return None;
+                }
                 let signal = props.get("signal_fire") == Some("true");
-                (crate::particle::campfire_smoke_enabled(lit, waterlogged)
-                    && fastrand::u32(..10) == 0)
-                    .then_some(glam::dvec3(
-                        pos.x as f64 + 0.5,
-                        pos.y as f64 + if signal { 2.0 } else { 0.8 },
-                        pos.z as f64 + 0.5,
-                    ))
+                let facing = props.get("facing").unwrap_or("north");
+                for (slot, occupied) in entity.campfire_slots.iter().copied().enumerate() {
+                    if occupied
+                        && crate::particle::campfire_food_smoke_enabled(campfire_food_rng.f32())
+                    {
+                        campfire_food_smoke
+                            .push(crate::particle::campfire_slot_smoke_pos(*pos, facing, slot));
+                    }
+                }
+                let chance = campfire_rng.f32();
+                if chance >= 0.11 {
+                    return None;
+                }
+                let count = crate::particle::campfire_smoke_count(chance, campfire_rng.u32(0..2))?;
+                Some((*pos, signal, count))
             })
             .collect();
-        for pos in campfire_smoke {
-            game.particle_store.add_campfire_smoke(pos);
+        let particle_camera = gfx.renderer.camera_render_position();
+        for pos in campfire_food_smoke {
+            for _ in 0..4 {
+                game.particle_store
+                    .add_campfire_food_smoke(pos, particle_camera);
+            }
+        }
+        for (pos, signal, count) in campfire_smoke {
+            for _ in 0..count {
+                let signed_offset =
+                    || fastrand::f64() / 3.0 * if fastrand::bool() { 1.0 } else { -1.0 };
+                let spawn = glam::dvec3(
+                    pos.x as f64 + 0.5 + signed_offset(),
+                    pos.y as f64 + fastrand::f64() + fastrand::f64(),
+                    pos.z as f64 + 0.5 + signed_offset(),
+                );
+                game.particle_store.add_campfire_smoke(spawn, signal);
+            }
         }
         let chunks = &game.chunk_store;
         let player = &game.player;
@@ -4528,6 +4626,47 @@ pub fn update_game(
                     beacon_effect_selection = result.effects;
                     result.container
                 }
+                ContainerScreen::Special(
+                    crate::ui::special_container::SpecialMenu::Stonecutter,
+                ) => crate::ui::stonecutter::build(
+                    &mut elements,
+                    sw,
+                    sh,
+                    core.input.cursor_pos(),
+                    &input,
+                    &container.slots,
+                    &container.data,
+                    &container.data_received,
+                    game.recipe_book.updates.as_ref(),
+                    &game.recipe_book.item_tags,
+                    &mut container.stonecutter_scroll,
+                    &container.title,
+                    &game.cursor_item,
+                    &mut game.inv_drag,
+                    &mut game.inv_last_click,
+                    gs,
+                    game.advanced_item_tooltips,
+                ),
+                ContainerScreen::Special(crate::ui::special_container::SpecialMenu::Loom) => {
+                    crate::ui::loom::build(
+                        &mut elements,
+                        sw,
+                        sh,
+                        core.input.cursor_pos(),
+                        &input,
+                        &container.slots,
+                        &container.data,
+                        &container.data_received,
+                        &game.loom_patterns,
+                        &mut container.loom_scroll,
+                        &container.title,
+                        &game.cursor_item,
+                        &mut game.inv_drag,
+                        &mut game.inv_last_click,
+                        gs,
+                        game.advanced_item_tooltips,
+                    )
+                }
                 ContainerScreen::Special(menu) => crate::ui::special_container::build(
                     &mut elements,
                     sw,
@@ -4918,6 +5057,9 @@ pub fn update_game(
                     ),
                     is_baby: e.is_baby,
                     is_crouching: e.is_crouching,
+                    shulker_peek: e.prev_shulker_peek_amount
+                        + (e.shulker_peek_amount - e.prev_shulker_peek_amount) * partial_tick,
+                    shulker_attach_face: e.shulker_attach_face,
                     is_sleeping: e.sleeping_pos.is_some(),
                     sleeping_yaw_deg: sleep_orientation.map(|(angle, _, _)| angle),
                     walk_anim_pos: e.walk_pos(partial_tick),
@@ -4957,6 +5099,9 @@ pub fn update_game(
                     feeding_anim: extras.feeding_anim,
                     animate_tail: extras.animate_tail,
                     is_in_water: e.is_in_water,
+                    is_on_ground: e.on_ground,
+                    boat_left_paddle: false,
+                    boat_right_paddle: false,
                     tentacle_angle: extras.tentacle_angle,
                     bat_resting: e.bat_resting,
                     bat_elapsed_secs: extras.bat_elapsed_secs,
@@ -4964,6 +5109,7 @@ pub fn update_game(
                     golem_offer_flower_ticks: extras.golem_offer_flower_ticks,
                     body_transform: extras.body_transform,
                     age_in_ticks: e.age_in_ticks as f32 + partial_tick,
+                    animation_phase: extras.animation_phase,
                     attack_time: e.swing_progress(partial_tick),
                     vex_charging: extras.vex_charging,
                     skip_cull: false,
@@ -5066,6 +5212,13 @@ pub fn update_game(
 
     if !benchmark_running {
         entity_renders.extend(arrow_render_infos(&game.entity_store, partial_tick));
+        entity_renders.extend(projectile_render_infos(&game.entity_store, partial_tick));
+        entity_renders.extend(boat_render_infos(
+            &game.entity_store,
+            partial_tick,
+            game.tick_count as f32 + partial_tick,
+        ));
+        entity_renders.extend(minecart_render_infos(&game.entity_store, partial_tick));
     }
 
     let sky_partial_tick = if core.server_tick_frozen {
@@ -5213,17 +5366,28 @@ pub fn update_game(
                 let player_head_profile_source = matches!(id, "player_head" | "player_wall_head")
                     .then(|| be.player_head_profile_source.clone())
                     .flatten();
+                let pot_wobble = be.pot_wobble.and_then(|(started, positive)| {
+                    let duration = crate::world::block_entity::pot_wobble_duration(positive) as f32;
+                    let progress =
+                        (game.tick_count.saturating_sub(started) as f32 + partial_tick) / duration;
+                    (progress <= 1.0).then_some((progress, positive))
+                });
                 Some(crate::renderer::BlockEntityRenderInfo {
                     pos: *pos,
                     player_head_profile_source,
+                    bell_swing: be.bell_swing,
+                    decorated_pot_sherds: be.decorated_pot_sherds.clone(),
+                    pot_wobble,
                     kind: be.kind,
                     statue_pose: statue.map(|(pose, _)| pose),
+                    book: be.book.as_ref().map(|book| book.interpolated(partial_tick)),
                     banner_phase: (pos.x as i64 * 7
                         + pos.y as i64 * 9
                         + pos.z as i64 * 13
                         + game.tick_count as i64)
                         .rem_euclid(100) as f32
                         + partial_tick,
+                    bell_partial: partial_tick,
                     yaw,
                     variant,
                     lid_open,
@@ -5298,6 +5462,7 @@ pub fn update_game(
             held_item(game.player.inventory.offhand()),
         )
     };
+    let main_hand_right = core.menu.main_hand_right();
     game.last_update_phases.scene_extract_ms = scene_extract_first_ms
         + scene_extract_second_start
             .map(|start| start.elapsed().as_secs_f32() * 1000.0)
@@ -5369,6 +5534,7 @@ pub fn update_game(
         &gfx.window,
         hide_cursor,
         show_hand,
+        main_hand_right,
         elements,
         hand_animation,
         use_anim,
@@ -5525,11 +5691,20 @@ pub fn update_game(
     }
 
     if game.options_from_game {
-        if game.client_information_changed(core.menu.render_distance, core.menu.chat_options) {
+        if game.client_information_changed(
+            core.menu.render_distance,
+            core.menu.chat_options,
+            core.menu.main_hand_right(),
+            core.menu.particle_status(),
+            core.menu.skin_parts_mask(),
+        ) {
             game.sync_client_information(
                 connection,
                 core.menu.render_distance,
                 core.menu.chat_options,
+                core.menu.main_hand_right(),
+                core.menu.particle_status(),
+                core.menu.skin_parts_mask(),
             );
         }
         if !core.menu.is_options_screen() {
@@ -5544,6 +5719,148 @@ pub fn update_game(
 }
 
 /// Extract visual interpolation independently from packet movement baselines.
+fn boat_render_infos(
+    store: &crate::entity::EntityStore,
+    partial_tick: f32,
+    age_in_ticks: f32,
+) -> Vec<EntityRenderInfo> {
+    use azalea_registry::builtin::EntityKind;
+
+    store
+        .vehicles
+        .values()
+        .filter_map(|vehicle| {
+            let kind = vehicle.kind?;
+            if !matches!(
+                kind,
+                EntityKind::AcaciaBoat
+                    | EntityKind::AcaciaChestBoat
+                    | EntityKind::BambooRaft
+                    | EntityKind::BambooChestRaft
+                    | EntityKind::BirchBoat
+                    | EntityKind::BirchChestBoat
+                    | EntityKind::CherryBoat
+                    | EntityKind::CherryChestBoat
+                    | EntityKind::DarkOakBoat
+                    | EntityKind::DarkOakChestBoat
+                    | EntityKind::JungleBoat
+                    | EntityKind::JungleChestBoat
+                    | EntityKind::MangroveBoat
+                    | EntityKind::MangroveChestBoat
+                    | EntityKind::OakBoat
+                    | EntityKind::OakChestBoat
+                    | EntityKind::PaleOakBoat
+                    | EntityKind::PaleOakChestBoat
+                    | EntityKind::SpruceBoat
+                    | EntityKind::SpruceChestBoat
+            ) {
+                return None;
+            }
+            if vehicle.shared_flags & 0x20 != 0 {
+                return None;
+            }
+            let yaw = match (vehicle.prev_look_dir, vehicle.look_dir) {
+                (Some(prev), Some(current)) => {
+                    lerp_angle(prev.y_rot_deg(), current.y_rot_deg(), partial_tick)
+                }
+                (_, Some(current)) => current.y_rot_deg(),
+                _ => 0.0,
+            };
+            let position = vehicle
+                .prev_position
+                .lerp(vehicle.position, partial_tick as f64);
+            let hurt = vehicle.boat_hurt_time as f32;
+            let rock = if hurt > 0.0 {
+                (hurt.sin() * hurt * vehicle.boat_damage / 10.0
+                    * vehicle.boat_hurt_direction as f32)
+                    .to_radians()
+            } else {
+                0.0
+            };
+            Some(EntityRenderInfo {
+                position,
+                simulation_position: vehicle.position,
+                body_y_rot_deg: yaw,
+                entity_kind: kind,
+                boat_left_paddle: vehicle.boat_left_paddle,
+                boat_right_paddle: vehicle.boat_right_paddle,
+                age_in_ticks,
+                body_transform: Some(
+                    glam::Mat4::from_translation(glam::Vec3::Y * 0.375)
+                        * glam::Mat4::from_rotation_x(rock),
+                ),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+fn minecart_render_infos(
+    store: &crate::entity::EntityStore,
+    partial_tick: f32,
+) -> Vec<EntityRenderInfo> {
+    use azalea_registry::builtin::EntityKind;
+
+    store
+        .vehicles
+        .values()
+        .filter_map(|vehicle| {
+            let kind = vehicle.kind?;
+            if !matches!(
+                kind,
+                EntityKind::Minecart
+                    | EntityKind::ChestMinecart
+                    | EntityKind::FurnaceMinecart
+                    | EntityKind::TntMinecart
+                    | EntityKind::HopperMinecart
+                    | EntityKind::CommandBlockMinecart
+                    | EntityKind::SpawnerMinecart
+            ) || vehicle.shared_flags & 0x20 != 0
+            {
+                return None;
+            }
+            let yaw = match (vehicle.prev_look_dir, vehicle.look_dir) {
+                (Some(prev), Some(current)) => {
+                    lerp_angle(prev.y_rot_deg(), current.y_rot_deg(), partial_tick)
+                }
+                (_, Some(current)) => current.y_rot_deg(),
+                _ => 0.0,
+            };
+            let pitch = match (vehicle.prev_look_dir, vehicle.look_dir) {
+                (Some(prev), Some(current)) => {
+                    prev.x_rot_deg() + (current.x_rot_deg() - prev.x_rot_deg()) * partial_tick
+                }
+                (_, Some(current)) => current.x_rot_deg(),
+                _ => 0.0,
+            };
+            let position = vehicle
+                .prev_position
+                .lerp(vehicle.position, partial_tick as f64);
+            let hurt = (vehicle.boat_hurt_time as f32 - partial_tick).max(0.0);
+            let rocking = if hurt > 0.0 {
+                (hurt.sin() * hurt * vehicle.boat_damage.max(0.0) / 10.0
+                    * vehicle.boat_hurt_direction as f32)
+                    .to_radians()
+            } else {
+                0.0
+            };
+            Some(EntityRenderInfo {
+                position,
+                simulation_position: vehicle.position,
+                body_y_rot_deg: yaw,
+                entity_kind: kind,
+                head_x_rot_deg: pitch,
+                body_transform: Some(
+                    glam::Mat4::from_translation(glam::Vec3::Y * 0.375)
+                        * glam::Mat4::from_rotation_z(-pitch.to_radians())
+                        * glam::Mat4::from_rotation_x(rocking),
+                ),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
 fn arrow_render_infos(
     store: &crate::entity::EntityStore,
     partial_tick: f32,
@@ -5552,7 +5869,9 @@ fn arrow_render_infos(
         .vehicles
         .values()
         .filter_map(|entity| {
-            let variant_index = match entity.kind? {
+            let kind = entity.kind?;
+            let variant_index = match kind {
+                EntityKind::Arrow if entity.arrow_effect_color > 0 => 2,
                 EntityKind::Arrow => 0,
                 EntityKind::SpectralArrow => 1,
                 _ => return None,
@@ -5580,6 +5899,17 @@ fn arrow_render_infos(
                 head_x_rot_deg: pitch,
                 entity_kind: EntityKind::Arrow,
                 variant_index,
+                base_tint: if kind == EntityKind::Arrow && entity.arrow_effect_color > 0 {
+                    let rgb = entity.arrow_effect_color as u32;
+                    [
+                        ((rgb >> 16) & 0xff) as f32 / 255.0,
+                        ((rgb >> 8) & 0xff) as f32 / 255.0,
+                        (rgb & 0xff) as f32 / 255.0,
+                        1.0,
+                    ]
+                } else {
+                    [1.0; 4]
+                },
                 ..Default::default()
             })
         })
@@ -6020,10 +6350,55 @@ fn item_frame_item_matrix(base: glam::Mat4, rotation: i32, fixed: glam::Mat4) ->
         * fixed
 }
 
-const SNOWBALL_ITEM_NAME: &str = "snowball";
+fn projectile_render_infos(
+    store: &crate::entity::EntityStore,
+    partial_tick: f32,
+) -> Vec<EntityRenderInfo> {
+    use azalea_registry::builtin::EntityKind as K;
+    store
+        .vehicles
+        .values()
+        .filter_map(|vehicle| {
+            let kind = vehicle.kind?;
+            if vehicle.shared_flags & 0x20 != 0
+                || !matches!(
+                    kind,
+                    K::Trident | K::ShulkerBullet | K::WitherSkull | K::LlamaSpit
+                )
+            {
+                return None;
+            }
+            let look = vehicle.look_dir?;
+            let position = vehicle
+                .prev_position
+                .lerp(vehicle.position, partial_tick as f64);
+            let (yaw, pitch) = if vehicle.velocity.length_squared() > 1.0e-8 {
+                (
+                    vehicle.velocity.x.atan2(vehicle.velocity.z).to_degrees() as f32,
+                    vehicle
+                        .velocity
+                        .y
+                        .atan2(vehicle.velocity.x.hypot(vehicle.velocity.z))
+                        .to_degrees() as f32,
+                )
+            } else {
+                (look.y_rot_deg(), look.x_rot_deg())
+            };
+            Some(EntityRenderInfo {
+                position,
+                simulation_position: vehicle.position,
+                entity_kind: kind,
+                body_y_rot_deg: yaw,
+                head_x_rot_deg: pitch,
+                variant_index: u32::from(kind == K::WitherSkull && vehicle.projectile_dangerous),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
 
-/// 26.2 ThrownItemRenderer: one camera-facing GROUND item at the
-/// interpolated display position, not a dropped-item cluster.
+/// 26.2 ThrownItemRenderer and SnowballRenderer: camera-facing GROUND item
+/// models at the interpolated display position, not dropped-item clusters.
 #[allow(clippy::too_many_arguments)]
 fn snowball_render_infos(
     entities: &crate::entity::EntityStore,
@@ -6034,16 +6409,12 @@ fn snowball_render_infos(
     view_scale: f32,
     camera_look: (f32, f32),
     frustum: &[[f32; 4]; 6],
-    ground_transform: Option<glam::Mat4>,
+    ground_transform: impl Fn(&str) -> Option<glam::Mat4>,
     nether_lighting: bool,
     light_at: impl Fn(Position) -> f32,
 ) -> Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo> {
     use crate::renderer::pipelines::item_entity::ItemRenderInfo;
 
-    // A missing baked mesh cannot be submitted by ItemEntityPipeline::draw.
-    let Some(ground_transform) = ground_transform else {
-        return Vec::new();
-    };
     let (yaw, pitch) = camera_look;
     let billboard = glam::Mat4::from_rotation_y((180.0 - yaw).to_radians())
         * glam::Mat4::from_rotation_x((-pitch).to_radians());
@@ -6051,9 +6422,40 @@ fn snowball_render_infos(
         .vehicles
         .values()
         .filter_map(|vehicle| {
-            if vehicle.kind != Some(azalea_registry::builtin::EntityKind::Snowball) {
+            if vehicle.shared_flags & 0x20 != 0 {
                 return None;
             }
+            let (default_item_name, scale, full_bright) = match vehicle.kind? {
+                azalea_registry::builtin::EntityKind::Snowball => ("snowball", 1.0, false),
+                azalea_registry::builtin::EntityKind::Egg => ("egg", 1.0, false),
+                azalea_registry::builtin::EntityKind::EnderPearl => ("ender_pearl", 1.0, false),
+                azalea_registry::builtin::EntityKind::ExperienceBottle => {
+                    ("experience_bottle", 1.0, false)
+                }
+                azalea_registry::builtin::EntityKind::Fireball => ("fire_charge", 3.0, true),
+                azalea_registry::builtin::EntityKind::LingeringPotion => {
+                    ("lingering_potion", 1.0, false)
+                }
+                azalea_registry::builtin::EntityKind::SmallFireball => ("fire_charge", 0.75, true),
+                azalea_registry::builtin::EntityKind::SplashPotion => ("splash_potion", 1.0, false),
+                _ => return None,
+            };
+            let item_name = match &vehicle.projectile_item {
+                azalea_inventory::ItemStack::Present(stack) if !stack.is_empty() => {
+                    crate::player::inventory::item_resource_name(stack.kind)
+                }
+                _ => default_item_name.to_owned(),
+            };
+            let ground_transform = ground_transform(&item_name)?;
+            let raw_dye_rgb = match &vehicle.projectile_item {
+                azalea_inventory::ItemStack::Present(stack) => stack
+                    .get_component::<azalea_inventory::components::DyedColor>()
+                    .map(|color| {
+                        let rgb = color.rgb;
+                        [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]
+                    }),
+                azalea_inventory::ItemStack::Empty => None,
+            };
             let pos = *vehicle
                 .projectile
                 .as_ref()
@@ -6071,13 +6473,18 @@ fn snowball_render_infos(
                 return None;
             }
             Some(ItemRenderInfo {
-                item_name: SNOWBALL_ITEM_NAME.to_owned(),
-                raw_dye_rgb: None,
+                item_name,
+                raw_dye_rgb,
                 player_head_profile_source: None,
                 model_matrix: glam::Mat4::from_translation((pos - anchor).as_vec3())
                     * billboard
+                    * glam::Mat4::from_scale(glam::Vec3::splat(scale))
                     * ground_transform,
-                light: light_at(pos.into()),
+                light: if full_bright {
+                    1.0
+                } else {
+                    light_at(pos.into())
+                },
                 nether_lighting,
                 entity_uuid: None,
                 invisible: false,
@@ -6238,11 +6645,8 @@ fn build_item_render_infos(
         );
     }
 
-    // Only Snowball currently maps to a thrown item. Do not infer other
-    // projectile item meshes (egg, etc.) from entity kinds here.
-    let snowball_mesh = renderer
-        .item_mesh_info(SNOWBALL_ITEM_NAME)
-        .map(|_| dropped_item_geometry(renderer, SNOWBALL_ITEM_NAME).0);
+    // Thrown item billboards use the existing item mesh/atlas path, but not
+    // dropped-item bobbing, stack copies, or spin.
     infos.extend(snowball_render_infos(
         entities,
         partial_tick,
@@ -6252,7 +6656,11 @@ fn build_item_render_infos(
         entity_view_scale,
         renderer.camera_effective_look_deg(),
         &renderer.frustum_planes(),
-        snowball_mesh,
+        |name| {
+            renderer
+                .item_mesh_info(name)
+                .map(|_| dropped_item_geometry(renderer, name).0)
+        },
         nether_lighting,
         |pos| get_entity_light(chunk_store, pos),
     ));
@@ -6410,6 +6818,7 @@ struct EntityExtras {
     golem_attack_ticks: f32,
     golem_offer_flower_ticks: u32,
     vex_charging: bool,
+    animation_phase: f32,
 }
 
 /// Only the first overlay slot visible, untinted.
@@ -6465,6 +6874,7 @@ fn entity_extras(
         },
         EntityKind::Phantom => EntityExtras {
             overlay_tints: SLOT0_TINTS,
+            animation_phase: (entity_id * 3) as f32,
             body_transform: Some(glam::Mat4::from_scale(glam::Vec3::splat(
                 1.0 + e.phantom_size as f32 * 0.15,
             ))),
@@ -6485,15 +6895,22 @@ fn entity_extras(
                 ..Default::default()
             }
         }
-        EntityKind::Wither => EntityExtras {
-            variant_index: u32::from(e.wither_invulnerability > 0),
-            overlay_tints: if e.wither_invulnerability > 0 {
-                SLOT0_TINTS
-            } else {
-                [None; MAX_OVERLAYS]
-            },
-            ..Default::default()
-        },
+        EntityKind::Wither => {
+            let invulnerable = (e.wither_invulnerability as f32 - alpha).max(0.0);
+            let tick = invulnerable.floor() as i32;
+            let flashing = tick > 0 && (tick > 80 || tick / 5 % 2 != 1);
+            let scale = 2.0 - invulnerable / 220.0 * 0.5;
+            EntityExtras {
+                variant_index: u32::from(flashing),
+                overlay_tints: if e.wither_invulnerability > 0 {
+                    SLOT0_TINTS
+                } else {
+                    [None; MAX_OVERLAYS]
+                },
+                body_transform: Some(glam::Mat4::from_scale(glam::Vec3::splat(scale))),
+                ..Default::default()
+            }
+        }
         EntityKind::Chicken => EntityExtras {
             variant_index: e.variant,
             flap: e.prev_flap.lerp(e.flap, alpha),
@@ -6921,8 +7338,22 @@ fn sheep_eat_scales(eat_tick: u8, prev_eat_tick: u8, alpha: f32) -> (f32, f32) {
 }
 
 fn client_information_changed(
-    last: (u32, crate::ui::chat::ChatVisibilitySetting, bool, &str),
-    current: (u32, crate::ui::chat::ChatVisibilitySetting, bool, &str),
+    last: (
+        u32,
+        crate::ui::chat::ChatVisibilitySetting,
+        bool,
+        bool,
+        crate::particle::ParticleMode,
+        &str,
+    ),
+    current: (
+        u32,
+        crate::ui::chat::ChatVisibilitySetting,
+        bool,
+        bool,
+        crate::particle::ParticleMode,
+        &str,
+    ),
 ) -> bool {
     last != current
 }
@@ -6930,15 +7361,95 @@ fn client_information_changed(
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_server_time, arrow_render_infos, block_entity_in_frustum,
+        advance_server_time, arrow_render_infos, block_entity_in_frustum, boat_render_infos,
         bump_loaded_content_generations, bump_section_generations, consecutive_section_runs,
         credits_may_advance, current_edit_section_runs, death_confirm_escape_allowed,
         finish_win_credits, finish_win_credits_if_allowed, has_red_overlay, is_win_game_event,
         item_frame_base_position, item_frame_base_rotation, limited_crafting_param,
-        mesh_result_is_stale, mesh_target_mask, section_bit, section_bits, server_tick_runs,
-        show_death_screen_param, sign_has_text, sign_text_in_range,
+        mesh_result_is_stale, mesh_target_mask, minecart_render_infos, section_bit, section_bits,
+        server_tick_runs, show_death_screen_param, sign_has_text, sign_text_in_range,
     };
     use crate::renderer::SkyState;
+
+    #[test]
+    fn all_twenty_boat_kinds_extract_from_nonliving_vehicle_store() {
+        use azalea_registry::builtin::EntityKind as K;
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::{LookDirection, Position};
+
+        let kinds = [
+            K::AcaciaBoat,
+            K::AcaciaChestBoat,
+            K::BambooRaft,
+            K::BambooChestRaft,
+            K::BirchBoat,
+            K::BirchChestBoat,
+            K::CherryBoat,
+            K::CherryChestBoat,
+            K::DarkOakBoat,
+            K::DarkOakChestBoat,
+            K::JungleBoat,
+            K::JungleChestBoat,
+            K::MangroveBoat,
+            K::MangroveChestBoat,
+            K::OakBoat,
+            K::OakChestBoat,
+            K::PaleOakBoat,
+            K::PaleOakChestBoat,
+            K::SpruceBoat,
+            K::SpruceChestBoat,
+        ];
+        let mut store = EntityStore::new();
+        for (id, kind) in kinds.into_iter().enumerate() {
+            store.set_vehicle_spawn_transform(
+                id as i32,
+                Position::new(id as f64, 64.0, -2.0),
+                glam::DVec3::ZERO,
+                LookDirection::new(135.0, 0.0),
+            );
+            store.set_vehicle_kind(id as i32, kind);
+        }
+        let draws = boat_render_infos(&store, 1.0, 0.5);
+        assert_eq!(draws.len(), 20);
+        assert!(store.living.is_empty(), "boats remain nonliving");
+        assert!(draws.iter().all(|info| info.body_y_rot_deg == 135.0));
+        assert!(draws.iter().all(|info| info.body_transform.is_some()));
+    }
+
+    #[test]
+    fn seven_minecart_kinds_extract_interpolated_draw_infos_from_nonliving_store() {
+        use azalea_registry::builtin::EntityKind as K;
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::{LookDirection, Position};
+
+        let kinds = [
+            K::Minecart,
+            K::ChestMinecart,
+            K::FurnaceMinecart,
+            K::TntMinecart,
+            K::HopperMinecart,
+            K::CommandBlockMinecart,
+            K::SpawnerMinecart,
+        ];
+        let mut store = EntityStore::new();
+        for (id, kind) in kinds.into_iter().enumerate() {
+            store.set_vehicle_spawn_transform(
+                id as i32,
+                Position::new(id as f64, 64.0, -4.0),
+                glam::DVec3::ZERO,
+                LookDirection::new(170.0, 12.0),
+            );
+            store.set_vehicle_kind(id as i32, kind);
+        }
+        let draws = minecart_render_infos(&store, 0.5);
+        assert_eq!(draws.len(), 7);
+        assert!(store.living.is_empty());
+        assert!(draws.iter().all(|info| info.body_y_rot_deg == 170.0));
+        assert!(draws.iter().all(|info| info.position.y == 64.0));
+        assert!(draws.iter().all(|info| info.body_transform.is_some()));
+    }
 
     #[test]
     fn pig_variant_store_value_reaches_renderer_extras() {
@@ -7048,21 +7559,78 @@ mod tests {
     #[test]
     fn client_information_diff_includes_locale_without_repeat_sends() {
         use crate::ui::chat::ChatVisibilitySetting;
-        let last = (12, ChatVisibilitySetting::Full, true, "en_us");
+        let last = (
+            12,
+            ChatVisibilitySetting::Full,
+            true,
+            true,
+            crate::particle::ParticleMode::All,
+            "en_us",
+        );
         assert!(!super::client_information_changed(last, last));
         assert!(super::client_information_changed(
             last,
-            (12, ChatVisibilitySetting::Full, true, "ja_jp")
+            (
+                12,
+                ChatVisibilitySetting::Full,
+                true,
+                true,
+                crate::particle::ParticleMode::All,
+                "ja_jp",
+            )
         ));
-        let updated = (12, ChatVisibilitySetting::Full, true, "ja_jp");
+        let updated = (
+            12,
+            ChatVisibilitySetting::Full,
+            true,
+            true,
+            crate::particle::ParticleMode::All,
+            "ja_jp",
+        );
         assert!(!super::client_information_changed(updated, updated));
         assert!(super::client_information_changed(
             updated,
-            (13, ChatVisibilitySetting::Full, true, "ja_jp")
+            (
+                13,
+                ChatVisibilitySetting::Full,
+                true,
+                true,
+                crate::particle::ParticleMode::All,
+                "ja_jp",
+            )
         ));
         assert!(super::client_information_changed(
             updated,
-            (12, ChatVisibilitySetting::Full, false, "ja_jp")
+            (
+                12,
+                ChatVisibilitySetting::Full,
+                false,
+                true,
+                crate::particle::ParticleMode::All,
+                "ja_jp",
+            )
+        ));
+        assert!(super::client_information_changed(
+            updated,
+            (
+                12,
+                ChatVisibilitySetting::Full,
+                true,
+                false,
+                crate::particle::ParticleMode::All,
+                "ja_jp",
+            )
+        ));
+        assert!(super::client_information_changed(
+            updated,
+            (
+                12,
+                ChatVisibilitySetting::Full,
+                true,
+                true,
+                crate::particle::ParticleMode::Minimal,
+                "ja_jp",
+            )
         ));
     }
 
@@ -7353,7 +7921,7 @@ mod tests {
             1.0,
             (0.0, 0.0),
             &[[0.0; 4]; 6],
-            Some(glam::Mat4::IDENTITY),
+            |_| Some(glam::Mat4::IDENTITY),
             false,
             |_| 1.0,
         );
@@ -7373,7 +7941,7 @@ mod tests {
                 1.0,
                 (0.0, 0.0),
                 &[[0.0; 4]; 6],
-                Some(glam::Mat4::IDENTITY),
+                |_| Some(glam::Mat4::IDENTITY),
                 false,
                 |_| 1.0,
             );
@@ -7486,7 +8054,7 @@ mod tests {
                     scale,
                     (0.0, 0.0),
                     planes,
-                    mesh,
+                    |_| mesh,
                     false,
                     |_| 0.7,
                 )
@@ -7572,7 +8140,7 @@ mod tests {
         // warm_item_meshes registers these exact names; mesh_info and draw use exact
         // keys.
         let warmed_keys: std::collections::HashSet<_> = registry.item_names().collect();
-        assert!(warmed_keys.contains(super::SNOWBALL_ITEM_NAME));
+        assert!(warmed_keys.contains("snowball"));
         assert!(!warmed_keys.contains("minecraft:snowball"));
 
         let mut store = EntityStore::new();
@@ -7592,7 +8160,7 @@ mod tests {
             1.0,
             (0.0, 0.0),
             &[[0.0; 4]; 6],
-            Some(glam::Mat4::IDENTITY),
+            |_| Some(glam::Mat4::IDENTITY),
             false,
             |_| 1.0,
         );

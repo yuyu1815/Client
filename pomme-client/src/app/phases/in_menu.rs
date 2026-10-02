@@ -22,6 +22,9 @@ fn connect_args(core: &AppCore, transport: Transport, username: String) -> Conne
         access_token: core.user.access_token.clone(),
         view_distance: core.view_distance(),
         chat_options: core.menu.chat_options,
+        main_hand_right: core.menu.main_hand_right(),
+        particle_mode: core.menu.particle_status(),
+        skin_parts_mask: core.menu.skin_parts_mask(),
         server_cookies: Default::default(),
     }
 }

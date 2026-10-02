@@ -30,6 +30,8 @@ pub enum MetaValue {
     Byte(u8),
     Float(f32),
     Long(i64),
+    OptionalBlockState(Option<u32>),
+    Direction(azalea_core::direction::Direction),
 }
 
 /// `AgeableMob` descendants on every supported version (Slime joined only
@@ -240,6 +242,10 @@ pub struct LivingEntity {
     /// bit.
     pub using_item: bool,
     pub using_offhand: bool,
+    /// Avatar DATA_PLAYER_MAIN_HAND; defaults right until its metadata arrives.
+    pub main_arm_right: bool,
+    /// Avatar DATA_PLAYER_MODE_CUSTOMISATION from remote entity metadata.
+    pub skin_parts_mask: Option<u8>,
     pub riptide_spin: bool,
     pub attributes: HashMap<String, f64>,
     pub effects: HashMap<u32, EntityEffect>,
@@ -258,6 +264,9 @@ pub struct LivingEntity {
     pub vex_charging: bool,
     pub phantom_size: i32,
     pub shulker_peek: u8,
+    pub shulker_peek_amount: f32,
+    pub prev_shulker_peek_amount: f32,
+    pub shulker_attach_face: azalea_core::direction::Direction,
     pub sulfur_cube_size: i32,
     pub wither_invulnerability: i32,
     /// Chicken wing-flap state (vanilla `Chicken.aiStep`): `flap` is the
@@ -416,6 +425,8 @@ impl LivingEntity {
             flags: EntityFlags::default(),
             using_item: false,
             using_offhand: false,
+            main_arm_right: true,
+            skin_parts_mask: None,
             riptide_spin: false,
             attributes: HashMap::new(),
             effects: HashMap::new(),
@@ -431,6 +442,9 @@ impl LivingEntity {
             vex_charging: false,
             phantom_size: 0,
             shulker_peek: 0,
+            shulker_peek_amount: 0.0,
+            prev_shulker_peek_amount: 0.0,
+            shulker_attach_face: azalea_core::direction::Direction::Down,
             sulfur_cube_size: 1,
             wither_invulnerability: 0,
             variant: if entity_type == EntityKind::Salmon {
@@ -1260,11 +1274,33 @@ pub struct VehicleState {
     /// FallingBlock this is a protocol block-state id, not a metadata index.
     pub spawn_data: Option<i32>,
     pub position: Position,
+    pub prev_position: Position,
     pub velocity: DVec3,
+    pub prev_look_dir: Option<LookDirection>,
     pub projectile: Option<ProjectileDisplay>,
+    /// Full synchronized stack for ThrownItem entities (26.2 metadata 8).
+    pub projectile_item: azalea_inventory::ItemStack,
+    /// WitherSkull dangerous/invulnerable metadata (index 8); Trident foil
+    /// (12).
+    pub projectile_dangerous: bool,
+    pub projectile_foil: bool,
+    /// Arrow metadata index 11: tipped-arrow color, default -1.
+    pub arrow_effect_color: i32,
     /// None until a real spawn transform arrives; SetPassengers may create
     /// placeholders.
     pub look_dir: Option<LookDirection>,
+    /// Shared entity flags (metadata 0); bit 5 is invisible.
+    pub shared_flags: u8,
+    /// AbstractBoat synchronized state (26.2 metadata 8..13).
+    pub boat_hurt_time: i32,
+    pub boat_hurt_direction: i32,
+    pub boat_damage: f32,
+    pub boat_left_paddle: bool,
+    pub boat_right_paddle: bool,
+    pub boat_bubble_time: i32,
+    /// AbstractMinecart metadata 11/12: optional registry state id + offset.
+    pub minecart_display_state: Option<u32>,
+    pub minecart_display_offset: i32,
     /// ItemFrame spawn data / metadata index 8; independent from entity yaw.
     pub item_frame_direction: Option<azalea_core::direction::Direction>,
     /// Full metadata index 9 stack, retained for component-backed item render.
@@ -1371,11 +1407,29 @@ impl EntityStore {
                 .living
                 .get(&vehicle_id)
                 .map_or(Position::default(), |e| e.position),
+            prev_position: self
+                .living
+                .get(&vehicle_id)
+                .map_or(Position::default(), |e| e.position),
             kind: None,
             spawn_data: None,
             velocity: DVec3::ZERO,
+            prev_look_dir: None,
             projectile: None,
+            projectile_item: azalea_inventory::ItemStack::Empty,
+            projectile_dangerous: false,
+            projectile_foil: false,
+            arrow_effect_color: -1,
             look_dir: None,
+            shared_flags: 0,
+            boat_hurt_time: 0,
+            boat_hurt_direction: 1,
+            boat_damage: 0.0,
+            boat_left_paddle: false,
+            boat_right_paddle: false,
+            boat_bubble_time: 0,
+            minecart_display_state: None,
+            minecart_display_offset: 6,
             item_frame_direction: None,
             item_frame_item: azalea_inventory::ItemStack::Empty,
             item_frame_rotation: 0,
@@ -1402,11 +1456,26 @@ impl EntityStore {
     pub fn set_vehicle_transform(&mut self, id: i32, position: Position, velocity: DVec3) {
         let state = self.vehicles.entry(id).or_insert(VehicleState {
             position,
+            prev_position: position,
             kind: None,
             spawn_data: None,
             velocity,
+            prev_look_dir: None,
             projectile: None,
+            projectile_item: azalea_inventory::ItemStack::Empty,
+            projectile_dangerous: false,
+            projectile_foil: false,
+            arrow_effect_color: -1,
             look_dir: None,
+            shared_flags: 0,
+            boat_hurt_time: 0,
+            boat_hurt_direction: 1,
+            boat_damage: 0.0,
+            boat_left_paddle: false,
+            boat_right_paddle: false,
+            boat_bubble_time: 0,
+            minecart_display_state: None,
+            minecart_display_offset: 6,
             item_frame_direction: None,
             item_frame_item: azalea_inventory::ItemStack::Empty,
             item_frame_rotation: 0,
@@ -1423,6 +1492,7 @@ impl EntityStore {
             text_display_billboard: 0,
             text_display_view_range: 1.0,
         });
+        state.prev_position = state.position;
         state.position = position;
         state.velocity = velocity;
         if let Some(display) = &mut state.projectile {
@@ -1452,15 +1522,105 @@ impl EntityStore {
         }
     }
 
+    pub fn set_projectile_item(&mut self, id: i32, stack: azalea_inventory::ItemStackData) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id) {
+            vehicle.projectile_item = azalea_inventory::ItemStack::Present(stack);
+        }
+    }
+
     pub fn set_vehicle_spawn_data(&mut self, id: i32, spawn_data: i32) {
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.spawn_data = Some(spawn_data);
         }
     }
 
+    pub fn apply_vehicle_metadata(&mut self, id: i32, index: u8, value: MetaValue) {
+        let Some(vehicle) = self.vehicles.get_mut(&id) else {
+            return;
+        };
+        match (vehicle.kind, index, value) {
+            (Some(EntityKind::WitherSkull), 8, MetaValue::Bool(v)) => {
+                vehicle.projectile_dangerous = v
+            }
+            (Some(EntityKind::Trident), 12, MetaValue::Bool(v)) => vehicle.projectile_foil = v,
+            (Some(EntityKind::Arrow), 11, MetaValue::Int(v)) => vehicle.arrow_effect_color = v,
+            _ => {}
+        }
+        if index == 0
+            && let MetaValue::Byte(flags) = value
+        {
+            vehicle.shared_flags = flags;
+        }
+        if matches!(
+            vehicle.kind,
+            Some(
+                EntityKind::Minecart
+                    | EntityKind::ChestMinecart
+                    | EntityKind::FurnaceMinecart
+                    | EntityKind::TntMinecart
+                    | EntityKind::HopperMinecart
+                    | EntityKind::CommandBlockMinecart
+                    | EntityKind::SpawnerMinecart
+            )
+        ) {
+            match (index, value) {
+                (8, MetaValue::Int(value)) => vehicle.boat_hurt_time = value,
+                (9, MetaValue::Int(value)) => vehicle.boat_hurt_direction = value,
+                (10, MetaValue::Float(value)) => vehicle.boat_damage = value,
+                (11, MetaValue::OptionalBlockState(state)) => {
+                    vehicle.minecart_display_state = state
+                }
+                (12, MetaValue::Int(offset)) => vehicle.minecart_display_offset = offset,
+                _ => {}
+            }
+            return;
+        }
+        if !matches!(
+            vehicle.kind,
+            Some(
+                EntityKind::AcaciaBoat
+                    | EntityKind::AcaciaChestBoat
+                    | EntityKind::BambooRaft
+                    | EntityKind::BambooChestRaft
+                    | EntityKind::BirchBoat
+                    | EntityKind::BirchChestBoat
+                    | EntityKind::CherryBoat
+                    | EntityKind::CherryChestBoat
+                    | EntityKind::DarkOakBoat
+                    | EntityKind::DarkOakChestBoat
+                    | EntityKind::JungleBoat
+                    | EntityKind::JungleChestBoat
+                    | EntityKind::MangroveBoat
+                    | EntityKind::MangroveChestBoat
+                    | EntityKind::OakBoat
+                    | EntityKind::OakChestBoat
+                    | EntityKind::PaleOakBoat
+                    | EntityKind::PaleOakChestBoat
+                    | EntityKind::SpruceBoat
+                    | EntityKind::SpruceChestBoat
+            )
+        ) {
+            return;
+        }
+        match (index, value) {
+            (8, MetaValue::Int(value)) => vehicle.boat_hurt_time = value,
+            (9, MetaValue::Int(value)) => vehicle.boat_hurt_direction = value,
+            (10, MetaValue::Float(value)) => vehicle.boat_damage = value,
+            (11, MetaValue::Bool(value)) => vehicle.boat_left_paddle = value,
+            (12, MetaValue::Bool(value)) => vehicle.boat_right_paddle = value,
+            (13, MetaValue::Int(value)) => vehicle.boat_bubble_time = value,
+            _ => {}
+        }
+    }
+
     pub fn set_vehicle_kind(&mut self, id: i32, kind: EntityKind) {
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.kind = Some(kind);
+            if kind == EntityKind::ChestMinecart {
+                vehicle.minecart_display_offset = 8;
+            } else if kind == EntityKind::HopperMinecart {
+                vehicle.minecart_display_offset = 1;
+            }
             vehicle.projectile = matches!(
                 kind,
                 EntityKind::Arrow | EntityKind::SpectralArrow | EntityKind::Snowball
@@ -1782,6 +1942,7 @@ impl EntityStore {
         if let Some(vehicle) = self.vehicles.get_mut(&id)
             && vehicle.look_dir.is_some()
         {
+            vehicle.prev_look_dir = vehicle.look_dir;
             vehicle.look_dir = Some(look_dir);
         }
     }
@@ -1796,6 +1957,7 @@ impl EntityStore {
         self.set_vehicle_transform(id, position, velocity);
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.look_dir = Some(look_dir);
+            vehicle.prev_look_dir = Some(look_dir);
         }
     }
 
@@ -1941,6 +2103,7 @@ impl EntityStore {
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
             // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
             (k, 15, Byte(f)) if k != EntityKind::Player => entity.aggressive = f & 0x04 != 0,
+            (EntityKind::Player, 16, Byte(mask)) => entity.skin_parts_mask = Some(mask & 0x7f),
             (k, 16, Bool(b)) if is_baby_kind(k) => entity.is_baby = b,
             // Skeleton: powder-snow stray conversion; drives the vanilla
             // `isShaking` body jitter.
@@ -1961,6 +2124,9 @@ impl EntityStore {
             (EntityKind::Ghast, 16, Bool(b)) => entity.ghast_charging = b,
             (EntityKind::Vex, 16, Byte(f)) => entity.vex_charging = f & 0x01 != 0,
             (EntityKind::Phantom, 16, Int(s)) => entity.phantom_size = s.max(0),
+            (EntityKind::Shulker, 16, MetaValue::Direction(face)) => {
+                entity.shulker_attach_face = face
+            }
             (EntityKind::Shulker, 17, Byte(p)) => entity.shulker_peek = p,
             (EntityKind::Shulker, 18, Byte(c)) => entity.variant = (c & 0xFF) as u32,
             (EntityKind::Wither, 19, Int(t)) => entity.wither_invulnerability = t.max(0),
@@ -2052,6 +2218,15 @@ impl EntityStore {
                 EntityPose::Standing
             },
         );
+    }
+
+    /// Stores Avatar DATA_PLAYER_MAIN_HAND metadata for player entities.
+    pub fn set_main_arm(&mut self, id: i32, right: bool) {
+        if let Some(entity) = self.living.get_mut(&id)
+            && entity.entity_type == EntityKind::Player
+        {
+            entity.main_arm_right = right;
+        }
     }
 
     /// Stores the complete metadata pose without collapsing
@@ -2293,6 +2468,15 @@ impl EntityStore {
     ) {
         for entity in self.living.values_mut() {
             entity.tick_interpolation();
+            if entity.entity_type == EntityKind::Shulker {
+                entity.prev_shulker_peek_amount = entity.shulker_peek_amount;
+                let target = entity.shulker_peek as f32 * 0.01;
+                entity.shulker_peek_amount = if entity.shulker_peek_amount > target {
+                    (entity.shulker_peek_amount - 0.05).clamp(target, 1.0)
+                } else {
+                    (entity.shulker_peek_amount + 0.05).clamp(0.0, target)
+                };
+            }
             entity.tick_body_rotation();
             let dx = entity.position.x - entity.prev_position.x;
             let dz = entity.position.z - entity.prev_position.z;
@@ -2510,6 +2694,75 @@ mod tests {
         store.set_vehicle_spawn_transform(1, position, velocity, LookDirection::default());
         store.set_vehicle_kind(1, kind);
         store
+    }
+
+    #[test]
+    fn boat_metadata_uses_versioned_indices_and_never_enters_living_store() {
+        let mut store = EntityStore::new();
+        store.set_vehicle_spawn_transform(
+            7,
+            Position::new(1.0, 2.0, 3.0),
+            DVec3::ZERO,
+            LookDirection::new(90.0, 0.0),
+        );
+        store.set_vehicle_kind(7, EntityKind::OakChestBoat);
+        for (index, value) in [
+            (8, MetaValue::Int(4)),
+            (9, MetaValue::Int(-1)),
+            (10, MetaValue::Float(6.5)),
+            (11, MetaValue::Bool(true)),
+            (12, MetaValue::Bool(false)),
+            (13, MetaValue::Int(3)),
+            (0, MetaValue::Byte(0x20)),
+        ] {
+            store.apply_vehicle_metadata(7, index, value);
+        }
+        let boat = &store.vehicles[&7];
+        assert_eq!((boat.boat_hurt_time, boat.boat_hurt_direction), (4, -1));
+        assert_eq!(boat.boat_damage, 6.5);
+        assert!(boat.boat_left_paddle);
+        assert!(!boat.boat_right_paddle);
+        assert_eq!(boat.boat_bubble_time, 3);
+        assert_eq!(boat.shared_flags, 0x20);
+        assert!(store.living.is_empty());
+
+        store.set_vehicle_spawn_transform(
+            8,
+            Position::default(),
+            DVec3::ZERO,
+            LookDirection::default(),
+        );
+        store.set_vehicle_kind(8, EntityKind::Minecart);
+        store.apply_vehicle_metadata(8, 8, MetaValue::Int(99));
+        assert_eq!(store.vehicles[&8].boat_hurt_time, 0);
+    }
+
+    #[test]
+    fn minecart_metadata_keeps_optional_display_state_and_native_offsets() {
+        for (kind, default_offset) in [
+            (EntityKind::Minecart, 6),
+            (EntityKind::ChestMinecart, 8),
+            (EntityKind::FurnaceMinecart, 6),
+            (EntityKind::TntMinecart, 6),
+            (EntityKind::HopperMinecart, 1),
+            (EntityKind::CommandBlockMinecart, 6),
+            (EntityKind::SpawnerMinecart, 6),
+        ] {
+            let mut store = projectile(kind, Position::default(), DVec3::ZERO);
+            assert_eq!(store.vehicles[&1].minecart_display_offset, default_offset);
+            store.apply_vehicle_metadata(1, 11, MetaValue::OptionalBlockState(Some(321)));
+            store.apply_vehicle_metadata(1, 12, MetaValue::Int(14));
+            let cart = &store.vehicles[&1];
+            assert_eq!(cart.minecart_display_state, Some(321));
+            assert_eq!(cart.minecart_display_offset, 14);
+            assert!(store.living.is_empty());
+            store.apply_vehicle_metadata(1, 11, MetaValue::OptionalBlockState(None));
+            assert_eq!(store.vehicles[&1].minecart_display_state, None);
+        }
+        let mut chest = projectile(EntityKind::ChestMinecart, Position::default(), DVec3::ZERO);
+        assert_eq!(chest.vehicles[&1].minecart_display_offset, 8);
+        let mut hopper = projectile(EntityKind::HopperMinecart, Position::default(), DVec3::ZERO);
+        assert_eq!(hopper.vehicles[&1].minecart_display_offset, 1);
     }
 
     #[test]
@@ -3178,6 +3431,46 @@ mod tests {
     }
 
     #[test]
+    fn player_main_arm_metadata_is_stored_and_non_players_ignore_it() {
+        let mut store = EntityStore::new();
+        for (id, kind) in [(1, EntityKind::Player), (2, EntityKind::Zombie)] {
+            store.spawn_living(
+                id,
+                kind,
+                Position::default(),
+                LookDirection::default(),
+                0.0,
+                None,
+            );
+        }
+        assert!(store.living[&1].main_arm_right);
+        store.set_main_arm(1, false);
+        store.set_main_arm(2, false);
+        assert!(!store.living[&1].main_arm_right);
+        assert!(store.living[&2].main_arm_right);
+    }
+
+    #[test]
+    fn player_skin_parts_metadata_is_kept_separate_and_masks_to_seven_bits() {
+        let mut store = EntityStore::new();
+        store.spawn_living(
+            1,
+            EntityKind::Player,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        assert_eq!(store.living[&1].skin_parts_mask, None);
+        for mask in 0..=u8::MAX {
+            store.apply_entity_data(1, 16, MetaValue::Byte(mask));
+            assert_eq!(store.living[&1].skin_parts_mask, Some(mask & 0x7f));
+        }
+        store.apply_entity_data(1, 16, MetaValue::Bool(true));
+        assert_eq!(store.living[&1].skin_parts_mask, Some(127));
+    }
+
+    #[test]
     fn remaining_living_species_metadata_uses_26_2_indices() {
         let mut store = EntityStore::new();
         for (id, kind) in [
@@ -3209,6 +3502,12 @@ mod tests {
         store.apply_entity_data(2, 18, MetaValue::Int(4));
         store.apply_entity_data(3, 18, MetaValue::Int(1));
         store.apply_entity_data(4, 16, MetaValue::Int(3));
+        store.apply_entity_data(
+            5,
+            16,
+            MetaValue::Direction(azalea_core::direction::Direction::East),
+        );
+        store.apply_entity_data(5, 16, MetaValue::Bool(true)); // wrong serializer is ignored
         store.apply_entity_data(5, 17, MetaValue::Byte(127));
         store.apply_entity_data(5, 18, MetaValue::Byte(16));
         store.apply_entity_data(6, 18, MetaValue::Int(2));
@@ -3222,10 +3521,45 @@ mod tests {
         assert_eq!(store.living[&3].variant, 1);
         assert_eq!(store.living[&4].phantom_size, 3);
         assert_eq!(store.living[&5].shulker_peek, 127);
+        assert_eq!(
+            store.living[&5].shulker_attach_face,
+            azalea_core::direction::Direction::East
+        );
         assert_eq!(store.living[&5].variant, 16);
         assert_eq!(store.living[&6].sulfur_cube_size, 2);
         assert!(store.living[&7].vex_charging);
         assert_eq!(store.living[&8].wither_invulnerability, 40);
+    }
+
+    #[test]
+    fn shulker_direction_is_typed_and_peek_interpolates_in_source_rate() {
+        use azalea_core::direction::Direction as D;
+
+        let mut store = EntityStore::new();
+        store.spawn_living(
+            1,
+            EntityKind::Shulker,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        for face in [D::Down, D::Up, D::North, D::South, D::West, D::East] {
+            store.apply_entity_data(1, 16, MetaValue::Direction(face));
+            assert_eq!(store.living[&1].shulker_attach_face, face);
+        }
+        store.apply_entity_data(1, 16, MetaValue::Bool(true));
+        assert_eq!(store.living[&1].shulker_attach_face, D::East);
+        store.apply_entity_data(1, 17, MetaValue::Byte(50));
+        for _ in 0..5 {
+            store.tick_living(&ChunkStore::new(2), Position::default(), 10);
+        }
+        let shulker = &store.living[&1];
+        assert!((shulker.prev_shulker_peek_amount - 0.2).abs() < 1e-6);
+        assert!((shulker.shulker_peek_amount - 0.25).abs() < 1e-6);
+        let interpolated = shulker.prev_shulker_peek_amount
+            + (shulker.shulker_peek_amount - shulker.prev_shulker_peek_amount) * 0.5;
+        assert!((interpolated - 0.225).abs() < 1e-6);
     }
 
     #[test]

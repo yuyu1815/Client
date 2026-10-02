@@ -77,6 +77,11 @@ struct Settings {
     skin_hat: bool,
     #[serde(default = "default_true")]
     skin_main_hand_right: bool,
+    #[serde(
+        default = "default_particle_status",
+        deserialize_with = "deserialize_particle_status"
+    )]
+    particle_status: u8,
     #[serde(default = "default_volume")]
     master_volume: f32,
     #[serde(default = "default_volume")]
@@ -176,8 +181,39 @@ fn default_true() -> bool {
     true
 }
 
+const fn skin_parts_mask(
+    cape: bool,
+    jacket: bool,
+    left_sleeve: bool,
+    right_sleeve: bool,
+    left_pants: bool,
+    right_pants: bool,
+    hat: bool,
+) -> u8 {
+    cape as u8
+        | (jacket as u8) << 1
+        | (left_sleeve as u8) << 2
+        | (right_sleeve as u8) << 3
+        | (left_pants as u8) << 4
+        | (right_pants as u8) << 5
+        | (hat as u8) << 6
+}
+
 fn default_chunk_detail() -> u32 {
     8
+}
+
+fn default_particle_status() -> u8 {
+    0
+}
+
+fn deserialize_particle_status<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_u64().filter(|value| *value <= 2).unwrap_or(0) as u8)
 }
 
 fn default_volume() -> f32 {
@@ -213,6 +249,7 @@ impl Default for Settings {
             skin_right_pants: true,
             skin_hat: true,
             skin_main_hand_right: true,
+            particle_status: 0,
             master_volume: 1.0,
             music_volume: 1.0,
             jukebox_volume: 1.0,
@@ -658,6 +695,7 @@ pub struct MainMenu {
     skin_right_pants: bool,
     skin_hat: bool,
     skin_main_hand_right: bool,
+    particle_status: u8,
     pub display_mode: DisplayMode,
     pub cloud_mode: CloudMode,
     pub attack_indicator: crate::ui::hud::AttackIndicatorMode,
@@ -798,6 +836,7 @@ impl MainMenu {
             skin_right_pants: settings.skin_right_pants,
             skin_hat: settings.skin_hat,
             skin_main_hand_right: settings.skin_main_hand_right,
+            particle_status: settings.particle_status.min(2),
             display_mode: DisplayMode::from_u8(settings.display_mode),
             cloud_mode: CloudMode::from_u8(settings.cloud_mode),
             attack_indicator: crate::ui::hud::AttackIndicatorMode::from_u8(
@@ -925,6 +964,7 @@ impl MainMenu {
                 skin_right_pants: self.skin_right_pants,
                 skin_hat: self.skin_hat,
                 skin_main_hand_right: self.skin_main_hand_right,
+                particle_status: self.particle_status.min(2),
                 cloud_mode: self.cloud_mode.to_u8(),
                 attack_indicator: self.attack_indicator.to_u8(),
                 display_mode: self.display_mode.to_u8(),
@@ -944,6 +984,22 @@ impl MainMenu {
 
     pub fn main_hand_right(&self) -> bool {
         self.skin_main_hand_right
+    }
+
+    pub fn skin_parts_mask(&self) -> u8 {
+        skin_parts_mask(
+            self.skin_cape,
+            self.skin_jacket,
+            self.skin_left_sleeve,
+            self.skin_right_sleeve,
+            self.skin_left_pants,
+            self.skin_right_pants,
+            self.skin_hat,
+        )
+    }
+
+    pub fn particle_status(&self) -> crate::particle::ParticleMode {
+        crate::particle::ParticleMode::from_u8(self.particle_status)
     }
 
     pub fn open_options(&mut self) {
@@ -1301,6 +1357,81 @@ impl MainMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skin_part_mask_maps_all_seven_settings_bits_and_old_defaults() {
+        let defaults = Settings::default();
+        assert!(defaults.skin_cape && defaults.skin_jacket && defaults.skin_left_sleeve);
+        assert!(
+            defaults.skin_right_sleeve && defaults.skin_left_pants && defaults.skin_right_pants
+        );
+        assert!(defaults.skin_hat);
+        assert_eq!(
+            super::skin_parts_mask(true, true, true, true, true, true, true),
+            0x7f
+        );
+        for bit in 0..7 {
+            let mut enabled = [true; 7];
+            enabled[bit] = false;
+            assert_eq!(
+                super::skin_parts_mask(
+                    enabled[0], enabled[1], enabled[2], enabled[3], enabled[4], enabled[5],
+                    enabled[6],
+                ),
+                0x7f ^ (1 << bit),
+            );
+            let mut disabled = [false; 7];
+            disabled[bit] = true;
+            assert_eq!(
+                super::skin_parts_mask(
+                    disabled[0],
+                    disabled[1],
+                    disabled[2],
+                    disabled[3],
+                    disabled[4],
+                    disabled[5],
+                    disabled[6],
+                ),
+                1 << bit,
+            );
+        }
+    }
+
+    #[test]
+    fn particle_setting_defaults_invalid_values_and_roundtrips_all_modes() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("particle_status");
+        assert_eq!(
+            serde_json::from_value::<Settings>(legacy)
+                .unwrap()
+                .particle_status,
+            0
+        );
+        let mut invalid = serde_json::to_value(Settings::default()).unwrap();
+        invalid["particle_status"] = serde_json::json!("invalid");
+        assert_eq!(
+            serde_json::from_value::<Settings>(invalid)
+                .unwrap()
+                .particle_status,
+            0
+        );
+        for mode in 0..=2 {
+            let settings = Settings {
+                particle_status: mode,
+                ..Settings::default()
+            };
+            assert_eq!(
+                serde_json::from_str::<Settings>(&serde_json::to_string(&settings).unwrap())
+                    .unwrap()
+                    .particle_status,
+                mode
+            );
+        }
+        assert_eq!(
+            crate::particle::ParticleMode::from_u8(3),
+            crate::particle::ParticleMode::All
+        );
+    }
 
     #[test]
     fn invert_mouse_settings_round_trip_and_old_default() {

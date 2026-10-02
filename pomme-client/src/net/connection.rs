@@ -89,6 +89,9 @@ pub struct ConnectArgs {
     pub access_token: Option<String>,
     pub view_distance: u8,
     pub chat_options: crate::ui::chat::ChatOptions,
+    pub main_hand_right: bool,
+    pub particle_mode: crate::particle::ParticleMode,
+    pub skin_parts_mask: u8,
     pub server_cookies: std::collections::HashMap<azalea_registry::identifier::Identifier, Vec<u8>>,
 }
 
@@ -179,6 +182,9 @@ async fn connect_recorded(
         access_token,
         view_distance,
         chat_options,
+        main_hand_right,
+        particle_mode,
+        skin_parts_mask,
         mut server_cookies,
     } = args;
 
@@ -255,6 +261,10 @@ async fn connect_recorded(
                 &mut conn,
                 view_distance,
                 chat_options,
+                main_hand_right,
+                particle_mode,
+                skin_parts_mask,
+                &recorder,
                 &event_tx,
                 &mut game_packet_rx,
                 &mut server_cookies,
@@ -278,6 +288,9 @@ async fn connect_recorded(
             joined,
             view_distance,
             chat_options,
+            main_hand_right,
+            particle_mode,
+            skin_parts_mask,
             chat: ChatSender::new(profile_id, uuid, access_token, key_pair_tx),
             key_pair_rx,
             server_cookies,
@@ -299,6 +312,7 @@ struct Joined {
 struct Configured {
     registries: std::sync::Arc<azalea_core::registry_holder::RegistryHolder>,
     dialogs: std::sync::Arc<DialogRegistry>,
+    loom_patterns: std::sync::Arc<crate::ui::loom::PatternData>,
 }
 
 /// Reads the registries a pre-configuration-phase server ships inside its game
@@ -327,6 +341,7 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
     };
 
     let mut registry_holder = RegistryHolder::default();
+    let mut loom_patterns = crate::ui::loom::PatternData::default();
     translation.clear_dynamic_registries();
     for frame in frames {
         match deserialize_packet::<ClientboundConfigPacket>(&mut std::io::Cursor::new(&frame)) {
@@ -335,6 +350,14 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
                     &p.registry_id.to_string(),
                     p.entries.iter().map(|(name, _)| name.to_string()).collect(),
                 );
+                if p.registry_id.to_string() == "minecraft:banner_pattern" {
+                    loom_patterns.replace_registry(
+                        p.entries
+                            .iter()
+                            .map(|(key, data)| (key.to_string(), data.clone()))
+                            .collect(),
+                    );
+                }
                 registry_holder.append(p.registry_id, p.entries);
             }
             Ok(_) => {}
@@ -345,6 +368,7 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
         configured: Configured {
             registries: std::sync::Arc::new(registry_holder),
             dialogs: Default::default(),
+            loom_patterns: std::sync::Arc::new(loom_patterns),
         },
         deferred_login: Some(login),
     })
@@ -537,6 +561,10 @@ async fn config_sequence(
     conn: &mut Conn,
     view_distance: u8,
     chat_options: crate::ui::chat::ChatOptions,
+    main_hand_right: bool,
+    particle_mode: crate::particle::ParticleMode,
+    skin_parts_mask: u8,
+    recorder: &crate::movement_record::Recorder,
     event_tx: &Sender<NetworkEvent>,
     outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
     server_cookies: &mut std::collections::HashMap<
@@ -552,12 +580,16 @@ async fn config_sequence(
     use azalea_protocol::packets::config::*;
 
     let mut registry_holder = RegistryHolder::default();
+    let mut loom_patterns = previous
+        .map(|p| (*p.loom_patterns).clone())
+        .unwrap_or_default();
     if previous.is_none() {
         if let Some(translation) = super::translate::active() {
             translation.clear_dynamic_registries();
         }
     }
     let mut received_registry_data = false;
+    let mut received_loom_tags = false;
     let mut selected_known_packs = false;
     let mut received_dialog_tags = None;
     let mut code_of_conduct_seen = false;
@@ -581,7 +613,13 @@ async fn config_sequence(
             conn,
             ServerboundConfigPacket::ClientInformation(
                 s_client_information::ServerboundClientInformation {
-                    information: super::client_information(view_distance, chat_options),
+                    information: super::client_information(
+                        view_distance,
+                        chat_options,
+                        main_hand_right,
+                        particle_mode,
+                        skin_parts_mask & 0x7f,
+                    ),
                 },
             ),
         )
@@ -603,6 +641,7 @@ async fn config_sequence(
             return Ok(match previous {
                 Some(previous) if !received_registry_data => Configured {
                     registries: previous.registries.clone(),
+                    loom_patterns: std::sync::Arc::new(loom_patterns),
                     dialogs: match received_dialog_tags {
                         Some(tags) => std::sync::Arc::new(previous.dialogs.with_tags(tags)),
                         None => previous.dialogs.clone(),
@@ -614,6 +653,7 @@ async fn config_sequence(
                         received_dialog_tags.unwrap_or_default(),
                     )),
                     registries: std::sync::Arc::new(registry_holder),
+                    loom_patterns: std::sync::Arc::new(loom_patterns),
                 },
             });
         }
@@ -630,6 +670,7 @@ async fn config_sequence(
                             continue;
                         }
                     };
+                    recorder.raw_packet("inbound", "configuration", &raw);
                     let frames = match super::translate::active() {
                         Some(t) => t.translate_config_frame(raw),
                         None => vec![raw],
@@ -666,6 +707,16 @@ async fn config_sequence(
                 if !received_registry_data && previous.is_some() {
                     // A replacement holder is built from this config's data;
                     // don't keep ids from registries the new holder omits.
+                    let new_tags = received_loom_tags.then(|| {
+                        (
+                            std::mem::take(&mut loom_patterns.tags),
+                            std::mem::take(&mut loom_patterns.item_tags),
+                        )
+                    });
+                    loom_patterns = crate::ui::loom::PatternData::default();
+                    if let Some((tags, item_tags)) = new_tags {
+                        loom_patterns.replace_tags(tags, item_tags);
+                    }
                     if let Some(translation) = super::translate::active() {
                         translation.clear_dynamic_registries();
                     }
@@ -685,6 +736,14 @@ async fn config_sequence(
                         entries.iter().map(|(name, _)| name.to_string()).collect(),
                     );
                 }
+                if p.registry_id.to_string() == "minecraft:banner_pattern" {
+                    loom_patterns.replace_registry(
+                        entries
+                            .iter()
+                            .map(|(key, data)| (key.to_string(), data.clone()))
+                            .collect(),
+                    );
+                }
                 registry_holder.append(p.registry_id, entries);
             }
             ClientboundConfigPacket::UpdateTags(p) => {
@@ -692,6 +751,9 @@ async fn config_sequence(
                 if let Some(tags) = dialog_tags(&p.tags) {
                     received_dialog_tags = Some(tags);
                 }
+                let (patterns, items) = loom_pattern_tags(&p.tags);
+                loom_patterns.replace_tags(patterns, items);
+                received_loom_tags = true;
             }
             ClientboundConfigPacket::SelectKnownPacks(p) => {
                 // Vanilla `handleSelectKnownPacks`: claim the offered packs we
@@ -1075,6 +1137,53 @@ fn dialog_registry(
 }
 
 /// The `minecraft:dialog` tags of an `update_tags` packet, if it has any.
+pub(super) fn loom_pattern_tags(
+    tags: &azalea_protocol::common::tags::TagMap,
+) -> (
+    std::collections::HashMap<String, Vec<usize>>,
+    std::collections::HashMap<String, std::collections::HashSet<u32>>,
+) {
+    let patterns: azalea_registry::identifier::Identifier = "minecraft:banner_pattern".into();
+    let pattern_tags = tags
+        .0
+        .get(&patterns)
+        .into_iter()
+        .flatten()
+        .map(|tag| {
+            (
+                tag.name.to_string(),
+                tag.elements
+                    .iter()
+                    .filter_map(|&id| usize::try_from(id).ok())
+                    .collect(),
+            )
+        })
+        .collect();
+    let items: azalea_registry::identifier::Identifier = "minecraft:item".into();
+    let item_tags = tags
+        .0
+        .get(&items)
+        .into_iter()
+        .flatten()
+        .filter(|tag| {
+            matches!(
+                tag.name.to_string().as_str(),
+                "minecraft:loom_dyes" | "minecraft:loom_patterns"
+            )
+        })
+        .map(|tag| {
+            (
+                tag.name.to_string(),
+                tag.elements
+                    .iter()
+                    .filter_map(|&id| u32::try_from(id).ok())
+                    .collect(),
+            )
+        })
+        .collect();
+    (pattern_tags, item_tags)
+}
+
 fn dialog_tags(
     tags: &azalea_protocol::common::tags::TagMap,
 ) -> Option<std::collections::HashMap<String, Vec<usize>>> {
@@ -1108,6 +1217,9 @@ struct GameLoopArgs {
     joined: Joined,
     view_distance: u8,
     chat_options: crate::ui::chat::ChatOptions,
+    main_hand_right: bool,
+    particle_mode: crate::particle::ParticleMode,
+    skin_parts_mask: u8,
     chat: ChatSender,
     key_pair_rx: mpsc::UnboundedReceiver<Option<std::sync::Arc<ProfileKeyPair>>>,
     server_cookies: std::collections::HashMap<azalea_registry::identifier::Identifier, Vec<u8>>,
@@ -1126,6 +1238,9 @@ async fn game_loop(
         joined,
         view_distance,
         chat_options,
+        main_hand_right,
+        particle_mode,
+        skin_parts_mask,
         mut chat,
         mut key_pair_rx,
         mut server_cookies,
@@ -1183,12 +1298,22 @@ async fn game_loop(
         event_tx,
         NetworkEvent::DialogRegistry(configured.dialogs.clone())
     ))?;
+    pump!(send_event(
+        event_tx,
+        NetworkEvent::LoomPatterns(configured.loom_patterns.clone())
+    ))?;
     if deferred_login.is_some() {
         // 1.20.1 sends both from its login handler, where later versions send
         // them in the configuration phase (ClientPacketListener.handleLogin).
         let info = ServerboundGamePacket::ClientInformation(
             azalea_protocol::packets::game::s_client_information::ServerboundClientInformation {
-                client_information: super::client_information(view_distance, chat_options),
+                client_information: super::client_information(
+                    view_distance,
+                    chat_options,
+                    main_hand_right,
+                    particle_mode,
+                    skin_parts_mask & 0x7f,
+                ),
             },
         );
         write_game_frame(
@@ -1229,6 +1354,7 @@ async fn game_loop(
                 continue;
             }
         };
+        recorder.raw_packet("inbound", "play", &raw);
         if translation.is_none()
             && crate::version::session_protocol() == pomme_protocol::version::NATIVE.protocol
         {
@@ -1357,6 +1483,10 @@ async fn game_loop(
                         &mut conn,
                         view_distance,
                         chat_options,
+                        main_hand_right,
+                        particle_mode,
+                        skin_parts_mask,
+                        &recorder,
                         event_tx,
                         &mut outbound_rx,
                         &mut server_cookies,
@@ -1382,6 +1512,10 @@ async fn game_loop(
                             NetworkEvent::DialogRegistry(next.dialogs.clone())
                         ))?;
                     }
+                    pump!(send_event(
+                        event_tx,
+                        NetworkEvent::LoomPatterns(next.loom_patterns.clone())
+                    ))?;
                     configured = next;
                     continue;
                 }
@@ -1596,6 +1730,7 @@ async fn write_game_frame(
         recorder.record("outbound", "translation_suppressed", || observation.clone());
     }
     for frame in frames {
+        recorder.raw_packet("outbound", "play", &frame);
         let result = writer.write(&frame).await;
         recorder.record(
             "outbound",
@@ -1640,6 +1775,8 @@ async fn write_config_frame(conn: &mut Conn, frame: Vec<u8>) -> Result<(), Conne
         },
         None => frame,
     };
+    // LOGIN frames never pass through this helper; this is the config phase only.
+    // The Conn's game-loop recorder is separately attached to the outbound sender.
     Ok(conn.writer.write(&frame).await?)
 }
 
@@ -1841,11 +1978,15 @@ mod tests {
                         configured: Configured {
                             registries: Arc::default(),
                             dialogs: Arc::default(),
+                            loom_patterns: Arc::default(),
                         },
                         deferred_login: None,
                     },
                     view_distance: 8,
                     chat_options: Default::default(),
+                    main_hand_right: true,
+                    particle_mode: crate::particle::ParticleMode::All,
+                    skin_parts_mask: 127,
                     chat: ChatSender::new(Uuid::nil(), Uuid::nil(), None, key_tx),
                     key_pair_rx,
                     server_cookies: Default::default(),
@@ -2045,6 +2186,10 @@ mod tests {
                 &mut Conn::from_memory(client_end),
                 8,
                 Default::default(),
+                true,
+                crate::particle::ParticleMode::All,
+                127,
+                &crate::movement_record::Recorder::default(),
                 &tx,
                 &mut out_rx,
                 &mut Default::default(),
@@ -2294,6 +2439,9 @@ mod tests {
                     access_token: None,
                     view_distance: 8,
                     chat_options: crate::ui::chat::ChatOptions::default(),
+                    main_hand_right: true,
+                    particle_mode: crate::particle::ParticleMode::All,
+                    skin_parts_mask: 127,
                     server_cookies: cookies,
                 },
                 event_tx,
@@ -2328,6 +2476,9 @@ mod tests {
                 access_token: None,
                 view_distance: 8,
                 chat_options: crate::ui::chat::ChatOptions::default(),
+                main_hand_right: true,
+                particle_mode: crate::particle::ParticleMode::All,
+                skin_parts_mask: 127,
                 server_cookies: Default::default(),
             },
             event_tx,
@@ -2381,6 +2532,9 @@ mod tests {
                 access_token: None,
                 view_distance: 8,
                 chat_options: crate::ui::chat::ChatOptions::default(),
+                main_hand_right: true,
+                particle_mode: crate::particle::ParticleMode::All,
+                skin_parts_mask: 127,
                 server_cookies: Default::default(),
             },
             event_tx,
@@ -2438,6 +2592,9 @@ mod tests {
                 access_token: None,
                 view_distance: 8,
                 chat_options: crate::ui::chat::ChatOptions::default(),
+                main_hand_right: true,
+                particle_mode: crate::particle::ParticleMode::All,
+                skin_parts_mask: 127,
                 server_cookies: Default::default(),
             },
             event_tx,
@@ -2821,6 +2978,9 @@ mod tests {
                 access_token: None,
                 view_distance: 8,
                 chat_options: crate::ui::chat::ChatOptions::default(),
+                main_hand_right: false,
+                particle_mode: crate::particle::ParticleMode::Minimal,
+                skin_parts_mask: 0b0100101,
                 server_cookies: Default::default(),
             },
             event_tx,
@@ -2854,7 +3014,17 @@ mod tests {
         ));
         assert!(matches!(
             sent(&mut peer).await,
-            ServerboundConfigPacket::ClientInformation(p) if p.information.view_distance == 8
+            ServerboundConfigPacket::ClientInformation(p)
+                if p.information.view_distance == 8
+                    && p.information.main_hand == azalea_entity::HumanoidArm::Left
+                    && p.information.particle_status == azalea_protocol::common::client_information::ParticleStatus::Minimal
+                    && p.information.model_customization.cape
+                    && !p.information.model_customization.jacket
+                    && p.information.model_customization.left_sleeve
+                    && !p.information.model_customization.right_sleeve
+                    && !p.information.model_customization.left_pants
+                    && p.information.model_customization.right_pants
+                    && !p.information.model_customization.hat
         ));
 
         peer.write_packet(ClientboundFinishConfiguration)
