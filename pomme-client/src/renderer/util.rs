@@ -181,7 +181,7 @@ pub fn try_create_mapped_buffer(
     name: &str,
 ) -> Result<(vk::Buffer, Allocation), String> {
     let buffer_info = vk::BufferCreateInfo {
-        size: data.len() as u64,
+        size: data.len().max(1) as u64,
         usage,
         sharing_mode: vk::SharingMode::Exclusive,
         ..Default::default()

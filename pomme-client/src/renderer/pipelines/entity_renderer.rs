@@ -3839,6 +3839,7 @@ impl EntityRenderer {
                 vis.push(VisEntity {
                     info,
                     entry,
+                    base_model: &variant.model,
                     entity_mat,
                     anim,
                     part_transforms,
@@ -4303,6 +4304,7 @@ fn create_camera_sets(
 struct VisEntity<'a> {
     info: &'a EntityRenderInfo,
     entry: &'a MobEntry,
+    base_model: &'a BakedEntityModel,
     entity_mat: glam::Mat4,
     anim: entity_model::PartAnim,
     part_transforms: Vec<glam::Mat4>,
@@ -4424,7 +4426,12 @@ impl<'a> VariantGroups<'a> {
             let own: Option<Vec<Vec<glam::Mat4>>> = variant.own_pivots.then(|| {
                 members
                     .iter()
-                    .map(|(vi, ..)| variant.model.compute_part_transforms(&vis[*vi].anim))
+                    .map(|(vi, ..)| {
+                        let entity = &vis[*vi];
+                        let anim =
+                            remap_part_anim(&entity.base_model.parts, &variant.model, &entity.anim);
+                        variant.model.compute_part_transforms(&anim)
+                    })
                     .collect()
             });
             for (p, (start, part_count)) in variant.model.part_ranges.iter().enumerate() {
@@ -4791,33 +4798,44 @@ fn entity_visible(
     true
 }
 
-/// Anim part-name indices are computed against the base variant's model and
-/// reused for each overlay draw, so overlay part order must match the base
-/// (asserted at construction rather than rendering wrong limbs). Overlays
-/// whose part poses also match share the base's transforms; the rest are
-/// flagged `own_pivots` and get their own.
+/// Overlays may have different part counts or an independent model (for
+/// example, a wind layer). Recompute their transforms when their poses differ;
+/// otherwise they can reuse the base's transforms.
+fn overlay_uses_own_pivots(base: &BakedEntityModel, overlay: &BakedEntityModel) -> bool {
+    !base.same_part_poses(overlay)
+}
+
+fn remap_part_anim(
+    base_parts: &[entity_model::EntityPart],
+    overlay: &BakedEntityModel,
+    anim: &entity_model::PartAnim,
+) -> entity_model::PartAnim {
+    let remap = |index: usize| {
+        let name = &base_parts.get(index)?.name;
+        overlay.parts.iter().position(|part| &part.name == name)
+    };
+    entity_model::PartAnim {
+        rotation: anim
+            .rotation
+            .iter()
+            .filter_map(|(index, rotation)| remap(*index).map(|index| (index, *rotation)))
+            .collect(),
+        translation: anim
+            .translation
+            .iter()
+            .filter_map(|(index, translation)| remap(*index).map(|index| (index, *translation)))
+            .collect(),
+    }
+}
+
 fn link_overlays(base: &[MobVariant], overlays: &mut [Vec<MobVariant>]) {
     let Some(base_first) = base.first() else {
         return;
     };
-    let base_names: Vec<&str> = base_first
-        .model
-        .parts
-        .iter()
-        .map(|p| p.name.as_str())
-        .collect();
     for overlay in overlays.iter_mut().flatten() {
-        let overlay_names: Vec<&str> = overlay
-            .model
-            .parts
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect();
-        assert_eq!(
-            base_names, overlay_names,
-            "overlay part order must match base; anim indices are shared across both"
-        );
-        overlay.own_pivots = !base_first.model.same_part_poses(&overlay.model);
+        // Different part layouts need their own transforms; base part indices
+        // cannot safely be reused for independent layers such as Breeze wind.
+        overlay.own_pivots = overlay_uses_own_pivots(&base_first.model, &overlay.model);
     }
 }
 
@@ -5352,6 +5370,29 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn independent_breeze_wind_layer_uses_its_own_part_transforms() {
+        let base = super::entity_models::flying::bake_breeze_model();
+        let wind = super::entity_models::flying::bake_breeze_wind_model();
+
+        assert!(super::overlay_uses_own_pivots(&base, &wind));
+        assert_eq!(base.parts[0].name, "body");
+        assert_eq!(wind.parts[0].name, "wind_body");
+        let base_anim = super::entity_model::PartAnim {
+            translation: vec![(0, glam::Vec3::Y)],
+            ..Default::default()
+        };
+        assert_eq!(
+            super::remap_part_anim(&base.parts, &base, &base_anim).translation,
+            base_anim.translation
+        );
+        let wind_anim = super::remap_part_anim(&base.parts, &wind, &base_anim);
+        assert!(wind_anim.translation.is_empty());
+        let wind_transforms = wind.compute_part_transforms(&wind_anim);
+        assert_eq!(wind_transforms.len(), wind.parts.len());
+        assert_eq!(wind_transforms.len(), 4);
+    }
+
     #[test]
     fn cape_pose_reaches_draw_matrix_with_yaw_and_attachment() {
         let attachment = glam::Mat4::from_translation(glam::Vec3::new(2.0, 3.0, 4.0))
