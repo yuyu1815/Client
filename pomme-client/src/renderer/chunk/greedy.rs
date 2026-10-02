@@ -810,7 +810,23 @@ mod raw_light_tests {
 
         let merged = mesh_two(|_, _, _| 0x0f);
         assert_eq!(merged.quads[0].len(), 1);
-        assert_eq!(merged.quads[0][0].height(), 2);
+        let quad = &merged.quads[0][0];
+        assert_eq!(quad.xyz(), [0, 1, 0]);
+        assert_eq!((quad.width(), quad.height()), (2, 1));
+
+        let vertices = Face::Up.vertices(quad);
+        let (min, max) = vertices.iter().fold(
+            ([f32::MAX; 3], [f32::MIN; 3]),
+            |(mut min, mut max), (pos, _)| {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(pos[axis]);
+                    max[axis] = max[axis].max(pos[axis]);
+                }
+                (min, max)
+            },
+        );
+        assert_eq!((min, max), ([0.0, 0.0, 1.0], [2.0, 0.0, 2.0]));
+        assert_eq!((max[0] - min[0]) * (max[2] - min[2]), 2.0);
     }
 
     #[test]
