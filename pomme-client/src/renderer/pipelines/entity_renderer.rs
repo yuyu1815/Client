@@ -4777,7 +4777,7 @@ fn boat_water_patch_matrix(body_matrix: glam::Mat4, patch_root: glam::Mat4) -> g
 }
 
 fn boat_water_patch_visible(kind: EntityKind, underwater: bool, invisible: bool) -> bool {
-    underwater && !invisible && boat_has_water_patch(kind)
+    !underwater && !invisible && boat_has_water_patch(kind)
 }
 
 fn boat_has_water_patch(kind: EntityKind) -> bool {
@@ -5280,9 +5280,10 @@ mod tests {
         );
         assert!(!super::boat_has_water_patch(K::BambooRaft));
         assert!(!super::boat_has_water_patch(K::BambooChestRaft));
-        assert!(!super::boat_water_patch_visible(K::OakBoat, false, false));
+        // Native BoatRenderer renders the patch only when !state.isUnderWater().
+        assert!(super::boat_water_patch_visible(K::OakBoat, false, false));
+        assert!(!super::boat_water_patch_visible(K::OakBoat, true, false));
         assert!(!super::boat_water_patch_visible(K::OakBoat, true, true));
-        assert!(super::boat_water_patch_visible(K::OakBoat, true, false));
         assert!(!super::boat_water_patch_visible(K::BambooRaft, true, false));
 
         let patch = super::entity_models::vehicles::bake_boat_water_patch_model();
