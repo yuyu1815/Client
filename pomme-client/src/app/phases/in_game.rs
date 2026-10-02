@@ -2059,7 +2059,11 @@ pub(crate) fn advance_level_time(
     if paused {
         return 0;
     }
-    let period = server_time_tick_period(tick_rate);
+    let period = if frozen {
+        TICK_RATE
+    } else {
+        server_time_tick_period(tick_rate)
+    };
     *accumulator += dt.max(0.0);
     let mut ticks = 0;
     while *accumulator + 1e-6 >= period {
@@ -10019,7 +10023,7 @@ mod tests {
             advance_level_time(
                 &mut accumulator,
                 0.15,
-                20.0,
+                10.0,
                 true,
                 false,
                 &mut steps,
