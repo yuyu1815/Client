@@ -6463,6 +6463,31 @@ mod tests {
         let orb = &def.adult_overlays[0];
         assert!(orb.overlay_kind == super::OverlayKind::BodyTranslucent);
         assert_eq!(orb.model.vertices.len(), 6);
+        assert_eq!(orb.model.part_ranges, [(0, 6)]);
+        let part = orb
+            .model
+            .compute_part_transforms(&super::entity_model::PartAnim::default());
+        let bounds = orb.model.vertices.iter().fold(
+            [
+                f32::INFINITY,
+                f32::INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ],
+            |mut bounds, vertex| {
+                let p = part[0].transform_point3(glam::Vec3::from_array(vertex.position));
+                bounds[0] = bounds[0].min(p.x);
+                bounds[1] = bounds[1].min(p.y);
+                bounds[2] = bounds[2].min(p.z);
+                bounds[3] = bounds[3].max(p.x);
+                bounds[4] = bounds[4].max(p.y);
+                bounds[5] = bounds[5].max(p.z);
+                bounds
+            },
+        );
+        assert_eq!(bounds, [-0.5, -0.25, 0.0, 0.5, 0.75, 0.0]);
         assert_eq!(orb.tex_size, 64);
         assert_eq!(
             orb.tex_variants[0][0],
@@ -6472,6 +6497,8 @@ mod tests {
 
     #[test]
     fn all_mob_meshes_bake_and_definitions_are_unique() {
+        use azalea_registry::builtin::EntityKind;
+
         let defs = super::mob_definitions();
         let mut kinds = std::collections::HashSet::new();
         for def in &defs {
@@ -6487,11 +6514,27 @@ mod tests {
                 .chain(&def.adult_overlays)
                 .chain(&def.baby_overlays)
             {
-                assert!(
-                    !variant.model.vertices.is_empty(),
-                    "empty model for {:?}",
-                    def.kind
-                );
+                // ExperienceOrb intentionally registers an empty opaque base
+                // placeholder: its only native draw is the real translucent
+                // billboard quad in `adult_overlays`, consumed by the normal
+                // BodyTranslucent VariantGroups path.
+                let orb_placeholder =
+                    def.kind == EntityKind::ExperienceOrb && std::ptr::eq(variant, &def.adult[0]);
+                if orb_placeholder {
+                    assert!(variant.model.vertices.is_empty());
+                    let [orb] = def.adult_overlays.as_slice() else {
+                        panic!("ExperienceOrb must have exactly one translucent billboard");
+                    };
+                    assert_eq!(orb.overlay_kind, super::OverlayKind::BodyTranslucent);
+                    assert_eq!(orb.model.vertices.len(), 6);
+                    assert_eq!(orb.model.part_ranges, [(0, 6)]);
+                } else {
+                    assert!(
+                        !variant.model.vertices.is_empty(),
+                        "empty model for {:?}",
+                        def.kind
+                    );
+                }
                 assert!(
                     !variant.tex_variants.is_empty(),
                     "empty texture pool for {:?}",
