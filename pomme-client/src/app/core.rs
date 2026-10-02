@@ -5721,6 +5721,7 @@ mod tests {
 
     #[test]
     fn bounded_network_drain_applies_chunk_and_be_before_next_tick_update() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_core::position::{BlockPos, ChunkPos};
         use azalea_registry::builtin::BlockEntityKind;
         use simdnbt::owned::NbtCompound;
@@ -5797,6 +5798,7 @@ mod tests {
 
     #[test]
     fn server_waterlogged_chest_keeps_same_be_animation() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_core::position::BlockPos;
 
         use crate::world::block;
@@ -5833,6 +5835,7 @@ mod tests {
 
     #[test]
     fn restored_shulker_keeps_animation_even_when_not_single_chest_mesh() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_core::position::{BlockPos, ChunkPos};
 
         use crate::world::block;
@@ -5866,6 +5869,7 @@ mod tests {
 
     #[test]
     fn chest_open_event_only_dirties_its_own_section_on_binary_transitions() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_core::position::{BlockPos, ChunkPos};
         use azalea_registry::builtin::BlockEntityKind;
         use simdnbt::owned::NbtCompound;
@@ -5973,6 +5977,7 @@ mod tests {
 
     #[test]
     fn chunk_reload_replaces_be_and_animation_only_after_successful_decode() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_core::position::{BlockPos, ChunkPos};
         use azalea_registry::builtin::BlockEntityKind;
         use simdnbt::owned::NbtCompound;
@@ -6717,6 +6722,7 @@ mod tests {
 
     #[test]
     fn block_entity_update_preserves_absent_or_mismatched_entries() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let pos = azalea_core::position::BlockPos::new(1, 2, 3);
         let mut entries = std::collections::HashMap::from([(
             pos,
@@ -7159,6 +7165,7 @@ mod mounted_tick_tests {
 
     #[test]
     fn mounted_tick_orders_input_rotation_vehicle_then_sprint() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let mut ride = Ride::new(0.0);
         ride.player.set_sprinting(true);
         let packets = ride.tick();
@@ -7185,6 +7192,7 @@ mod mounted_tick_tests {
 
     #[test]
     fn actual_twenty_ticks_wire_simulated_horse_and_change_only_input() {
+        let _protocol = crate::world::block::test_protocol_guard();
         for yaw in [0.0, 90.0] {
             let mut ride = Ride::new(yaw);
             let origin = ride.horse().position;
@@ -7232,6 +7240,7 @@ mod mounted_tick_tests {
 
     #[test]
     fn unsaddled_second_passenger_placeholder_and_dismount_send_no_vehicle() {
+        let _protocol = crate::world::block::test_protocol_guard();
         for mode in 0..3 {
             let mut ride = Ride::new(0.0);
             match mode {
@@ -7285,6 +7294,7 @@ mod mounted_tick_tests {
 
     #[test]
     fn jump_command_precedes_tick_pair_and_correction_is_one_extra_reply() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let mut ride = Ride::new(0.0);
         ride.tick();
         ride.player.was_jump_pressed = true;
@@ -7346,6 +7356,7 @@ mod mounted_tick_tests {
 
     #[test]
     fn unsupported_fluids_stop_motion_but_keep_controlled_tick_cadence() {
+        let _protocol = crate::world::block::test_protocol_guard();
         for fluid in ["water", "lava"] {
             let mut ride = Ride::new(0.0);
             ride.chunks

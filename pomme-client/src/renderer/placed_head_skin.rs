@@ -617,6 +617,7 @@ mod tests {
 
     #[test]
     fn rejects_oversized_property_before_admission_and_defaults_unsupported_sources() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let mut cache = PlacedHeadSkinCache::new(sheet(0));
         for source in [
             source(&"A".repeat(super::super::MAX_TEXTURE_PROPERTY_BYTES + 1)),
@@ -670,6 +671,7 @@ mod tests {
 
     #[test]
     fn nbt_stored_profiles_admit_list_map_static_dynamic_and_patch() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_registry::builtin::BlockEntityKind;
         use simdnbt::owned::{NbtCompound, NbtList};
 
@@ -773,6 +775,7 @@ mod tests {
 
     #[test]
     fn pack_patch_resolution_preserves_alpha_and_reload_rejects_old_jobs() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use crate::world::block_entity::PlayerHeadSkinPatch;
         let root = std::env::temp_dir().join(format!("pomme-head-{}", uuid::Uuid::new_v4()));
         let jar = root.join("jar");

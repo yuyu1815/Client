@@ -664,6 +664,7 @@ mod tests {
 
     #[test]
     fn bounded_backlog_preserves_fifo_and_final_light() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_buf::AzBuf;
         use azalea_core::position::ChunkPos;
 
@@ -745,6 +746,7 @@ mod tests {
 
     #[test]
     fn reloaded_chunk_does_not_copy_light_published_before_unload() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_buf::AzBuf;
         use azalea_core::position::ChunkPos;
 
@@ -798,6 +800,7 @@ mod tests {
 
     #[test]
     fn standalone_updates_across_repeated_unloads_do_not_publish_old_sections() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_buf::AzBuf;
         use azalea_core::position::ChunkPos;
 
@@ -876,6 +879,7 @@ mod tests {
 
     #[test]
     fn torch_diamond() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let mut world = TestWorld::new();
         let mut engine = block_engine();
         world.set(8, 8, 8, find_state("torch", &[]));
@@ -894,6 +898,7 @@ mod tests {
 
     #[test]
     fn torch_against_wall() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let mut world = TestWorld::new();
         let mut engine = block_engine();
         world.set(8, 8, 8, find_state("torch", &[]));
@@ -909,6 +914,7 @@ mod tests {
 
     #[test]
     fn torch_removal_clears_light() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let mut world = TestWorld::new();
         let mut engine = block_engine();
         world.set(8, 8, 8, find_state("torch", &[]));
@@ -926,6 +932,7 @@ mod tests {
 
     #[test]
     fn overlapping_sources_keep_brighter() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let mut world = TestWorld::new();
         let mut engine = block_engine();
         let torch = find_state("torch", &[]);
@@ -949,6 +956,7 @@ mod tests {
 
     #[test]
     fn emission_off_in_disabled_column() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let mut world = TestWorld::new();
         let mut engine = BlockLightEngine::new();
         engine.update_section_status(SectionKey::new(0, 0, 0), false);
@@ -984,6 +992,7 @@ mod tests {
 
     #[test]
     fn slab_occludes_directionally() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let mut world = TestWorld::new();
         let mut engine = block_engine();
         let slab = find_state("oak_slab", &[("type", "top"), ("waterlogged", "false")]);
@@ -1021,6 +1030,7 @@ mod tests {
 
     #[test]
     fn digging_through_a_floor_lets_sky_under_it() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let mut world = TestWorld::new();
         let stone = find_state("stone", &[]);
         for x in 0..16 {
@@ -1073,6 +1083,7 @@ mod tests {
 
     #[test]
     fn leaves_attenuate_falling_sky_light() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let mut world = TestWorld::new();
         world.set(8, 10, 8, find_state("oak_leaves", &[]));
         let mut engine = sky_engine(&world, &[(8, 10, 8)]);
@@ -1090,6 +1101,7 @@ mod tests {
 
     #[test]
     fn light_property_change_detection() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let _world = TestWorld::new();
         let air = BlockState::AIR;
         let stone = find_state("stone", &[]);

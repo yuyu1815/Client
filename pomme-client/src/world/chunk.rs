@@ -423,6 +423,7 @@ mod tests {
 
     #[test]
     fn probe_debug_world_override_is_shared_not_a_dump_substitution() {
+        let _protocol = crate::world::block::test_protocol_guard();
         super::super::block::init("26.2");
         let debug = super::super::block::DebugWorld::new();
         let mut chunk = Chunk::default();

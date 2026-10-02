@@ -758,6 +758,7 @@ mod tests {
     }
     #[test]
     fn raw_edit_and_rotation_allowlist_and_exact_prediction_sequence() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_protocol::packets::game::s_move_player_rot::ServerboundMovePlayerRot;
         use azalea_protocol::packets::game::s_player_action::{Action, ServerboundPlayerAction};
         let (r, rx) = ready(8);

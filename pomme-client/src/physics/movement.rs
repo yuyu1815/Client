@@ -1765,6 +1765,7 @@ mod tests {
 
     #[test]
     fn bounded_entity_observation_is_opt_in_and_preserves_numeric_outcome() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let chunks = sparse_world(&[]);
         let entities = [Aabb::block(0, 60, 0); 10];
         for active in [false, true] {
@@ -1796,6 +1797,7 @@ mod tests {
 
     #[test]
     fn full_tick_pose_uses_block_entity_and_border_clearance_and_swimming_fallback() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let chunks = flat_floor();
         let neutral = InputState::released();
         for (ceiling, expected) in [
@@ -1866,6 +1868,7 @@ mod tests {
 
     #[test]
     fn full_tick_sneak_uses_remaining_fall_distance_attribute_step_and_entity_support() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let chunks = sparse_world(&[(0, 60, 0, "stone")]);
         let mut shift = InputState::released();
         shift.set_test_key(KeyCode::ShiftLeft, true);
@@ -1918,6 +1921,7 @@ mod tests {
 
     #[test]
     fn full_tick_equipment_powder_snow_context_reaches_ground_and_support_queries() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let chunks = sparse_world(&[(0, 60, 0, "powder_snow")]);
         for boots in [false, true] {
             let mut player = LocalPlayer::new();
@@ -1949,6 +1953,7 @@ mod tests {
 
     #[test]
     fn full_tick_edge_support_selects_ice_friction_at_positive_and_negative_coordinates() {
+        let _protocol = crate::world::block::test_protocol_guard();
         for (bx, x) in [(0, 1.05), (-1, -1.05)] {
             for (id, friction) in [("ice", 0.98_f32), ("stone", 0.6_f32)] {
                 let chunks = sparse_world(&[(bx, 60, 0, id)]);
@@ -1984,6 +1989,7 @@ mod tests {
 
     #[test]
     fn full_tick_support_uses_previous_horizontal_position_then_clears_when_airborne() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let chunks = sparse_world(&[(0, 60, 0, "ice")]);
         let mut player = LocalPlayer::new();
         player.position = dvec3(0.5, 61.0, 0.5).into();
@@ -2003,6 +2009,7 @@ mod tests {
 
     #[test]
     fn supporting_blocks_use_nearest_center_ties_and_no_block_fallback_gate() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let chunks = sparse_world(&[(0, 60, 0, "ice"), (1, 60, 0, "stone")]);
         let mut player = LocalPlayer::new();
         player.position = dvec3(1.0, 61.0, 0.5).into();
@@ -2036,6 +2043,7 @@ mod tests {
 
     #[test]
     fn full_tick_edge_honey_shares_support_for_speed_and_jump_not_friction() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let chunks = sparse_world(&[(0, 60, 0, "honey_block")]);
         let mut player = LocalPlayer::new();
         player.position = dvec3(1.05, 60.9375, 0.5).into();
@@ -2058,6 +2066,7 @@ mod tests {
 
     #[test]
     fn soul_sand_support_shape_has_all_horizontal_faces_but_not_invalid_directions() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let state = crate::world::block::find_state("soul_sand", &[]);
         for direction in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -2082,6 +2091,7 @@ mod tests {
 
     #[test]
     fn authoritative_native_packet_event_local_player_tick_and_log() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_core::attribute_modifier_operation::AttributeModifierOperation as Op;
         use azalea_inventory::components::AttributeModifier;
         use azalea_protocol::packets::ProtocolPacket;
@@ -2267,6 +2277,7 @@ mod tests {
 
     #[test]
     fn jump_boost_honey_and_zero_power_match_float_jump() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let chunks = flat_floor();
         let mut player = LocalPlayer::new();
         player.position = dvec3(4.5, 61.0, 4.5).into();
@@ -2316,6 +2327,7 @@ mod tests {
 
     #[test]
     fn server_sprint_snapshot_survives_idle_tick_until_set_sprinting() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_core::attribute_modifier_operation::AttributeModifierOperation as Op;
         use azalea_inventory::components::AttributeModifier;
         use azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot;
@@ -2346,6 +2358,7 @@ mod tests {
 
     #[test]
     fn tiny_velocity_is_zeroed_before_travel_in_ground_air_water_and_flight() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let floor = flat_floor();
         let water = flat_floor();
         water.set_block_state(
@@ -2396,6 +2409,7 @@ mod tests {
 
     #[test]
     fn default_walk_and_sprint_keep_vanilla_steady_tick_displacement() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let chunks = flat_floor();
         for (sprint, expected_bps) in [(false, 4.317177), (true, 5.612330)] {
             let mut player = LocalPlayer::new();
@@ -2426,6 +2440,7 @@ mod tests {
 
     #[test]
     fn stair_step_ground_uses_requested_y_and_next_tick_uses_air_physics_after_jump() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let chunks = flat_floor();
         chunks.set_block_state(
             4,
@@ -2563,6 +2578,7 @@ mod tests {
 
     #[test]
     fn effective_movement_attributes_override_vanilla_defaults() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let mut player = LocalPlayer::new();
         player.set_attribute_value("minecraft:generic.movement_speed", 0.2);
         player.set_attribute_value("minecraft:generic.gravity", 0.04);
@@ -2640,6 +2656,7 @@ mod tests {
 
     #[test]
     fn lava_travel_uses_deep_fluid_drag_and_gravity() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let mut player = LocalPlayer::new();
         player.position = dvec3(0.5, 10.0, 0.5).into();
@@ -2686,6 +2703,7 @@ mod tests {
 
     #[test]
     fn fall_flying_travel_applies_official_glide_and_drag() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let mut player = LocalPlayer::new();
         player.look_dir = crate::entity::components::LookDirection::new(0.0, -30.0);
@@ -2736,6 +2754,7 @@ mod tests {
 
     #[test]
     fn fluid_blocking_and_full_face_support_are_distinct_from_collision() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let stone = crate::world::block::find_state("stone", &[]);
         let cobweb = crate::world::block::find_state("cobweb", &[]);
@@ -2810,6 +2829,7 @@ mod tests {
 
     #[test]
     fn apply_collision_clips_fall_at_floor_and_resets_grounded_distance() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let mut player = LocalPlayer::new();
         player.position = dvec3(0.5, 61.0, 0.5).into();
@@ -2844,6 +2864,7 @@ mod tests {
 
     #[test]
     fn tick_and_dead_tick_preserve_fall_distance_during_flight_and_reset_for_effects() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let input = InputState::released();
@@ -2901,6 +2922,7 @@ mod tests {
 
     #[test]
     fn climbable_post_move_impulse_matches_steel_even_while_sneaking() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let chunks = sparse_world(&[(0, 64, 0, "ladder"), (1, 64, 0, "stone")]);
         let ladder = crate::world::block::find_state("ladder", &[("facing", "north")]);
         let mut chunks = chunks;
@@ -2978,6 +3000,7 @@ mod tests {
 
     #[test]
     fn bubble_column_effect_visits_each_swept_cell_once_and_respects_velocity_limits() {
+        let _protocol = crate::world::block::test_protocol_guard();
         assert_eq!(bubble_column_velocity(0.68, false, false), 0.7);
         assert_eq!(bubble_column_velocity(0.69, false, false), 0.7);
         assert_eq!(bubble_column_velocity(-0.28, true, false), -0.3);
@@ -3076,6 +3099,7 @@ mod tests {
 
     #[test]
     fn levitation_moves_before_adjusting_velocity_and_removal_restores_gravity() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let input = InputState::released();
@@ -3119,6 +3143,7 @@ mod tests {
 
     #[test]
     fn dead_player_keeps_zero_input_air_travel() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let mut player = LocalPlayer::new();
         player.position = dvec3(0.0, 80.0, 0.0).into();

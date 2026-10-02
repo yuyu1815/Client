@@ -166,6 +166,7 @@ mod tests {
 
     #[test]
     fn shadow_contract_table_rejects_missing_surface_and_matches_alpha_gates() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let stone = crate::world::block::first_state_of("stone").unwrap();
         let air = crate::world::block::first_state_of("air").unwrap();

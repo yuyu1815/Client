@@ -2931,6 +2931,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_transfer_intention_is_independent_of_cookies() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
 
         use crate::net::conn::memory_pipes;
@@ -2971,6 +2972,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_custom_query_is_answered_with_same_transaction_id_and_no_payload() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_protocol::packets::handshake::ServerboundHandshakePacket;
         use azalea_protocol::packets::login::c_custom_query::ClientboundCustomQuery;
         use azalea_protocol::packets::login::s_custom_query_answer::ServerboundCustomQueryAnswer;
@@ -3079,6 +3081,7 @@ mod tests {
     /// finish configuration. No registry data, no compression, no encryption.
     #[tokio::test]
     async fn code_of_conduct_waits_for_explicit_accept_before_finish_configuration() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_auth::game_profile::GameProfile;
         use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
@@ -3166,6 +3169,7 @@ mod tests {
 
     #[tokio::test]
     async fn code_of_conduct_rejection_never_finishes_configuration() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
 
@@ -3204,6 +3208,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_code_of_conduct_after_accept_never_finishes_configuration() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
 
@@ -3246,6 +3251,7 @@ mod tests {
 
     #[tokio::test]
     async fn code_of_conduct_keeps_ping_live_before_accept() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
         use azalea_protocol::packets::config::c_ping::ClientboundPing;
 
@@ -3285,6 +3291,7 @@ mod tests {
 
     #[tokio::test]
     async fn code_of_conduct_defers_finish_and_keeps_ping_live() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
         use azalea_protocol::packets::config::c_ping::ClientboundPing;
@@ -3344,6 +3351,7 @@ mod tests {
 
     #[tokio::test]
     async fn code_of_conduct_keeps_cookie_exchange_live_before_accept() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
         use azalea_protocol::packets::config::c_cookie_request::ClientboundCookieRequest;
         use azalea_protocol::packets::config::c_store_cookie::ClientboundStoreCookie;
@@ -3381,6 +3389,7 @@ mod tests {
 
     #[tokio::test]
     async fn configuration_transfer_carries_server_cookies() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_protocol::packets::config::c_store_cookie::ClientboundStoreCookie;
         use azalea_protocol::packets::config::c_transfer::ClientboundTransfer;
 
@@ -3415,6 +3424,7 @@ mod tests {
 
     #[tokio::test]
     async fn game_transfer_carries_server_cookies() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_protocol::packets::config::ServerboundConfigPacket;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
         use azalea_protocol::packets::config::c_store_cookie::ClientboundStoreCookie;
@@ -3462,6 +3472,7 @@ mod tests {
 
     #[tokio::test]
     async fn joins_an_integrated_server_over_the_pipe() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_auth::game_profile::GameProfile;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
         use azalea_protocol::packets::handshake::ServerboundHandshakePacket;

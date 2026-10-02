@@ -581,6 +581,7 @@ mod tests {
 
     #[test]
     fn four_collision_families_match_registry_oracle_for_every_state() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let oracle: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(concat!(
@@ -692,6 +693,7 @@ mod tests {
 
     #[test]
     fn double_chest_halves_meet_at_connected_face_without_gap() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use glam::{DVec3, dvec3};
 
         use crate::physics::aabb::Aabb;
@@ -731,6 +733,7 @@ mod tests {
 
     #[test]
     fn partial_block_tops_stop_descending_feet_and_keep_exact_outlines() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_core::position::ChunkPos;
         use glam::{DVec3, dvec3};
 
@@ -802,6 +805,7 @@ mod tests {
 
     #[test]
     fn shape_defaults_and_noncollidable_fallbacks_are_preserved() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         for id in ["chest", "ender_chest"] {
             let state = crate::world::block::default_state_of(id).unwrap();
@@ -835,6 +839,7 @@ mod tests {
 
     #[test]
     fn sign_shapes_match_vanilla_for_all_directions_and_rotations() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         for wood in SIGN_WOODS {
             for waterlogged in ["false", "true"] {
@@ -917,6 +922,7 @@ mod tests {
 
     #[test]
     fn hopper_shapes_match_registry_oracle_in_all_five_directions_and_enabled_states() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let oracle: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(concat!(
@@ -1001,6 +1007,7 @@ mod tests {
 
     #[test]
     fn chain_variants_use_axis_collision_as_outline_fallback() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         for id in [
             "iron_chain",
@@ -1053,6 +1060,7 @@ mod tests {
 
     #[test]
     fn sign_outline_raycast_hits_board_but_passes_outside_to_chest() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_core::position::{BlockPos, ChunkPos};
         use glam::{Vec3, dvec3};
 
@@ -1104,6 +1112,7 @@ mod tests {
 
     #[test]
     fn shelves_match_vanilla_shapes_and_outline_in_all_horizontal_directions() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let expected = [
             (
@@ -1156,6 +1165,7 @@ mod tests {
 
     #[test]
     fn supported_collision_families_follow_state_connections() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let shape = |id, props| {
             crate::world::block::block_shape(crate::world::block::find_state(id, props)).unwrap()
@@ -1178,6 +1188,7 @@ mod tests {
 
     #[test]
     fn cross_connections_keep_their_collision_and_outline_heights_in_all_directions() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         for (id, half, height) in [
             ("oak_fence", 0.375, 1.5),
@@ -1212,6 +1223,7 @@ mod tests {
 
     #[test]
     fn collision_shapes_follow_vanilla_state_properties() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let shape = |id, props| {
             crate::world::block::block_shape(crate::world::block::find_state(id, props)).unwrap()
@@ -1256,6 +1268,7 @@ mod tests {
 
     #[test]
     fn offset_shape_families_keep_26_2_canonical_state_geometry() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         for id in [
             "dandelion",
@@ -1334,6 +1347,7 @@ mod tests {
 
     #[test]
     fn world_offset_translates_outline_raycast_and_collision_boxes() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_core::position::{BlockPos, ChunkPos};
         use glam::{Vec3, dvec3};
 
@@ -1420,6 +1434,7 @@ mod tests {
 
     #[test]
     fn verified_vanilla_overrides_separate_collision_and_outline_shapes() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
 
         let wire = crate::world::block::find_state(

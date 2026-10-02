@@ -184,6 +184,7 @@ fn chat_encoders_round_trip_through_azalea() {
 
 #[test]
 fn packet_ids_match_azalea() {
+    let _protocol = crate::world::block::test_protocol_guard();
     use azalea_protocol::packets::game::{s_attack, s_interact};
 
     let interact = ServerboundGamePacket::Interact(s_interact::ServerboundInteract {

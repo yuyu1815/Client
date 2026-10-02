@@ -539,6 +539,7 @@ mod tests {
 
     #[test]
     fn diagnostic_bounds_and_requery_do_not_change_collision() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let mut chunks = ChunkStore::new(1);
         chunks.partial_storage.set(
@@ -624,6 +625,7 @@ mod tests {
 
     #[test]
     fn explicit_wall_hanging_crossbar_collides_even_when_has_collision_is_false() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let air = crate::world::block::find_state("air", &[]);
         let piston = crate::world::block::find_state("moving_piston", &[]);
@@ -670,6 +672,7 @@ mod tests {
 
     #[test]
     fn collector_keeps_undefined_noncollidable_blocks_empty_including_moving_pistons() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let air = crate::world::block::find_state("air", &[]);
         let piston = crate::world::block::find_state("moving_piston", &[]);
@@ -717,6 +720,7 @@ mod tests {
 
     #[test]
     fn tall_shapes_in_cell_below_region_collide_at_positive_and_negative_heights() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let air = crate::world::block::find_state("air", &[]);
         for (id, props, min_x) in [
@@ -801,6 +805,7 @@ mod tests {
 
     #[test]
     fn entity_aabb_stops_player_motion() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let player = Aabb::from_center(dvec3(0.5, 0.0, 0.5), 0.3, 0.9);
@@ -819,6 +824,7 @@ mod tests {
 
     #[test]
     fn world_border_stops_player_at_boundary() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let player = Aabb::from_center(dvec3(4.5, 0.0, 0.0), 0.3, 0.9);
@@ -836,6 +842,7 @@ mod tests {
 
     #[test]
     fn border_does_not_trap_entity_already_outside() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let outside = Aabb::from_center(dvec3(5.5, 0.0, 0.0), 0.3, 0.9);

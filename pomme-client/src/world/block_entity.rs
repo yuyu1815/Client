@@ -1290,6 +1290,7 @@ mod tests {
 
     #[test]
     fn standing_wall_and_hanging_signs_use_their_text_renderers() {
+        let _protocol = crate::world::block::test_protocol_guard();
         assert_eq!(rendered_kind("oak_sign"), Some(BlockEntityKind::Sign));
         assert_eq!(
             rendered_kind("spruce_wall_sign"),
@@ -1345,6 +1346,7 @@ mod tests {
 
     #[test]
     fn bell_is_synthesized_for_the_block_entity_renderer() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         assert_eq!(rendered_kind("bell"), Some(BlockEntityKind::Bell));
         let mut entries = HashMap::new();
@@ -1371,6 +1373,7 @@ mod tests {
 
     #[test]
     fn copper_golem_statue_pose_and_oxidation_follow_block_state() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         for (name, pose, expected) in [
             ("copper_golem_statue", "running", (1u8, 0u32)),

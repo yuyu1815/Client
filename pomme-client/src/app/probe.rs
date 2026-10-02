@@ -1397,6 +1397,7 @@ mod tests {
 
     #[test]
     fn probe_boundaries_and_canonical_states() {
+        let _protocol = crate::world::block::test_protocol_guard();
         block::init("26.2");
         assert_eq!(canonical_id("stone"), "minecraft:stone");
         assert_eq!(canonical_id("test:stone"), "test:stone");

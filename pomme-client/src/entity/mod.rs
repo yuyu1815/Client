@@ -3341,6 +3341,7 @@ mod tests {
 
     #[test]
     fn sixteen_projectiles_integrate_every_fixed_tick_and_interpolate() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let mut chunks = ChunkStore::new(1);
         chunks.load_decoded_chunk(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
@@ -3366,6 +3367,7 @@ mod tests {
 
     #[test]
     fn held_worker_never_loses_ticks_or_rewinds_interpolation() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let mut store = EntityStore::new();
@@ -3435,6 +3437,7 @@ mod tests {
 
     #[test]
     fn sync_and_worker_match_for_all_three_kinds_across_two_horizons() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let mut async_store = EntityStore::new();
@@ -3495,6 +3498,7 @@ mod tests {
 
     #[test]
     fn late_worker_and_misordered_packet_cannot_snap_to_an_old_path() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let mut chunks = ChunkStore::new(1);
         chunks.load_decoded_chunk(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
@@ -3595,6 +3599,7 @@ mod tests {
 
     #[test]
     fn stale_correction_remove_reuse_world_epoch_and_landing_are_authoritative() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let mut store = projectile(EntityKind::Arrow, Position::new(2.0, 70.0, 2.0), DVec3::X);
@@ -3673,6 +3678,7 @@ mod tests {
 
     #[test]
     fn dimension_info_rejects_held_world_job_and_reuses_worker_for_new_projectiles() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let mut store = EntityStore::new();
@@ -3763,6 +3769,7 @@ mod tests {
 
     #[test]
     fn threshold_horizon_and_bounded_batch() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let mut store = EntityStore::new();
@@ -3821,6 +3828,7 @@ mod tests {
 
     #[test]
     fn early_refill_keeps_absolute_ticks_across_horizon() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let chunks = ChunkStore::new(1);
         let mut store = EntityStore::new();
@@ -3885,6 +3893,7 @@ mod tests {
 
     #[test]
     fn water_sample_is_display_only_and_crossing_geometry_never_hides_arrow() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let mut chunks = ChunkStore::new(1);
         chunks.load_decoded_chunk(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
@@ -3959,6 +3968,7 @@ mod tests {
 
     #[test]
     fn snowball_gravity_and_drag_precede_movement_and_motion_does_not_rewind() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let mut chunks = ChunkStore::new(1);
         let _chunk = chunks

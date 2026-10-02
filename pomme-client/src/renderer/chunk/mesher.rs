@@ -3945,6 +3945,7 @@ mod chest_quad_tests {
 
     #[test]
     fn single_chest_snapshot_copies_state_and_open_flag_without_other_containers() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_buf::AzBuf;
         use azalea_registry::builtin::BlockEntityKind;
         use simdnbt::owned::NbtCompound;
@@ -4001,6 +4002,7 @@ mod chest_quad_tests {
 
     #[test]
     fn double_chest_snapshots_require_reciprocal_loaded_matching_halves() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_buf::AzBuf;
         use azalea_registry::builtin::BlockEntityKind;
         use simdnbt::owned::NbtCompound;
@@ -4532,6 +4534,7 @@ mod terrain_uv_tests {
 
     #[test]
     fn fluid_scalar_brightness_and_raw_samples_share_each_face_neighbor() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let mut sky = Box::new([0; 2048]);
         let mut block = Box::new([0; 2048]);
@@ -4685,6 +4688,7 @@ mod terrain_uv_tests {
 
     #[test]
     fn moving_piston_state_changes_require_exact_registered_properties() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let state = crate::world::block::state_with_properties(
             "sticky_piston",
@@ -4723,6 +4727,7 @@ mod terrain_uv_tests {
 
     #[test]
     fn hopper_and_other_non_ao_quads_use_one_flat_sample_and_keep_all_32_quads() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let registry = BlockRegistry::test_empty();
         let atlas = AtlasUVMap::test_empty();
@@ -5028,6 +5033,7 @@ mod terrain_uv_tests {
 
     #[test]
     fn immediate_edit_small_mesh_exposure_culling_and_latest_state() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use std::collections::HashSet;
 
         crate::world::block::init("26.2");
@@ -5269,6 +5275,7 @@ mod terrain_uv_tests {
 
     #[test]
     fn offset_model_origins_match_shared_helper_and_signed_section_packing() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let flower = crate::world::block::find_state("dandelion", &[]);
         let bamboo = crate::world::block::find_state("bamboo_sapling", &[]);
@@ -5389,6 +5396,7 @@ mod terrain_uv_tests {
 
     #[test]
     fn flow_neighbor_height_uses_below_only_for_empty_neighbor() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use crate::world::block::{Fluid, FluidKind};
 
         crate::world::block::init("26.2");
@@ -5446,6 +5454,7 @@ mod terrain_uv_tests {
 
     #[test]
     fn neighboring_fluid_height_uses_its_own_amount() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let water = crate::world::block::Fluid {
             kind: crate::world::block::FluidKind::Water,
             amount: 8,
@@ -5464,6 +5473,7 @@ mod terrain_uv_tests {
 
     #[test]
     fn same_fluid_above_fills_side_height_without_changing_own_height() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let water = crate::world::block::Fluid {
             kind: crate::world::block::FluidKind::Water,
             amount: 8,

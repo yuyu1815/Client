@@ -2241,6 +2241,7 @@ mod sign_text_tests {
 
     #[test]
     fn banner_variants_cover_every_dye_for_standing_and_wall_models() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let defs = kind_definitions(false);
         let banner = defs
             .iter()
@@ -2281,6 +2282,7 @@ mod sign_text_tests {
 
     #[test]
     fn bell_swing_matches_native_formula_and_local_direction_after_facing_yaw() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let swing = crate::world::block_entity::BellSwing {
             ticks: 5,
             direction: 2,
@@ -2911,6 +2913,7 @@ mod sign_text_tests {
 
     #[test]
     fn skull_variants_pair_textures_models_and_wall_forms() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let cases = [
             (
                 "skeleton_skull",
@@ -3012,6 +3015,7 @@ mod sign_text_tests {
 
     #[test]
     fn skull_wall_transform_keeps_facing_offset_and_rotation_conventions() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use glam::Vec3;
         // Native SkullBlockRenderer uses wall translations relative to block center,
         // then rotates by the wall-facing yaw (north=180, east=270 here).
@@ -3045,6 +3049,7 @@ mod sign_text_tests {
 
     #[test]
     fn bell_uses_block_facing_for_its_body_transform() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         for (facing, yaw) in [
             ("south", 0.0),

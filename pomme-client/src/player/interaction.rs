@@ -2531,6 +2531,7 @@ mod tests {
 
     #[test]
     fn hopper_block_use_is_consumed_by_menu() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         assert!(opens_menu(
             crate::world::block::first_state_of("hopper").unwrap()
@@ -2570,6 +2571,7 @@ mod tests {
 
     #[test]
     fn hopper_raycast_uses_hollow_outline_and_only_overrides_the_face() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let (chunks, _) = border_test_world();
         let border = crate::world::border::WorldBorder::default();
         let pos = BlockPos::new(2, 64, 2);
@@ -2637,6 +2639,7 @@ mod tests {
 
     #[test]
     fn hopper_lower_space_does_not_block_entity_selection_or_blocks_behind_it() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let (chunks, _) = border_test_world();
         let border = crate::world::border::WorldBorder::default();
         chunks.set_block_state(2, 64, 2, crate::world::block::find_state("hopper", &[]));
@@ -2678,6 +2681,7 @@ mod tests {
 
     #[test]
     fn raycast_block_hit_crossing_border_synthesizes_vanilla_result() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let (mut chunks, border) = border_test_world();
         let stone = crate::world::block::first_state_of("stone").unwrap();
         chunks.set_block_state(6, 64, 0, stone);
@@ -2692,6 +2696,7 @@ mod tests {
 
     #[test]
     fn raycast_miss_end_crossing_positive_z_synthesizes_vanilla_result() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let (chunks, border) = border_test_world();
         let hit = raycast(dvec3(0.5, 64.5, 3.0), Vec3::Z, 5.0, &chunks, &border).unwrap();
         assert_eq!(hit.hit_point, dvec3(0.5, 64.5, 5.0 - f64::from(1.0E-5_f32)));
@@ -2703,6 +2708,7 @@ mod tests {
 
     #[test]
     fn raycast_in_bounds_block_hit_is_not_a_border_hit() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let (mut chunks, border) = border_test_world();
         let stone = crate::world::block::first_state_of("stone").unwrap();
         chunks.set_block_state(2, 64, 0, stone);
@@ -2717,6 +2723,7 @@ mod tests {
 
     #[test]
     fn raycast_starting_outside_does_not_synthesize_border_hit() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let (chunks, border) = border_test_world();
         let origin = dvec3(6.0, 64.5, 0.5);
         assert!(raycast(origin, Vec3::X, 2.0, &chunks, &border).is_none());
@@ -3123,6 +3130,7 @@ mod tests {
 
     #[test]
     fn start_use_item_orders_main_and_offhand_packets() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use InteractionHand::{MainHand, OffHand};
 
         use crate::net::sender::Outbound;
@@ -3364,6 +3372,7 @@ mod tests {
 
     #[test]
     fn start_use_item_predicts_even_when_server_may_reject_placement() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use InteractionHand::{MainHand, OffHand};
 
         use crate::net::sender::Outbound;
@@ -3598,6 +3607,7 @@ mod tests {
 
     #[test]
     fn start_use_item_preserves_inside_and_restores_replaced_state_on_rejected_ack() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use crate::net::sender::Outbound;
         for replace_clicked in [true, false] {
             let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
@@ -3688,6 +3698,7 @@ mod tests {
 
     #[test]
     fn immediate_edit_prediction_repick_collision_and_ack_rollback() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use crate::net::sender::Outbound;
         use crate::physics::collision::no_collision;
 
@@ -3809,6 +3820,7 @@ mod tests {
 
     #[test]
     fn consecutive_break_then_place_keeps_latest_prediction_until_its_ack() {
+        let _protocol = crate::world::block::test_protocol_guard();
         for confirmed in [false, true] {
             let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
             let stone = crate::world::block::first_state_of("stone").unwrap();
@@ -3908,6 +3920,7 @@ mod tests {
 
     #[test]
     fn start_use_item_multistate_reconciles_both_hands_and_ignores_old_ack() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use InteractionHand::{MainHand, OffHand};
 
         use crate::net::sender::Outbound;
@@ -4028,6 +4041,7 @@ mod tests {
 
     #[test]
     fn placement_state_predicts_basic_orientation_and_wall_variants() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         for (name, face, key, expected) in [
             ("oak_log", Direction::East, "axis", "x"),
@@ -4144,6 +4158,7 @@ mod tests {
 
     #[test]
     fn placement_target_does_not_treat_contextual_blocks_as_replaceable() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let (chunks, _) = border_test_world();
         let hit = BlockHitResult {
             block_pos: BlockPos::new(2, 64, 2),

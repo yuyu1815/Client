@@ -2618,6 +2618,7 @@ mod tests {
 
     #[test]
     fn tracking_store_ticks_three_batches_and_detach_preserves_old_id_snapshot() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use std::sync::Arc;
 
         use crate::renderer::chunk::atlas::AtlasUVMap;
@@ -2702,6 +2703,7 @@ mod tests {
 
     #[test]
     fn tracking_crit_and_enchanted_emitters_keep_three_total_batches() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use std::sync::Arc;
 
         use crate::renderer::chunk::atlas::AtlasUVMap;
@@ -2732,6 +2734,7 @@ mod tests {
 
     #[test]
     fn totem_tracking_emits_immediately_then_30_total_batches_and_removes() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use std::sync::Arc;
 
         use crate::renderer::chunk::atlas::AtlasUVMap;
@@ -2789,6 +2792,7 @@ mod tests {
 
     #[test]
     fn totem_move_clips_against_loaded_floor_and_wall() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use crate::renderer::chunk::atlas::AtlasRegion;
         use crate::world::chunk::ChunkStore;
         crate::world::block::init("26.2");
@@ -2838,6 +2842,7 @@ mod tests {
 
     #[test]
     fn totem_constructor_physics_render_and_sprite_tick_contract() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use crate::renderer::chunk::atlas::AtlasRegion;
         use crate::world::chunk::ChunkStore;
         crate::world::block::init("26.2");
@@ -2923,6 +2928,7 @@ mod tests {
 
     #[test]
     fn totem_tracking_detach_same_id_reuse_and_clear_use_store() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use std::sync::Arc;
 
         use crate::renderer::chunk::atlas::AtlasUVMap;
@@ -2974,6 +2980,7 @@ mod tests {
 
     #[test]
     fn tracking_particle_ctor_and_sprite_contract() {
+        let _protocol = crate::world::block::test_protocol_guard();
         assert_eq!(super::CRIT_SPRITE, "particle/critical_hit");
         assert_eq!(super::ENCHANTED_HIT_SPRITE, "particle/enchanted_hit");
         assert_eq!(
@@ -3036,6 +3043,7 @@ mod tests {
 
     #[test]
     fn particle_lifetime_keeps_age_life_frame_then_removes_next_tick() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use crate::world::chunk::ChunkStore;
 
         crate::world::block::init("26.2");
@@ -3130,6 +3138,7 @@ mod tests {
 
     #[test]
     fn poof_starts_not_fullbright_and_refreshes_world_light_on_tick() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let frame = super::AtlasRegion {
             u_min: 0.0,
             v_min: 0.0,
@@ -3153,6 +3162,7 @@ mod tests {
 
     #[test]
     fn poof_and_smoke_advance_frames_and_smoke_grows_during_tick() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let generic_frames = std::array::from_fn(|i| super::AtlasRegion {
             u_min: i as f32 / 8.0,
             u_max: (i + 1) as f32 / 8.0,

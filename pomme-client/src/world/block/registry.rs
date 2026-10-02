@@ -557,6 +557,7 @@ mod item_particle_tests {
 
     #[test]
     fn every_mapped_block_item_predicts_its_active_default_state() {
+        let _protocol = crate::world::block::test_protocol_guard();
         super::super::init("26.2");
         let registry = BlockRegistry::test_empty();
         for (item, definition) in &placement_data().block_items {

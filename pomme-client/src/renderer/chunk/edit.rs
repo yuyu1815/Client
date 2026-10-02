@@ -248,6 +248,7 @@ mod tests {
 
     #[test]
     fn immediate_edit_latest_overwrite_and_exact_uploaded_generation() {
+        let _protocol = crate::world::block::test_protocol_guard();
         // Section indices are relative to min_y=-64, not world section Y.
         // -49 is section 0; -48 is the first cell of section 1.
         let p = BlockPos::new(-1, -48, -1);

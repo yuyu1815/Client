@@ -176,6 +176,7 @@ mod tests {
 
     #[test]
     fn update_tracks_placed_and_removed_occluders() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         let stone = find_state("stone", &[]);
         let mut blocks: HashMap<i32, BlockState> = HashMap::new();

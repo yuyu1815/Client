@@ -3055,6 +3055,7 @@ mod tests {
     /// Quads must stay CCW viewed from outside for backface culling.
     #[test]
     fn determine_tint_matches_vanilla_leaf_table() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let cases = [
             ("oak_leaves", Tint::Foliage),
             ("dark_oak_leaves", Tint::Foliage),
@@ -3892,6 +3893,7 @@ mod tests {
 
     #[test]
     fn multipart_conditions_follow_vanilla_truth_table() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let props = crate::world::block::PropMap::from_pairs(vec![
             ("north", "true"),
             ("east", "false"),

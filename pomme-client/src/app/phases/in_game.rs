@@ -7180,6 +7180,7 @@ mod dropped_item_tests {
 
     #[test]
     fn dropped_item_copies_preserve_player_head_profile() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_inventory::components::{PartialOrFullProfile, PartialProfile, Profile};
         use azalea_inventory::{ItemStack, ItemStackData};
         use azalea_registry::builtin::{DataComponentKind, ItemKind};
@@ -8864,6 +8865,7 @@ mod tests {
 
     #[test]
     fn boat_underwater_status_matches_native_top_plane_fluid_scan() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use crate::world::block::{Fluid, FluidKind};
         let empty = Fluid {
             kind: FluidKind::Empty,
@@ -8951,6 +8953,7 @@ mod tests {
 
     #[test]
     fn all_twenty_boat_kinds_extract_from_nonliving_vehicle_store() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_registry::builtin::EntityKind as K;
 
         use crate::entity::EntityStore;
@@ -9000,6 +9003,7 @@ mod tests {
 
     #[test]
     fn boat_pose_uses_interpolated_native_tick_state() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_registry::builtin::EntityKind as K;
 
         use crate::entity::EntityStore;
@@ -9354,6 +9358,7 @@ mod tests {
 
     #[test]
     fn block_entity_state_lookup_reorder_keeps_candidates() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_core::position::BlockPos;
         use azalea_registry::builtin::BlockEntityKind as Kind;
         use glam::DVec3;
@@ -9489,6 +9494,7 @@ mod tests {
 
     #[test]
     fn projectile_display_interpolates_without_changing_packet_position() {
+        let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         use azalea_registry::builtin::EntityKind;
         use glam::DVec3;
@@ -9740,6 +9746,7 @@ mod tests {
 
     #[test]
     fn snowball_draw_key_matches_warmed_registry_item_name() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_registry::builtin::EntityKind;
         use glam::DVec3;
 
@@ -10701,6 +10708,7 @@ mod tests {
 
     #[test]
     fn minecart_cargo_uses_native_default_states_and_optional_override() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_registry::builtin::EntityKind as K;
 
         use super::minecart_cargo_state_for;

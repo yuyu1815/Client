@@ -678,6 +678,7 @@ mod tests {
 
     #[test]
     fn player_head_profile_survives_slot_and_cursor_extraction() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use azalea_auth::game_profile::{GameProfileProperties, ProfilePropertyValue};
         use azalea_inventory::components::{PartialOrFullProfile, PartialProfile, Profile};
         use azalea_registry::builtin::{DataComponentKind, ItemKind};

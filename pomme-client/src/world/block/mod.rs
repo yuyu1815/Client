@@ -315,6 +315,30 @@ const NATIVE_SLOT: usize = 0;
 static ACTIVE_TABLE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(NATIVE_SLOT);
 
+#[cfg(test)]
+static TEST_PROTOCOL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct TestProtocolGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for TestProtocolGuard {
+    fn drop(&mut self) {
+        ACTIVE_TABLE.store(NATIVE_SLOT, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_protocol_guard() -> TestProtocolGuard {
+    let lock = TEST_PROTOCOL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    set_active_protocol(pomme_protocol::version::NATIVE.protocol);
+    TestProtocolGuard { _lock: lock }
+}
+
 /// Vanilla getFluidState overrides on blocks without a `waterlogged` property.
 const IMPLICIT_WATER: [&str; 4] = ["seagrass", "tall_seagrass", "kelp", "kelp_plant"];
 
@@ -1079,6 +1103,7 @@ mod tests {
 
     #[test]
     fn vanilla_26_2_block_offsets_match_xz_seed_contract_and_version_gate() {
+        let _protocol = crate::world::block::test_protocol_guard();
         setup();
         let plant = find_state("dandelion", &[]);
         let same_column = block_offset(plant, BlockPos::new(-123, -40, 77));
@@ -1136,6 +1161,7 @@ mod tests {
 
     #[test]
     fn chest_states_decode() {
+        let _protocol = crate::world::block::test_protocol_guard();
         setup();
         // Oracle from reference/26.2/generated/reports/blocks.json:
         // chest[type=single,facing=south,waterlogged=false] is id 3994 — the
@@ -1151,6 +1177,7 @@ mod tests {
 
     #[test]
     fn default_states_use_registered_default_not_first_state() {
+        let _protocol = crate::world::block::test_protocol_guard();
         setup();
         for name in ["oak_log", "oak_slab", "oak_sign", "chest"] {
             let file: BlockFile = serde_json::from_str(BLOCK_DATA[NATIVE_SLOT].blocks).unwrap();
@@ -1163,6 +1190,7 @@ mod tests {
 
     #[test]
     fn new_26_2_blocks_resolve() {
+        let _protocol = crate::world::block::test_protocol_guard();
         setup();
         assert!(all_states().any(|(_, d)| d.id == "copper_chest"));
         assert!(try_state(u32::MAX).is_none());
@@ -1173,6 +1201,7 @@ mod tests {
 
     #[test]
     fn redstone_wire_colors() {
+        let _protocol = crate::world::block::test_protocol_guard();
         setup();
         let unpowered = find_state("redstone_wire", &[("power", "0")]);
         assert_eq!(redstone_wire_rgb(unpowered), [0.3, 0.0, 0.0]);
@@ -1184,6 +1213,7 @@ mod tests {
 
     #[test]
     fn stem_colors_follow_vanilla_age_formula() {
+        let _protocol = crate::world::block::test_protocol_guard();
         setup();
         for age in 0..=7 {
             let state = find_state("pumpkin_stem", &[("age", &age.to_string())]);
@@ -1200,6 +1230,7 @@ mod tests {
 
     #[test]
     fn fluid_states() {
+        let _protocol = crate::world::block::test_protocol_guard();
         setup();
         let (still, _) = all_states()
             .find(|(s, d)| d.id == "water" && block_properties(*s).get("level") == Some("0"))
@@ -1230,6 +1261,7 @@ mod tests {
 
     #[test]
     fn collision_flags() {
+        let _protocol = crate::world::block::test_protocol_guard();
         setup();
         // Oracles from reference/26.2/decompiled Blocks.java noCollision sites.
         assert!(!has_collision(BlockState::AIR));
@@ -1242,6 +1274,7 @@ mod tests {
 
     #[test]
     fn light_emission_values() {
+        let _protocol = crate::world::block::test_protocol_guard();
         setup();
         // Oracles from reference/26.2/decompiled Blocks.java lightLevel sites.
         assert_eq!(light_props(find_state("torch", &[])).emission, 14);
@@ -1286,6 +1319,7 @@ mod tests {
 
     #[test]
     fn light_dampening_values() {
+        let _protocol = crate::world::block::test_protocol_guard();
         setup();
         let stone = light_props(find_state("stone", &[]));
         assert_eq!(stone.dampening, 15);
@@ -1306,6 +1340,7 @@ mod tests {
 
     #[test]
     fn slab_face_occlusion() {
+        let _protocol = crate::world::block::test_protocol_guard();
         setup();
         let top = find_state("oak_slab", &[("type", "top"), ("waterlogged", "false")]);
         let bottom = find_state("oak_slab", &[("type", "bottom"), ("waterlogged", "false")]);
@@ -1339,6 +1374,7 @@ mod tests {
     /// `LiquidBlock`/`BubbleColumnBlock` return `Shapes.empty()`.
     #[test]
     fn outline_shapes() {
+        let _protocol = crate::world::block::test_protocol_guard();
         setup();
 
         // One snow layer is 2/16 tall to look at but has no collision at all.

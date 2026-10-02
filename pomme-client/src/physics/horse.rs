@@ -349,6 +349,7 @@ mod tests {
 
     #[test]
     fn wall_clips_displacement_and_resets_velocity() {
+        let _protocol = crate::world::block::test_protocol_guard();
         in_world(|chunks| {
             let stone = block::first_state_of("stone").unwrap();
             for x in 0..16 {
@@ -370,6 +371,7 @@ mod tests {
 
     #[test]
     fn ridden_step_height_has_one_block_minimum_and_uses_attribute() {
+        let _protocol = crate::world::block::test_protocol_guard();
         for (height, attribute, climbs) in [(1, 0.0, true), (2, 1.0, false), (2, 2.0, true)] {
             in_world(|chunks| {
                 let stone = block::first_state_of("stone").unwrap();
@@ -403,6 +405,7 @@ mod tests {
 
     #[test]
     fn ledge_enters_air_and_uses_horse_not_player_acceleration_or_gravity() {
+        let _protocol = crate::world::block::test_protocol_guard();
         in_world(|chunks| {
             for x in 0..16 {
                 for z in 5..16 {
@@ -483,6 +486,7 @@ mod tests {
 
     #[test]
     fn water_and_lava_return_explicitly_without_mutating_horse() {
+        let _protocol = crate::world::block::test_protocol_guard();
         for fluid in ["water", "lava"] {
             in_world(|chunks| {
                 // Touch the horse's flank, not just its feet/center cell.

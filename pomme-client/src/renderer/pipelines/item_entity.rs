@@ -2009,6 +2009,7 @@ mod tests {
 
     #[test]
     fn baked_block_quad_converts_to_float_uv_mesh_without_neighbor_culling() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let quad = crate::world::block::model::BakedQuad {
             positions: [
                 [0.0, 0.0, 1.0],
@@ -2079,6 +2080,7 @@ mod tests {
 
     #[test]
     fn gui_translucent_quad_order_matches_vanilla_buckets() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let quad = |direction, cullface| crate::world::block::model::BakedQuad {
             ambient_occlusion: true,
             positions: [[0.0; 3]; 4],
@@ -2220,6 +2222,7 @@ mod tests {
 
     #[test]
     fn player_head_same_kind_profiles_select_independent_textures() {
+        let _protocol = crate::world::block::test_protocol_guard();
         use crate::world::block_entity::{PlayerHeadProfileProperty, PlayerHeadSkinPatch};
         let profile = |signature: &str, cape: Option<&str>| PlayerHeadProfileSource::Static {
             name: Some("same-player".into()),
@@ -2257,6 +2260,7 @@ mod tests {
 
     #[test]
     fn player_head_quads_feed_all_item_contexts_with_72_vertices() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let transform = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
             * glam::Mat4::from_quat(glam::Quat::from_xyzw(1.0, 0.0, 0.0, 0.0));
         let model = crate::world::block::model::bake_player_head_item_model(transform);
@@ -2315,6 +2319,7 @@ mod tests {
 
     #[test]
     fn conduit_quads_feed_gui_held_and_drop_mesh_with_36_vertices() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let model = crate::world::block::model::bake_conduit_item_model();
         // Unit UV region isolates CPU mesh conversion, not atlas loading/GPU upload.
         let atlas = AtlasUVMap::test_empty();
@@ -2351,6 +2356,7 @@ mod tests {
 
     #[test]
     fn baked_quad_normal_matches_vanilla_closest_cardinal_direction() {
+        let _protocol = crate::world::block::test_protocol_guard();
         let angle = 22.5_f32.to_radians();
         let normal = glam::Vec3::new(angle.sin(), 0.0, angle.cos());
         let tangent = glam::Vec3::X * angle.cos() - glam::Vec3::Z * angle.sin();
