@@ -32,6 +32,7 @@ pub enum MetaValue {
     Long(i64),
     OptionalBlockState(Option<u32>),
     OptionalBlockPos(Option<BlockPos>),
+    BlockPos(BlockPos),
     BlockState(u32),
     Direction(azalea_core::direction::Direction),
 }
@@ -1315,6 +1316,39 @@ impl Default for DisplayState {
     }
 }
 
+fn decode_falling_block_state(
+    kind: Option<EntityKind>,
+    raw: i32,
+    protocol: i32,
+) -> Option<azalea_block::BlockState> {
+    (kind == Some(EntityKind::FallingBlock) && protocol == pomme_protocol::version::NATIVE.protocol)
+        .then(|| {
+            u32::try_from(raw)
+                .ok()
+                .and_then(crate::world::block::try_state)
+        })
+        .flatten()
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FallingBlockRenderState {
+    pub state: Option<azalea_block::BlockState>,
+    pub start_pos: BlockPos,
+}
+
+pub(crate) fn falling_block_sample_pos(position: Position) -> BlockPos {
+    BlockPos::new(
+        position.x.floor() as i32,
+        (position.y + 0.98).floor() as i32,
+        position.z.floor() as i32,
+    )
+}
+
+pub(crate) fn falling_block_model_matrix(position: Position, camera_anchor: DVec3) -> glam::Mat4 {
+    let relative = DVec3::new(position.x, position.y, position.z) - camera_anchor;
+    glam::Mat4::from_translation(relative.as_vec3() + glam::Vec3::new(0.0, 0.5, 0.0))
+}
+
 #[derive(Clone, Debug)]
 pub struct VehicleState {
     /// Missing for SetPassengers-only placeholders.
@@ -1322,6 +1356,9 @@ pub struct VehicleState {
     /// Raw AddEntity data, retained without assuming a registry mapping. For a
     /// FallingBlock this is a protocol block-state id, not a metadata index.
     pub spawn_data: Option<i32>,
+    /// Native-only interpretation of FallingBlock's AddEntity state and
+    /// metadata 8.
+    pub falling_block: FallingBlockRenderState,
     pub position: Position,
     pub prev_position: Position,
     pub velocity: DVec3,
@@ -1507,6 +1544,7 @@ impl EntityStore {
                 .map_or(Position::default(), |e| e.position),
             kind: None,
             spawn_data: None,
+            falling_block: FallingBlockRenderState::default(),
             velocity: DVec3::ZERO,
             prev_look_dir: None,
             projectile: None,
@@ -1590,6 +1628,7 @@ impl EntityStore {
             prev_position: position,
             kind: None,
             spawn_data: None,
+            falling_block: FallingBlockRenderState::default(),
             velocity,
             prev_look_dir: None,
             projectile: None,
@@ -1699,6 +1738,11 @@ impl EntityStore {
     pub fn set_vehicle_spawn_data(&mut self, id: i32, spawn_data: i32) {
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.spawn_data = Some(spawn_data);
+            vehicle.falling_block.state = decode_falling_block_state(
+                vehicle.kind,
+                spawn_data,
+                crate::version::session_protocol(),
+            );
         }
     }
 
@@ -1718,6 +1762,9 @@ impl EntityStore {
             }
             (Some(EntityKind::Tnt), 9, MetaValue::BlockState(v)) => {
                 vehicle.tnt_block_state = Some(v);
+            }
+            (Some(EntityKind::FallingBlock), 8, MetaValue::BlockPos(pos)) => {
+                vehicle.falling_block.start_pos = pos;
             }
             (Some(EntityKind::EndCrystal), 8, MetaValue::OptionalBlockPos(pos)) => {
                 vehicle.crystal_beam_target = pos;
@@ -1871,6 +1918,14 @@ impl EntityStore {
     pub fn set_vehicle_kind(&mut self, id: i32, kind: EntityKind) {
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.kind = Some(kind);
+            vehicle.falling_block = FallingBlockRenderState::default();
+            if kind == EntityKind::FallingBlock
+                && crate::version::session_protocol() == pomme_protocol::version::NATIVE.protocol
+            {
+                vehicle.falling_block.state = vehicle.spawn_data.and_then(|raw| {
+                    decode_falling_block_state(Some(kind), raw, crate::version::session_protocol())
+                });
+            }
             vehicle.projectile_age = 0;
             vehicle.projectile_prev_age = 0;
             if kind == EntityKind::ChestMinecart {
@@ -3088,6 +3143,42 @@ fn probes_water(kind: &EntityKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn falling_block_wire_state_gate_retains_raw_data_without_foreign_remapping() {
+        let native = pomme_protocol::version::NATIVE.protocol;
+        assert!(decode_falling_block_state(Some(EntityKind::FallingBlock), 0, native).is_some());
+        assert!(decode_falling_block_state(Some(EntityKind::FallingBlock), -1, native).is_none());
+        assert!(
+            decode_falling_block_state(Some(EntityKind::FallingBlock), i32::MAX, native).is_none()
+        );
+        assert!(
+            decode_falling_block_state(Some(EntityKind::FallingBlock), 0, native - 1).is_none()
+        );
+        assert!(decode_falling_block_state(Some(EntityKind::Tnt), 0, native).is_none());
+
+        let mut store = projectile(EntityKind::Tnt, Position::default(), DVec3::ZERO);
+        store.set_vehicle_spawn_data(1, 0);
+        assert_eq!(store.vehicles[&1].spawn_data, Some(0));
+        assert_eq!(store.vehicles[&1].falling_block.state, None);
+    }
+
+    #[test]
+    fn falling_block_start_pos_metadata_is_exactly_retained() {
+        let mut store = projectile(EntityKind::FallingBlock, Position::default(), DVec3::ZERO);
+        let start = BlockPos::new(-31, -48, 17);
+        store.apply_vehicle_metadata(1, 8, MetaValue::BlockPos(start));
+        assert_eq!(store.vehicles[&1].falling_block.start_pos, start);
+    }
+
+    #[test]
+    fn falling_block_sample_and_root_matrix_match_renderer_coordinates() {
+        let position = Position::new(4.25, 8.05, -2.75);
+        assert_eq!(falling_block_sample_pos(position), BlockPos::new(4, 9, -3));
+        let anchor = DVec3::new(4.0, 8.0, -3.0);
+        let matrix = falling_block_model_matrix(position, anchor);
+        assert_eq!(matrix.w_axis.truncate(), glam::Vec3::new(0.25, 0.55, 0.25));
+    }
 
     #[test]
     fn shulker_bullet_renderer_age_is_fixed_tick_interpolatable_and_resets_on_reuse() {

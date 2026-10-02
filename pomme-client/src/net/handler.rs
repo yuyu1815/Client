@@ -1641,6 +1641,9 @@ pub(super) async fn handle_game_packet_with_display_text(
                     azalea_entity::EntityDataValue::OptionalBlockPos(pos) => {
                         Some(MetaValue::OptionalBlockPos(*pos))
                     }
+                    azalea_entity::EntityDataValue::BlockPos(pos) => {
+                        Some(MetaValue::BlockPos(*pos))
+                    }
                     // Serializer 16 on Shulker only. The consumer gates this
                     // semantic value by (kind, index); other index-16 fields
                     // remain their original Bool/Byte/Int variants.

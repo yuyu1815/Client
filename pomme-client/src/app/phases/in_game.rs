@@ -5410,6 +5410,69 @@ pub fn update_game(
             });
         }
         for vehicle in game.entity_store.vehicles.values() {
+            if vehicle.kind != Some(azalea_registry::builtin::EntityKind::FallingBlock) {
+                continue;
+            }
+            let Some(state) = vehicle.falling_block.state else {
+                continue;
+            };
+            let pos = vehicle
+                .prev_position
+                .lerp(vehicle.position, f64::from(partial_tick));
+            let block_pos = crate::entity::falling_block_sample_pos(pos);
+            if crate::world::block::is_air(state)
+                || game
+                    .chunk_store
+                    .get_block_state(block_pos.x, block_pos.y, block_pos.z)
+                    == state
+                || crate::world::block_entity::is_invisible_block(crate::world::block::block_id(
+                    state,
+                ))
+            {
+                continue;
+            }
+            let start = vehicle.falling_block.start_pos;
+            let Some(item_name) = gfx
+                .renderer
+                .ensure_block_mesh(state, [start.x, start.y, start.z])
+            else {
+                continue;
+            };
+            item_renders.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
+                item_name,
+                raw_dye_rgb: None,
+                player_head_profile_source: None,
+                // Block meshes are centered by -0.5 per vertex; restore that half-block
+                // while matching FallingBlockRenderer's root (-0.5, 0, -0.5).
+                model_matrix: crate::entity::falling_block_model_matrix(
+                    pos,
+                    gfx.renderer.camera_anchor(),
+                ),
+                light: lightmap_brightness(
+                    &game.chunk_store,
+                    &game.dimension,
+                    block_pos.x,
+                    block_pos.y,
+                    block_pos.z,
+                ),
+                white_overlay: 0.0,
+                nether_lighting: game.cardinal_light == CardinalLightType::Nether,
+                entity_uuid: None,
+                invisible: false,
+                actual_age: None,
+                actual_render_age: 0.0,
+                age_f: 0.0,
+                actual_spin: 0.0,
+                spin: 0.0,
+                bob_offset: 0.0,
+                actual_bob_offset: 0.0,
+                controlled_phase: false,
+                bob_controlled: false,
+                position: pos.to_array(),
+                stack_count: 1,
+            });
+        }
+        for vehicle in game.entity_store.vehicles.values() {
             if vehicle.kind != Some(azalea_registry::builtin::EntityKind::ItemDisplay) {
                 continue;
             }
