@@ -9,7 +9,9 @@ use azalea_protocol::packets::ProtocolPacket;
 use azalea_protocol::packets::game::{ClientboundGamePacket as C, ServerboundGamePacket as S};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-const QUEUE: usize = 16;
+const QUEUE: usize = 1024;
+const QUEUE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
+const WRITER_BUFFER: usize = 1024 * 1024;
 const LIMIT: u64 = 1024 * 1024 * 1024;
 const MAX_RAW: usize = 8 * 1024 * 1024;
 const MAX_ROW: usize = 12 * 1024 * 1024;
@@ -43,7 +45,14 @@ pub struct PacketTraceId {
     id: u64,
 }
 struct Session {
-    tx: Option<crossbeam_channel::Sender<Value>>,
+    tx: Option<crossbeam_channel::Sender<QueuedRow>>,
+    pending_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    pending_rows: Arc<std::sync::atomic::AtomicUsize>,
+    high_water_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    high_water_rows: Arc<std::sync::atomic::AtomicUsize>,
+    queue_full_drops: u64,
+    byte_budget_drops: u64,
+    oversize_omitted: u64,
     start: Instant,
     seq: u64,
     dropped: u64,
@@ -51,6 +60,18 @@ struct Session {
     path: PathBuf,
     wall: u64,
     id: u64,
+}
+struct QueuedRow {
+    bytes: Vec<u8>,
+    pending_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    pending_rows: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl Drop for QueuedRow {
+    fn drop(&mut self) {
+        self.pending_bytes
+            .fetch_sub(self.bytes.len(), Ordering::Relaxed);
+        self.pending_rows.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 impl Recorder {
     pub fn active(&self) -> bool {
@@ -71,10 +92,21 @@ impl Recorder {
             return;
         }
         let (tx, rx) = crossbeam_channel::bounded(QUEUE);
+        let pending_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pending_rows = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let high_water_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let high_water_rows = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let wall = wall_ms();
         state.status = format!("Recording start UTC unix_ms={wall}: {}", path.display());
         state.session = Some(Session {
             tx: Some(tx),
+            pending_bytes,
+            pending_rows,
+            high_water_bytes,
+            high_water_rows,
+            queue_full_drops: 0,
+            byte_budget_drops: 0,
+            oversize_omitted: 0,
             start: Instant::now(),
             seq: 0,
             dropped: 0,
@@ -91,7 +123,14 @@ impl Recorder {
                 .write(true)
                 .create_new(true)
                 .open(&path)
-                .and_then(|file| recorder.write_log(BufWriter::new(file), rx, protocol, LIMIT));
+                .and_then(|file| {
+                    recorder.write_log(
+                        BufWriter::with_capacity(WRITER_BUFFER, file),
+                        rx,
+                        protocol,
+                        LIMIT,
+                    )
+                });
             recorder.finish(result);
         });
     }
@@ -167,38 +206,71 @@ impl Recorder {
         s.seq += 1;
         let (frame_id, tick) = *self.context.lock();
         let row = json!({"seq":s.seq,"offset_us":s.start.elapsed().as_micros() as u64,"frame_id":frame_id,"tick":tick,"direction":direction,"stage":stage,"data":data});
-        if s.tx.as_ref().unwrap().try_send(row).is_err() {
+        Self::enqueue(s, row);
+    }
+    fn enqueue(s: &mut Session, row: Value) {
+        let mut bytes = serde_json::to_vec(&row).expect("JSON Value serialization cannot fail");
+        bytes.push(b'\n');
+        if bytes.len() > MAX_ROW {
             s.dropped += 1;
+            s.oversize_omitted += 1;
+            return;
+        }
+        let mut pending = s.pending_bytes.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = pending
+                .checked_add(bytes.len())
+                .filter(|n| *n <= QUEUE_BYTE_BUDGET)
+            else {
+                s.dropped += 1;
+                s.byte_budget_drops += 1;
+                return;
+            };
+            match s.pending_bytes.compare_exchange_weak(
+                pending,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    s.high_water_bytes.fetch_max(next, Ordering::Relaxed);
+                    break;
+                }
+                Err(actual) => pending = actual,
+            }
+        }
+        let rows = s.pending_rows.fetch_add(1, Ordering::Relaxed) + 1;
+        s.high_water_rows.fetch_max(rows, Ordering::Relaxed);
+        let queued = QueuedRow {
+            bytes,
+            pending_bytes: s.pending_bytes.clone(),
+            pending_rows: s.pending_rows.clone(),
+        };
+        if s.tx.as_ref().unwrap().try_send(queued).is_err() {
+            s.dropped += 1;
+            s.queue_full_drops += 1;
         }
     }
     fn write_log(
         &self,
         mut out: impl Write,
-        rx: crossbeam_channel::Receiver<Value>,
+        rx: crossbeam_channel::Receiver<QueuedRow>,
         protocol: i32,
         limit: u64,
     ) -> io::Result<()> {
         let start = self.state.lock().session.as_ref().unwrap().wall;
         write_row(
             &mut out,
-            &json!({"type":"header","schema":1,"utc_start_unix_ms":start,"connection_epoch":self.epoch,"wire_protocol":protocol,"executable":executable_identity(),"package_version":env!("CARGO_PKG_VERSION"),"source_build_revision":null,"queue_capacity":QUEUE,"size_limit_bytes":limit,"max_row_bytes":MAX_ROW,"semantics":"client observations only; queued != transport_write_success != server acceptance; raw PLAY/CONFIG payloads include cookies/chat/custom payloads and are private local diagnostics; LOGIN/auth secrets excluded; normalized packet IDs are native; seq gaps/dropped mean incomplete evidence"}),
+            &json!({"type":"header","schema":1,"utc_start_unix_ms":start,"connection_epoch":self.epoch,"wire_protocol":protocol,"executable":executable_identity(),"package_version":env!("CARGO_PKG_VERSION"),"source_build_revision":null,"queue_capacity":QUEUE,"queue_byte_budget":QUEUE_BYTE_BUDGET,"writer_buffer_bytes":WRITER_BUFFER,"size_limit_bytes":limit,"max_row_bytes":MAX_ROW,"semantics":"client observations only; queued != transport_write_success != server acceptance; raw PLAY/CONFIG payloads include cookies/chat/custom payloads and are private local diagnostics; LOGIN/auth secrets excluded; normalized packet IDs are native; seq gaps/dropped mean incomplete evidence"}),
         )?;
         let mut bytes = 0;
-        let mut omitted = 0;
         let mut written = 0;
         for row in rx {
-            let mut data = serde_json::to_vec(&row)?;
-            data.push(b'\n');
-            if data.len() > MAX_ROW {
-                omitted += 1;
-                self.state.lock().session.as_mut().unwrap().dropped += 1;
-                continue;
-            }
-            out.write_all(&data)?;
+            out.write_all(&row.bytes)?;
             written += 1;
-            bytes += data.len() as u64;
-            // ponytail: soft limit then drain; hard ceiling LIMIT + QUEUE*MAX_ROW (<1.19
-            // GiB).
+            bytes += row.bytes.len() as u64;
+            // ponytail: soft limit then drain; queued payloads are bounded by
+            // QUEUE_BYTE_BUDGET.
             if bytes >= limit {
                 self.stop("size_limit");
             }
@@ -206,7 +278,7 @@ impl Recorder {
         let footer = {
             let state = self.state.lock();
             let s = state.session.as_ref().unwrap();
-            json!({"type":"footer","utc_end_unix_ms":wall_ms(),"offset_us":s.start.elapsed().as_micros() as u64,"last_seq":s.seq,"written":written,"dropped":s.dropped,"oversize_omitted":omitted,"reason":s.reason,"complete":s.dropped==0 && omitted==0})
+            json!({"type":"footer","utc_end_unix_ms":wall_ms(),"offset_us":s.start.elapsed().as_micros() as u64,"last_seq":s.seq,"written":written,"dropped":s.dropped,"queue_full_drops":s.queue_full_drops,"byte_budget_drops":s.byte_budget_drops,"pending_bytes_high_water":s.high_water_bytes.load(Ordering::Relaxed),"pending_rows_high_water":s.high_water_rows.load(Ordering::Relaxed),"oversize_omitted":s.oversize_omitted,"reason":s.reason,"complete":s.dropped==0})
         };
         write_row(&mut out, &footer)?;
         out.flush()
@@ -259,9 +331,7 @@ impl Recorder {
         s.seq += 1;
         let (frame_id, tick) = *self.context.lock();
         let row = json!({"seq":s.seq,"offset_us":s.start.elapsed().as_micros() as u64,"frame_id":frame_id,"tick":tick,"direction":direction,"stage":stage,"data":data});
-        if s.tx.as_ref().unwrap().try_send(row).is_err() {
-            s.dropped += 1;
-        }
+        Self::enqueue(s, row);
     }
 
     pub fn set_context(&self, frame_id: u64, tick: u64) {
@@ -656,11 +726,19 @@ pub fn event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn ready(cap: usize) -> (Arc<Recorder>, crossbeam_channel::Receiver<Value>) {
+    fn ready(cap: usize) -> (Arc<Recorder>, crossbeam_channel::Receiver<QueuedRow>) {
         let r = Arc::new(Recorder::default());
         let (tx, rx) = crossbeam_channel::bounded(cap);
+        let pending_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         r.state.lock().session = Some(Session {
             tx: Some(tx),
+            pending_bytes,
+            pending_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            high_water_bytes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            high_water_rows: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            queue_full_drops: 0,
+            byte_budget_drops: 0,
+            oversize_omitted: 0,
             start: Instant::now(),
             seq: 0,
             dropped: 0,
@@ -741,6 +819,57 @@ mod tests {
         assert_eq!(rows(&bytes).last().unwrap()["reason"], "size_limit");
     }
     #[test]
+    fn burst_and_byte_budget_are_bounded_and_reported() {
+        let (r, rx) = ready(QUEUE);
+        for n in 0..512 {
+            r.record("local", "burst", || Some(json!({"n":n})));
+        }
+        assert_eq!(r.state.lock().session.as_ref().unwrap().dropped, 0);
+        r.stop("test");
+        let mut log = Vec::new();
+        r.write_log(&mut log, rx, 776, LIMIT).unwrap();
+        let footer = rows(&log).pop().unwrap();
+        assert_eq!(footer["written"], 512);
+        assert_eq!(footer["dropped"], 0);
+        assert_eq!(footer["pending_rows_high_water"], 512);
+        assert!(footer["pending_bytes_high_water"].as_u64().unwrap() <= QUEUE_BYTE_BUDGET as u64);
+
+        let (r, rx) = ready(QUEUE);
+        let payload = "x".repeat(11 * 1024 * 1024);
+        for _ in 0..6 {
+            r.record("local", "large", || Some(json!({"payload":payload})));
+        }
+        let session = r.state.lock();
+        let s = session.session.as_ref().unwrap();
+        assert_eq!(s.byte_budget_drops, 1);
+        assert_eq!(s.queue_full_drops, 0);
+        assert!(s.pending_bytes.load(Ordering::Relaxed) <= QUEUE_BYTE_BUDGET);
+        assert_eq!(s.pending_rows.load(Ordering::Relaxed), 5);
+        drop(session);
+        r.stop("test");
+        drop(rx);
+        assert_eq!(
+            r.state
+                .lock()
+                .session
+                .as_ref()
+                .unwrap()
+                .pending_bytes
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            r.state
+                .lock()
+                .session
+                .as_ref()
+                .unwrap()
+                .pending_rows
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+    #[test]
     fn inactive_and_secret_allowlist() {
         use azalea_protocol::packets::game::s_edit_book::ServerboundEditBook;
         let r = Recorder::default();
@@ -782,8 +911,8 @@ mod tests {
         }
         r.local_prediction(pos, stone, azalea_block::BlockState::AIR, 7);
         r.local_prediction(pos, azalea_block::BlockState::AIR, stone, 8);
-        let first = rx.try_recv().unwrap();
-        let second = rx.try_recv().unwrap();
+        let first: Value = serde_json::from_slice(&rx.try_recv().unwrap().bytes).unwrap();
+        let second: Value = serde_json::from_slice(&rx.try_recv().unwrap().bytes).unwrap();
         assert_eq!(first["data"]["before"], stone.id());
         assert_eq!(first["data"]["predicted"], 0);
         assert_eq!(first["data"]["action_sequence"], 7);
@@ -800,7 +929,7 @@ mod tests {
         // Native configuration cookie_response ID 5 plus arbitrary cookie bytes.
         let frame = [5, 3, 0xff, 0x00, 0x42];
         r.raw_packet("inbound", "configuration", &frame);
-        let row = rx.try_recv().unwrap();
+        let row: Value = serde_json::from_slice(&rx.try_recv().unwrap().bytes).unwrap();
         assert_eq!(row["stage"], "packet_raw");
         assert_eq!(row["data"]["protocol_state"], "configuration");
         assert_eq!(row["data"]["capture_point"], "wire_plaintext");
@@ -814,7 +943,7 @@ mod tests {
             frame
         );
         r.raw_packet("inbound", "play", &[0x80, 0x80, 0x80, 0x80, 0x80]);
-        let malformed = rx.try_recv().unwrap();
+        let malformed: Value = serde_json::from_slice(&rx.try_recv().unwrap().bytes).unwrap();
         assert!(malformed["data"]["native_id"].is_null());
         assert_eq!(malformed["data"]["raw_length"], 5);
         let (other, _other_rx) = ready(1);
@@ -831,7 +960,7 @@ mod tests {
         );
         r.raw_packet("inbound", "play", &vec![0; MAX_RAW + 1]);
         assert_eq!(
-            rx.try_recv().unwrap()["stage"],
+            serde_json::from_slice::<Value>(&rx.try_recv().unwrap().bytes).unwrap()["stage"],
             "packet_raw_omitted_oversize"
         );
         r.stop("test");
