@@ -42,20 +42,33 @@ pub struct DimensionEnvironment {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClockSample {
-    pub total_ticks: u64,
+    pub total_ticks: i64,
     pub partial_tick: f32,
     pub rate: f32,
 }
 
 impl ClockSample {
-    pub fn advance_tick(&mut self) {
-        let partial = self.partial_tick + self.rate;
-        let full_ticks = partial.floor();
-        self.total_ticks = self.total_ticks.wrapping_add_signed(full_ticks as i64);
-        self.partial_tick = partial - full_ticks;
+    /// Mirrors ClientClockManager.tick(gameTimeDelta): Java floors to a
+    /// saturating int before adding that integer to its wrapping long total.
+    pub fn advance_game_time(&mut self, game_time_delta: i64) {
+        let elapsed = f64::from(self.partial_tick) + game_time_delta as f64 * f64::from(self.rate);
+        if !elapsed.is_finite() {
+            return;
+        }
+        let full_ticks = elapsed.floor() as i32;
+        self.partial_tick = (elapsed - f64::from(full_ticks)) as f32;
+        self.total_ticks = self.total_ticks.wrapping_add(i64::from(full_ticks));
     }
 
-    pub fn tick(self, render_partial_tick: f32) -> f64 {
+    /// Native timeline sampling is integer-only; rendering interpolation is
+    /// deliberately separate so it cannot perturb timeline phase selection.
+    pub fn timeline_ticks(self, period_ticks: Option<i32>) -> i64 {
+        period_ticks.map_or(self.total_ticks, |period| {
+            self.total_ticks.rem_euclid(i64::from(period))
+        })
+    }
+
+    pub fn renderer_tick(self, render_partial_tick: f32) -> f64 {
         self.total_ticks as f64
             + f64::from(self.partial_tick)
             + f64::from(render_partial_tick) * f64::from(self.rate)
@@ -194,6 +207,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn signed_clock_phase_and_native_tick_advancement() {
+        let sample = ClockSample {
+            total_ticks: -1,
+            partial_tick: 0.75,
+            rate: 0.0,
+        };
+        assert_eq!(sample.timeline_ticks(Some(24_000)), 23_999);
+        assert_eq!(
+            ClockSample {
+                total_ticks: i64::MIN,
+                ..sample
+            }
+            .timeline_ticks(Some(24_000)),
+            16_192
+        );
+        assert_eq!(
+            ClockSample {
+                total_ticks: (1_i64 << 53) + 1,
+                ..sample
+            }
+            .timeline_ticks(Some(24_000)),
+            12_993
+        );
+        assert_eq!(sample.renderer_tick(0.5), -0.25);
+        assert_eq!(sample.timeline_ticks(Some(24_000)), 23_999);
+
+        let mut stopped = sample;
+        stopped.advance_game_time(20);
+        assert_eq!((stopped.total_ticks, stopped.partial_tick), (-1, 0.75));
+        let mut reverse = ClockSample {
+            rate: -0.25,
+            ..sample
+        };
+        reverse.advance_game_time(1);
+        assert_eq!((reverse.total_ticks, reverse.partial_tick), (0, 0.5));
+        let mut huge = ClockSample {
+            partial_tick: 0.0,
+            rate: f32::MAX,
+            ..sample
+        };
+        huge.advance_game_time(1);
+        assert_eq!(huge.total_ticks, i64::from(i32::MAX) - 1);
+    }
+
+    #[test]
     fn dimension_defaults_and_trust_boundary_ranges() {
         let defaults =
             from_dimension_fields(true, false, false, Some(0.0), None, &[], &[]).unwrap();
@@ -252,34 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn timeline_track_is_bounded_finite_and_ordered() {
-        let frame = |ticks, value| {
-            let mut nbt = NbtCompound::new();
-            nbt.insert("ticks", ticks);
-            nbt.insert("value", value);
-            nbt
-        };
-        let mut track = NbtCompound::new();
-        track.insert(
-            "keyframes",
-            NbtList::from(vec![frame(0, 1.0f32), frame(10, 0.25f32)]),
-        );
-        assert_eq!(float_track(&track).unwrap().keyframes.len(), 2);
-        track.insert(
-            "keyframes",
-            NbtList::from(vec![frame(10, 1.0f32), frame(0, 0.25f32)]),
-        );
-        assert!(float_track(&track).is_none());
-        track.insert("keyframes", NbtList::from(vec![frame(0, f32::NAN)]));
-        assert!(float_track(&track).is_none());
-        track.insert(
-            "keyframes",
-            NbtList::from(vec![frame(0, 1.0f32), frame(0, 0.5), frame(0, 0.25)]),
-        );
-        assert!(float_track(&track).is_none());
-    }
-}
-    #[test]
     fn native_day_sky_light_track_reaches_typed_environment() {
         let frame = |ticks, value| {
             let mut nbt = NbtCompound::new();
@@ -337,3 +367,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn timeline_track_is_bounded_finite_and_ordered() {
+        let frame = |ticks, value| {
+            let mut nbt = NbtCompound::new();
+            nbt.insert("ticks", ticks);
+            nbt.insert("value", value);
+            nbt
+        };
+        let mut track = NbtCompound::new();
+        track.insert(
+            "keyframes",
+            NbtList::from(vec![frame(0, 1.0f32), frame(10, 0.25f32)]),
+        );
+        assert_eq!(float_track(&track).unwrap().keyframes.len(), 2);
+        track.insert(
+            "keyframes",
+            NbtList::from(vec![frame(10, 1.0f32), frame(0, 0.25f32)]),
+        );
+        assert!(float_track(&track).is_none());
+        track.insert("keyframes", NbtList::from(vec![frame(0, f32::NAN)]));
+        assert!(float_track(&track).is_none());
+        track.insert(
+            "keyframes",
+            NbtList::from(vec![frame(0, 1.0f32), frame(0, 0.5), frame(0, 0.25)]),
+        );
+        assert!(float_track(&track).is_none());
+    }
+}

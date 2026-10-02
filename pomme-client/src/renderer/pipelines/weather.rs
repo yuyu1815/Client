@@ -513,7 +513,7 @@ fn column_seed(x: i32, z: i32) -> i64 {
 }
 
 /// Vanilla `createRainColumnInstance`: V scrolls downward at `3 + rand` speed.
-fn rain_uv(game_time: u64, partial: f32, x: i32, z: i32) -> (f32, f32) {
+fn rain_uv(game_time: i64, partial: f32, x: i32, z: i32) -> (f32, f32) {
     let wrapped = (game_time & 0x1FFFF) as f32;
     // Both seed and tick offset use the same column hash halves.
     let (a, b) = column_hash_parts(x, z);
@@ -526,7 +526,7 @@ fn rain_uv(game_time: u64, partial: f32, x: i32, z: i32) -> (f32, f32) {
 
 /// Vanilla `createSnowColumnInstance`: gentle gaussian drift plus a slow
 /// scroll.
-fn snow_uv(game_time: u64, partial: f32, x: i32, z: i32) -> (f32, f32) {
+fn snow_uv(game_time: i64, partial: f32, x: i32, z: i32) -> (f32, f32) {
     let mut rng = JavaRandom::new(column_seed(x, z));
     let wrapped = (game_time & 0x1FFFF) as f32;
     let time = wrapped + partial;
@@ -774,7 +774,7 @@ mod precipitation_tests {
     #[test]
     fn rain_uv_matches_independent_seed_and_tick_hashes() {
         for (x, z) in [(0, 0), (-10, 15), (1024, -512), (i32::MIN, i32::MAX)] {
-            for (game_time, partial) in [(0, 0.0), (131071, 0.5), (u64::MAX, 0.99)] {
+            for (game_time, partial) in [(0, 0.0), (131071, 0.5), (i64::MIN, 0.99)] {
                 let (a, b) = super::column_hash_parts(x, z);
                 let mut rng = super::JavaRandom::new((a ^ b) as i64);
                 let (tick_a, tick_b) = super::column_hash_parts(x, z);

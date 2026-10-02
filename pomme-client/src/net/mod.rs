@@ -136,6 +136,9 @@ pub enum NetworkEvent {
             Vec<azalea_registry::identifier::Identifier>,
         >,
     ),
+    /// Wire-order numeric IDs for `minecraft:world_clock`; `None` means not
+    /// received.
+    WorldClockRegistry(Option<std::collections::HashMap<String, u32>>),
     /// The `minecraft:dialog` registry with its tags, sent with `Registries`
     /// and again whenever a tag update replaces the dialog tags.
     DialogRegistry(Arc<crate::ui::server_dialog::DialogRegistry>),
@@ -158,8 +161,9 @@ pub enum NetworkEvent {
         /// Server registry ID selected from this dimension type's
         /// `default_clock`.
         clock_id: Option<u32>,
-        /// Snapshot of numeric IDs from the server's world_clock registry.
-        world_clock_ids: std::collections::HashMap<String, u32>,
+        /// Wire-order snapshot; `None` means no registry was received, distinct
+        /// from an empty registry.
+        world_clock_ids: Option<std::collections::HashMap<String, u32>>,
         environment: environment::DimensionEnvironment,
     },
     ChunkLoaded {
@@ -487,9 +491,9 @@ pub enum NetworkEvent {
         category: Option<u8>,
     },
     TimeUpdate {
-        game_time: u64,
+        game_time: i64,
         /// `(world-clock registry id, total ticks, partial tick, rate)`.
-        clock_updates: Vec<(u32, u64, f32, f32)>,
+        clock_updates: Vec<(u32, i64, f32, f32)>,
         /// Pre-26.2 `set_time` was translated to synthetic clock id 0.
         legacy: bool,
     },

@@ -48,7 +48,7 @@ fn dialog_holder_reference(
 /// not model directly live in its flattened extras. Missing `has_skylight`
 /// defaults to true; missing `cardinal_light` defaults to vanilla's `default`.
 fn dimension_clock_id(
-    registries: &RegistryHolder,
+    world_clock_ids: Option<&[Identifier]>,
     dim: &azalea_core::registry_holder::dimension_type::DimensionKindElement,
 ) -> Option<u32> {
     let Some(clock_name) = dim
@@ -62,14 +62,13 @@ fn dimension_clock_id(
     };
     // 26.2's official registry key is minecraft:world_clock. Resolve the
     // server-provided entry order; never infer an ID from a dimension name.
-    let Some(registry) = registries.extra.get(&Identifier::new("world_clock")) else {
+    let Some(world_clock_ids) = world_clock_ids else {
         tracing::warn!("Server omitted minecraft:world_clock registry; world clock is unknown");
         return None;
     };
-    let Some(id) = registry
-        .map
+    let Some(id) = world_clock_ids
         .iter()
-        .position(|(key, _)| key.to_string() == clock_name)
+        .position(|key| key.to_string() == clock_name)
     else {
         tracing::warn!(clock = %clock_name, "Dimension default_clock is absent from minecraft:world_clock");
         return None;
@@ -83,24 +82,19 @@ fn dimension_info(
     clock_id: Option<u32>,
     world_key: &str,
     registries: &RegistryHolder,
+    world_clock_ids: Option<&[Identifier]>,
 ) -> NetworkEvent {
     NetworkEvent::DimensionInfo {
         is_debug,
         height: dim.height,
         min_y: dim.min_y,
         clock_id,
-        world_clock_ids: registries
-            .extra
-            .get(&Identifier::new("world_clock"))
-            .map(|registry| {
-                registry
-                    .map
-                    .iter()
-                    .enumerate()
-                    .map(|(id, (key, _))| (key.to_string(), id as u32))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        world_clock_ids: world_clock_ids.map(|ids| {
+            ids.iter()
+                .enumerate()
+                .map(|(id, key)| (key.to_string(), id as u32))
+                .collect()
+        }),
         has_skylight: dim
             ._extra
             .get("has_skylight")
@@ -199,6 +193,7 @@ pub async fn handle_game_packet(
         sender,
         event_tx,
         registry_holder,
+        None,
         shared_tree,
         batch_size_calculator,
         current_dimension,
@@ -213,6 +208,7 @@ pub(super) async fn handle_game_packet_with_display_text(
     sender: &PacketSender,
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
+    world_clock_ids: Option<&[Identifier]>,
     shared_tree: &SharedCommandTree,
     batch_size_calculator: &mut ChunkBatchSizeCalculator,
     current_dimension: &mut (u32, i32),
@@ -231,9 +227,10 @@ pub(super) async fn handle_game_packet_with_display_text(
                     dimension_info(
                         dim,
                         p.common.is_debug,
-                        dimension_clock_id(registry_holder, dim),
+                        dimension_clock_id(world_clock_ids, dim),
                         &p.common.dimension.to_string(),
                         registry_holder,
+                        world_clock_ids,
                     ),
                 )
                 .await?;
@@ -1153,7 +1150,7 @@ pub(super) async fn handle_game_packet_with_display_text(
                 .map(|(clock, state)| {
                     (
                         clock.protocol_id(),
-                        state.total_ticks,
+                        state.total_ticks as i64,
                         state.partial_tick,
                         state.rate,
                     )
@@ -1162,7 +1159,7 @@ pub(super) async fn handle_game_packet_with_display_text(
             send_event(
                 event_tx,
                 NetworkEvent::TimeUpdate {
-                    game_time: p.game_time,
+                    game_time: p.game_time as i64,
                     clock_updates,
                     legacy: crate::version::session_protocol()
                         < pomme_protocol::version::NATIVE.protocol,
@@ -1995,9 +1992,10 @@ pub(super) async fn handle_game_packet_with_display_text(
                     dimension_info(
                         dim,
                         p.common.is_debug,
-                        dimension_clock_id(registry_holder, dim),
+                        dimension_clock_id(world_clock_ids, dim),
                         &p.common.dimension.to_string(),
                         registry_holder,
+                        world_clock_ids,
                     ),
                 )
                 .await?;
@@ -4197,6 +4195,7 @@ mod tests {
                 &PacketSender::new(out_tx),
                 &tx,
                 &RegistryHolder::default(),
+                None,
                 &Arc::new(Mutex::new(None)),
                 &mut ChunkBatchSizeCalculator::default(),
                 &mut (384, -64),
@@ -4380,7 +4379,7 @@ mod dimension_info_tests {
     use azalea_core::registry_holder::RegistryHolder;
     use simdnbt::owned::NbtTag;
 
-    use super::{dimension_info, parse_set_objective};
+    use super::{dimension_clock_id, dimension_info, parse_set_objective};
     use crate::net::NetworkEvent;
     use crate::world::block::model::CardinalLightType;
 
@@ -4414,6 +4413,7 @@ mod dimension_info_tests {
             None,
             "minecraft:overworld",
             &RegistryHolder::default(),
+            None,
         )
         else {
             panic!("dimension_info returned the wrong event variant");
@@ -4448,6 +4448,7 @@ mod dimension_info_tests {
             None,
             "minecraft:the_end",
             &RegistryHolder::default(),
+            None,
         );
         let custom_world_using_end_type = dimension_info(
             &dim,
@@ -4455,6 +4456,7 @@ mod dimension_info_tests {
             None,
             "example:custom",
             &RegistryHolder::default(),
+            None,
         );
         let NetworkEvent::DimensionInfo {
             environment: end, ..
@@ -4613,6 +4615,43 @@ mod dimension_info_tests {
     }
 
     #[test]
+    fn world_clock_dimension_id_and_wire_map_keep_missing_nbt_ordinal() {
+        let ids = [
+            "minecraft:overworld".into(),
+            "custom:missing".into(),
+            "custom:clock".into(),
+        ];
+        let dim = azalea_core::registry_holder::dimension_type::DimensionKindElement {
+            height: 384,
+            min_y: -64,
+            ultrawarm: None,
+            _extra: HashMap::from([(
+                "default_clock".to_string(),
+                simdnbt::owned::NbtTag::String("custom:clock".into()),
+            )]),
+        };
+        assert_eq!(dimension_clock_id(Some(&ids), &dim), Some(2));
+        let NetworkEvent::DimensionInfo {
+            world_clock_ids,
+            clock_id,
+            ..
+        } = dimension_info(
+            &dim,
+            false,
+            Some(2),
+            "custom:dimension",
+            &RegistryHolder::default(),
+            Some(&ids),
+        )
+        else {
+            panic!("wrong event");
+        };
+        let world_clock_ids = world_clock_ids.unwrap();
+        assert_eq!(world_clock_ids["custom:clock"], 2);
+        assert_eq!(clock_id, Some(2));
+    }
+
+    #[test]
     fn probe_dimension_info_defaults_to_normal_world_and_cardinal_light() {
         let dim = azalea_core::registry_holder::dimension_type::DimensionKindElement {
             height: 384,
@@ -4632,6 +4671,7 @@ mod dimension_info_tests {
             None,
             "minecraft:overworld",
             &RegistryHolder::default(),
+            None,
         )
         else {
             panic!("dimension_info returned the wrong event variant");

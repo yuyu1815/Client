@@ -20,8 +20,8 @@ const SUNRISE_STEPS: u32 = 16;
 
 const MOON_BRIGHTNESS_PER_PHASE: [f32; 8] = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75];
 
-fn moon_phase(day_time: u64) -> usize {
-    ((day_time / TICKS_PER_DAY as u64) % 8) as usize
+fn moon_phase(day_time: i64) -> usize {
+    (day_time.rem_euclid(8 * TICKS_PER_DAY as i64) / TICKS_PER_DAY as i64) as usize
 }
 
 const STAR_BRIGHTNESS_KEYFRAMES: &[(f32, f32)] = &[
@@ -113,8 +113,8 @@ struct SkyUniform {
 
 #[derive(Clone, Copy)]
 pub struct SkyState {
-    pub day_time: u64,
-    pub game_time: u64,
+    pub day_time: i64,
+    pub game_time: i64,
     pub rain_level: f32,
     pub thunder_level: f32,
     /// Server clock state, not the frame interpolation fraction.
@@ -122,7 +122,7 @@ pub struct SkyState {
     pub clock_partial_tick: f32,
     pub clock_rate: f32,
     /// Last authoritative packet values, kept separate from local prediction.
-    pub last_network_clock: Option<(u32, u64, f32, f32)>,
+    pub last_network_clock: Option<(u32, i64, f32, f32)>,
     pub partial_tick: f32,
 }
 
@@ -145,7 +145,7 @@ impl SkyState {
         }
     }
 
-    pub fn apply_clock_update(&mut self, id: u32, total_ticks: u64, partial_tick: f32, rate: f32) {
+    pub fn apply_clock_update(&mut self, id: u32, total_ticks: i64, partial_tick: f32, rate: f32) {
         if !partial_tick.is_finite() || !rate.is_finite() {
             tracing::warn!(
                 id,
@@ -166,14 +166,14 @@ impl SkyState {
         if self.clock_id.is_none() {
             return;
         }
-        self.clock_partial_tick += self.clock_rate;
-        let full_ticks = self.clock_partial_tick.floor();
-        self.day_time = self.day_time.wrapping_add_signed(full_ticks as i64);
-        self.clock_partial_tick -= full_ticks;
+        let elapsed = f64::from(self.clock_partial_tick) + f64::from(self.clock_rate);
+        let full_ticks = elapsed.floor() as i32;
+        self.day_time = self.day_time.wrapping_add(i64::from(full_ticks));
+        self.clock_partial_tick = (elapsed - f64::from(full_ticks)) as f32;
     }
 
     pub fn day_tick(&self) -> f32 {
-        ((self.day_time % TICKS_PER_DAY as u64) as f32
+        (self.day_time.rem_euclid(TICKS_PER_DAY as i64) as f32
             + self.clock_partial_tick
             + self.partial_tick * self.clock_rate)
             .rem_euclid(TICKS_PER_DAY)
@@ -1293,7 +1293,7 @@ mod tests {
         let mut sky = SkyState::default_day();
         sky.apply_clock_update(1, 0, 0.0, -1.0);
         sky.advance_clock_tick();
-        assert_eq!(sky.day_time, u64::MAX);
+        assert_eq!(sky.day_time, -1);
         assert_eq!(sky.clock_partial_tick, 0.0);
         assert_eq!(sky.day_tick(), 23_999.0);
     }
@@ -1303,6 +1303,8 @@ mod tests {
         assert_eq!(super::moon_phase(0), 0);
         assert_eq!(super::moon_phase(24_000), 1);
         assert_eq!(super::moon_phase(8 * 24_000), 0);
+        assert_eq!(super::moon_phase(-1), 7);
+        assert!(super::moon_phase(i64::MAX) < 8);
     }
 
     #[test]

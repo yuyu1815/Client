@@ -1351,8 +1351,8 @@ fn resolve_head_profile(profile: HeadProfile, tab_list: &TabList) -> HeadProfile
 fn time_update_clock(
     clock_id: Option<u32>,
     legacy: bool,
-    updates: &[(u32, u64, f32, f32)],
-) -> Option<(u32, u64, f32, f32)> {
+    updates: &[(u32, i64, f32, f32)],
+) -> Option<(u32, i64, f32, f32)> {
     let id = clock_id.or(legacy.then_some(0))?;
     updates
         .iter()
@@ -2127,6 +2127,14 @@ impl AppCore {
                         tracker.loading_packets_received();
                     }
                 }
+                NetworkEvent::WorldClockRegistry(world_clock_ids) => {
+                    let ids = world_clock_ids.unwrap_or_default();
+                    if game.world_clock_ids != ids {
+                        game.world_clocks.clear();
+                        game.world_clock_game_time = 0;
+                    }
+                    game.world_clock_ids = ids;
+                }
                 NetworkEvent::BiomeColors { colors } => {
                     tracing::info!("Received {} biome climate entries", colors.len());
                     game.biome_climate = Arc::new(colors);
@@ -2155,7 +2163,9 @@ impl AppCore {
                     game.sky_state.clock_partial_tick = 0.0;
                     game.sky_state.clock_rate = 0.0;
                     game.sky_state.last_network_clock = None;
-                    game.world_clock_ids = world_clock_ids;
+                    game.world_clocks.clear();
+                    game.world_clock_game_time = 0;
+                    game.world_clock_ids = world_clock_ids.unwrap_or_default();
                     game.dimension_environment = environment;
                     game.cardinal_light = cardinal_light;
                     game.chunk_store =
@@ -3377,6 +3387,11 @@ impl AppCore {
                     clock_updates,
                     legacy,
                 } => {
+                    let game_time_delta = game_time.wrapping_sub(game.world_clock_game_time);
+                    for clock in game.world_clocks.values_mut() {
+                        clock.advance_game_time(game_time_delta);
+                    }
+                    game.world_clock_game_time = game_time;
                     game.sky_state.game_time = game_time;
                     for (id, total_ticks, partial_tick, rate) in &clock_updates {
                         if partial_tick.is_finite() && rate.is_finite() {

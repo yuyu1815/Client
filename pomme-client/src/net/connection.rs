@@ -313,6 +313,7 @@ struct Joined {
 struct Configured {
     registries: std::sync::Arc<azalea_core::registry_holder::RegistryHolder>,
     timeline_ids: Option<Vec<azalea_registry::identifier::Identifier>>,
+    world_clock_ids: Option<Vec<azalea_registry::identifier::Identifier>>,
     timeline_tags: std::collections::HashMap<
         azalea_registry::identifier::Identifier,
         Vec<azalea_registry::identifier::Identifier>,
@@ -321,26 +322,48 @@ struct Configured {
     loom_patterns: std::sync::Arc<crate::ui::loom::PatternData>,
 }
 
+fn registry_ids_from_entries<T>(
+    registry: &str,
+    entries: &[(azalea_registry::identifier::Identifier, Option<T>)],
+) -> Result<Vec<azalea_registry::identifier::Identifier>, ConnectionError> {
+    validate_registry_ids(
+        registry,
+        entries.iter().map(|(key, _)| key.clone()).collect(),
+    )
+}
+
 fn timeline_ids_from_entries<T>(
     entries: &[(azalea_registry::identifier::Identifier, Option<T>)],
 ) -> Result<Vec<azalea_registry::identifier::Identifier>, ConnectionError> {
-    validate_timeline_ids(entries.iter().map(|(key, _)| key.clone()).collect())
+    registry_ids_from_entries("minecraft:timeline", entries)
 }
 
-fn validate_timeline_ids(
+fn world_clock_map(
+    ids: Option<&[azalea_registry::identifier::Identifier]>,
+) -> Option<std::collections::HashMap<String, u32>> {
+    ids.map(|ids| {
+        ids.iter()
+            .enumerate()
+            .map(|(id, key)| (key.to_string(), id as u32))
+            .collect()
+    })
+}
+
+fn validate_registry_ids(
+    registry: &str,
     ids: Vec<azalea_registry::identifier::Identifier>,
 ) -> Result<Vec<azalea_registry::identifier::Identifier>, ConnectionError> {
     use std::collections::HashSet;
     if ids.len() > i32::MAX as usize {
-        return Err(ConnectionError::Disconnected(
-            "minecraft:timeline registry exceeds numeric ID limit".into(),
-        ));
+        return Err(ConnectionError::Disconnected(format!(
+            "{registry} registry exceeds numeric ID limit"
+        )));
     }
     let mut seen = HashSet::with_capacity(ids.len());
     if ids.iter().any(|id| !seen.insert(id)) {
-        return Err(ConnectionError::Disconnected(
-            "minecraft:timeline registry contains duplicate IDs".into(),
-        ));
+        return Err(ConnectionError::Disconnected(format!(
+            "{registry} registry contains duplicate IDs"
+        )));
     }
     Ok(ids)
 }
@@ -437,6 +460,7 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
 
     let mut registry_holder = RegistryHolder::default();
     let mut timeline_ids = None;
+    let mut world_clock_ids = None;
     let mut loom_patterns = crate::ui::loom::PatternData::default();
     translation.clear_dynamic_registries();
     for frame in frames {
@@ -457,6 +481,12 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
                 if p.registry_id.to_string() == "minecraft:timeline" {
                     timeline_ids = Some(timeline_ids_from_entries(&p.entries)?);
                 }
+                if p.registry_id.to_string() == "minecraft:world_clock" {
+                    world_clock_ids = Some(registry_ids_from_entries(
+                        "minecraft:world_clock",
+                        &p.entries,
+                    )?);
+                }
                 registry_holder.append(p.registry_id, p.entries);
             }
             Ok(_) => {}
@@ -467,6 +497,7 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
         configured: Configured {
             registries: std::sync::Arc::new(registry_holder),
             timeline_ids,
+            world_clock_ids,
             timeline_tags: Default::default(),
             dialogs: Default::default(),
             loom_patterns: std::sync::Arc::new(loom_patterns),
@@ -682,6 +713,7 @@ async fn config_sequence(
 
     let mut registry_holder = RegistryHolder::default();
     let mut timeline_ids = previous.and_then(|p| p.timeline_ids.clone());
+    let mut world_clock_ids = previous.and_then(|p| p.world_clock_ids.clone());
     let mut timeline_tags = previous
         .map(|p| p.timeline_tags.clone())
         .unwrap_or_default();
@@ -747,6 +779,7 @@ async fn config_sequence(
                 Some(previous) if !received_registry_data => Configured {
                     registries: previous.registries.clone(),
                     timeline_ids,
+                    world_clock_ids,
                     timeline_tags,
                     loom_patterns: std::sync::Arc::new(loom_patterns),
                     dialogs: match received_dialog_tags {
@@ -761,6 +794,7 @@ async fn config_sequence(
                     )),
                     registries: std::sync::Arc::new(registry_holder),
                     timeline_ids,
+                    world_clock_ids,
                     timeline_tags,
                     loom_patterns: std::sync::Arc::new(loom_patterns),
                 },
@@ -824,6 +858,7 @@ async fn config_sequence(
                     });
                     loom_patterns = crate::ui::loom::PatternData::default();
                     timeline_ids = None;
+                    world_clock_ids = None;
                     timeline_tags.clear();
                     if let Some((tags, item_tags)) = new_tags {
                         loom_patterns.replace_tags(tags, item_tags);
@@ -850,6 +885,12 @@ async fn config_sequence(
                 if p.registry_id.to_string() == "minecraft:timeline" {
                     timeline_ids = Some(timeline_ids_from_entries(&entries)?);
                     timeline_tags.clear();
+                }
+                if p.registry_id.to_string() == "minecraft:world_clock" {
+                    world_clock_ids = Some(registry_ids_from_entries(
+                        "minecraft:world_clock",
+                        &entries,
+                    )?);
                 }
                 if p.registry_id.to_string() == "minecraft:banner_pattern" {
                     loom_patterns.replace_registry(
@@ -1451,6 +1492,10 @@ async fn game_loop(
     ))?;
     pump!(send_event(
         event_tx,
+        NetworkEvent::WorldClockRegistry(world_clock_map(configured.world_clock_ids.as_deref()))
+    ))?;
+    pump!(send_event(
+        event_tx,
         NetworkEvent::DialogRegistry(configured.dialogs.clone())
     ))?;
     pump!(send_event(
@@ -1671,6 +1716,12 @@ async fn game_loop(
                         event_tx,
                         NetworkEvent::TimelineTags(next.timeline_tags.clone())
                     ))?;
+                    pump!(send_event(
+                        event_tx,
+                        NetworkEvent::WorldClockRegistry(world_clock_map(
+                            next.world_clock_ids.as_deref()
+                        ))
+                    ))?;
                     if !std::sync::Arc::ptr_eq(&next.dialogs, &configured.dialogs) {
                         pump!(send_event(
                             event_tx,
@@ -1728,6 +1779,7 @@ async fn game_loop(
                     &sender,
                     event_tx,
                     &configured.registries,
+                    configured.world_clock_ids.as_deref(),
                     &shared_tree,
                     &mut batch_size_calculator,
                     &mut current_dimension,
@@ -2102,9 +2154,29 @@ mod tests {
     }
 
     #[test]
+    fn world_clock_wire_ids_keep_entries_without_nbt() {
+        let entries = vec![
+            ("minecraft:overworld".into(), Some(())),
+            ("custom:missing".into(), None),
+            ("custom:clock".into(), Some(())),
+        ];
+        let ids = registry_ids_from_entries("minecraft:world_clock", &entries).unwrap();
+        let wire_map = world_clock_map(Some(&ids)).unwrap();
+        assert_eq!(wire_map["minecraft:overworld"], 0);
+        assert_eq!(wire_map["custom:missing"], 1);
+        assert_eq!(wire_map["custom:clock"], 2);
+        assert_eq!(world_clock_map(Some(&[])), Some(Default::default()));
+        assert_eq!(world_clock_map(None), None);
+    }
+
+    #[test]
     fn timeline_ids_and_tags_reject_invalid_wire_references() {
         assert!(
-            validate_timeline_ids(vec!["minecraft:day".into(), "minecraft:day".into()]).is_err()
+            validate_registry_ids(
+                "minecraft:timeline",
+                vec!["minecraft:day".into(), "minecraft:day".into()]
+            )
+            .is_err()
         );
         let ids = vec!["minecraft:day".into()];
         assert!(
@@ -2347,6 +2419,7 @@ mod tests {
                         configured: Configured {
                             registries: Arc::default(),
                             timeline_ids: None,
+                            world_clock_ids: None,
                             timeline_tags: Default::default(),
                             dialogs: Arc::default(),
                             loom_patterns: Arc::default(),

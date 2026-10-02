@@ -365,6 +365,7 @@ pub struct GameState {
     /// clock currently selected by the dimension's visual sky.
     pub world_clocks: HashMap<u32, crate::net::environment::ClockSample>,
     pub world_clock_ids: HashMap<String, u32>,
+    pub world_clock_game_time: i64,
     pub show_debug: bool,
     pub show_chunk_borders: bool,
     pub advanced_item_tooltips: bool,
@@ -603,8 +604,7 @@ impl GameState {
     pub fn timeline_clock_sample(
         &self,
         timeline: &crate::net::environment::TimelineInput,
-        render_partial_tick: f32,
-    ) -> Result<f64, String> {
+    ) -> Result<i64, String> {
         let id = self.world_clock_ids.get(&timeline.clock).ok_or_else(|| {
             format!(
                 "timeline {} references unknown world clock {}",
@@ -617,7 +617,11 @@ impl GameState {
                 timeline.id, timeline.clock
             )
         })?;
-        Ok(sample.tick(render_partial_tick))
+        let period = timeline
+            .tracks
+            .iter()
+            .find_map(|(_, track)| track.period_ticks);
+        Ok(sample.timeline_ticks(period))
     }
 
     /// Resolve a spawned entity's attachment from the dimensions available to
@@ -821,6 +825,7 @@ impl GameState {
             dimension_environment: Default::default(),
             world_clocks: HashMap::new(),
             world_clock_ids: HashMap::new(),
+            world_clock_game_time: 0,
             show_debug: false,
             show_chunk_borders: false,
             advanced_item_tooltips: false,
@@ -2031,7 +2036,7 @@ pub(crate) fn advance_server_time(
     frozen: bool,
     steps: &mut u32,
     sky: &mut SkyState,
-    clocks: &mut HashMap<u32, crate::net::environment::ClockSample>,
+    _clocks: &mut HashMap<u32, crate::net::environment::ClockSample>,
 ) -> u32 {
     let period = server_time_tick_period(tick_rate);
     *accumulator = (*accumulator + dt.max(0.0)).min(1.0);
@@ -2040,9 +2045,6 @@ pub(crate) fn advance_server_time(
         if server_tick_runs(frozen, *steps) {
             sky.advance_clock_tick();
             sky.game_time = sky.game_time.wrapping_add(1);
-            for clock in clocks.values_mut() {
-                clock.advance_tick();
-            }
             if frozen {
                 *steps -= 1;
             }
@@ -3206,8 +3208,8 @@ pub fn update_game(
     game.mesh_dispatcher
         .set_camera_position(*game.player.position);
 
-    // Predict the server world clock between SetTime packets. A zero rate is
-    // authoritative pause; fractional rates accumulate in clock_partial_tick.
+    // Predict the selected sky clock between SetTime packets. Other clocks
+    // advance from authoritative game-time deltas to avoid double prediction.
     // This cadence is separate from the 20 Hz player/input loop below.
     let simulation_ticks = advance_server_time(
         &mut core.time_tick_accumulator,
@@ -9773,12 +9775,12 @@ mod tests {
                 ),
                 expected
             );
-            assert_eq!(sky.day_time, u64::from(expected));
+            assert_eq!(sky.day_time, i64::from(expected));
         }
     }
 
     #[test]
-    fn all_world_clocks_advance_independently_at_server_cadence() {
+    fn server_tick_prediction_does_not_double_advance_world_clock_samples() {
         let mut sky = SkyState::default_day();
         let mut clocks = HashMap::from([
             (
@@ -9813,7 +9815,7 @@ mod tests {
             20
         );
         assert_eq!(clocks[&1].total_ticks, 20);
-        assert_eq!(clocks[&2].total_ticks, 40);
+        assert_eq!(clocks[&2].total_ticks, 30);
         assert_eq!(clocks[&2].partial_tick, 0.0);
     }
 
