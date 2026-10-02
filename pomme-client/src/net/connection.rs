@@ -2520,7 +2520,19 @@ mod tests {
         ));
         assert!(matches!(
             recv_event(&event_rx).await,
+            NetworkEvent::TimelineTags(_)
+        ));
+        assert!(matches!(
+            recv_event(&event_rx).await,
+            NetworkEvent::WorldClockRegistry(_)
+        ));
+        assert!(matches!(
+            recv_event(&event_rx).await,
             NetworkEvent::DialogRegistry(_)
+        ));
+        assert!(matches!(
+            recv_event(&event_rx).await,
+            NetworkEvent::LoomPatterns(_)
         ));
         let NetworkEvent::ChunkLoaded {
             chunk,

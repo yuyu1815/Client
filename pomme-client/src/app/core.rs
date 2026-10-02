@@ -5449,7 +5449,7 @@ mod tests {
             (MenuKind::CartographyTable, M::Cartography, 39, 3, Some(2)),
             (MenuKind::Grindstone, M::Grindstone, 39, 3, Some(2)),
             (MenuKind::Smithing, M::Smithing, 40, 4, Some(3)),
-            (MenuKind::Crafter3x3, M::Crafter, 45, 9, None),
+            (MenuKind::Crafter3x3, M::Crafter, 46, 9, Some(45)),
             (MenuKind::Stonecutter, M::Stonecutter, 38, 2, Some(1)),
             (MenuKind::Loom, M::Loom, 40, 4, Some(3)),
         ] {

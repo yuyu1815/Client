@@ -491,7 +491,9 @@ mod tests {
         });
         let path = current.benchmark_path(&dir);
         std::fs::write(&path, result.to_string()).unwrap();
-        std::fs::File::open(&path)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH))
             .unwrap();

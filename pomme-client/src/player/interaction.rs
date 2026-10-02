@@ -3329,9 +3329,14 @@ mod tests {
                     "{name}"
                 );
             }
+            let expected_use = match main_kind {
+                ItemKind::Shield => Some((MainHand, ItemKind::Shield)),
+                _ if off_kind == ItemKind::Apple => Some((OffHand, ItemKind::Apple)),
+                _ => None,
+            };
             assert_eq!(
                 state.using_item.as_ref().map(|use_| (use_.hand, use_.kind)),
-                (off_kind == ItemKind::Apple).then_some((OffHand, ItemKind::Apple)),
+                expected_use,
                 "{name}",
             );
             if let Some(hand) = actual.iter().find_map(|sent| match sent {
