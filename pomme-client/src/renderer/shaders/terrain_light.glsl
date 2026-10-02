@@ -10,7 +10,7 @@ float terrain_native_brightness(uint pair, float sky_darken, float ambient) {
     uint block = (pair >> 4u) & 15u;
     uint darkened_sky = uint(max(int(sky) - int(clamp(sky_darken, 0.0, 15.0)), 0));
     uint level = max(darkened_sky, block);
-    float v = TERRAIN_OLD_LIGHT[level];
+    float v = float(level) / 15.0;
     float curved = v / (4.0 - 3.0 * v);
     return curved + ambient * (1.0 - curved);
 }

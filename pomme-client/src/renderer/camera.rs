@@ -789,7 +789,7 @@ mod tests {
         fn brightness(pair: u8, darken: u8, ambient: f32) -> f32 {
             let sky = (pair & 15).saturating_sub(darken);
             let block = pair >> 4;
-            let v = TABLE[sky.max(block) as usize];
+            let v = sky.max(block) as f32 / 15.0;
             let curved = v / (4.0 - 3.0 * v);
             curved + ambient * (1.0 - curved)
         }
@@ -810,16 +810,18 @@ mod tests {
             if old > 0.0 { new / old } else { 1.0 }
         }
 
-        assert!(
-            (ratio([15, 15, 15, 15], 0, 0.0, true) - brightness(15, 0, 0.0) / TABLE[15]).abs()
-                < 1e-6
-        );
-        assert!(brightness(15, 11, 0.0) < brightness(15, 0, 0.0)); // sky only
-        assert_eq!(brightness(0xf0, 11, 0.0), brightness(0xf0, 0, 0.0)); // block only
-        assert!(ratio([0x01, 0x24, 0x57, 0x8a], 7, 0.1, true).is_finite()); // smooth mixed corners
-        for ambient in [0.0, 0.1, 0.25] {
-            assert!(brightness(0, 15, ambient) >= ambient - 1e-6);
+        for (pair, expected) in [
+            (0x00, [0.0, 0.1, 0.25]),
+            (0x44, [1.0 / 12.0, 0.175, 0.3125]),
+            (0xff, [1.0, 1.0, 1.0]),
+        ] {
+            for (ambient, expected) in [0.0, 0.1, 0.25].into_iter().zip(expected) {
+                assert!((brightness(pair, 0, ambient) - expected).abs() < 1e-6);
+            }
         }
+        assert!((ratio([15; 4], 11, 0.0, true) - 1.0 / 12.0).abs() < 1e-6); // sky 15 -> level 4
+        assert_eq!(ratio([0xf0; 4], 11, 0.0, true), 1.0); // block 15 unaffected by sky darken
+        assert!((ratio([0x01, 0x24, 0x57, 0x8a], 7, 0.1, true) - 275.0 / 306.0).abs() < 1e-6); // levels 0, 2, 5, 8
         assert_eq!(ratio([0x00; 4], 15, 0.25, false), 1.0); // legacy flag preserves baked value
         let (baked, tint, alpha) = (0.42_f32, [0.2_f32, 0.5, 0.9], 0.37_f32);
         let lit = baked * ratio([0x23, 0x45, 0x67, 0x89], 8, 0.1, true);
