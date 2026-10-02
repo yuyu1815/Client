@@ -31,6 +31,7 @@ pub enum MetaValue {
     Float(f32),
     Long(i64),
     OptionalBlockState(Option<u32>),
+    BlockState(u32),
     Direction(azalea_core::direction::Direction),
 }
 
@@ -1286,6 +1287,10 @@ pub struct VehicleState {
     pub projectile_foil: bool,
     /// Arrow metadata index 11: tipped-arrow color, default -1.
     pub arrow_effect_color: i32,
+    /// Primed TNT synchronized fuse and block-state metadata.
+    pub tnt_fuse: i32,
+    pub tnt_prev_fuse: i32,
+    pub tnt_block_state: Option<u32>,
     /// None until a real spawn transform arrives; SetPassengers may create
     /// placeholders.
     pub look_dir: Option<LookDirection>,
@@ -1420,6 +1425,9 @@ impl EntityStore {
             projectile_dangerous: false,
             projectile_foil: false,
             arrow_effect_color: -1,
+            tnt_fuse: 80,
+            tnt_prev_fuse: 81,
+            tnt_block_state: None,
             look_dir: None,
             shared_flags: 0,
             boat_hurt_time: 0,
@@ -1466,6 +1474,9 @@ impl EntityStore {
             projectile_dangerous: false,
             projectile_foil: false,
             arrow_effect_color: -1,
+            tnt_fuse: 80,
+            tnt_prev_fuse: 81,
+            tnt_block_state: None,
             look_dir: None,
             shared_flags: 0,
             boat_hurt_time: 0,
@@ -1544,6 +1555,13 @@ impl EntityStore {
             }
             (Some(EntityKind::Trident), 12, MetaValue::Bool(v)) => vehicle.projectile_foil = v,
             (Some(EntityKind::Arrow), 11, MetaValue::Int(v)) => vehicle.arrow_effect_color = v,
+            (Some(EntityKind::Tnt), 8, MetaValue::Int(v)) => {
+                vehicle.tnt_prev_fuse = v.saturating_add(1);
+                vehicle.tnt_fuse = v;
+            }
+            (Some(EntityKind::Tnt), 9, MetaValue::BlockState(v)) => {
+                vehicle.tnt_block_state = Some(v);
+            }
             _ => {}
         }
         if index == 0
@@ -1647,6 +1665,12 @@ impl EntityStore {
     pub fn tick_projectile_displays(&mut self, chunks: &ChunkStore) {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;
+        for vehicle in self.vehicles.values_mut() {
+            if vehicle.kind == Some(EntityKind::Tnt) {
+                vehicle.tnt_prev_fuse = vehicle.tnt_fuse;
+                vehicle.tnt_fuse = vehicle.tnt_fuse.saturating_sub(1);
+            }
+        }
         if let Some(worker) = &mut self.worker {
             match worker.poll() {
                 Ok(Some(result)) if result.epoch == self.epoch => {
@@ -2694,6 +2718,21 @@ mod tests {
         store.set_vehicle_spawn_transform(1, position, velocity, LookDirection::default());
         store.set_vehicle_kind(1, kind);
         store
+    }
+
+    #[test]
+    fn primed_tnt_fuse_metadata_resyncs_and_ticks_at_fixed_rate() {
+        let mut store = projectile(EntityKind::Tnt, Position::default(), DVec3::ZERO);
+        store.apply_vehicle_metadata(1, 8, MetaValue::Int(10));
+        assert_eq!(store.vehicles[&1].tnt_fuse, 10);
+        assert_eq!(store.vehicles[&1].tnt_prev_fuse, 11);
+        let chunks = ChunkStore::new(1);
+        store.tick_projectile_displays(&chunks);
+        assert_eq!(store.vehicles[&1].tnt_prev_fuse, 10);
+        assert_eq!(store.vehicles[&1].tnt_fuse, 9);
+        store.apply_vehicle_metadata(1, 8, MetaValue::Int(4));
+        assert_eq!(store.vehicles[&1].tnt_prev_fuse, 5);
+        assert_eq!(store.vehicles[&1].tnt_fuse, 4);
     }
 
     #[test]

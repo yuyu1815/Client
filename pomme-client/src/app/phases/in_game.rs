@@ -2977,6 +2977,20 @@ fn lightmap_brightness(chunks: &ChunkStore, dimension: &str, x: i32, y: i32, z: 
     curved + (1.0 - curved) * ambient
 }
 
+fn tnt_render_effect(fuse: f32) -> (f32, f32) {
+    let swell = if fuse < 10.0 && fuse >= 0.0 {
+        (1.0 - fuse / 10.0).clamp(0.0, 1.0).powi(4) * 0.3 + 1.0
+    } else {
+        1.0
+    };
+    let white = if fuse >= 0.0 && (fuse / 5.0).floor() as i32 % 2 == 0 {
+        1.0
+    } else {
+        0.0
+    };
+    (swell, white)
+}
+
 fn eye_lightmap_brightness(game: &GameState) -> f32 {
     let eye = game.player.eye_pos();
     lightmap_brightness(
@@ -5250,7 +5264,7 @@ pub fn update_game(
     } else {
         sky_partial_tick
     };
-    let item_renders = if benchmark_running {
+    let mut item_renders = if benchmark_running {
         Vec::new()
     } else {
         build_item_render_infos(
@@ -5266,6 +5280,69 @@ pub fn update_game(
             entity_view_scale,
         )
     };
+    if !benchmark_running {
+        for vehicle in game.entity_store.vehicles.values() {
+            if vehicle.kind != Some(azalea_registry::builtin::EntityKind::Tnt) {
+                continue;
+            }
+            let state = match vehicle.tnt_block_state {
+                Some(id) => crate::world::block::try_state(id),
+                None => crate::world::block::default_state_of("tnt"),
+            };
+            let Some(state) = state else { continue };
+            let block_pos = [
+                vehicle.position.x.floor() as i32,
+                vehicle.position.y.floor() as i32,
+                vehicle.position.z.floor() as i32,
+            ];
+            let Some(item_name) = gfx.renderer.ensure_block_mesh(state, block_pos) else {
+                continue;
+            };
+            let pos = glam::DVec3::new(
+                vehicle.prev_position.x,
+                vehicle.prev_position.y,
+                vehicle.prev_position.z,
+            )
+            .lerp(
+                glam::DVec3::new(vehicle.position.x, vehicle.position.y, vehicle.position.z),
+                f64::from(partial_tick),
+            );
+            let fuse = vehicle.tnt_prev_fuse as f32
+                + (vehicle.tnt_fuse - vehicle.tnt_prev_fuse) as f32 * partial_tick;
+            let (swell, white_overlay) = tnt_render_effect(fuse);
+            let matrix = glam::Mat4::from_translation(
+                (pos - gfx.renderer.camera_anchor()).as_vec3() + glam::Vec3::Y * 0.5,
+            ) * glam::Mat4::from_scale(glam::Vec3::splat(swell));
+            item_renders.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
+                item_name,
+                raw_dye_rgb: None,
+                player_head_profile_source: None,
+                model_matrix: matrix,
+                light: lightmap_brightness(
+                    &game.chunk_store,
+                    &game.dimension,
+                    block_pos[0],
+                    block_pos[1],
+                    block_pos[2],
+                ),
+                white_overlay,
+                nether_lighting: game.cardinal_light == CardinalLightType::Nether,
+                entity_uuid: None,
+                invisible: false,
+                actual_age: None,
+                actual_render_age: 0.0,
+                age_f: 0.0,
+                actual_spin: 0.0,
+                spin: 0.0,
+                bob_offset: 0.0,
+                actual_bob_offset: 0.0,
+                controlled_phase: false,
+                bob_controlled: false,
+                position: pos.to_array(),
+                stack_count: 1,
+            });
+        }
+    }
 
     let scene_extract_first_ms = scene_extract_start
         .map(|start| start.elapsed().as_secs_f32() * 1000.0)
@@ -6258,6 +6335,7 @@ fn emit_item_copies(
             player_head_profile_source: player_head_profile_source.clone(),
             model_matrix: base * copy_offset * ground_transform,
             light,
+            white_overlay: 0.0,
             nether_lighting,
             entity_uuid,
             invisible,
@@ -6485,6 +6563,7 @@ fn snowball_render_infos(
                 } else {
                     light_at(pos.into())
                 },
+                white_overlay: 0.0,
                 nether_lighting,
                 entity_uuid: None,
                 invisible: false,
@@ -6716,6 +6795,7 @@ fn build_item_render_infos(
                 chunk_store,
                 Position::new(position.x, position.y, position.z),
             ),
+            white_overlay: 0.0,
             nether_lighting,
             entity_uuid: None,
             invisible: false,
@@ -6765,6 +6845,7 @@ fn build_item_render_infos(
                     chunk_store,
                     Position::new(position.x, position.y, position.z),
                 ),
+                white_overlay: 0.0,
                 nether_lighting,
                 entity_uuid: None,
                 invisible: false,
@@ -7368,8 +7449,22 @@ mod tests {
         item_frame_base_position, item_frame_base_rotation, limited_crafting_param,
         mesh_result_is_stale, mesh_target_mask, minecart_render_infos, section_bit, section_bits,
         server_tick_runs, show_death_screen_param, sign_has_text, sign_text_in_range,
+        tnt_render_effect,
     };
     use crate::renderer::SkyState;
+
+    #[test]
+    fn tnt_fuse_scale_flash_and_partial_tick_boundaries() {
+        assert_eq!(tnt_render_effect(80.0), (1.0, 1.0));
+        assert_eq!(tnt_render_effect(10.0), (1.0, 1.0));
+        assert_eq!(tnt_render_effect(5.0).1, 0.0);
+        assert_eq!(tnt_render_effect(9.0).1, 1.0);
+        assert!((tnt_render_effect(9.0).0 - 1.00003).abs() < 1.0e-6);
+        assert_eq!(tnt_render_effect(0.0), (1.3, 1.0));
+        assert_eq!(tnt_render_effect(-1.0), (1.0, 0.0));
+        let partial = 10.0 + (9.0 - 10.0) * 0.5;
+        assert_eq!(tnt_render_effect(partial).1, 1.0);
+    }
 
     #[test]
     fn all_twenty_boat_kinds_extract_from_nonliving_vehicle_store() {

@@ -1499,6 +1499,9 @@ pub(super) async fn handle_game_packet_with_display_text(
                     azalea_entity::EntityDataValue::Byte(v) => Some(MetaValue::Byte(*v)),
                     azalea_entity::EntityDataValue::Float(v) => Some(MetaValue::Float(*v)),
                     azalea_entity::EntityDataValue::Long(v) => Some(MetaValue::Long(*v)),
+                    azalea_entity::EntityDataValue::BlockState(state) => {
+                        Some(MetaValue::BlockState(u32::from(state.id())))
+                    }
                     _ => None,
                 };
                 if let Some(value) = scalar {

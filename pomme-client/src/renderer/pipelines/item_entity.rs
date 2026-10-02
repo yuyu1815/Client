@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::slice;
 use std::sync::{Arc, Mutex};
 
@@ -84,6 +84,8 @@ pub struct ItemRenderInfo {
     pub player_head_profile_source: Option<PlayerHeadProfileSource>,
     pub model_matrix: Mat4,
     pub light: f32,
+    /// Native white-overlay strength used by primed TNT's five-tick flash.
+    pub white_overlay: f32,
     pub nether_lighting: bool,
     pub entity_uuid: Option<uuid::Uuid>,
     pub invisible: bool,
@@ -655,6 +657,8 @@ pub struct ItemEntityPipeline {
     translucent: vk::Pipeline,
     shared: ItemPipelineShared,
     meshes: HashMap<String, MeshEntry>,
+    block_meshes: HashSet<String>,
+    block_generation: u64,
     head_textures: HashMap<PlayerHeadProfileSource, HeadTexture>,
     free_head_sets: Vec<vk::DescriptorSet>,
     head_generation: Option<u64>,
@@ -694,6 +698,8 @@ impl ItemEntityPipeline {
             translucent,
             shared,
             meshes: HashMap::new(),
+            block_meshes: HashSet::new(),
+            block_generation: 0,
             head_textures: HashMap::new(),
             free_head_sets: Vec::new(),
             head_generation: None,
@@ -997,6 +1003,53 @@ impl ItemEntityPipeline {
         key
     }
 
+    /// Select and upload state-specific baked block geometry for an entity.
+    /// Position drives the registry's weighted model/multipart choices; the
+    /// cache is isolated from item-name meshes and invalidated on pack reload.
+    pub fn ensure_block_mesh(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        registry: &crate::world::block::registry::BlockRegistry,
+        state: azalea_block::BlockState,
+        position: [i32; 3],
+        uv_map: &AtlasUVMap,
+    ) -> Option<String> {
+        if state == azalea_block::BlockState::AIR {
+            return None;
+        }
+        let mut quads = registry
+            .get_baked_model_at(state, position[0], position[1], position[2])
+            .map_or_else(Vec::new, |model| model.quads);
+        if let Some(multipart) =
+            registry.get_multipart_quads_at(state, position[0], position[1], position[2])
+        {
+            quads.extend(multipart);
+        }
+        if quads.is_empty() {
+            return None;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        format!("{quads:?}").hash(&mut hasher);
+        let key = format!("{}:{}", u32::from(state), hasher.finish());
+        let name = format!("__pomme_block:{}:{key}", self.block_generation);
+        if !self.block_meshes.contains(&name) {
+            let model = BakedModel {
+                quads,
+                ambient_occlusion: true,
+                is_full_cube: false,
+                occludes: false,
+            };
+            self.ensure_mesh(device, allocator, &name, &model, uv_map);
+            if !self.meshes.contains_key(&name) {
+                return None;
+            }
+            self.block_meshes.insert(name.clone());
+        }
+        Some(name)
+    }
+
     pub fn ensure_mesh(
         &mut self,
         device: &vk::Device,
@@ -1107,6 +1160,12 @@ impl ItemEntityPipeline {
                     &item.model_matrix,
                     item.nether_lighting,
                 );
+                cmd.push_constants(
+                    self.shared.pipeline_layout,
+                    vk::ShaderStageFlags::Fragment,
+                    72,
+                    bytemuck::bytes_of(&item.white_overlay),
+                );
                 cmd.draw(mesh.vertex_count, 1, 0, 0);
                 if let Some(uuid) = item.entity_uuid
                     && matches_trace_target(trace_target.as_deref(), uuid)
@@ -1169,6 +1228,8 @@ impl ItemEntityPipeline {
     }
 
     pub fn clear_meshes(&mut self, device: &vk::Device, allocator: &Arc<Mutex<Allocator>>) {
+        self.block_generation = self.block_generation.wrapping_add(1);
+        self.block_meshes.clear();
         for (_, entry) in self.meshes.drain() {
             device.destroy_buffer(entry.buffer, None);
             allocator.lock().unwrap().free(entry.allocation).ok();
@@ -1940,6 +2001,38 @@ mod tests {
                 assert_eq!(matches_trace_target(cached, id), old);
             }
         }
+    }
+
+    #[test]
+    fn baked_block_quad_converts_to_float_uv_mesh_without_neighbor_culling() {
+        let quad = crate::world::block::model::BakedQuad {
+            positions: [
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ],
+            ambient_occlusion: true,
+            uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            texture: "block/tnt_side".into(),
+            cullface: Some(Direction::North),
+            tint_index: None,
+            tint: crate::world::block::registry::Tint::None,
+            item_tint: ItemTint::Untinted,
+            shade_light: 1.0,
+            shade_face: Some(Direction::North),
+        };
+        let model = BakedModel {
+            quads: vec![quad],
+            ambient_occlusion: true,
+            is_full_cube: false,
+            occludes: false,
+        };
+        let vertices = build_item_mesh_texture(&model, &AtlasUVMap::test_empty(), false, false);
+        assert_eq!(vertices.len(), 6);
+        assert_eq!(vertices[0].position, [-0.5, -0.5, 0.5]);
+        assert_eq!(vertices[1].tex_coords, [1.0, 0.0]);
+        assert_eq!(unpack_normal(&vertices[0]), glam::Vec3::Z);
     }
 
     fn unit_region() -> AtlasRegion {

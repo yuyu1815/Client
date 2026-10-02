@@ -1555,6 +1555,22 @@ impl Renderer {
         &self.atlas.uv_map
     }
 
+    /// Return the uploaded mesh name for the selected native block-state model.
+    pub fn ensure_block_mesh(
+        &mut self,
+        state: azalea_block::BlockState,
+        position: [i32; 3],
+    ) -> Option<String> {
+        self.item_entity_pipeline.ensure_block_mesh(
+            &self.ctx.device,
+            &self.ctx.allocator,
+            &self.registry,
+            state,
+            position,
+            &self.atlas.uv_map,
+        )
+    }
+
     pub(crate) fn atlas_sprite_rects_bytes(&self) -> u64 {
         self.atlas.sprite_rects_bytes()
     }

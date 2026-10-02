@@ -7,6 +7,7 @@ layout(set = 1, binding = 0) uniform sampler2D atlas_texture;
 layout(push_constant) uniform PushConstants {
     layout(offset = 64) float world_light;
     layout(offset = 68) float unorm_atlas_target;
+    layout(offset = 72) float white_overlay;
 };
 
 layout(location = 0) in vec2 v_tex_coords;
@@ -44,6 +45,7 @@ void main() {
         linear_to_srgb_exact(color.b)
     );
     encoded *= v_tint * (world_light * v_light);
+    encoded = mix(encoded, vec3(1.0), clamp(white_overlay, 0.0, 1.0));
     encoded = apply_fog(encoded, v_fog, v_fog_color);
     vec3 linear = vec3(
         srgb_to_linear_exact(encoded.r),
