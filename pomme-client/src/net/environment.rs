@@ -2,6 +2,7 @@
 use simdnbt::owned::{NbtCompound, NbtList};
 
 pub const SKY_LIGHT_LEVEL: f32 = 15.0;
+pub const SKY_LIGHT_LEVEL_ATTRIBUTE: &str = "minecraft:gameplay/sky_light_level";
 const MAX_TIMELINES: usize = 4096;
 const MAX_KEYFRAMES: usize = 4096;
 
@@ -162,7 +163,7 @@ pub fn from_dimension_fields(
         let Some(tracks) = nbt.compound("tracks") else {
             continue;
         };
-        let Some(track) = tracks.compound("minecraft:sky_light_level") else {
+        let Some(track) = tracks.compound(SKY_LIGHT_LEVEL_ATTRIBUTE) else {
             continue;
         };
         let mut parsed =
@@ -182,7 +183,7 @@ pub fn from_dimension_fields(
         result.tracks.push(TimelineInput {
             id: id.clone(),
             clock,
-            tracks: vec![("minecraft:sky_light_level".into(), parsed)],
+            tracks: vec![(SKY_LIGHT_LEVEL_ATTRIBUTE.into(), parsed)],
         });
     }
     Ok(result)

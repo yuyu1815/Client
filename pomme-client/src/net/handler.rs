@@ -120,7 +120,7 @@ fn dimension_info(
                 ._extra
                 .get("attributes")
                 .and_then(|t| t.compound())
-                .and_then(|attrs| attrs.float("minecraft:sky_light_level"));
+                .and_then(|attrs| attrs.float(super::environment::SKY_LIGHT_LEVEL_ATTRIBUTE));
             let timeline_ids: Vec<String> = dim
                 ._extra
                 .get("timelines")
