@@ -7021,6 +7021,7 @@ fn projectile_render_infos(
                 head_x_rot_deg: pitch,
                 variant_index: u32::from(kind == K::WitherSkull && vehicle.projectile_dangerous),
                 camera_orientation: (kind == K::DragonFireball).then_some(camera_orientation),
+                projectile_foil: kind == K::Trident && vehicle.projectile_foil,
                 overlay_tints: if kind == K::ShulkerBullet {
                     [Some([1.0, 1.0, 1.0, 0.15]), None, None, None]
                 } else {

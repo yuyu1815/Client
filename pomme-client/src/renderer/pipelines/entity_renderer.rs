@@ -160,6 +160,9 @@ pub struct EntityRenderInfo {
     pub body_transform: Option<glam::Mat4>,
     /// Camera orientation for native camera-facing projectile quads.
     pub camera_orientation: Option<glam::Quat>,
+    /// Native Trident foil flag; only this projectile uses the entity-glint
+    /// pass.
+    pub projectile_foil: bool,
     /// Interpolated entity age in ticks; drives entity animations/projectiles.
     pub age_in_ticks: f32,
     /// Per-entity deterministic phase used by vanilla's Phantom flap clock.
@@ -236,6 +239,7 @@ impl Default for EntityRenderInfo {
             base_tint: WHITE_TINT,
             body_transform: None,
             camera_orientation: None,
+            projectile_foil: false,
             age_in_ticks: 0.0,
             animation_phase: 0.0,
             attack_time: 0.0,
@@ -265,6 +269,8 @@ enum OverlayKind {
     /// Additive, full-bright, depth-writing, scrolling UV — charged creeper
     /// swirl.
     SwirlAdditive,
+    /// Vanilla entity glint material for the foiled Trident second pass.
+    TridentGlint,
 }
 
 struct MobVariant {
@@ -455,6 +461,7 @@ pub struct EntityRenderer {
     eyes_pipeline: vk::Pipeline,
     /// Additive, depth-writing — charged-creeper energy swirl.
     swirl_pipeline: vk::Pipeline,
+    glint_pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
     camera_layout: vk::DescriptorSetLayout,
     texture_layout: vk::DescriptorSetLayout,
@@ -484,6 +491,8 @@ pub(super) enum BlendMode {
     /// `entityTranslucent` vs `EYES`).
     TranslucentDepthWrite,
     Additive,
+    /// Vanilla `RenderPipelines.GLINT`: depth-equal, no depth writes.
+    Glint,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2377,7 +2386,14 @@ fn mob_definitions() -> Vec<MobDef> {
                 overlay_kind,
             }],
             baby: None,
-            adult_overlays: if kind == EntityKind::ShulkerBullet {
+            adult_overlays: if kind == EntityKind::Trident {
+                vec![VariantDef {
+                    model: entity_models::projectiles::bake_trident_model(),
+                    tex_variants: &[&["minecraft/textures/misc/enchanted_glint_item.png"]],
+                    tex_size: 64,
+                    overlay_kind: OverlayKind::TridentGlint,
+                }]
+            } else if kind == EntityKind::ShulkerBullet {
                 vec![VariantDef {
                     model: entity_models::projectiles::bake_shulker_bullet_model(),
                     tex_variants: &[&["minecraft/textures/entity/shulker/spark.png"]],
@@ -2477,6 +2493,7 @@ impl EntityRenderer {
             body_translucent_pipeline,
             eyes_pipeline,
             swirl_pipeline,
+            glint_pipeline,
         ] = create_pipelines(device, render_pass, pipeline_layout);
 
         let defs = mob_definitions();
@@ -2600,6 +2617,7 @@ impl EntityRenderer {
             body_translucent_pipeline,
             eyes_pipeline,
             swirl_pipeline,
+            glint_pipeline,
             pipeline_layout,
             camera_layout,
             texture_layout,
@@ -3228,7 +3246,7 @@ impl EntityRenderer {
         // part) becomes a single instanced draw. `vis`/`groups` borrow self.mobs
         // and are dropped at the end of this block, before the buffer write below.
         let mut instances: Vec<EntityInstance> = Vec::new();
-        let (opaque, culled, body, eyes, swirl) = {
+        let (opaque, culled, body, eyes, swirl, glint) = {
             let mut vis: Vec<VisEntity> = Vec::new();
             for info in entities {
                 let Some(entry) = self.mobs.get(&info.entity_kind) else {
@@ -3317,6 +3335,7 @@ impl EntityRenderer {
             let body = collect_overlays(&vis, OverlayKind::BodyTranslucent);
             let eyes = collect_overlays(&vis, OverlayKind::EyesTranslucent);
             let swirl = collect_overlays(&vis, OverlayKind::SwirlAdditive);
+            let glint = collect_overlays(&vis, OverlayKind::TridentGlint);
 
             (
                 opaque.emit(&vis, &mut instances),
@@ -3324,6 +3343,7 @@ impl EntityRenderer {
                 body.emit(&vis, &mut instances),
                 eyes.emit(&vis, &mut instances),
                 swirl.emit(&vis, &mut instances),
+                glint.emit(&vis, &mut instances),
             )
         };
 
@@ -3346,6 +3366,7 @@ impl EntityRenderer {
         self.record_pass(cmd, frame, self.body_translucent_pipeline, &body, count);
         self.record_pass(cmd, frame, self.eyes_pipeline, &eyes, count);
         self.record_pass(cmd, frame, self.swirl_pipeline, &swirl, count);
+        self.record_pass(cmd, frame, self.glint_pipeline, &glint, count);
         (entity_pose_ms, entity_pose_count)
     }
 
@@ -3397,12 +3418,14 @@ impl EntityRenderer {
         device.destroy_pipeline(self.body_translucent_pipeline, None);
         device.destroy_pipeline(self.eyes_pipeline, None);
         device.destroy_pipeline(self.swirl_pipeline, None);
+        device.destroy_pipeline(self.glint_pipeline, None);
         [
             self.pipeline,
             self.culled_pipeline,
             self.body_translucent_pipeline,
             self.eyes_pipeline,
             self.swirl_pipeline,
+            self.glint_pipeline,
         ] = create_pipelines(device, render_pass, self.pipeline_layout);
     }
 
@@ -3462,6 +3485,7 @@ impl EntityRenderer {
         device.destroy_pipeline(self.body_translucent_pipeline, None);
         device.destroy_pipeline(self.eyes_pipeline, None);
         device.destroy_pipeline(self.swirl_pipeline, None);
+        device.destroy_pipeline(self.glint_pipeline, None);
         device.destroy_pipeline_layout(self.pipeline_layout, None);
         device.destroy_descriptor_pool(self.descriptor_pool, None);
         device.destroy_descriptor_set_layout(self.camera_layout, None);
@@ -3706,7 +3730,15 @@ fn collect_overlays<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGrou
                 && overlay.overlay_kind == OverlayKind::WindScroll;
             let bullet_in_body_pass = kind == OverlayKind::BodyTranslucent
                 && overlay.overlay_kind == OverlayKind::ShulkerBulletOverlay;
+            let trident_glint = trident_glint_pass_count(
+                v.info.entity_kind,
+                overlay.overlay_kind,
+                v.info.projectile_foil,
+            ) == 1;
             if overlay.overlay_kind != kind && !wind_in_body_pass && !bullet_in_body_pass {
+                continue;
+            }
+            if overlay.overlay_kind == OverlayKind::TridentGlint && !trident_glint {
                 continue;
             }
             let uv = if v.info.entity_kind == EntityKind::ExperienceOrb {
@@ -3720,6 +3752,7 @@ fn collect_overlays<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGrou
                     OverlayKind::WindScroll => {
                         [(v.info.age_in_ticks * 0.02).rem_euclid(1.0), 0.0, 1.0, 1.0]
                     }
+                    OverlayKind::TridentGlint => entity_glint_uv(),
                     _ => [0.0, 0.0, 1.0, 1.0],
                 }
             };
@@ -3728,12 +3761,37 @@ fn collect_overlays<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGrou
             } else {
                 NO_OVERLAY
             };
-            if let Some(tint) = v.info.overlay_tints[slot] {
+            let tint = if trident_glint {
+                Some(WHITE_TINT)
+            } else {
+                v.info.overlay_tints[slot]
+            };
+            if let Some(tint) = tint {
                 groups.add(overlay, overlay.texture_set, (vi, tint, overlay_color, uv));
             }
         }
     }
     groups
+}
+
+fn trident_glint_pass_count(kind: EntityKind, overlay: OverlayKind, foil: bool) -> u32 {
+    u32::from(kind == EntityKind::Trident && overlay == OverlayKind::TridentGlint && foil)
+}
+
+/// Vanilla `TextureTransform.ENTITY_GLINT_TEXTURING`: 0.5 scale, 10°
+/// rotation, and the native two-period UV scroll (`glintSpeed` defaults to 1).
+fn entity_glint_uv() -> [f32; 4] {
+    let millis = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64)
+        .wrapping_mul(8);
+    [
+        -((millis % 110_000) as f32 / 110_000.0),
+        (millis % 30_000) as f32 / 30_000.0,
+        1.0,
+        1.0,
+    ]
 }
 
 fn experience_orb_uv(icon: u32) -> [f32; 4] {
@@ -3936,7 +3994,9 @@ fn build_variants(
     } = variant;
     // The scrolling swirl needs REPEAT wrapping; everything else clamps.
     let sampler = match overlay_kind {
-        OverlayKind::SwirlAdditive | OverlayKind::WindScroll => texture_sampler_repeat,
+        OverlayKind::SwirlAdditive | OverlayKind::WindScroll | OverlayKind::TridentGlint => {
+            texture_sampler_repeat
+        }
         _ => texture_sampler,
     };
     let vert_bytes = bytemuck::cast_slice::<ChunkVertex, u8>(&model.vertices);
@@ -4108,7 +4168,7 @@ fn create_pipelines(
     device: &vk::Device,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
-) -> [vk::Pipeline; 5] {
+) -> [vk::Pipeline; 6] {
     [
         create_pipeline(
             device,
@@ -4145,6 +4205,13 @@ fn create_pipelines(
             BlendMode::Additive,
             ModelInput::Instanced,
         ),
+        create_pipeline(
+            device,
+            render_pass,
+            layout,
+            BlendMode::Glint,
+            ModelInput::Instanced,
+        ),
     ]
 }
 
@@ -4163,11 +4230,19 @@ pub(super) fn create_pipeline(
     blend: BlendMode,
     model_input: ModelInput,
 ) -> vk::Pipeline {
-    let vert_spv: &[u8] = match model_input {
-        ModelInput::Instanced => shader::include_spirv!("entity.vert.spv"),
-        ModelInput::PushConstant => shader::include_spirv!("block_entity.vert.spv"),
+    let vert_spv: &[u8] = if blend == BlendMode::Glint {
+        shader::include_spirv!("entity_glint.vert.spv").as_slice()
+    } else {
+        match model_input {
+            ModelInput::Instanced => shader::include_spirv!("entity.vert.spv").as_slice(),
+            ModelInput::PushConstant => shader::include_spirv!("block_entity.vert.spv").as_slice(),
+        }
     };
-    let frag_spv = shader::include_spirv!("entity.frag.spv");
+    let frag_spv: &[u8] = if blend == BlendMode::Glint {
+        shader::include_spirv!("entity_glint.frag.spv").as_slice()
+    } else {
+        shader::include_spirv!("entity.frag.spv").as_slice()
+    };
 
     let vert_module = shader::create_shader_module(device, vert_spv);
     let frag_module = shader::create_shader_module(device, frag_spv);
@@ -4247,13 +4322,17 @@ pub(super) fn create_pipeline(
     // Only the translucent eyes overlay skips depth-write (vanilla `EYES`); the
     // opaque base, slime shell, and additive swirl write depth.
     let depth_write = match blend {
-        BlendMode::Translucent => vk::FALSE,
+        BlendMode::Translucent | BlendMode::Glint => vk::FALSE,
         _ => vk::TRUE,
     };
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo {
         depth_test_enable: vk::TRUE,
         depth_write_enable: depth_write,
-        depth_compare_op: vk::CompareOp::LessOrEqual,
+        depth_compare_op: if blend == BlendMode::Glint {
+            vk::CompareOp::Equal
+        } else {
+            vk::CompareOp::LessOrEqual
+        },
         ..Default::default()
     };
 
@@ -4276,6 +4355,17 @@ pub(super) fn create_pipeline(
                 color_write_mask: vk::ColorComponentFlags::RGBA,
             }
         }
+        // Vanilla glint multiplies destination and source colors.
+        BlendMode::Glint => vk::PipelineColorBlendAttachmentState {
+            blend_enable: vk::TRUE,
+            src_color_blend_factor: vk::BlendFactor::DstColor,
+            dst_color_blend_factor: vk::BlendFactor::SrcColor,
+            color_blend_op: vk::BlendOp::Add,
+            src_alpha_blend_factor: vk::BlendFactor::One,
+            dst_alpha_blend_factor: vk::BlendFactor::Zero,
+            alpha_blend_op: vk::BlendOp::Add,
+            color_write_mask: vk::ColorComponentFlags::RGBA,
+        },
         // Additive (energy swirl glow).
         BlendMode::Additive => vk::PipelineColorBlendAttachmentState {
             blend_enable: vk::TRUE,
@@ -4336,6 +4426,81 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trident_foil_has_exactly_one_second_pass_and_reuses_the_base_mesh_pose() {
+        use azalea_registry::builtin::EntityKind;
+        use pyronyx::vk;
+
+        use crate::renderer::chunk::mesher::ChunkVertex;
+
+        let def = super::mob_definitions()
+            .into_iter()
+            .find(|def| def.kind == EntityKind::Trident)
+            .unwrap();
+        let base = &def.adult[0].model;
+        let glint = &def.adult_overlays[0];
+        assert_eq!(glint.overlay_kind, super::OverlayKind::TridentGlint);
+        assert_eq!(
+            glint.tex_variants[0][0],
+            "minecraft/textures/misc/enchanted_glint_item.png"
+        );
+        assert!(!base.vertices.is_empty());
+        assert_eq!(base.vertices, glint.model.vertices);
+        assert_eq!(base.part_ranges, glint.model.part_ranges);
+        assert_eq!(
+            super::trident_glint_pass_count(EntityKind::Trident, glint.overlay_kind, false),
+            0
+        );
+        assert_eq!(
+            super::trident_glint_pass_count(EntityKind::Trident, glint.overlay_kind, true),
+            1
+        );
+        assert_eq!(
+            super::trident_glint_pass_count(EntityKind::Arrow, glint.overlay_kind, true),
+            0
+        );
+        assert_eq!(
+            base.compute_part_transforms(&super::entity_model::PartAnim::default()),
+            glint
+                .model
+                .compute_part_transforms(&super::entity_model::PartAnim::default())
+        );
+
+        // The packed entity vertex stream exposes float3 position + UNORM16x2 UV;
+        // item meshes instead carry float UV + tint + packed normal (28-byte stride).
+        assert_eq!(ChunkVertex::STRIDE, 20);
+        let attrs = ChunkVertex::attribute_descriptions();
+        assert_eq!(attrs[0].format, vk::Format::R32G32B32Sfloat);
+        assert_eq!(attrs[0].offset, 0);
+        assert_eq!(attrs[1].format, vk::Format::R16G16Unorm);
+        assert_eq!(attrs[1].offset, 12);
+        assert_eq!(attrs[2].format, vk::Format::R8G8B8A8Unorm);
+        assert_eq!(attrs[2].offset, 16);
+        let item_vertex_source = include_str!("item_entity.rs");
+        assert!(item_vertex_source.contains("tex_coords: [f32; 2]"));
+        assert!(item_vertex_source.contains("offset: 20"));
+        assert!(item_vertex_source.contains("offset: 24"));
+    }
+
+    #[test]
+    fn entity_glint_scroll_uses_native_two_periods_and_entity_scale() {
+        let uv = super::entity_glint_uv();
+        assert!((-1.0..=0.0).contains(&uv[0]));
+        assert!((0.0..=1.0).contains(&uv[1]));
+        assert_eq!(&uv[2..], &[1.0, 1.0]);
+        let source = include_str!("../shaders/entity_glint.vert");
+        assert!(source.contains("tex_coords * 0.5"));
+        assert!(source.contains("0.1745329252"));
+        let pipeline_source = include_str!("entity_renderer.rs");
+        assert!(pipeline_source.contains("millis % 110_000"));
+        assert!(pipeline_source.contains("millis % 30_000"));
+        assert!(pipeline_source.contains(".wrapping_mul(8)"));
+        assert!(pipeline_source.contains("vk::CompareOp::Equal"));
+        assert!(pipeline_source.contains("BlendMode::Glint"));
+        assert!(pipeline_source.contains("device.destroy_pipeline(self.glint_pipeline, None)"));
+        assert!(pipeline_source.contains("glint_pipeline,\n        ] = create_pipelines"));
+    }
+
     #[test]
     fn dragon_fireball_uses_camera_quaternion_and_full_native_scale() {
         use azalea_registry::builtin::EntityKind;
