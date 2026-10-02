@@ -264,6 +264,19 @@ mod tests {
         });
         let resolved = resolve_happy_ghast_layer_inputs(&layers, None);
         assert_eq!(resolved.len(), 16, "native color 0 skips its layer");
+        let expected: Vec<_> = colors
+            .iter()
+            .skip(1)
+            .map(|color| [(*color >> 16) as u8, (*color >> 8) as u8, *color as u8])
+            .chain([[255, 255, 255]])
+            .collect();
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|layer| layer.tint_rgb)
+                .collect::<Vec<_>>(),
+            expected,
+        );
         assert_eq!(resolved[0].tint_rgb, [255, 255, 255]);
         assert_eq!(
             resolved[0].texture_key,
