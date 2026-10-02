@@ -504,17 +504,15 @@ pub fn bake_parched_model() -> BakedEntityModel {
     )
 }
 pub fn bake_wither_skeleton_model() -> BakedEntityModel {
-    let mut parts = crate::renderer::entity_model::bake_skeleton_model().parts;
-    // LayerDefinitions scales the complete skeleton MeshDefinition by exactly 1.2.
-    for part in &mut parts {
-        part.offset *= 1.2;
-        for cube in &mut part.cubes {
-            cube.origin *= 1.2;
-            cube.size *= 1.2;
-            cube.deformation *= 1.2;
-        }
-    }
-    bake_model(parts, 64, 32)
+    // MeshTransformer scales geometry and pivots, not the skeleton's 64x32 UV
+    // atlas. Keep the existing part indices used by animation and armor
+    // extraction.
+    crate::renderer::entity_model::bake_independent_roots_scaled(
+        crate::renderer::entity_model::bake_skeleton_model().parts,
+        1.2,
+        64,
+        32,
+    )
 }
 
 /// WanderingTraderRenderer uses VillagerModel's nose/robe layer with its own
@@ -1052,6 +1050,7 @@ pub fn bake_zombie_nautilus_coral_model() -> BakedEntityModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::entity_model::PartAnim;
 
     #[test]
     fn all_static_bakes_have_golden_parts_uv_and_nonempty_vertices() {
@@ -1122,8 +1121,66 @@ mod tests {
         let skeleton = crate::renderer::entity_model::bake_skeleton_model();
         let wither = bake_wither_skeleton_model();
         assert_eq!(
-            wither.parts[0].cubes[0].size,
-            skeleton.parts[0].cubes[0].size * 1.2
+            wither
+                .parts
+                .iter()
+                .map(|part| part.name.as_str())
+                .collect::<Vec<_>>(),
+            skeleton
+                .parts
+                .iter()
+                .map(|part| part.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(wither.parts.len(), 6);
+        assert_eq!(wither.parts[2].name, "right_arm");
+        assert_eq!(wither.parts[5].name, "left_leg");
+        assert_eq!(wither.vertices.len(), skeleton.vertices.len());
+        assert_eq!(
+            wither
+                .vertices
+                .iter()
+                .map(|v| v.tex_coords)
+                .collect::<Vec<_>>(),
+            skeleton
+                .vertices
+                .iter()
+                .map(|v| v.tex_coords)
+                .collect::<Vec<_>>(),
+            "1.2 geometry scaling must preserve normalized 64x32 UVs"
+        );
+        let y_offset = 24.016 * (1.0 - 1.2);
+        for (base, scaled) in skeleton.parts.iter().zip(&wither.parts) {
+            assert_eq!(scaled.cubes[0].size, base.cubes[0].size);
+            assert_eq!(scaled.cubes[0].tex_offset, base.cubes[0].tex_offset);
+            assert_eq!(
+                scaled.offset,
+                base.offset * 1.2 + Vec3::new(0.0, y_offset, 0.0)
+            );
+        }
+        assert!(wither.part_scales.iter().all(|&scale| scale == 1.2));
+        let base_transforms = skeleton.compute_part_transforms(&PartAnim::default());
+        let scaled_transforms = wither.compute_part_transforms(&PartAnim::default());
+        for (part_index, &(start, count)) in skeleton.part_ranges.iter().enumerate() {
+            let end = (start + count) as usize;
+            for (base_vertex, scaled_vertex) in skeleton.vertices[start as usize..end]
+                .iter()
+                .zip(&wither.vertices[start as usize..end])
+            {
+                let base_point = base_transforms[part_index]
+                    .transform_point3(Vec3::from_array(base_vertex.position));
+                let scaled_point = scaled_transforms[part_index]
+                    .transform_point3(Vec3::from_array(scaled_vertex.position));
+                assert!((scaled_point - base_point * 1.2).abs().max_element() < 1e-5);
+            }
+        }
+        // Vanilla's leg pivot at y=12 and the scaled 12px leg retain the
+        // transformed 24.016px ground anchor (rather than adding a new root).
+        let right_leg = &wither.parts[4];
+        assert_eq!(right_leg.offset.y, 12.0 * 1.2 + y_offset);
+        assert_eq!(
+            right_leg.cubes[0].size.y * wither.part_scales[4],
+            12.0 * 1.2
         );
     }
 }

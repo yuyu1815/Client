@@ -1035,6 +1035,31 @@ fn bake_root_scaled(
     model
 }
 
+/// Applies a mesh scale to disconnected root parts without changing their
+/// indices, which are shared with humanoid animation and armor extraction.
+pub(crate) fn bake_independent_roots_scaled(
+    mut parts: Vec<EntityPart>,
+    factor: f32,
+    tex_w: u32,
+    tex_h: u32,
+) -> BakedEntityModel {
+    let y_offset = MODEL_REBASE_Y * (1.0 - factor);
+    let scales = parts
+        .iter_mut()
+        .map(|part| {
+            if part.parent.is_none() {
+                part.offset = part.offset * factor + Vec3::new(0.0, y_offset, 0.0);
+                factor
+            } else {
+                1.0
+            }
+        })
+        .collect();
+    let mut model = bake_model(parts, tex_w, tex_h);
+    model.part_scales = scales;
+    model
+}
+
 /// Vanilla `AdultWolfModel.createBodyLayer(g)`, 64x32. The `head` and `tail`
 /// parts are cubeless pivot containers; look goes on the container while the
 /// wet-shake roll and beg tilt go on the `real_*` child.
