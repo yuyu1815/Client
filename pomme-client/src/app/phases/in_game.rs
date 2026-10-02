@@ -5281,6 +5281,16 @@ pub fn update_game(
         )
     };
     if !benchmark_running {
+        let camera_anchor = gfx.renderer.camera_anchor();
+        item_renders.extend(minecart_cargo_render_infos(
+            &game.entity_store,
+            &mut gfx.renderer,
+            &game.chunk_store,
+            &game.dimension,
+            game.cardinal_light,
+            camera_anchor,
+            partial_tick,
+        ));
         for vehicle in game.entity_store.vehicles.values() {
             if vehicle.kind != Some(azalea_registry::builtin::EntityKind::Tnt) {
                 continue;
@@ -5290,34 +5300,28 @@ pub fn update_game(
                 None => crate::world::block::default_state_of("tnt"),
             };
             let Some(state) = state else { continue };
+            let pos = vehicle
+                .prev_position
+                .lerp(vehicle.position, f64::from(partial_tick));
             let block_pos = [
-                vehicle.position.x.floor() as i32,
-                vehicle.position.y.floor() as i32,
-                vehicle.position.z.floor() as i32,
+                pos.x.floor() as i32,
+                pos.y.floor() as i32,
+                pos.z.floor() as i32,
             ];
             let Some(item_name) = gfx.renderer.ensure_block_mesh(state, block_pos) else {
                 continue;
             };
-            let pos = glam::DVec3::new(
-                vehicle.prev_position.x,
-                vehicle.prev_position.y,
-                vehicle.prev_position.z,
-            )
-            .lerp(
-                glam::DVec3::new(vehicle.position.x, vehicle.position.y, vehicle.position.z),
-                f64::from(partial_tick),
-            );
             let fuse = vehicle.tnt_prev_fuse as f32
                 + (vehicle.tnt_fuse - vehicle.tnt_prev_fuse) as f32 * partial_tick;
             let (swell, white_overlay) = tnt_render_effect(fuse);
-            let matrix = glam::Mat4::from_translation(
-                (pos - gfx.renderer.camera_anchor()).as_vec3() + glam::Vec3::Y * 0.5,
-            ) * glam::Mat4::from_scale(glam::Vec3::splat(swell));
+            let relative = glam::DVec3::new(pos.x, pos.y, pos.z) - camera_anchor;
             item_renders.push(crate::renderer::pipelines::item_entity::ItemRenderInfo {
                 item_name,
                 raw_dye_rgb: None,
                 player_head_profile_source: None,
-                model_matrix: matrix,
+                model_matrix: glam::Mat4::from_translation(
+                    relative.as_vec3() + glam::Vec3::Y * 0.5,
+                ) * glam::Mat4::from_scale(glam::Vec3::splat(swell)),
                 light: lightmap_brightness(
                     &game.chunk_store,
                     &game.dimension,
@@ -5867,6 +5871,150 @@ fn boat_render_infos(
                         * glam::Mat4::from_rotation_x(rock),
                 ),
                 ..Default::default()
+            })
+        })
+        .collect()
+}
+
+fn minecart_cargo_state(vehicle: &crate::entity::VehicleState) -> Option<azalea_block::BlockState> {
+    minecart_cargo_state_for(
+        vehicle.kind?,
+        vehicle.minecart_display_state,
+        vehicle.minecart_furnace_has_fuel,
+    )
+}
+
+fn minecart_cargo_state_for(
+    kind: azalea_registry::builtin::EntityKind,
+    custom_state: Option<u32>,
+    furnace_has_fuel: bool,
+) -> Option<azalea_block::BlockState> {
+    use azalea_registry::builtin::EntityKind;
+
+    use crate::world::block::{block_properties, default_state_of, state_with_properties};
+
+    if let Some(id) = custom_state {
+        return crate::world::block::try_state(id)
+            .filter(|state| !crate::world::block::is_air(*state));
+    }
+    let name = match kind {
+        EntityKind::ChestMinecart => "chest",
+        EntityKind::FurnaceMinecart => "furnace",
+        EntityKind::TntMinecart => "tnt",
+        EntityKind::HopperMinecart => "hopper",
+        EntityKind::CommandBlockMinecart => "command_block",
+        EntityKind::SpawnerMinecart => "spawner",
+        EntityKind::Minecart => return None,
+        _ => return None,
+    };
+    let mut state = default_state_of(name)?;
+    let mut properties: Vec<_> = block_properties(state)
+        .entries()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+    if name == "chest" || name == "furnace" {
+        if let Some((_, value)) = properties.iter_mut().find(|(key, _)| key == "facing") {
+            *value = "north".to_owned();
+        }
+    }
+    if name == "furnace"
+        && let Some((_, value)) = properties.iter_mut().find(|(key, _)| key == "lit")
+    {
+        *value = furnace_has_fuel.to_string();
+    }
+    if !properties.is_empty() {
+        state = state_with_properties(name, &properties)?;
+    }
+    Some(state)
+}
+
+fn minecart_cargo_render_infos(
+    store: &crate::entity::EntityStore,
+    renderer: &mut crate::renderer::Renderer,
+    chunks: &crate::world::chunk::ChunkStore,
+    dimension: &str,
+    cardinal_light: CardinalLightType,
+    camera_anchor: glam::DVec3,
+    partial_tick: f32,
+) -> Vec<crate::renderer::pipelines::item_entity::ItemRenderInfo> {
+    use azalea_registry::builtin::EntityKind;
+    store
+        .vehicles
+        .values()
+        .filter_map(|vehicle| {
+            let kind = vehicle.kind?;
+            if !matches!(
+                kind,
+                EntityKind::Minecart
+                    | EntityKind::ChestMinecart
+                    | EntityKind::FurnaceMinecart
+                    | EntityKind::TntMinecart
+                    | EntityKind::HopperMinecart
+                    | EntityKind::CommandBlockMinecart
+                    | EntityKind::SpawnerMinecart
+            ) || vehicle.shared_flags & 0x20 != 0
+            {
+                return None;
+            }
+            let state = minecart_cargo_state(vehicle)?;
+            let position = vehicle
+                .prev_position
+                .lerp(vehicle.position, f64::from(partial_tick));
+            let block_pos = [
+                position.x.floor() as i32,
+                position.y.floor() as i32,
+                position.z.floor() as i32,
+            ];
+            let item_name = renderer.ensure_block_mesh(state, block_pos)?;
+            let current = vehicle.look_dir?;
+            let (yaw, pitch) = match vehicle.prev_look_dir {
+                Some(prev) => (
+                    lerp_angle(prev.y_rot_deg(), current.y_rot_deg(), partial_tick),
+                    prev.x_rot_deg() + (current.x_rot_deg() - prev.x_rot_deg()) * partial_tick,
+                ),
+                None => (current.y_rot_deg(), current.x_rot_deg()),
+            };
+            let hurt = (vehicle.boat_hurt_time as f32 - partial_tick).max(0.0);
+            let damage = (vehicle.boat_damage - partial_tick).max(0.0);
+            let rocking = (hurt.sin() * hurt * damage / 10.0 * vehicle.boat_hurt_direction as f32)
+                .to_radians();
+            let offset = vehicle.minecart_display_offset;
+            let relative = glam::DVec3::new(position.x, position.y, position.z) - camera_anchor;
+            let matrix = glam::Mat4::from_translation(relative.as_vec3())
+                * glam::Mat4::from_rotation_y((180.0 - yaw).to_radians())
+                * glam::Mat4::from_rotation_z(-pitch.to_radians())
+                * glam::Mat4::from_translation(glam::Vec3::Y * 0.375)
+                * glam::Mat4::from_rotation_x(rocking)
+                * glam::Mat4::from_scale(glam::Vec3::splat(0.75))
+                * glam::Mat4::from_translation(glam::vec3(-0.5, (offset - 8) as f32 / 16.0, 0.5))
+                * glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+            Some(crate::renderer::pipelines::item_entity::ItemRenderInfo {
+                item_name,
+                raw_dye_rgb: None,
+                player_head_profile_source: None,
+                model_matrix: matrix,
+                light: lightmap_brightness(
+                    chunks,
+                    dimension,
+                    block_pos[0],
+                    block_pos[1],
+                    block_pos[2],
+                ),
+                white_overlay: 0.0,
+                nether_lighting: cardinal_light == CardinalLightType::Nether,
+                entity_uuid: None,
+                invisible: false,
+                actual_age: None,
+                actual_render_age: 0.0,
+                age_f: 0.0,
+                actual_spin: 0.0,
+                spin: 0.0,
+                bob_offset: 0.0,
+                actual_bob_offset: 0.0,
+                controlled_phase: false,
+                bob_controlled: false,
+                position: position.to_array(),
+                stack_count: 1,
             })
         })
         .collect()
@@ -8914,5 +9062,41 @@ mod tests {
         assert!(credits.is_none());
         assert!(!death_confirm_escape_allowed(true, true));
         assert!(death_confirm_escape_allowed(true, false));
+    }
+
+    #[test]
+    fn minecart_cargo_uses_native_default_states_and_optional_override() {
+        use azalea_registry::builtin::EntityKind as K;
+
+        use super::minecart_cargo_state_for;
+        crate::world::block::init("26.2");
+        for (kind, block, facing) in [
+            (K::ChestMinecart, "chest", Some("north")),
+            (K::FurnaceMinecart, "furnace", Some("north")),
+            (K::TntMinecart, "tnt", None),
+            (K::HopperMinecart, "hopper", None),
+            (K::CommandBlockMinecart, "command_block", None),
+            (K::SpawnerMinecart, "spawner", None),
+        ] {
+            let state = minecart_cargo_state_for(kind, None, false).unwrap();
+            assert_eq!(crate::world::block::block_id(state), block);
+            if let Some(facing) = facing {
+                assert_eq!(
+                    crate::world::block::block_properties(state).get("facing"),
+                    Some(facing)
+                );
+            }
+        }
+        assert!(minecart_cargo_state_for(K::Minecart, None, false).is_none());
+        let furnace = minecart_cargo_state_for(K::FurnaceMinecart, None, true).unwrap();
+        assert_eq!(
+            crate::world::block::block_properties(furnace).get("lit"),
+            Some("true")
+        );
+        let custom = crate::world::block::default_state_of("stone").unwrap();
+        let override_state =
+            minecart_cargo_state_for(K::ChestMinecart, Some(u32::from(custom)), false).unwrap();
+        assert_eq!(override_state, custom);
+        assert!(minecart_cargo_state_for(K::ChestMinecart, Some(u32::MAX), false).is_none());
     }
 }

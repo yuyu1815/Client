@@ -1306,6 +1306,8 @@ pub struct VehicleState {
     /// AbstractMinecart metadata 11/12: optional registry state id + offset.
     pub minecart_display_state: Option<u32>,
     pub minecart_display_offset: i32,
+    /// MinecartFurnace DATA_ID_FUEL, used by its native default display state.
+    pub minecart_furnace_has_fuel: bool,
     /// ItemFrame spawn data / metadata index 8; independent from entity yaw.
     pub item_frame_direction: Option<azalea_core::direction::Direction>,
     /// Full metadata index 9 stack, retained for component-backed item render.
@@ -1438,6 +1440,7 @@ impl EntityStore {
             boat_bubble_time: 0,
             minecart_display_state: None,
             minecart_display_offset: 6,
+            minecart_furnace_has_fuel: false,
             item_frame_direction: None,
             item_frame_item: azalea_inventory::ItemStack::Empty,
             item_frame_rotation: 0,
@@ -1487,6 +1490,7 @@ impl EntityStore {
             boat_bubble_time: 0,
             minecart_display_state: None,
             minecart_display_offset: 6,
+            minecart_furnace_has_fuel: false,
             item_frame_direction: None,
             item_frame_item: azalea_inventory::ItemStack::Empty,
             item_frame_rotation: 0,
@@ -1589,6 +1593,11 @@ impl EntityStore {
                     vehicle.minecart_display_state = state
                 }
                 (12, MetaValue::Int(offset)) => vehicle.minecart_display_offset = offset,
+                (13, MetaValue::Bool(has_fuel))
+                    if vehicle.kind == Some(EntityKind::FurnaceMinecart) =>
+                {
+                    vehicle.minecart_furnace_has_fuel = has_fuel
+                }
                 _ => {}
             }
             return;
