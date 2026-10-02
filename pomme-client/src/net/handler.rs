@@ -158,6 +158,10 @@ fn dimension_info(
                 Err(error) => {
                     tracing::warn!(%error, "Invalid dimension environment inputs; using safe defaults");
                     super::environment::DimensionEnvironment {
+                        has_sky_light: byte("has_skylight", true),
+                        has_weather: byte("has_skylight", true)
+                            && !byte("has_ceiling", false)
+                            && world_key != "minecraft:the_end",
                         unsupported_reason: Some(error),
                         ..Default::default()
                     }
@@ -4402,6 +4406,7 @@ mod dimension_info_tests {
             cardinal_light,
             is_debug,
             clock_id,
+            environment,
             ..
         } = dimension_info(
             &dim,
@@ -4419,6 +4424,55 @@ mod dimension_info_tests {
         assert_eq!(min_y, -64);
         assert!(has_skylight);
         assert_eq!(cardinal_light, CardinalLightType::Nether);
+        assert_eq!(
+            environment.unsupported_reason.as_deref(),
+            Some("missing/invalid ambient_light")
+        );
+    }
+
+    #[test]
+    fn end_weather_uses_world_key_not_dimension_type() {
+        let dim = azalea_core::registry_holder::dimension_type::DimensionKindElement {
+            height: 384,
+            min_y: -64,
+            ultrawarm: None,
+            _extra: HashMap::from([
+                ("has_skylight".to_string(), NbtTag::Byte(1)),
+                ("has_ceiling".to_string(), NbtTag::Byte(0)),
+                ("ambient_light".to_string(), NbtTag::Float(0.25)),
+            ]),
+        };
+        let end = dimension_info(
+            &dim,
+            false,
+            None,
+            "minecraft:the_end",
+            &RegistryHolder::default(),
+        );
+        let custom_world_using_end_type = dimension_info(
+            &dim,
+            false,
+            None,
+            "example:custom",
+            &RegistryHolder::default(),
+        );
+        let NetworkEvent::DimensionInfo {
+            environment: end, ..
+        } = end
+        else {
+            panic!("wrong event");
+        };
+        let NetworkEvent::DimensionInfo {
+            environment: custom,
+            ..
+        } = custom_world_using_end_type
+        else {
+            panic!("wrong event");
+        };
+        assert!(!end.has_weather);
+        assert!(custom.has_weather);
+        assert_eq!(end.ambient_light, 0.25);
+        assert_eq!(custom.ambient_light, 0.25);
     }
 
     #[test]
