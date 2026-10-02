@@ -500,6 +500,7 @@ impl ShadowPipeline {
         camera: [f64; 3],
         anchor: glam::DVec3,
         dimension: &str,
+        evaluation: Option<crate::net::environment::SkyLightEvaluation>,
     ) {
         self.last_trace = None;
         let ambient = if dimension == "minecraft:the_nether" {
@@ -527,6 +528,7 @@ impl ShadowPipeline {
                     camera,
                     0.15,
                     0.75,
+                    evaluation,
                     ambient,
                     true,
                     !item.invisible,
@@ -839,6 +841,7 @@ impl ItemEntityPipeline {
         camera: [f64; 3],
         anchor: glam::DVec3,
         dimension: &str,
+        evaluation: Option<crate::net::environment::SkyLightEvaluation>,
     ) {
         let Some(shadow) = self.shadow.as_mut() else {
             return;
@@ -852,6 +855,7 @@ impl ItemEntityPipeline {
             camera,
             anchor,
             dimension,
+            evaluation,
         );
     }
 

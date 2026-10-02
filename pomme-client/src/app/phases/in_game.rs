@@ -361,6 +361,8 @@ pub struct GameState {
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
     pub dimension_environment: crate::net::environment::DimensionEnvironment,
+    pub sky_light_evaluation: Option<crate::net::environment::SkyLightEvaluation>,
+    pub(crate) sky_light_unavailable_reason: Option<String>,
     pub pending_dimension_environment: Option<crate::net::environment::DimensionEnvironmentInput>,
     /// Latest authoritative samples for every server clock, independent of the
     /// clock currently selected by the dimension's visual sky.
@@ -824,6 +826,8 @@ impl GameState {
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
             dimension_environment: Default::default(),
+            sky_light_evaluation: None,
+            sky_light_unavailable_reason: None,
             pending_dimension_environment: None,
             world_clocks: HashMap::new(),
             world_clock_ids: HashMap::new(),
@@ -3043,25 +3047,53 @@ fn send_container_clicks(
     }
 }
 
-/// Vanilla `Lightmap.getBrightness` at a block position, with
-/// `getMaxLocalRawBrightness` = max(skyLight - skyDarken, blockLight).
-/// TODO: skyDarken (26.2: 15 - the SKY_LIGHT_LEVEL environment attribute) is
-/// untracked; 0 assumed, so the outdoor night-time vignette stays weak.
-fn lightmap_brightness(chunks: &ChunkStore, dimension: &str, x: i32, y: i32, z: i32) -> f32 {
-    let level = chunks
-        .get_sky_light(x, y, z)
-        .max(chunks.get_block_light(x, y, z)) as f32;
-    // Dimension-type ambient light, matched by id since the dimension-type
-    // registry isn't tracked; custom dimensions fall back to 0.
-    let ambient = if dimension == "minecraft:the_nether" {
-        0.1
-    } else {
-        0.0
+fn refresh_sky_light_evaluation(game: &mut GameState) {
+    game.dimension_environment.rain_level = game.sky_state.rain_level;
+    game.dimension_environment.thunder_level = game.sky_state.thunder_level;
+    let evaluation =
+        crate::net::environment::evaluate_sky_light(&game.dimension_environment, |timeline| {
+            game.timeline_clock_sample(timeline)
+        });
+    game.sky_light_evaluation = match evaluation {
+        Ok(evaluation) => {
+            game.sky_light_unavailable_reason = None;
+            Some(evaluation)
+        }
+        Err(reason) => {
+            if game.sky_light_unavailable_reason.as_deref() != Some(&reason) {
+                tracing::warn!("Native sky-light evaluation unavailable: {reason}");
+                game.sky_light_unavailable_reason = Some(reason);
+            }
+            None
+        }
     };
-    let v = level / 15.0;
-    let curved = v / (4.0 - 3.0 * v);
-    // Mth.lerp(ambientLight, curved, 1.0)
-    curved + (1.0 - curved) * ambient
+}
+
+/// Approximate vanilla Lightmap.getBrightness; inherited entity/scalar tint
+/// remains approximate.
+fn lightmap_brightness(
+    chunks: &ChunkStore,
+    dimension: &str,
+    evaluation: Option<crate::net::environment::SkyLightEvaluation>,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> f32 {
+    let sky = chunks
+        .get_sky_light(x, y, z)
+        .saturating_sub(evaluation.map_or(0, |e| e.sky_darken));
+    let level = sky.max(chunks.get_block_light(x, y, z));
+    let ambient = evaluation.map_or_else(
+        || {
+            if dimension == "minecraft:the_nether" {
+                0.1
+            } else {
+                0.0
+            }
+        },
+        |e| e.ambient_light,
+    );
+    crate::renderer::world_shadow::lightmap_brightness(level, ambient)
 }
 
 fn tnt_render_effect(fuse: f32) -> (f32, f32) {
@@ -3083,6 +3115,7 @@ fn eye_lightmap_brightness(game: &GameState) -> f32 {
     lightmap_brightness(
         &game.chunk_store,
         &game.dimension,
+        game.sky_light_evaluation,
         eye.x.floor() as i32,
         eye.y.floor() as i32,
         eye.z.floor() as i32,
@@ -3202,10 +3235,14 @@ pub fn update_game(
         core.drain_network_events(connection, None, &mut gfx.renderer, &gfx.window, game);
     core.input.set_text_owner(game.text_owner());
     if let Some(transfer) = game.pending_server_transfer.take() {
+        game.sky_light_evaluation = None;
+        gfx.renderer.set_world_light_environment(None);
         game.tab_score_state.set_visible(false);
         return GameUpdateResult::Transfer(transfer);
     }
     if let Some(reason) = disconnect_reason {
+        game.sky_light_evaluation = None;
+        gfx.renderer.set_world_light_environment(None);
         game.tab_score_state.set_visible(false);
         return GameUpdateResult::Disconnected { reason };
     }
@@ -3454,6 +3491,7 @@ pub fn update_game(
     game.last_update_phases.fixed_tick_ms = fixed_tick_start
         .map(|start| start.elapsed().as_secs_f32() * 1000.0)
         .unwrap_or_default();
+    refresh_sky_light_evaluation(game);
 
     // Once per frame after the frame's ticks, where vanilla `Minecraft.runTick`
     // calls `level.update()`.
@@ -5492,6 +5530,7 @@ pub fn update_game(
             &mut gfx.renderer,
             &game.chunk_store,
             &game.dimension,
+            game.sky_light_evaluation,
             game.cardinal_light,
             camera_anchor,
             partial_tick,
@@ -5559,6 +5598,7 @@ pub fn update_game(
                 light: lightmap_brightness(
                     &game.chunk_store,
                     &game.dimension,
+                    game.sky_light_evaluation,
                     block_pos[0],
                     block_pos[1],
                     block_pos[2],
@@ -5622,6 +5662,7 @@ pub fn update_game(
                 light: lightmap_brightness(
                     &game.chunk_store,
                     &game.dimension,
+                    game.sky_light_evaluation,
                     block_pos.x,
                     block_pos.y,
                     block_pos.z,
@@ -5705,6 +5746,7 @@ pub fn update_game(
                     lightmap_brightness(
                         &game.chunk_store,
                         &game.dimension,
+                        game.sky_light_evaluation,
                         block_pos[0],
                         block_pos[1],
                         block_pos[2],
@@ -5761,6 +5803,7 @@ pub fn update_game(
                 light: lightmap_brightness(
                     &game.chunk_store,
                     &game.dimension,
+                    game.sky_light_evaluation,
                     block_pos[0],
                     block_pos[1],
                     block_pos[2],
@@ -5916,7 +5959,14 @@ pub fn update_game(
                     sign_back_glowing,
                     sign_wall: props.get("facing").is_some(),
                     sign_light: if is_sign {
-                        lightmap_brightness(&game.chunk_store, &game.dimension, pos.x, pos.y, pos.z)
+                        lightmap_brightness(
+                            &game.chunk_store,
+                            &game.dimension,
+                            game.sky_light_evaluation,
+                            pos.x,
+                            pos.y,
+                            pos.z,
+                        )
                     } else {
                         1.0
                     },
@@ -6046,6 +6096,8 @@ pub fn update_game(
         &core.tokio_rt,
     );
     game.last_update_phases.cpu_update_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+    gfx.renderer
+        .set_world_light_environment(game.sky_light_evaluation);
     let render_start = std::time::Instant::now();
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
@@ -6443,6 +6495,7 @@ fn minecart_cargo_render_infos(
     renderer: &mut crate::renderer::Renderer,
     chunks: &crate::world::chunk::ChunkStore,
     dimension: &str,
+    evaluation: Option<crate::net::environment::SkyLightEvaluation>,
     cardinal_light: CardinalLightType,
     camera_anchor: glam::DVec3,
     partial_tick: f32,
@@ -6506,6 +6559,7 @@ fn minecart_cargo_render_infos(
                 light: lightmap_brightness(
                     chunks,
                     dimension,
+                    evaluation,
                     block_pos[0],
                     block_pos[1],
                     block_pos[2],

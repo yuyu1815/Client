@@ -22,6 +22,7 @@ pub(crate) fn item_shadow_pieces(
     camera: [f64; 3],
     radius: f32,
     strength: f32,
+    evaluation: Option<crate::net::environment::SkyLightEvaluation>,
     ambient_light: f32,
     shadows_enabled: bool,
     visible: bool,
@@ -50,11 +51,19 @@ pub(crate) fn item_shadow_pieces(
                 let Some(below) = loaded_full_surface(chunks, x, y - 1, z) else {
                     continue;
                 };
-                let Some(brightness) = loaded_max_brightness(chunks, x, y, z) else {
+                let Some(brightness) = loaded_max_brightness(
+                    chunks,
+                    x,
+                    y,
+                    z,
+                    evaluation.map_or(0, |evaluation| evaluation.sky_darken),
+                ) else {
                     continue;
                 };
+                let ambient =
+                    evaluation.map_or(ambient_light, |evaluation| evaluation.ambient_light);
                 let power_at_depth = power - (entity[1] - y as f64) as f32 * 0.5;
-                let Some(alpha) = shadow_alpha(power_at_depth, brightness, ambient_light) else {
+                let Some(alpha) = shadow_alpha(power_at_depth, brightness, ambient) else {
                     continue;
                 };
                 let relative = [
@@ -104,16 +113,24 @@ fn full_surface_shape(state: azalea_block::BlockState) -> Option<LocalBox> {
     Some(FULL_BLOCK)
 }
 
-fn loaded_max_brightness(chunks: &ChunkStore, x: i32, y: i32, z: i32) -> Option<u8> {
-    // skyDarken is not tracked; the accepted daytime fixture's sky level is 15, so
-    // Java's subtraction is zero here.
+fn loaded_max_brightness(
+    chunks: &ChunkStore,
+    x: i32,
+    y: i32,
+    z: i32,
+    sky_darken: u8,
+) -> Option<u8> {
     let chunk_pos = azalea_core::position::ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
     chunks.light_data.get(&(chunk_pos.x, chunk_pos.z))?;
-    Some(
-        chunks
-            .get_sky_light(x, y, z)
-            .max(chunks.get_block_light(x, y, z)),
-    )
+    Some(max_brightness(
+        chunks.get_sky_light(x, y, z),
+        chunks.get_block_light(x, y, z),
+        sky_darken,
+    ))
+}
+
+fn max_brightness(sky: u8, block: u8, sky_darken: u8) -> u8 {
+    sky.saturating_sub(sky_darken).max(block)
 }
 
 fn shadow_power(distance_sq: f64, strength: f32) -> Option<f32> {
@@ -121,7 +138,7 @@ fn shadow_power(distance_sq: f64, strength: f32) -> Option<f32> {
     (power > 0.0).then_some(power)
 }
 
-fn lightmap_brightness(level: u8, ambient_light: f32) -> f32 {
+pub(crate) fn lightmap_brightness(level: u8, ambient_light: f32) -> f32 {
     let value = level as f32 / 15.0;
     let curved = value / (4.0 - 3.0 * value);
     curved + (1.0 - curved) * ambient_light
@@ -136,6 +153,16 @@ fn shadow_alpha(power_at_depth: f32, brightness: u8, ambient_light: f32) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brightness_keeps_block_channel_and_legacy_none_uses_zero_darken() {
+        assert_eq!(max_brightness(15, 0, 11), 4);
+        assert_eq!(max_brightness(0, 15, 11), 15);
+        assert_eq!(max_brightness(15, 0, 0), 15);
+        assert!(
+            (lightmap_brightness(4, 0.0) - (4.0 / 15.0 / (4.0 - 3.0 * 4.0 / 15.0))).abs() < 1e-6
+        );
+    }
 
     #[test]
     fn shadow_contract_table_rejects_missing_surface_and_matches_alpha_gates() {

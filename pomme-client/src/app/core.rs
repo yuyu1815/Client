@@ -2130,6 +2130,7 @@ impl AppCore {
                 NetworkEvent::WorldClockRegistry(world_clock_ids) => {
                     let ids = world_clock_ids.unwrap_or_default();
                     if game.world_clock_ids != ids {
+                        renderer.set_world_light_environment(None);
                         game.world_clocks.clear();
                         game.world_clock_game_time = 0;
                     }
@@ -2166,6 +2167,7 @@ impl AppCore {
                     game.world_clocks.clear();
                     game.world_clock_game_time = 0;
                     game.world_clock_ids = world_clock_ids.unwrap_or_default();
+                    renderer.set_world_light_environment(None);
                     game.pending_dimension_environment = Some(environment_input);
                     resolve_pending_dimension_environment(game);
                     game.cardinal_light = cardinal_light;
@@ -2523,6 +2525,7 @@ impl AppCore {
                     timeline_entries_error,
                 } => {
                     game.registries = holder;
+                    renderer.set_world_light_environment(None);
                     if let Some(input) = &mut game.pending_dimension_environment {
                         input.timeline_entries = timeline_entries;
                         input.timeline_entries_error = timeline_entries_error;
@@ -2531,6 +2534,7 @@ impl AppCore {
                 }
                 NetworkEvent::TimelineTags(tags) => {
                     game.timeline_tags = tags;
+                    renderer.set_world_light_environment(None);
                     resolve_pending_dimension_environment(game);
                 }
                 NetworkEvent::DialogRegistry(registry) => {
@@ -4325,6 +4329,7 @@ impl AppCore {
                     tracing::info!("Server re-entered configuration");
                     self.audio.stop_all_sounds();
                     game.timeline_tags.clear();
+                    renderer.set_world_light_environment(None);
                     resolve_pending_dimension_environment(game);
                     game.entity_store = crate::entity::EntityStore::new();
                     game.item_entity_store = crate::entity::ItemEntityStore::new();
@@ -5175,6 +5180,8 @@ fn resolve_pending_dimension_environment(game: &mut GameState) {
                 }
             }
         };
+    game.sky_light_evaluation = None;
+    game.sky_light_unavailable_reason = game.dimension_environment.unsupported_reason.clone();
 }
 
 /// DimensionInfo follows Login/Respawn, not ordinary same-world chunk updates.

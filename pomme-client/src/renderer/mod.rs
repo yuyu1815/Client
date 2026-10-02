@@ -259,6 +259,7 @@ pub struct BlockEntityModelDrawCounts {
 }
 
 pub struct Renderer {
+    pub world_light_environment: Option<crate::net::environment::SkyLightEvaluation>,
     ctx: VulkanContext,
     swapchain: Swapchain,
     camera: Camera,
@@ -315,6 +316,13 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    pub fn set_world_light_environment(
+        &mut self,
+        environment: Option<crate::net::environment::SkyLightEvaluation>,
+    ) {
+        self.world_light_environment = environment;
+    }
+
     pub fn new(
         window: Arc<Window>,
         font_sources: FontSources<'_>,
@@ -681,6 +689,7 @@ impl Renderer {
         crate::app::startup_mark("renderer_ready");
 
         let mut renderer = Self {
+            world_light_environment: None,
             ctx,
             swapchain: swapchain_state,
             camera,
@@ -1934,6 +1943,7 @@ impl Renderer {
         cursor: (f32, f32),
         show_skin: bool,
     ) -> Result<(), RendererError> {
+        self.set_world_light_environment(None);
         let result = self.render_frame(
             window,
             false,
@@ -2698,6 +2708,7 @@ impl Renderer {
                     eye.to_array(),
                     anchor,
                     dimension,
+                    self.world_light_environment,
                 );
 
                 if let Some((block_pos, stage, state)) = destroy_info {
