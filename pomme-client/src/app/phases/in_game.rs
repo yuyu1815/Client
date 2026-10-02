@@ -5134,8 +5134,6 @@ pub fn update_game(
                     animate_tail: extras.animate_tail,
                     is_in_water: e.is_in_water,
                     is_on_ground: e.on_ground,
-                    boat_left_paddle: false,
-                    boat_right_paddle: false,
                     tentacle_angle: extras.tentacle_angle,
                     bat_resting: e.bat_resting,
                     bat_elapsed_secs: extras.bat_elapsed_secs,
@@ -5147,6 +5145,7 @@ pub fn update_game(
                     attack_time: e.swing_progress(partial_tick),
                     vex_charging: extras.vex_charging,
                     skip_cull: false,
+                    ..Default::default()
                 })
             })
             .collect()
@@ -5254,11 +5253,7 @@ pub fn update_game(
             camera_look.y_rot_deg(),
             camera_look.x_rot_deg(),
         ));
-        entity_renders.extend(boat_render_infos(
-            &game.entity_store,
-            partial_tick,
-            game.tick_count as f32 + partial_tick,
-        ));
+        entity_renders.extend(boat_render_infos(&game.entity_store, partial_tick));
         entity_renders.extend(minecart_render_infos(&game.entity_store, partial_tick));
         entity_renders.extend(end_crystal_render_infos(&game.entity_store, partial_tick));
         entity_renders.extend(armor_stand_render_infos(&game.entity_store, partial_tick));
@@ -6009,7 +6004,6 @@ pub fn update_game(
 fn boat_render_infos(
     store: &crate::entity::EntityStore,
     partial_tick: f32,
-    age_in_ticks: f32,
 ) -> Vec<EntityRenderInfo> {
     use azalea_registry::builtin::EntityKind;
 
@@ -6056,25 +6050,37 @@ fn boat_render_infos(
             let position = vehicle
                 .prev_position
                 .lerp(vehicle.position, partial_tick as f64);
-            let hurt = vehicle.boat_hurt_time as f32;
-            let rock = if hurt > 0.0 {
-                (hurt.sin() * hurt * vehicle.boat_damage / 10.0
+            let rowing_time = std::array::from_fn(|i| {
+                vehicle.boat_prev_rowing_time[i]
+                    + (vehicle.boat_rowing_time[i] - vehicle.boat_prev_rowing_time[i])
+                        * partial_tick
+            });
+            let hurt_time = vehicle.boat_prev_hurt_time as f32
+                + (vehicle.boat_hurt_time - vehicle.boat_prev_hurt_time) as f32 * partial_tick;
+            let damage = vehicle.boat_prev_damage
+                + (vehicle.boat_damage - vehicle.boat_prev_damage) * partial_tick;
+            let hurt_angle = if hurt_time > 0.0 {
+                (hurt_time.sin() * hurt_time * damage.max(0.0) / 10.0
                     * vehicle.boat_hurt_direction as f32)
                     .to_radians()
             } else {
                 0.0
             };
+            let bubble_angle = vehicle.boat_prev_bubble_angle
+                + (vehicle.boat_bubble_angle - vehicle.boat_prev_bubble_angle) * partial_tick;
             Some(EntityRenderInfo {
                 position,
                 simulation_position: vehicle.position,
                 body_y_rot_deg: yaw,
                 entity_kind: kind,
-                boat_left_paddle: vehicle.boat_left_paddle,
-                boat_right_paddle: vehicle.boat_right_paddle,
-                age_in_ticks,
+                boat_rowing_time: rowing_time,
                 body_transform: Some(
                     glam::Mat4::from_translation(glam::Vec3::Y * 0.375)
-                        * glam::Mat4::from_rotation_x(rock),
+                        * glam::Mat4::from_rotation_x(hurt_angle)
+                        * glam::Mat4::from_axis_angle(
+                            glam::Vec3::new(1.0, 0.0, 1.0).normalize(),
+                            bubble_angle.to_radians(),
+                        ),
                 ),
                 ..Default::default()
             })
@@ -8146,11 +8152,53 @@ mod tests {
             );
             store.set_vehicle_kind(id as i32, kind);
         }
-        let draws = boat_render_infos(&store, 1.0, 0.5);
+        let draws = boat_render_infos(&store, 1.0);
         assert_eq!(draws.len(), 20);
         assert!(store.living.is_empty(), "boats remain nonliving");
         assert!(draws.iter().all(|info| info.body_y_rot_deg == 135.0));
         assert!(draws.iter().all(|info| info.body_transform.is_some()));
+        assert!(draws.iter().all(|info| info.boat_rowing_time == [0.0; 2]));
+    }
+
+    #[test]
+    fn boat_pose_uses_interpolated_native_tick_state() {
+        use azalea_registry::builtin::EntityKind as K;
+
+        use crate::entity::EntityStore;
+        use crate::entity::components::{LookDirection, Position};
+        use crate::world::chunk::ChunkStore;
+
+        let mut store = EntityStore::new();
+        store.set_vehicle_spawn_transform(
+            1,
+            Position::default(),
+            glam::DVec3::ZERO,
+            LookDirection::default(),
+        );
+        store.set_vehicle_kind(1, K::OakBoat);
+        store.apply_vehicle_metadata(1, 8, crate::entity::MetaValue::Int(3));
+        store.apply_vehicle_metadata(1, 10, crate::entity::MetaValue::Float(8.0));
+        store.apply_vehicle_metadata(1, 11, crate::entity::MetaValue::Bool(true));
+        store.apply_vehicle_metadata(1, 12, crate::entity::MetaValue::Bool(true));
+        store.apply_vehicle_metadata(1, 13, crate::entity::MetaValue::Int(10));
+        store.tick_projectile_displays(&ChunkStore::new(1));
+
+        let info = &boat_render_infos(&store, 0.5)[0];
+        assert_eq!(info.boat_rowing_time, [0.19634955; 2]);
+        assert_eq!(store.vehicles[&1].boat_prev_hurt_time, 3);
+        assert_eq!(store.vehicles[&1].boat_hurt_time, 2);
+        assert_eq!(store.vehicles[&1].boat_prev_damage, 8.0);
+        assert_eq!(store.vehicles[&1].boat_damage, 7.0);
+        assert!((store.vehicles[&1].boat_bubble_angle - 10.0 * 0.5_f32.sin() * 0.05).abs() < 1e-6);
+        assert!(info.body_transform.is_some());
+
+        store.apply_vehicle_metadata(1, 11, crate::entity::MetaValue::Bool(false));
+        store.apply_vehicle_metadata(1, 13, crate::entity::MetaValue::Int(0));
+        store.tick_projectile_displays(&ChunkStore::new(1));
+        let reset = &boat_render_infos(&store, 1.0)[0];
+        assert_eq!(reset.boat_rowing_time[0], 0.0);
+        assert_eq!(reset.boat_rowing_time[1], 2.0 * 0.3926991);
+        assert_eq!(store.vehicles[&1].boat_bubble_multiplier, 0.0);
     }
 
     #[test]

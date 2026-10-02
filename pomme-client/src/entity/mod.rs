@@ -1351,6 +1351,15 @@ pub struct VehicleState {
     pub boat_left_paddle: bool,
     pub boat_right_paddle: bool,
     pub boat_bubble_time: i32,
+    pub boat_prev_rowing_time: [f32; 2],
+    pub boat_rowing_time: [f32; 2],
+    pub boat_prev_bubble_multiplier: f32,
+    pub boat_bubble_multiplier: f32,
+    pub boat_prev_bubble_angle: f32,
+    pub boat_bubble_angle: f32,
+    pub boat_tick_count: u32,
+    pub boat_prev_hurt_time: i32,
+    pub boat_prev_damage: f32,
     /// AbstractMinecart metadata 11/12: optional registry state id + offset.
     pub minecart_display_state: Option<u32>,
     pub minecart_display_offset: i32,
@@ -1512,6 +1521,15 @@ impl EntityStore {
             boat_left_paddle: false,
             boat_right_paddle: false,
             boat_bubble_time: 0,
+            boat_prev_rowing_time: [0.0; 2],
+            boat_rowing_time: [0.0; 2],
+            boat_prev_bubble_multiplier: 0.0,
+            boat_bubble_multiplier: 0.0,
+            boat_prev_bubble_angle: 0.0,
+            boat_bubble_angle: 0.0,
+            boat_tick_count: 0,
+            boat_prev_hurt_time: 0,
+            boat_prev_damage: 0.0,
             minecart_display_state: None,
             minecart_display_offset: 6,
             minecart_furnace_has_fuel: false,
@@ -1584,6 +1602,15 @@ impl EntityStore {
             boat_left_paddle: false,
             boat_right_paddle: false,
             boat_bubble_time: 0,
+            boat_prev_rowing_time: [0.0; 2],
+            boat_rowing_time: [0.0; 2],
+            boat_prev_bubble_multiplier: 0.0,
+            boat_bubble_multiplier: 0.0,
+            boat_prev_bubble_angle: 0.0,
+            boat_bubble_angle: 0.0,
+            boat_tick_count: 0,
+            boat_prev_hurt_time: 0,
+            boat_prev_damage: 0.0,
             minecart_display_state: None,
             minecart_display_offset: 6,
             minecart_furnace_has_fuel: false,
@@ -1873,6 +1900,59 @@ impl EntityStore {
             }
             if vehicle.kind == Some(EntityKind::ExperienceOrb) {
                 vehicle.experience_orb_age = vehicle.experience_orb_age.wrapping_add(1);
+            }
+            if matches!(
+                vehicle.kind,
+                Some(
+                    EntityKind::AcaciaBoat
+                        | EntityKind::AcaciaChestBoat
+                        | EntityKind::BambooRaft
+                        | EntityKind::BambooChestRaft
+                        | EntityKind::BirchBoat
+                        | EntityKind::BirchChestBoat
+                        | EntityKind::CherryBoat
+                        | EntityKind::CherryChestBoat
+                        | EntityKind::DarkOakBoat
+                        | EntityKind::DarkOakChestBoat
+                        | EntityKind::JungleBoat
+                        | EntityKind::JungleChestBoat
+                        | EntityKind::MangroveBoat
+                        | EntityKind::MangroveChestBoat
+                        | EntityKind::OakBoat
+                        | EntityKind::OakChestBoat
+                        | EntityKind::PaleOakBoat
+                        | EntityKind::PaleOakChestBoat
+                        | EntityKind::SpruceBoat
+                        | EntityKind::SpruceChestBoat
+                )
+            ) {
+                vehicle.boat_tick_count = vehicle.boat_tick_count.wrapping_add(1);
+                vehicle.boat_prev_rowing_time = vehicle.boat_rowing_time;
+                for (i, rowing) in vehicle.boat_rowing_time.iter_mut().enumerate() {
+                    *rowing = if [vehicle.boat_left_paddle, vehicle.boat_right_paddle][i] {
+                        *rowing + 0.3926991
+                    } else {
+                        0.0
+                    };
+                }
+                vehicle.boat_prev_bubble_multiplier = vehicle.boat_bubble_multiplier;
+                vehicle.boat_bubble_multiplier = (vehicle.boat_bubble_multiplier
+                    + if vehicle.boat_bubble_time > 0 {
+                        0.05
+                    } else {
+                        -0.1
+                    })
+                .clamp(0.0, 1.0);
+                vehicle.boat_prev_bubble_angle = vehicle.boat_bubble_angle;
+                vehicle.boat_bubble_angle = 10.0
+                    * (0.5 * vehicle.boat_tick_count as f32).sin()
+                    * vehicle.boat_bubble_multiplier;
+                vehicle.boat_prev_hurt_time = vehicle.boat_hurt_time;
+                vehicle.boat_prev_damage = vehicle.boat_damage;
+                vehicle.boat_hurt_time = vehicle.boat_hurt_time.saturating_sub(1);
+                if vehicle.boat_damage > 0.0 {
+                    vehicle.boat_damage -= 1.0;
+                }
             }
             if vehicle.kind == Some(EntityKind::Tnt) {
                 vehicle.tnt_prev_fuse = vehicle.tnt_fuse;

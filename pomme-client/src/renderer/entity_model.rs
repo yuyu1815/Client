@@ -444,33 +444,22 @@ pub fn bake_baby_pig_model() -> BakedEntityModel {
 
 /// `slim` is the 3px-wide-arm (Alex) layout; same texture offsets and pivots,
 /// only the arm boxes differ.
-// TODO: jacket/sleeve/pants overlay layers (only the hat is modeled here).
 // TODO: default-skin-by-UUID selection for players without a fetched skin.
 pub fn bake_player_model(slim: bool) -> BakedEntityModel {
     let arm_w = if slim { 3.0 } else { 4.0 };
     let right_arm_ox = if slim { -2.0 } else { -3.0 };
-    let parts = vec![
+    let mut parts = vec![
         EntityPart {
             name: "head".into(),
             offset: Vec3::new(0.0, 0.0, 0.0),
             default_rotation: Vec3::ZERO,
-            cubes: vec![
-                ModelCube {
-                    origin: Vec3::new(-4.0, -8.0, -4.0),
-                    size: Vec3::new(8.0, 8.0, 8.0),
-                    tex_offset: (0, 0),
-                    deformation: 0.0,
-                    mirror: false,
-                },
-                // Hat / headwear outer layer.
-                ModelCube {
-                    origin: Vec3::new(-4.0, -8.0, -4.0),
-                    size: Vec3::new(8.0, 8.0, 8.0),
-                    tex_offset: (32, 0),
-                    deformation: 0.5,
-                    mirror: false,
-                },
-            ],
+            cubes: vec![ModelCube {
+                origin: Vec3::new(-4.0, -8.0, -4.0),
+                size: Vec3::new(8.0, 8.0, 8.0),
+                tex_offset: (0, 0),
+                deformation: 0.0,
+                mirror: false,
+            }],
             parent: None,
         },
         EntityPart {
@@ -539,7 +528,87 @@ pub fn bake_player_model(slim: bool) -> BakedEntityModel {
             parent: None,
         },
     ];
-
+    let head = part_index(&parts, "head");
+    let body = part_index(&parts, "body");
+    let right_arm = part_index(&parts, "right_arm");
+    let left_arm = part_index(&parts, "left_arm");
+    let right_leg = part_index(&parts, "right_leg");
+    let left_leg = part_index(&parts, "left_leg");
+    let child = |name: &str, parent: usize, cube: ModelCube| EntityPart {
+        name: name.into(),
+        offset: Vec3::ZERO,
+        default_rotation: Vec3::ZERO,
+        cubes: vec![cube],
+        parent: Some(parent),
+    };
+    parts.extend([
+        child(
+            "hat",
+            head,
+            ModelCube {
+                origin: Vec3::new(-4.0, -8.0, -4.0),
+                size: Vec3::new(8.0, 8.0, 8.0),
+                tex_offset: (32, 0),
+                deformation: 0.5,
+                mirror: false,
+            },
+        ),
+        child(
+            "jacket",
+            body,
+            ModelCube {
+                origin: Vec3::new(-4.0, 0.0, -2.0),
+                size: Vec3::new(8.0, 12.0, 4.0),
+                tex_offset: (16, 32),
+                deformation: 0.25,
+                mirror: false,
+            },
+        ),
+        child(
+            "right_sleeve",
+            right_arm,
+            ModelCube {
+                origin: Vec3::new(right_arm_ox, -2.0, -2.0),
+                size: Vec3::new(arm_w, 12.0, 4.0),
+                tex_offset: (40, 32),
+                deformation: 0.25,
+                mirror: false,
+            },
+        ),
+        child(
+            "left_sleeve",
+            left_arm,
+            ModelCube {
+                origin: Vec3::new(-1.0, -2.0, -2.0),
+                size: Vec3::new(arm_w, 12.0, 4.0),
+                tex_offset: (48, 48),
+                deformation: 0.25,
+                mirror: false,
+            },
+        ),
+        child(
+            "right_pants",
+            right_leg,
+            ModelCube {
+                origin: Vec3::new(-2.0, 0.0, -2.0),
+                size: Vec3::new(4.0, 12.0, 4.0),
+                tex_offset: (0, 32),
+                deformation: 0.25,
+                mirror: false,
+            },
+        ),
+        child(
+            "left_pants",
+            left_leg,
+            ModelCube {
+                origin: Vec3::new(-2.0, 0.0, -2.0),
+                size: Vec3::new(4.0, 12.0, 4.0),
+                tex_offset: (0, 48),
+                deformation: 0.25,
+                mirror: false,
+            },
+        ),
+    ]);
     bake_model(parts, 64, 64)
 }
 
@@ -5329,6 +5398,206 @@ pub fn compute_equine_anim(
         }
     }
     anim
+}
+
+/// Allay's idle/flying `setupAnim` path. Dance/spin/held-item flags are
+/// supplied by metadata once Allay's synced target state is available.
+pub fn compute_allay_anim(
+    model: &BakedEntityModel,
+    age: f32,
+    walk_pos: f32,
+    walk_speed: f32,
+) -> PartAnim {
+    let flight = (walk_speed / 0.3).clamp(0.0, 1.0);
+    let flap =
+        (age * 20.0_f32.to_radians() + walk_pos).cos() * std::f32::consts::PI * 0.15 + walk_speed;
+    let idle = age * 9.0_f32.to_radians();
+    let mut pose = PartAnim::default();
+    for (i, part) in model.parts.iter().enumerate() {
+        let rot = match part.name.as_str() {
+            "right_wing" => Some(Vec3::new(
+                0.43633232 * (1.0 - flight),
+                -std::f32::consts::FRAC_PI_4 + flap,
+                0.0,
+            )),
+            "left_wing" => Some(Vec3::new(
+                0.43633232 * (1.0 - flight),
+                std::f32::consts::FRAC_PI_4 - flap,
+                0.0,
+            )),
+            "body" => Some(Vec3::new(flight * std::f32::consts::FRAC_PI_4, 0.0, 0.0)),
+            "left_arm" => Some(Vec3::new(
+                0.0,
+                0.0,
+                -(0.43633232
+                    - (idle + 3.0 * std::f32::consts::FRAC_PI_2).cos()
+                        * std::f32::consts::PI
+                        * 0.075
+                        * (1.0 - flight)),
+            )),
+            "right_arm" => Some(Vec3::new(
+                0.0,
+                0.0,
+                0.43633232
+                    - (idle + 3.0 * std::f32::consts::FRAC_PI_2).cos()
+                        * std::f32::consts::PI
+                        * 0.075
+                        * (1.0 - flight),
+            )),
+            _ => None,
+        };
+        if let Some(rot) = rot {
+            pose.rotation.push((i, rot));
+        }
+        if part.name == "root" {
+            pose.translation
+                .push((i, Vec3::new(0.0, idle.cos() * 0.25 * (1.0 - flight), 0.0)));
+        }
+    }
+    pose
+}
+
+/// Bee's ungrounded wing cycle, grounded legs, and source body bob.
+pub fn compute_bee_anim(model: &BakedEntityModel, age: f32, on_ground: bool) -> PartAnim {
+    let speed = (age * 0.18).cos();
+    let wing = if on_ground {
+        0.0
+    } else {
+        (age * 120.32113_f32.to_radians()).cos() * std::f32::consts::PI * 0.15
+    };
+    let mut pose = PartAnim::default();
+    for (i, part) in model.parts.iter().enumerate() {
+        let rot = match part.name.as_str() {
+            "right_wing" => Some(Vec3::new(0.0, 0.0, wing)),
+            "left_wing" => Some(Vec3::new(0.0, 0.0, -wing)),
+            "front_legs" | "middle_legs" if on_ground => {
+                Some(Vec3::new(std::f32::consts::FRAC_PI_4, 0.0, 0.0))
+            }
+            "front_legs" | "middle_legs" => Some(Vec3::new(
+                -speed * std::f32::consts::PI * 0.1 + std::f32::consts::FRAC_PI_8,
+                0.0,
+                0.0,
+            )),
+            "back_legs" => Some(Vec3::new(
+                -speed * std::f32::consts::PI * 0.05 + std::f32::consts::FRAC_PI_4,
+                0.0,
+                0.0,
+            )),
+            "bone" => Some(Vec3::new(
+                0.1 + speed * std::f32::consts::PI * 0.025,
+                0.0,
+                0.0,
+            )),
+            _ => None,
+        };
+        if let Some(rot) = rot {
+            pose.rotation.push((i, rot));
+        }
+        if part.name == "bone" {
+            pose.translation
+                .push((i, Vec3::new(0.0, -((age * 0.18).cos()) * 0.9, 0.0)));
+        }
+    }
+    pose
+}
+
+/// Breezes retain the model's look-controlled head while the source body
+/// receives its age-based idle bob. Action-state keyframes are separate.
+pub fn compute_breeze_anim(
+    model: &BakedEntityModel,
+    age: f32,
+    head_x: f32,
+    head_y: f32,
+) -> PartAnim {
+    let mut pose = PartAnim::default();
+    for (i, part) in model.parts.iter().enumerate() {
+        match part.name.as_str() {
+            "head" => pose.rotation.push((
+                i,
+                vanilla_rot(head_x.to_radians(), head_y.to_radians(), 0.0),
+            )),
+            "body" => pose
+                .translation
+                .push((i, Vec3::new(0.0, (age * 0.1).sin() * 0.5, 0.0))),
+            _ => {}
+        }
+    }
+    pose
+}
+
+/// Shared source tentacle cycle for Ghast and Happy Ghast.
+pub fn compute_ghast_anim(model: &BakedEntityModel, age: f32) -> PartAnim {
+    let mut pose = PartAnim::default();
+    for (i, part) in model.parts.iter().enumerate() {
+        if part.name.starts_with("tentacle") {
+            let n = part.name[8..].parse::<usize>().unwrap_or(0);
+            pose.rotation.push((
+                i,
+                Vec3::new(0.2 * (age * 0.3 + n as f32).sin() + 0.4, 0.0, 0.0),
+            ));
+        }
+    }
+    pose
+}
+
+/// Phantom flap, tail articulation, and head pitch from its model setup.
+pub fn compute_phantom_anim(model: &BakedEntityModel, age: f32) -> PartAnim {
+    let anim = age * 7.448451_f32.to_radians();
+    let flap = anim.cos() * 16.0_f32.to_radians();
+    let tail = -(5.0 + (anim * 2.0).cos() * 5.0) * std::f32::consts::PI / 180.0;
+    let mut pose = PartAnim::default();
+    for (i, part) in model.parts.iter().enumerate() {
+        let z = match part.name.as_str() {
+            "left_wing_base" | "left_wing_tip" => Some(flap),
+            "right_wing_base" | "right_wing_tip" => Some(-flap),
+            _ => None,
+        };
+        if let Some(z) = z {
+            pose.rotation.push((
+                i,
+                vanilla_rot(part.default_rotation.x, part.default_rotation.y, z),
+            ));
+        }
+        if matches!(part.name.as_str(), "tail_base" | "tail_tip") {
+            pose.rotation.push((
+                i,
+                vanilla_rot(tail, part.default_rotation.y, part.default_rotation.z),
+            ));
+        }
+    }
+    pose
+}
+
+/// Wither idle ribcage/tail motion and synchronized main head orientation.
+pub fn compute_wither_anim(
+    model: &BakedEntityModel,
+    age: f32,
+    head_x: f32,
+    head_y: f32,
+) -> PartAnim {
+    let anim = (age * 0.1).cos();
+    let rib_x = (0.065 + 0.05 * anim) * std::f32::consts::PI;
+    let tail_x = (0.265 + 0.1 * anim) * std::f32::consts::PI;
+    let mut pose = PartAnim::default();
+    for (i, part) in model.parts.iter().enumerate() {
+        match part.name.as_str() {
+            "ribcage" => pose.rotation.push((i, vanilla_rot(rib_x, 0.0, 0.0))),
+            "tail" => {
+                pose.rotation.push((i, vanilla_rot(tail_x, 0.0, 0.0)));
+                pose.translation.push((
+                    i,
+                    Vec3::new(-2.0, 6.9 + rib_x.cos() * 10.0, -0.5 + rib_x.sin() * 10.0)
+                        - part.offset,
+                ));
+            }
+            "center_head" => pose.rotation.push((
+                i,
+                vanilla_rot(head_x.to_radians(), head_y.to_radians(), 0.0),
+            )),
+            _ => {}
+        }
+    }
+    pose
 }
 
 /// Squid (`SquidModel.setupAnim`): every tentacle pitches by the stroke

@@ -144,8 +144,7 @@ pub struct EntityRenderInfo {
     /// Fish flop pose / squid body branch.
     pub is_in_water: bool,
     pub is_on_ground: bool,
-    pub boat_left_paddle: bool,
-    pub boat_right_paddle: bool,
+    pub boat_rowing_time: [f32; 2],
     /// Squid tentacle stroke angle, interpolated.
     pub tentacle_angle: f32,
     /// Bat pose flag + its fly/rest animation clock.
@@ -226,8 +225,7 @@ impl Default for EntityRenderInfo {
             animate_tail: false,
             is_in_water: false,
             is_on_ground: false,
-            boat_left_paddle: false,
-            boat_right_paddle: false,
+            boat_rowing_time: [0.0; 2],
             tentacle_angle: 0.0,
             bat_resting: false,
             bat_elapsed_secs: None,
@@ -3038,16 +3036,16 @@ impl EntityRenderer {
                 }
             }
             AnimationType::Boat => {
-                let time = info.age_in_ticks;
-                let paddle = |left: bool| {
+                let paddle = |time: f32, right: bool| {
                     let x_t = ((-time).sin() + 1.0) * 0.5;
-                    let y_t = ((1.0 - time).sin() + 1.0) * 0.5;
-                    let x = -1.0471976 + (1.0471976 - 0.2617994) * x_t;
-                    let mut y = -0.7853982 + (0.7853982 - -0.7853982) * y_t;
-                    if !left {
+                    let y_t = ((-time + 1.0).sin() + 1.0) * 0.5;
+                    let x = -std::f32::consts::FRAC_PI_3
+                        + (std::f32::consts::FRAC_PI_3 - (std::f32::consts::PI / 12.0)) * x_t;
+                    let mut y = -std::f32::consts::FRAC_PI_4 + (std::f32::consts::FRAC_PI_2) * y_t;
+                    if right {
                         y = std::f32::consts::PI - y;
                     }
-                    (x, y, 0.0)
+                    (x, y)
                 };
                 let mut pose = entity_model::PartAnim::default();
                 if model.parts.len() >= 3 {
@@ -3056,16 +3054,12 @@ impl EntityRenderer {
                     } else {
                         (1, 2)
                     };
-                    if info.boat_left_paddle {
-                        let left = paddle(true);
-                        pose.rotation
-                            .push((left_index, glam::Vec3::new(left.0, left.1, left.2)));
-                    }
-                    if info.boat_right_paddle {
-                        let right = paddle(false);
-                        pose.rotation
-                            .push((right_index, glam::Vec3::new(right.0, right.1, right.2)));
-                    }
+                    let (x, y) = paddle(info.boat_rowing_time[0], false);
+                    pose.rotation
+                        .push((left_index, glam::Vec3::new(x, y, 0.19634955)));
+                    let (x, y) = paddle(info.boat_rowing_time[1], true);
+                    pose.rotation
+                        .push((right_index, glam::Vec3::new(x, y, 0.19634955)));
                 }
                 pose
             }
