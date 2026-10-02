@@ -2393,7 +2393,8 @@ impl Renderer {
         } = &mode
         {
             let uniform =
-                CameraUniform::new(&self.camera, *fog_color, *render_distance, *eyes_in_water);
+                CameraUniform::new(&self.camera, *fog_color, *render_distance, *eyes_in_water)
+                    .with_terrain_light_environment(self.world_light_environment);
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);

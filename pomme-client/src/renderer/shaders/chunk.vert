@@ -3,6 +3,7 @@
 #include "fog.glsl"
 #include "camera_ubo.glsl"
 #include "packing.glsl"
+#include "terrain_light.glsl"
 
 // Binding 0: packed section-local terrain vertex.
 layout(location = 0) in vec2 in_pos_xy;
@@ -34,7 +35,7 @@ void main() {
     v_edit_origin = in_origin;
     v_edit_rel = rel;
     v_sprite_uv = vec2(in_sprite_uv) / TERRAIN_UV_FIXED_SCALE;
-    v_light = in_light_tint.r;
+    v_light = in_light_tint.r * terrain_vertex_light_ratio(in_raw_light_samples, terrain_light_environment);
     v_tint = in_light_tint.gba;
     v_visibility = in_visibility;
     v_fog_color = fog_color.rgb;

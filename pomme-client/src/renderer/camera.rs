@@ -535,6 +535,8 @@ pub struct CameraUniform {
     /// lanes above. Appended last so shaders that don't fog can keep their
     /// shorter prefix declarations.
     fog_env: [f32; 4],
+    /// x: sky darken, y: ambient light, z: native lighting enabled.
+    terrain_light_environment: [f32; 4],
 }
 
 // Vanilla FogType.WATER defaults (EnvironmentAttributes): color 0xFF050533,
@@ -602,7 +604,18 @@ impl CameraUniform {
             fog_color: [fog_rgb[0], fog_rgb[1], fog_rgb[2], fog_end],
             camera_block: anchor.as_ivec3().extend(0).to_array(),
             fog_env: [env_start, env_end, 0.0, 0.0],
+            terrain_light_environment: [0.0; 4],
         }
+    }
+
+    pub fn with_terrain_light_environment(
+        mut self,
+        environment: Option<crate::net::environment::SkyLightEvaluation>,
+    ) -> Self {
+        self.terrain_light_environment = environment.map_or([0.0; 4], |value| {
+            [value.sky_darken as f32, value.ambient_light, 1.0, 0.0]
+        });
+        self
     }
 
     /// Unfogged camera: both bands at `f32::MAX` like vanilla's empty fog
@@ -614,6 +627,7 @@ impl CameraUniform {
             fog_color: [0.0, 0.0, 0.0, f32::MAX],
             camera_block: [0; 4],
             fog_env: [f32::MAX, f32::MAX, 0.0, 0.0],
+            terrain_light_environment: [0.0; 4],
         }
     }
 }
@@ -734,6 +748,82 @@ mod tests {
             Mat4::IDENTITY,
             "expired hurt timing must not rotate the camera",
         );
+    }
+
+    #[test]
+    fn camera_ubo_matches_std140_prefix_and_terrain_extension() {
+        assert_eq!(std::mem::offset_of!(CameraUniform, camera_pos), 64);
+        assert_eq!(std::mem::offset_of!(CameraUniform, fog_color), 80);
+        assert_eq!(std::mem::offset_of!(CameraUniform, camera_block), 96);
+        assert_eq!(std::mem::offset_of!(CameraUniform, fog_env), 112);
+        assert_eq!(
+            std::mem::offset_of!(CameraUniform, terrain_light_environment),
+            128
+        );
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 144);
+
+        let identity = CameraUniform::with_view_proj(Mat4::IDENTITY);
+        assert_eq!(identity.terrain_light_environment, [0.0; 4]);
+        let native = identity.with_terrain_light_environment(Some(
+            crate::net::environment::SkyLightEvaluation {
+                sky_light_level: 1.0,
+                sky_darken: 11,
+                ambient_light: 0.25,
+            },
+        ));
+        assert_eq!(native.terrain_light_environment, [11.0, 0.25, 1.0, 0.0]);
+        assert_eq!(
+            native
+                .with_terrain_light_environment(None)
+                .terrain_light_environment,
+            [0.0; 4]
+        );
+    }
+
+    #[test]
+    fn terrain_lighting_cpu_golden_matches_shader_contract() {
+        const TABLE: [f32; 16] = [
+            0.05, 0.067, 0.085, 0.106, 0.129, 0.156, 0.188, 0.227, 0.272, 0.328, 0.393, 0.472,
+            0.566, 0.679, 0.815, 1.0,
+        ];
+        fn brightness(pair: u8, darken: u8, ambient: f32) -> f32 {
+            let sky = (pair & 15).saturating_sub(darken);
+            let block = pair >> 4;
+            let v = TABLE[sky.max(block) as usize];
+            let curved = v / (4.0 - 3.0 * v);
+            curved + ambient * (1.0 - curved)
+        }
+        fn ratio(samples: [u8; 4], darken: u8, ambient: f32, supported: bool) -> f32 {
+            if !supported {
+                return 1.0;
+            }
+            let old = samples
+                .iter()
+                .map(|p| TABLE[((p & 15).max(p >> 4)) as usize])
+                .sum::<f32>()
+                * 0.25;
+            let new = samples
+                .iter()
+                .map(|p| brightness(*p, darken, ambient))
+                .sum::<f32>()
+                * 0.25;
+            if old > 0.0 { new / old } else { 1.0 }
+        }
+
+        assert!(
+            (ratio([15, 15, 15, 15], 0, 0.0, true) - brightness(15, 0, 0.0) / TABLE[15]).abs()
+                < 1e-6
+        );
+        assert!(brightness(15, 11, 0.0) < brightness(15, 0, 0.0)); // sky only
+        assert_eq!(brightness(0xf0, 11, 0.0), brightness(0xf0, 0, 0.0)); // block only
+        assert!(ratio([0x01, 0x24, 0x57, 0x8a], 7, 0.1, true).is_finite()); // smooth mixed corners
+        for ambient in [0.0, 0.1, 0.25] {
+            assert!(brightness(0, 15, ambient) >= ambient - 1e-6);
+        }
+        assert_eq!(ratio([0x00; 4], 15, 0.25, false), 1.0); // legacy flag preserves baked value
+        let (baked, tint, alpha) = (0.42_f32, [0.2_f32, 0.5, 0.9], 0.37_f32);
+        let lit = baked * ratio([0x23, 0x45, 0x67, 0x89], 8, 0.1, true);
+        assert!(lit.is_finite() && tint == [0.2, 0.5, 0.9] && alpha == 0.37);
     }
 
     #[test]

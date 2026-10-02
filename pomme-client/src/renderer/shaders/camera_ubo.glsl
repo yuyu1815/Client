@@ -8,4 +8,6 @@ layout(set = 0, binding = 0) uniform CameraUniform {
     vec4 fog_color;
     ivec4 camera_block;
     vec4 fog_env;
+    // x: sky darken (0..15), y: ambient light, z: native values supported.
+    vec4 terrain_light_environment;
 };
