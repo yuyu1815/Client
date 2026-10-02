@@ -111,7 +111,7 @@ struct SkyUniform {
     _pad: f32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct SkyState {
     pub day_time: u64,
     pub game_time: u64,

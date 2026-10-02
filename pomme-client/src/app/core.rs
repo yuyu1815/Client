@@ -2140,6 +2140,7 @@ impl AppCore {
                     has_skylight,
                     cardinal_light,
                     clock_id,
+                    environment,
                 } => {
                     game.interaction.pending_command_block = None;
                     game.command_block_edit = None;
@@ -2153,6 +2154,7 @@ impl AppCore {
                     game.sky_state.clock_partial_tick = 0.0;
                     game.sky_state.clock_rate = 0.0;
                     game.sky_state.last_network_clock = None;
+                    game.dimension_environment = environment;
                     game.cardinal_light = cardinal_light;
                     game.chunk_store =
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);

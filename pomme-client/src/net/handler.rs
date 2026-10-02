@@ -81,6 +81,7 @@ fn dimension_info(
     dim: &azalea_core::registry_holder::dimension_type::DimensionKindElement,
     is_debug: bool,
     clock_id: Option<u32>,
+    registries: &RegistryHolder,
 ) -> NetworkEvent {
     NetworkEvent::DimensionInfo {
         is_debug,
@@ -93,6 +94,59 @@ fn dimension_info(
             .and_then(|tag| tag.byte())
             .map(|b| b != 0)
             .unwrap_or(true),
+        environment: {
+            let byte = |name: &str, default: bool| {
+                dim._extra
+                    .get(name)
+                    .and_then(|t| t.byte())
+                    .map(|v| v != 0)
+                    .unwrap_or(default)
+            };
+            let ambient = dim._extra.get("ambient_light").and_then(|t| t.float());
+            let sky_level = dim
+                ._extra
+                .get("attributes")
+                .and_then(|t| t.compound())
+                .and_then(|attrs| attrs.float("minecraft:sky_light_level"));
+            let timeline_ids: Vec<String> = dim
+                ._extra
+                .get("timelines")
+                .and_then(|t| t.list())
+                .and_then(|list| list.strings())
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| item.to_str().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let timelines: Vec<(String, simdnbt::owned::NbtCompound)> = registries
+                .extra
+                .get(&Identifier::new("timeline"))
+                .map(|registry| {
+                    registry
+                        .map
+                        .iter()
+                        .filter(|(id, _)| timeline_ids.iter().any(|used| used == &id.to_string()))
+                        .map(|(id, nbt)| (id.to_string(), nbt.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match super::environment::from_dimension_fields(
+                byte("has_skylight", true),
+                !byte("has_ceiling", false),
+                ambient,
+                sky_level,
+                &timelines,
+                &timeline_ids,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(%error, "Invalid dimension environment inputs; using safe defaults");
+                    Default::default()
+                }
+            }
+        },
         cardinal_light: match dim
             ._extra
             .get("cardinal_light")
@@ -157,6 +211,7 @@ pub(super) async fn handle_game_packet_with_display_text(
                         dim,
                         p.common.is_debug,
                         dimension_clock_id(registry_holder, dim),
+                        registry_holder,
                     ),
                 )
                 .await?;
@@ -1919,6 +1974,7 @@ pub(super) async fn handle_game_packet_with_display_text(
                         dim,
                         p.common.is_debug,
                         dimension_clock_id(registry_holder, dim),
+                        registry_holder,
                     ),
                 )
                 .await?;
@@ -4298,6 +4354,7 @@ mod scoreboard_display_event_tests {
 mod dimension_info_tests {
     use std::collections::HashMap;
 
+    use azalea_core::registry_holder::RegistryHolder;
     use simdnbt::owned::NbtTag;
 
     use super::{dimension_info, parse_set_objective};
@@ -4326,7 +4383,8 @@ mod dimension_info_tests {
             cardinal_light,
             is_debug,
             clock_id,
-        } = dimension_info(&dim, true, None)
+            ..
+        } = dimension_info(&dim, true, None, &RegistryHolder::default())
         else {
             panic!("dimension_info returned the wrong event variant");
         };
@@ -4489,7 +4547,7 @@ mod dimension_info_tests {
             cardinal_light,
             is_debug,
             ..
-        } = dimension_info(&dim, false, None)
+        } = dimension_info(&dim, false, None, &RegistryHolder::default())
         else {
             panic!("dimension_info returned the wrong event variant");
         };

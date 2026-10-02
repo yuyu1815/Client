@@ -8,6 +8,7 @@ pub mod conn;
 pub mod connection;
 mod cooldown;
 mod dialog;
+pub mod environment;
 pub mod handler;
 pub mod known_packs;
 mod native_codecs;
@@ -149,6 +150,7 @@ pub enum NetworkEvent {
         /// Server registry ID selected from this dimension type's
         /// `default_clock`.
         clock_id: Option<u32>,
+        environment: environment::DimensionEnvironment,
     },
     ChunkLoaded {
         pos: ChunkPos,
