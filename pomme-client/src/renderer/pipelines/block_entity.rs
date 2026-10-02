@@ -3013,9 +3013,13 @@ mod sign_text_tests {
     #[test]
     fn skull_wall_transform_keeps_facing_offset_and_rotation_conventions() {
         use glam::Vec3;
-        let north = skull_wall_model_matrix(glam::Mat4::IDENTITY, 0.0).transform_point3(Vec3::ZERO);
-        assert!((north - Vec3::new(0.0, 0.25, -0.25)).length() < 1e-6);
-        let east = skull_wall_model_matrix(glam::Mat4::IDENTITY, 90.0).transform_point3(Vec3::ZERO);
+        // Native SkullBlockRenderer uses wall translations relative to block center,
+        // then rotates by the wall-facing yaw (north=180, east=270 here).
+        let north =
+            skull_wall_model_matrix(glam::Mat4::IDENTITY, 180.0).transform_point3(Vec3::ZERO);
+        assert!((north - Vec3::new(0.0, 0.25, 0.25)).length() < 1e-6);
+        let east =
+            skull_wall_model_matrix(glam::Mat4::IDENTITY, 270.0).transform_point3(Vec3::ZERO);
         assert!((east - Vec3::new(-0.25, 0.25, 0.0)).length() < 1e-6);
 
         crate::world::block::init("26.2");

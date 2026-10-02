@@ -5014,7 +5014,8 @@ mod terrain_uv_tests {
         quad.cullface = None;
         let (_, unshaded_raw) =
             model_quad_lighting(&snapshot, &registry, hopper, &quad, false, [8; 3]);
-        assert_eq!(unshaded_raw, [u32::from_le_bytes([0x30; 4]); 4]);
+        // Flat model lighting samples the face neighbour (up), not the hopper's center.
+        assert_eq!(unshaded_raw, [u32::from_le_bytes([0x40; 4]); 4]);
     }
 
     #[test]
@@ -5077,11 +5078,13 @@ mod terrain_uv_tests {
             alpha_counts: [0; 3],
         };
         assert!(!edit_state_supported(&registry, &atlas, stone, p)); // unresolved atlas texture
-        atlas.test_insert_region("minecraft:block/stone", region(true, false));
+        // The baked test fixture resolves the `#all` texture to the registry key
+        // `stone`.
+        atlas.test_insert_region("stone", region(true, false));
         assert!(edit_state_supported(&registry, &atlas, stone, p));
-        atlas.test_insert_region("minecraft:block/stone", region(false, false));
+        atlas.test_insert_region("stone", region(false, false));
         assert!(edit_state_supported(&registry, &atlas, stone, p)); // binary-alpha cutout
-        atlas.test_insert_region("minecraft:block/stone", region(false, true));
+        atlas.test_insert_region("stone", region(false, true));
         assert!(!edit_state_supported(&registry, &atlas, stone, p));
         let baked = registry.get_baked_model_at(stone, p.x, p.y, p.z).unwrap();
         assert!(!edit_model_quads_supported(&baked.quads, &atlas)); // same gate used by multipart
@@ -5090,7 +5093,7 @@ mod terrain_uv_tests {
             [0.0; 3],
             [0.5; 3]
         )));
-        atlas.test_insert_region("minecraft:block/stone", region(false, false));
+        atlas.test_insert_region("stone", region(false, false));
         let dispatcher = MeshDispatcher::new(
             registry,
             atlas,
@@ -5335,10 +5338,12 @@ mod terrain_uv_tests {
                 crate::world::block::block_id(state)
             );
         }
-        assert_eq!(model_vertex_origin([1.0, 2.0, 3.0], flower, 0, 0, 0), {
-            crate::world::block::init("1.21.11");
+        crate::world::block::init("1.21.11");
+        let old_flower = crate::world::block::find_state("dandelion", &[]);
+        assert_eq!(
+            model_vertex_origin([1.0, 2.0, 3.0], old_flower, 0, 0, 0),
             [1.0, 2.0, 3.0]
-        });
+        );
     }
 
     #[test]
@@ -5501,19 +5506,23 @@ mod terrain_uv_tests {
 
     #[test]
     fn generic_quad_indices_route_opaque_cutout_and_partial_alpha_separately() {
-        let region = AtlasUVMap::test_empty().missing_region();
+        let region = AtlasRegion {
+            opaque: true,
+            translucent: false,
+            ..AtlasUVMap::test_empty().missing_region()
+        };
         let mut sink = MeshSink::default();
         sink.indices_for(region).push(1);
         sink.indices_for(AtlasRegion {
             opaque: false,
             ..region
         })
-        .push(2);
+        .push(2); // binary-alpha cutout
         sink.indices_for(AtlasRegion {
             translucent: true,
             ..region
         })
-        .push(3);
+        .push(3); // partial alpha
         assert_eq!(sink.solid, [1]);
         assert_eq!(sink.cutout, [2]);
         assert_eq!(sink.translucent, [3]);

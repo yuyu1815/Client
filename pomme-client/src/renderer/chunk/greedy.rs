@@ -815,9 +815,38 @@ mod raw_light_tests {
 
     #[test]
     fn different_raw_pairs_with_same_scalar_light_do_not_merge() {
+        // Face 0 varies across x; the adjacent cells read distinct vertex
+        // neighborhoods at x=1/2 despite equal scalar light maxima.
         let split = mesh_two(|x, _, _| if x < 2 { 0x0f } else { 0xf0 });
         assert_eq!(split.quads[0].len(), 2);
-        assert_eq!(0x0f & 0x0f, 0xf0 >> 4);
+        let raw_groups: BTreeSet<_> = split.quads[0]
+            .iter()
+            .map(|quad| quad.raw_light_samples)
+            .collect();
+        assert_eq!(raw_groups.len(), 2);
+        assert!(
+            raw_groups
+                .iter()
+                .any(|samples| samples.iter().any(|s| s.to_le_bytes().contains(&0x0f)))
+        );
+        assert!(
+            raw_groups
+                .iter()
+                .any(|samples| samples.iter().any(|s| s.to_le_bytes().contains(&0xf0)))
+        );
+        let mut geometry = split.quads[0]
+            .iter()
+            .map(|quad| (quad.xyz(), quad.width(), quad.height()))
+            .collect::<Vec<_>>();
+        geometry.sort_unstable();
+        assert_eq!(geometry.len(), 2);
+        assert!(
+            geometry
+                .iter()
+                .all(|(_, width, height)| *width == 1 && *height == 1)
+        );
+        assert_ne!(geometry[0].0, geometry[1].0);
+        assert_eq!(0x0f & 0x0f, 0xf0 >> 4); // legacy brightness maxima match
     }
 
     #[test]
