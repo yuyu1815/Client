@@ -756,6 +756,9 @@ async fn config_sequence(
     let mut timeline_tags = previous
         .map(|p| p.timeline_tags.clone())
         .unwrap_or_default();
+    let mut pending_timeline_tags: Option<
+        Vec<(azalea_registry::identifier::Identifier, Vec<i32>)>,
+    > = None;
     let mut loom_patterns = previous
         .map(|p| (*p.loom_patterns).clone())
         .unwrap_or_default();
@@ -807,6 +810,9 @@ async fn config_sequence(
     let mut pending = std::collections::VecDeque::new();
     loop {
         if finish_configuration_pending && (!code_of_conduct_seen || code_of_conduct_accepted) {
+            if let Some(tags) = pending_timeline_tags.take() {
+                timeline_tags = resolve_timeline_tag_entries(&tags, timeline_ids.as_deref())?;
+            }
             write_config_packet(
                 conn,
                 ServerboundConfigPacket::FinishConfiguration(
@@ -954,7 +960,17 @@ async fn config_sequence(
                 if let Some(tags) = dialog_tags(&p.tags) {
                     received_dialog_tags = Some(tags);
                 }
-                timeline_tags = resolve_timeline_tags(&p.tags, timeline_ids.as_deref())?;
+                let timeline_registry: azalea_registry::identifier::Identifier =
+                    "minecraft:timeline".into();
+                pending_timeline_tags = Some(
+                    p.tags
+                        .0
+                        .get(&timeline_registry)
+                        .into_iter()
+                        .flatten()
+                        .map(|tag| (tag.name.clone(), tag.elements.clone()))
+                        .collect(),
+                );
                 let (patterns, items) = loom_pattern_tags(&p.tags);
                 loom_patterns.replace_tags(patterns, items);
                 received_loom_tags = true;
@@ -2684,6 +2700,72 @@ mod tests {
             send_event(&tx, NetworkEvent::ClearDialog).await,
             Err(crossbeam_channel::SendError(NetworkEvent::ClearDialog))
         ));
+    }
+
+    #[tokio::test]
+    async fn native_configuration_defers_timeline_tags_until_registry_data_arrives() {
+        use azalea_protocol::common::tags::{TagMap, Tags};
+        use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
+        use azalea_protocol::packets::config::c_registry_data::ClientboundRegistryData;
+        use azalea_protocol::packets::config::c_update_tags::ClientboundUpdateTags;
+
+        let (client_end, peer_end) = super::super::conn::memory_pipes();
+        let mut peer = Conn::from_memory(peer_end);
+        let (tx, _rx) = crossbeam_channel::bounded(8);
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let client = tokio::spawn(async move {
+            config_sequence(
+                &mut Conn::from_memory(client_end),
+                8,
+                Default::default(),
+                true,
+                crate::particle::ParticleMode::All,
+                127,
+                &crate::movement_record::Recorder::default(),
+                &tx,
+                &mut out_rx,
+                &mut Default::default(),
+                None,
+            )
+            .await
+        });
+        let _: ServerboundConfigPacket = read_test_packet(&mut peer).await;
+        let _: ServerboundConfigPacket = read_test_packet(&mut peer).await;
+
+        let mut tags = TagMap(Default::default());
+        tags.0.insert(
+            "minecraft:timeline".into(),
+            vec![Tags {
+                name: "custom:cycle".into(),
+                elements: vec![0],
+            }],
+        );
+        peer.write_packet(ClientboundUpdateTags { tags })
+            .await
+            .unwrap();
+        peer.write_packet(ClientboundRegistryData {
+            registry_id: "minecraft:timeline".into(),
+            entries: vec![("minecraft:day".into(), None)],
+        })
+        .await
+        .unwrap();
+        peer.write_packet(ClientboundFinishConfiguration)
+            .await
+            .unwrap();
+        assert!(matches!(
+            read_test_packet::<ServerboundConfigPacket>(&mut peer).await,
+            ServerboundConfigPacket::FinishConfiguration(_)
+        ));
+        let configured = tokio::time::timeout(std::time::Duration::from_secs(2), client)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            configured.timeline_tags[&"custom:cycle".into()],
+            ["minecraft:day".into()]
+        );
+        drop(out_tx);
     }
 
     #[tokio::test]
