@@ -150,6 +150,7 @@ fn chest_quads(
     open: bool,
     region: AtlasRegion,
     light: f32,
+    raw_light_samples: u32,
 ) -> (Vec<PackedVertex>, Vec<u32>, bool) {
     use azalea_registry::builtin::BlockEntityKind;
     use glam::{Mat4, Vec3};
@@ -177,8 +178,7 @@ fn chest_quads(
                     sprite_uv: vertex.tex_coords.map(|uv| uv as f32 / 65535.0),
                     sprite: region.sprite,
                     light_tint: pack_light_tint(light, PACKED_WHITE_SHIFTED),
-                    // TODO(source-required): chest quads expose only scalar light.
-                    raw_light_samples: u32::MAX,
+                    raw_light_samples,
                 }));
             }
             indices.extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
@@ -2278,6 +2278,14 @@ fn mesh_chunk_snapshot(
                 continue;
             }
             let origin_y = min_y + si * 16;
+            let mut raw =
+                raw_light_pair(snapshot, chest.state, chest.pos.x, chest.pos.y, chest.pos.z);
+            if let Some((partner, _)) = chest.partner {
+                raw = max_raw_light(
+                    raw,
+                    raw_light_pair(snapshot, chest.state, partner.x, partner.y, partner.z),
+                );
+            }
             let (verts, indices, _opaque) = chest_quads(
                 &models[chest.variant],
                 [
@@ -2288,10 +2296,8 @@ fn mesh_chunk_snapshot(
                 chest.yaw,
                 chest.open,
                 region,
-                // The current BE chest shader uses WHITE_TINT without
-                // local lightmap sampling; match it until both paths
-                // share the same block-light lookup.
-                1.0,
+                raw_light_brightness(raw),
+                packed_raw_light_replicated(raw),
             );
             let sink = &mut sinks[si as usize];
             let offset = sink.vertices.len() + chest_vertices[si as usize].len();
@@ -3222,22 +3228,20 @@ fn emit_fluid(
                 kind,
                 fluid_flow_vector(snapshot, current, bx, by, bz),
             );
+            let raw = raw_light_pair(snapshot, fluid_state, bx, by + 1, bz);
+            // Keep legacy brightness tied to the packed raw sample: future sky-darkening
+            // ratios must use this same source; scalar AO paths remain unchanged.
+            let light = raw_light_brightness(raw) * snapshot.cardinal_lighting.up;
             emit_face_into(
                 vertices,
                 indices,
                 block_pos,
                 &positions,
                 &uvs,
-                [snapshot.cardinal_lighting.up; 4],
+                [light; 4],
                 region,
                 tint,
-                packed_raw_light_replicated(raw_light_pair(
-                    snapshot,
-                    fluid_state,
-                    bx + Direction::Up.offset()[0],
-                    by + Direction::Up.offset()[1],
-                    bz + Direction::Up.offset()[2],
-                )),
+                packed_raw_light_replicated(raw),
             );
             if should_render_backward_up_face(snapshot, registry, fluid_state, bx, by, bz) {
                 let rev_positions = [positions[0], positions[3], positions[2], positions[1]];
@@ -3248,16 +3252,10 @@ fn emit_fluid(
                     block_pos,
                     &rev_positions,
                     &rev_uvs,
-                    [snapshot.cardinal_lighting.up; 4],
+                    [light; 4],
                     region,
                     tint,
-                    packed_raw_light_replicated(raw_light_pair(
-                        snapshot,
-                        fluid_state,
-                        bx + Direction::Up.offset()[0],
-                        by + Direction::Up.offset()[1],
-                        bz + Direction::Up.offset()[2],
-                    )),
+                    packed_raw_light_replicated(raw),
                 );
             }
             continue;
@@ -3274,26 +3272,22 @@ fn emit_fluid(
                 for position in &mut positions {
                     position[1] = bottom;
                 }
+                let raw = raw_light_pair(snapshot, fluid_state, bx, by - 1, bz);
+                let light = raw_light_brightness(raw) * snapshot.cardinal_lighting.down;
                 emit_face_into(
                     vertices,
                     indices,
                     block_pos,
                     &positions,
                     &uvs,
-                    [snapshot.cardinal_lighting.down; 4],
+                    [light; 4],
                     if matches!(kind, BlockKind::Water) {
                         uv_map.get_region("water_still")
                     } else {
                         uv_map.get_region("lava_still")
                     },
                     tint,
-                    packed_raw_light_replicated(raw_light_pair(
-                        snapshot,
-                        fluid_state,
-                        bx + Direction::Down.offset()[0],
-                        by + Direction::Down.offset()[1],
-                        bz + Direction::Down.offset()[2],
-                    )),
+                    packed_raw_light_replicated(raw),
                 );
                 continue;
             }
@@ -3355,22 +3349,24 @@ fn emit_fluid(
             [0.5, 0.5],
             [0.0, 0.5],
         ];
+        let raw = raw_light_pair(
+            snapshot,
+            fluid_state,
+            bx + dir.offset()[0],
+            by + dir.offset()[1],
+            bz + dir.offset()[2],
+        );
+        let light = raw_light_brightness(raw) * snapshot.cardinal_lighting.by_face(*dir);
         emit_face_into(
             vertices,
             indices,
             block_pos,
             &positions,
             &uvs,
-            [snapshot.cardinal_lighting.by_face(*dir); 4],
+            [light; 4],
             region,
             tint,
-            packed_raw_light_replicated(raw_light_pair(
-                snapshot,
-                fluid_state,
-                bx + dir.offset()[0],
-                by + dir.offset()[1],
-                bz + dir.offset()[2],
-            )),
+            packed_raw_light_replicated(raw),
         );
         // Flow sprites have no water_overlay material, so match vanilla's
         // two-sided ordinary fluid sides while reusing identical vertex data.
@@ -3519,7 +3515,14 @@ fn emit_lod_cube(
             block_face_tex_tint(state, *dir, uv_map, snapshot, registry, bx, by, bz);
 
         let (positions, uvs) = cube_face_geometry(*dir);
-        let light = snapshot.cardinal_lighting.by_face(*dir);
+        let raw = raw_light_pair(
+            snapshot,
+            state,
+            bx + step.div_euclid(2),
+            by + step.div_euclid(2),
+            bz + step.div_euclid(2),
+        );
+        let light = raw_light_brightness(raw) * snapshot.cardinal_lighting.by_face(*dir);
         let s = step as f32;
         let sy = if is_fluid { fluid_top } else { s };
         let base = sink.vertices.len() as u32;
@@ -3533,8 +3536,7 @@ fn emit_lod_cube(
                 sprite_uv: uvs[i],
                 sprite: region.sprite,
                 light_tint: pack_light_tint(light, tint),
-                // TODO(source-required): LOD currently has direction shade only.
-                raw_light_samples: u32::MAX,
+                raw_light_samples: packed_raw_light_replicated(raw),
             });
         }
         sink.indices_for(region).extend_from_slice(&[
@@ -3639,15 +3641,7 @@ fn emit_face(
         cutout
     };
     emit_face_into(
-        vertices,
-        indices,
-        block_pos,
-        positions,
-        uvs,
-        lights,
-        region,
-        tint,
-        u32::MAX,
+        vertices, indices, block_pos, positions, uvs, lights, region, tint, 0,
     );
 }
 
@@ -3925,6 +3919,14 @@ fn packed_raw_light_replicated(sample: u8) -> u32 {
     u32::from_le_bytes([sample; 4])
 }
 
+fn raw_light_brightness(sample: u8) -> f32 {
+    LIGHT_TABLE[(sample & 0x0f).max(sample >> 4) as usize]
+}
+
+fn max_raw_light(a: u8, b: u8) -> u8 {
+    (a & 0x0f).max(b & 0x0f) | ((a >> 4).max(b >> 4) << 4)
+}
+
 fn avg4(a: f32, b: f32, c: f32, d: f32) -> f32 {
     (a + b + c + d) * 0.25
 }
@@ -4123,12 +4125,24 @@ mod chest_quad_tests {
         for (variant, expected_faces) in [(1, 15), (2, 15)] {
             for open in [false, true] {
                 for yaw in [0.0, 90.0, 180.0, 270.0] {
-                    let (vertices, indices, opaque) =
-                        chest_quads(&models[variant], [0.0; 3], yaw, open, region, 1.0);
+                    let (vertices, indices, opaque) = chest_quads(
+                        &models[variant],
+                        [0.0; 3],
+                        yaw,
+                        open,
+                        region,
+                        1.0,
+                        u32::from_le_bytes([0xff; 4]),
+                    );
                     assert_eq!(vertices.len(), expected_faces * 4);
                     assert_eq!(indices.len(), expected_faces * 6);
                     assert!(!opaque);
                     assert!(vertices.iter().all(|v| v.sprite == region.sprite));
+                    assert!(
+                        vertices
+                            .iter()
+                            .all(|v| v.raw_light_samples == u32::from_le_bytes([0xff; 4]))
+                    );
                     let max_y = vertices
                         .iter()
                         .map(|v| decoded_pos(v)[1])
@@ -4158,7 +4172,15 @@ mod chest_quad_tests {
             // The same 64x64 sheet UVs are used by the normal and christmas
             // textures, including both open/closed lid poses.
             for open in [false, true] {
-                let (verts, _, _) = chest_quads(&models[variant], [0.0; 3], 0.0, open, region, 1.0);
+                let (verts, _, _) = chest_quads(
+                    &models[variant],
+                    [0.0; 3],
+                    0.0,
+                    open,
+                    region,
+                    1.0,
+                    u32::from_le_bytes([0xff; 4]),
+                );
                 for (i, face) in models[variant].vertices.chunks_exact(6).enumerate() {
                     for (corner, src) in [0, 1, 2, 5].into_iter().enumerate() {
                         for axis in 0..2 {
@@ -4270,8 +4292,15 @@ mod chest_quad_tests {
         let mut closed: Option<Vec<[f32; 3]>> = None;
         for open in [false, true] {
             for yaw in [0.0, 90.0, 180.0, 270.0] {
-                let (verts, indices, opaque) =
-                    chest_quads(&model, [2.0, 3.0, 4.0], yaw, open, region, 0.4);
+                let (verts, indices, opaque) = chest_quads(
+                    &model,
+                    [2.0, 3.0, 4.0],
+                    yaw,
+                    open,
+                    region,
+                    0.4,
+                    u32::from_le_bytes([0xff; 4]),
+                );
                 assert_eq!(verts.len(), 72); // 3 six-face cubes, four corners/face
                 assert_eq!(indices.len(), 108);
                 assert!(!opaque); // alpha sheet stays in the cutout pass
@@ -4401,6 +4430,7 @@ mod chest_quad_tests {
                 ..region
             },
             1.0,
+            u32::from_le_bytes([0xff; 4]),
         );
         assert!(opaque);
         assert_eq!(
@@ -4411,8 +4441,15 @@ mod chest_quad_tests {
         assert!(chest_sheet(&empty, 0, 0, false).is_none()); // absent pack PNG: BE fallback
         assert!(chest_sheet(&empty, 1, 0, false).is_none()); // distant LOD: BE fallback
         let missing = empty.get_region("entity/chest/normal");
-        let (fallback_verts, _, fallback_opaque) =
-            chest_quads(&model, [0.0; 3], 0.0, false, missing, 1.0);
+        let (fallback_verts, _, fallback_opaque) = chest_quads(
+            &model,
+            [0.0; 3],
+            0.0,
+            false,
+            missing,
+            1.0,
+            u32::from_le_bytes([0xff; 4]),
+        );
         assert!(fallback_verts.iter().all(|v| v.sprite == 0));
         assert!(!fallback_opaque);
     }
@@ -4436,7 +4473,7 @@ mod terrain_uv_tests {
         let samples = [0x21, 0x43, 0x65, 0x87];
         let packed = u32::from_le_bytes(samples);
         assert_eq!(packed.to_le_bytes(), samples);
-        assert_eq!(u32::MAX, 0xffff_ffff); // explicit legacy/fullbright bypass
+        assert_eq!(u32::MAX.to_le_bytes(), [0xff; 4]);
     }
 
     #[test]
@@ -4472,6 +4509,8 @@ mod terrain_uv_tests {
 
         assert_eq!(snapshot.get_light_raw(0, 0, 0), (8, 3));
         assert_eq!(snapshot.get_light(0, 0, 0), LIGHT_TABLE[8]);
+        assert_eq!(max_raw_light(0x1f, 0xe2), 0xef);
+        assert_eq!(raw_light_brightness(0x0f), raw_light_brightness(0xf0));
         assert_eq!(snapshot.get_light_raw(16, 0, 0), (15, 0));
     }
 
@@ -4489,6 +4528,132 @@ mod terrain_uv_tests {
             classify_block_entity_geometry("chest"),
             super::BlockKind::Air
         ));
+    }
+
+    #[test]
+    fn fluid_scalar_brightness_and_raw_samples_share_each_face_neighbor() {
+        crate::world::block::init("26.2");
+        let mut sky = Box::new([0; 2048]);
+        let mut block = Box::new([0; 2048]);
+        let mut set = |x: usize, y: usize, z: usize, sky_level: u8, block_level: u8| {
+            let index = y * 256 + z * 16 + x;
+            let shift = (index % 2) * 4;
+            sky[index / 2] = (sky[index / 2] & !(15 << shift)) | (sky_level << shift);
+            block[index / 2] = (block[index / 2] & !(15 << shift)) | (block_level << shift);
+        };
+        let samples = [
+            (Direction::Up, 4, 1),
+            (Direction::Down, 1, 7),
+            (Direction::North, 5, 2),
+            (Direction::South, 0, 9),
+            (Direction::East, 3, 4),
+            (Direction::West, 6, 1),
+        ];
+        for (dir, sky_level, block_level) in samples {
+            let [dx, dy, dz] = dir.offset();
+            set(
+                (8 + dx) as usize,
+                (8 + dy) as usize,
+                (8 + dz) as usize,
+                sky_level,
+                block_level,
+            );
+        }
+        let mut snapshot = ChunkStoreSnapshot {
+            chunks: Vec::new(),
+            light: HashMap::from([(
+                (0, 0),
+                Arc::new(chunk::ChunkLightData {
+                    sky_sections: vec![None, Some(sky), None],
+                    block_sections: vec![None, Some(block), None],
+                    min_y: 0,
+                    has_sky: true,
+                    sky_top_section: Some(2),
+                }),
+            )]),
+            grass_colormap: Arc::new(Colormap::test_empty()),
+            foliage_colormap: Arc::new(Colormap::test_empty()),
+            dry_foliage_colormap: Arc::new(Colormap::test_empty()),
+            biome_climate: Arc::new(HashMap::new()),
+            cardinal_lighting: CardinalLighting::DEFAULT,
+            min_y: 0,
+            height: 16,
+            debug_world: None,
+            trace: None,
+            moving_blocks: Vec::new(),
+            chests: Vec::new(),
+        };
+        let mut sink = MeshSink::default();
+        emit_fluid(
+            &mut sink,
+            BlockKind::Water,
+            [8.0, 8.0, 8.0],
+            crate::world::block::water_source_state(),
+            &snapshot,
+            &BlockRegistry::test_empty(),
+            &AtlasUVMap::test_empty(),
+            8,
+            8,
+            8,
+        );
+        let mut start = 0;
+        for (dir, sky_level, block_level) in samples {
+            let face_start = start;
+            let face_end = face_start + if dir == Direction::Up { 8 } else { 4 };
+            let raw = sky_level | block_level << 4;
+            let expected = raw_light_brightness(raw) * snapshot.cardinal_lighting.by_face(dir);
+            assert!(
+                sink.vertices[face_start..face_end]
+                    .iter()
+                    .all(|v| v.raw_light_samples == packed_raw_light_replicated(raw)
+                        && (f32::from((v.light_tint & 0xff) as u8) / 255.0 - expected).abs()
+                            < 0.002)
+            );
+            start = face_end;
+        }
+
+        let mut negative_sky = Box::new([0; 2048]);
+        let mut negative_block = Box::new([0; 2048]);
+        let negative_index = 10 * 256 + 10 * 16 + 15;
+        negative_sky[negative_index / 2] |= 2 << ((negative_index % 2) * 4);
+        negative_block[negative_index / 2] |= 11 << ((negative_index % 2) * 4);
+        snapshot.light.insert(
+            (-1, 0),
+            Arc::new(chunk::ChunkLightData {
+                sky_sections: vec![None, Some(negative_sky), None],
+                block_sections: vec![None, Some(negative_block), None],
+                min_y: 0,
+                has_sky: true,
+                sky_top_section: Some(2),
+            }),
+        );
+        assert_eq!(snapshot.get_light_raw(-1, 10, 10), (2, 11));
+        let mut lod_sink = MeshSink::default();
+        emit_lod_cube(
+            &mut lod_sink,
+            [13.0, 8.0, 8.0],
+            crate::world::block::first_state_of("stone").unwrap(),
+            &snapshot,
+            &BlockRegistry::test_empty(),
+            &AtlasUVMap::test_empty(),
+            -3,
+            8,
+            8,
+            4,
+        );
+        let lod_raw = packed_raw_light_replicated(2 | (11 << 4));
+        assert_eq!(lod_sink.vertices.len(), 24);
+        for (face, dir) in CUBE_FACE_DIRS.iter().enumerate() {
+            let expected =
+                raw_light_brightness(2 | (11 << 4)) * snapshot.cardinal_lighting.by_face(*dir);
+            assert!(
+                lod_sink.vertices[face * 4..face * 4 + 4]
+                    .iter()
+                    .all(|v| v.raw_light_samples == lod_raw
+                        && (f32::from((v.light_tint & 0xff) as u8) / 255.0 - expected).abs()
+                            < 0.002)
+            );
+        }
     }
 
     #[test]
@@ -5128,7 +5293,7 @@ mod terrain_uv_tests {
                     sprite_uv: [0.0; 2],
                     sprite: 0,
                     light_tint: 0,
-                    raw_light_samples: u32::MAX,
+                    raw_light_samples: 0,
                 });
                 let decoded = packed
                     .pos
@@ -5152,7 +5317,7 @@ mod terrain_uv_tests {
                         sprite_uv: [0.0; 2],
                         sprite: 0,
                         light_tint: 0,
-                        raw_light_samples: u32::MAX,
+                        raw_light_samples: 0,
                     });
                     let decoded_x = packed.pos[0] as f32 / 65535.0 * POS_RANGE - POS_BIAS;
                     assert!((decoded_x - beyond[0]).abs() <= POS_RANGE / 65535.0);
