@@ -2149,7 +2149,7 @@ impl AppCore {
                     cardinal_light,
                     clock_id,
                     world_clock_ids,
-                    environment,
+                    environment_input,
                 } => {
                     game.interaction.pending_command_block = None;
                     game.command_block_edit = None;
@@ -2166,7 +2166,8 @@ impl AppCore {
                     game.world_clocks.clear();
                     game.world_clock_game_time = 0;
                     game.world_clock_ids = world_clock_ids.unwrap_or_default();
-                    game.dimension_environment = environment;
+                    game.pending_dimension_environment = Some(environment_input);
+                    resolve_pending_dimension_environment(game);
                     game.cardinal_light = cardinal_light;
                     game.chunk_store =
                         ChunkStore::new_with_dimension(self.menu.render_distance, height, min_y);
@@ -2516,11 +2517,21 @@ impl AppCore {
                 NetworkEvent::CursorItem { item } => {
                     game.cursor_item = item;
                 }
-                NetworkEvent::Registries(registries) => {
-                    game.registries = registries;
+                NetworkEvent::Registries {
+                    holder,
+                    timeline_entries,
+                    timeline_entries_error,
+                } => {
+                    game.registries = holder;
+                    if let Some(input) = &mut game.pending_dimension_environment {
+                        input.timeline_entries = timeline_entries;
+                        input.timeline_entries_error = timeline_entries_error;
+                    }
+                    resolve_pending_dimension_environment(game);
                 }
                 NetworkEvent::TimelineTags(tags) => {
                     game.timeline_tags = tags;
+                    resolve_pending_dimension_environment(game);
                 }
                 NetworkEvent::DialogRegistry(registry) => {
                     game.dialog_registry = registry;
@@ -4314,6 +4325,7 @@ impl AppCore {
                     tracing::info!("Server re-entered configuration");
                     self.audio.stop_all_sounds();
                     game.timeline_tags.clear();
+                    resolve_pending_dimension_environment(game);
                     game.entity_store = crate::entity::EntityStore::new();
                     game.item_entity_store = crate::entity::ItemEntityStore::new();
                     game.entity_positions.clear();
@@ -5144,6 +5156,25 @@ fn container_screen_for_menu(
         )),
         _ => None,
     }
+}
+
+fn resolve_pending_dimension_environment(game: &mut GameState) {
+    let Some(input) = &game.pending_dimension_environment else {
+        return;
+    };
+    game.dimension_environment =
+        match crate::net::environment::resolve_dimension_environment(input, &game.timeline_tags) {
+            Ok(environment) => environment,
+            Err(error) => {
+                tracing::warn!(%error, "Dimension timeline inputs are not currently resolvable");
+                crate::net::environment::DimensionEnvironment {
+                    has_sky_light: input.has_sky_light,
+                    has_weather: input.has_sky_light && !input.has_ceiling && !input.is_end_world,
+                    unsupported_reason: Some(error),
+                    ..Default::default()
+                }
+            }
+        };
 }
 
 /// DimensionInfo follows Login/Respawn, not ordinary same-world chunk updates.

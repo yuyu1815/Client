@@ -127,7 +127,11 @@ pub enum NetworkEvent {
     Connected {
         profile_name: String,
     },
-    Registries(Arc<azalea_core::registry_holder::RegistryHolder>),
+    Registries {
+        holder: Arc<azalea_core::registry_holder::RegistryHolder>,
+        timeline_entries: environment::TimelineEntries,
+        timeline_entries_error: Option<String>,
+    },
     /// Resolved `minecraft:timeline` tags; tag numeric IDs are wire registry
     /// IDs.
     TimelineTags(
@@ -164,7 +168,7 @@ pub enum NetworkEvent {
         /// Wire-order snapshot; `None` means no registry was received, distinct
         /// from an empty registry.
         world_clock_ids: Option<std::collections::HashMap<String, u32>>,
-        environment: environment::DimensionEnvironment,
+        environment_input: environment::DimensionEnvironmentInput,
     },
     ChunkLoaded {
         pos: ChunkPos,

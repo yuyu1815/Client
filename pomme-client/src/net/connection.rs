@@ -312,6 +312,8 @@ struct Joined {
 /// What a configuration phase leaves the session with.
 struct Configured {
     registries: std::sync::Arc<azalea_core::registry_holder::RegistryHolder>,
+    timeline_entries: crate::net::environment::TimelineEntries,
+    timeline_entries_error: Option<String>,
     timeline_ids: Option<Vec<azalea_registry::identifier::Identifier>>,
     world_clock_ids: Option<Vec<azalea_registry::identifier::Identifier>>,
     timeline_tags: std::collections::HashMap<
@@ -320,6 +322,39 @@ struct Configured {
     >,
     dialogs: std::sync::Arc<DialogRegistry>,
     loom_patterns: std::sync::Arc<crate::ui::loom::PatternData>,
+}
+
+fn timeline_snapshot(
+    registries: &azalea_core::registry_holder::RegistryHolder,
+) -> (crate::net::environment::TimelineEntries, Option<String>) {
+    let Some(registry) = registries
+        .extra
+        .get(&azalea_registry::identifier::Identifier::new("timeline"))
+    else {
+        return (
+            std::sync::Arc::new(Vec::new()),
+            Some("minecraft:timeline registry unavailable".into()),
+        );
+    };
+    if registry.map.len() > crate::net::environment::MAX_TIMELINES {
+        return (
+            std::sync::Arc::new(Vec::new()),
+            Some(format!(
+                "minecraft:timeline registry exceeds {} entries",
+                crate::net::environment::MAX_TIMELINES
+            )),
+        );
+    }
+    (
+        std::sync::Arc::new(
+            registry
+                .map
+                .iter()
+                .map(|(id, nbt)| (id.to_string(), nbt.clone()))
+                .collect(),
+        ),
+        None,
+    )
 }
 
 fn registry_ids_from_entries<T>(
@@ -493,9 +528,13 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
             Err(e) => skip_malformed_packet(e)?,
         }
     }
+    let registries = std::sync::Arc::new(registry_holder);
+    let (timeline_entries, timeline_entries_error) = timeline_snapshot(&registries);
     Ok(Joined {
         configured: Configured {
-            registries: std::sync::Arc::new(registry_holder),
+            registries,
+            timeline_entries,
+            timeline_entries_error,
             timeline_ids,
             world_clock_ids,
             timeline_tags: Default::default(),
@@ -778,6 +817,8 @@ async fn config_sequence(
             return Ok(match previous {
                 Some(previous) if !received_registry_data => Configured {
                     registries: previous.registries.clone(),
+                    timeline_entries: previous.timeline_entries.clone(),
+                    timeline_entries_error: previous.timeline_entries_error.clone(),
                     timeline_ids,
                     world_clock_ids,
                     timeline_tags,
@@ -787,17 +828,23 @@ async fn config_sequence(
                         None => previous.dialogs.clone(),
                     },
                 },
-                _ => Configured {
-                    dialogs: std::sync::Arc::new(dialog_registry(
-                        &registry_holder,
-                        received_dialog_tags.unwrap_or_default(),
-                    )),
-                    registries: std::sync::Arc::new(registry_holder),
-                    timeline_ids,
-                    world_clock_ids,
-                    timeline_tags,
-                    loom_patterns: std::sync::Arc::new(loom_patterns),
-                },
+                _ => {
+                    let registries = std::sync::Arc::new(registry_holder);
+                    let (timeline_entries, timeline_entries_error) = timeline_snapshot(&registries);
+                    Configured {
+                        dialogs: std::sync::Arc::new(dialog_registry(
+                            &registries,
+                            received_dialog_tags.unwrap_or_default(),
+                        )),
+                        registries,
+                        timeline_entries,
+                        timeline_entries_error,
+                        timeline_ids,
+                        world_clock_ids,
+                        timeline_tags,
+                        loom_patterns: std::sync::Arc::new(loom_patterns),
+                    }
+                }
             });
         }
         let packet = if let Some(packet) = pending.pop_front() {
@@ -1484,7 +1531,11 @@ async fn game_loop(
     // Registries must arrive before any login or predicted container clicks.
     pump!(send_event(
         event_tx,
-        NetworkEvent::Registries(configured.registries.clone())
+        NetworkEvent::Registries {
+            holder: configured.registries.clone(),
+            timeline_entries: configured.timeline_entries.clone(),
+            timeline_entries_error: configured.timeline_entries_error.clone(),
+        }
     ))?;
     pump!(send_event(
         event_tx,
@@ -1703,7 +1754,11 @@ async fn game_loop(
                         chat_types = chat_types_from_registry_holder(&next.registries);
                         pump!(send_event(
                             event_tx,
-                            NetworkEvent::Registries(next.registries.clone())
+                            NetworkEvent::Registries {
+                                holder: next.registries.clone(),
+                                timeline_entries: next.timeline_entries.clone(),
+                                timeline_entries_error: next.timeline_entries_error.clone(),
+                            }
                         ))?;
                         pump!(send_event(
                             event_tx,
@@ -1779,6 +1834,8 @@ async fn game_loop(
                     &sender,
                     event_tx,
                     &configured.registries,
+                    &configured.timeline_entries,
+                    configured.timeline_entries_error.as_deref(),
                     configured.world_clock_ids.as_deref(),
                     &shared_tree,
                     &mut batch_size_calculator,
@@ -2418,6 +2475,8 @@ mod tests {
                     joined: Joined {
                         configured: Configured {
                             registries: Arc::default(),
+                            timeline_entries: Arc::default(),
+                            timeline_entries_error: None,
                             timeline_ids: None,
                             world_clock_ids: None,
                             timeline_tags: Default::default(),
@@ -2457,7 +2516,7 @@ mod tests {
         ));
         assert!(matches!(
             recv_event(&event_rx).await,
-            NetworkEvent::Registries(_)
+            NetworkEvent::Registries { .. }
         ));
         assert!(matches!(
             recv_event(&event_rx).await,

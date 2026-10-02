@@ -81,7 +81,8 @@ fn dimension_info(
     is_debug: bool,
     clock_id: Option<u32>,
     world_key: &str,
-    registries: &RegistryHolder,
+    timeline_entries: &super::environment::TimelineEntries,
+    timeline_entries_error: Option<&str>,
     world_clock_ids: Option<&[Identifier]>,
 ) -> NetworkEvent {
     NetworkEvent::DimensionInfo {
@@ -101,24 +102,29 @@ fn dimension_info(
             .and_then(|tag| tag.byte())
             .map(|b| b != 0)
             .unwrap_or(true),
-        environment: {
-            let byte = |name: &str, default: bool| {
-                dim._extra
-                    .get(name)
-                    .and_then(|t| t.byte())
-                    .map(|v| v != 0)
-                    .unwrap_or(default)
-            };
-            let ambient = dim._extra.get("ambient_light").and_then(|t| t.float());
-            let sky_level = dim
+        environment_input: super::environment::DimensionEnvironmentInput {
+            has_sky_light: dim
+                ._extra
+                .get("has_skylight")
+                .and_then(|tag| tag.byte())
+                .map(|b| b != 0)
+                .unwrap_or(true),
+            has_ceiling: dim
+                ._extra
+                .get("has_ceiling")
+                .and_then(|tag| tag.byte())
+                .is_some_and(|b| b != 0),
+            is_end_world: world_key == "minecraft:the_end",
+            ambient_light: dim._extra.get("ambient_light").and_then(|tag| tag.float()),
+            sky_light_level: dim
                 ._extra
                 .get("attributes")
-                .and_then(|t| t.compound())
-                .and_then(|attrs| attrs.float(super::environment::SKY_LIGHT_LEVEL_ATTRIBUTE));
-            let timeline_ids: Vec<String> = dim
+                .and_then(|tag| tag.compound())
+                .and_then(|attrs| attrs.float(super::environment::SKY_LIGHT_LEVEL_ATTRIBUTE)),
+            timeline_refs: dim
                 ._extra
                 .get("timelines")
-                .and_then(|t| t.list())
+                .and_then(|tag| tag.list())
                 .and_then(|list| list.strings())
                 .map(|items| {
                     items
@@ -126,41 +132,9 @@ fn dimension_info(
                         .map(|item| item.to_str().into_owned())
                         .collect()
                 })
-                .unwrap_or_default();
-            let timelines: Vec<(String, simdnbt::owned::NbtCompound)> = registries
-                .extra
-                .get(&Identifier::new("timeline"))
-                .map(|registry| {
-                    registry
-                        .map
-                        .iter()
-                        .filter(|(id, _)| timeline_ids.iter().any(|used| used == &id.to_string()))
-                        .map(|(id, nbt)| (id.to_string(), nbt.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            match super::environment::from_dimension_fields(
-                byte("has_skylight", true),
-                byte("has_ceiling", false),
-                world_key == "minecraft:the_end",
-                ambient,
-                sky_level,
-                &timelines,
-                &timeline_ids,
-            ) {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::warn!(%error, "Invalid dimension environment inputs; using safe defaults");
-                    super::environment::DimensionEnvironment {
-                        has_sky_light: byte("has_skylight", true),
-                        has_weather: byte("has_skylight", true)
-                            && !byte("has_ceiling", false)
-                            && world_key != "minecraft:the_end",
-                        unsupported_reason: Some(error),
-                        ..Default::default()
-                    }
-                }
-            }
+                .unwrap_or_default(),
+            timeline_entries: timeline_entries.clone(),
+            timeline_entries_error: timeline_entries_error.map(str::to_owned),
         },
         cardinal_light: match dim
             ._extra
@@ -193,6 +167,8 @@ pub async fn handle_game_packet(
         sender,
         event_tx,
         registry_holder,
+        &std::sync::Arc::new(Vec::new()),
+        Some("timeline registry snapshot unavailable"),
         None,
         shared_tree,
         batch_size_calculator,
@@ -208,6 +184,8 @@ pub(super) async fn handle_game_packet_with_display_text(
     sender: &PacketSender,
     event_tx: &Sender<NetworkEvent>,
     registry_holder: &RegistryHolder,
+    timeline_entries: &super::environment::TimelineEntries,
+    timeline_entries_error: Option<&str>,
     world_clock_ids: Option<&[Identifier]>,
     shared_tree: &SharedCommandTree,
     batch_size_calculator: &mut ChunkBatchSizeCalculator,
@@ -229,7 +207,8 @@ pub(super) async fn handle_game_packet_with_display_text(
                         p.common.is_debug,
                         dimension_clock_id(world_clock_ids, dim),
                         &p.common.dimension.to_string(),
-                        registry_holder,
+                        timeline_entries,
+                        timeline_entries_error,
                         world_clock_ids,
                     ),
                 )
@@ -1994,7 +1973,8 @@ pub(super) async fn handle_game_packet_with_display_text(
                         p.common.is_debug,
                         dimension_clock_id(world_clock_ids, dim),
                         &p.common.dimension.to_string(),
-                        registry_holder,
+                        timeline_entries,
+                        timeline_entries_error,
                         world_clock_ids,
                     ),
                 )
@@ -4195,6 +4175,8 @@ mod tests {
                 &PacketSender::new(out_tx),
                 &tx,
                 &RegistryHolder::default(),
+                &Arc::new(Vec::new()),
+                Some("timeline registry snapshot unavailable"),
                 None,
                 &Arc::new(Mutex::new(None)),
                 &mut ChunkBatchSizeCalculator::default(),
@@ -4376,7 +4358,6 @@ mod scoreboard_display_event_tests {
 mod dimension_info_tests {
     use std::collections::HashMap;
 
-    use azalea_core::registry_holder::RegistryHolder;
     use simdnbt::owned::NbtTag;
 
     use super::{dimension_clock_id, dimension_info, parse_set_objective};
@@ -4405,14 +4386,15 @@ mod dimension_info_tests {
             cardinal_light,
             is_debug,
             clock_id,
-            environment,
+            environment_input,
             ..
         } = dimension_info(
             &dim,
             true,
             None,
             "minecraft:overworld",
-            &RegistryHolder::default(),
+            &std::sync::Arc::new(Vec::new()),
+            Some("timeline registry snapshot unavailable"),
             None,
         )
         else {
@@ -4424,10 +4406,7 @@ mod dimension_info_tests {
         assert_eq!(min_y, -64);
         assert!(has_skylight);
         assert_eq!(cardinal_light, CardinalLightType::Nether);
-        assert_eq!(
-            environment.unsupported_reason.as_deref(),
-            Some("missing/invalid ambient_light")
-        );
+        assert_eq!(environment_input.ambient_light, None);
     }
 
     #[test]
@@ -4447,7 +4426,8 @@ mod dimension_info_tests {
             false,
             None,
             "minecraft:the_end",
-            &RegistryHolder::default(),
+            &std::sync::Arc::new(Vec::new()),
+            Some("timeline registry snapshot unavailable"),
             None,
         );
         let custom_world_using_end_type = dimension_info(
@@ -4455,26 +4435,28 @@ mod dimension_info_tests {
             false,
             None,
             "example:custom",
-            &RegistryHolder::default(),
+            &std::sync::Arc::new(Vec::new()),
+            Some("timeline registry snapshot unavailable"),
             None,
         );
         let NetworkEvent::DimensionInfo {
-            environment: end, ..
+            environment_input: end,
+            ..
         } = end
         else {
             panic!("wrong event");
         };
         let NetworkEvent::DimensionInfo {
-            environment: custom,
+            environment_input: custom,
             ..
         } = custom_world_using_end_type
         else {
             panic!("wrong event");
         };
-        assert!(!end.has_weather);
-        assert!(custom.has_weather);
-        assert_eq!(end.ambient_light, 0.25);
-        assert_eq!(custom.ambient_light, 0.25);
+        assert!(end.is_end_world);
+        assert!(!custom.is_end_world);
+        assert_eq!(end.ambient_light, Some(0.25));
+        assert_eq!(custom.ambient_light, Some(0.25));
     }
 
     #[test]
@@ -4640,7 +4622,8 @@ mod dimension_info_tests {
             false,
             Some(2),
             "custom:dimension",
-            &RegistryHolder::default(),
+            &std::sync::Arc::new(Vec::new()),
+            Some("timeline registry snapshot unavailable"),
             Some(&ids),
         )
         else {
@@ -4670,7 +4653,8 @@ mod dimension_info_tests {
             false,
             None,
             "minecraft:overworld",
-            &RegistryHolder::default(),
+            &std::sync::Arc::new(Vec::new()),
+            Some("timeline registry snapshot unavailable"),
             None,
         )
         else {

@@ -1,10 +1,66 @@
 //! Typed ingress for the dimension environment inputs consumed by the renderer.
+use std::sync::Arc;
+
 use simdnbt::owned::{NbtCompound, NbtList};
 
 pub const SKY_LIGHT_LEVEL: f32 = 15.0;
 pub const SKY_LIGHT_LEVEL_ATTRIBUTE: &str = "minecraft:gameplay/sky_light_level";
-const MAX_TIMELINES: usize = 4096;
+pub const MAX_TIMELINES: usize = 4096;
 const MAX_KEYFRAMES: usize = 4096;
+
+pub type TimelineEntries = Arc<Vec<(String, NbtCompound)>>;
+
+#[derive(Clone, Debug)]
+pub struct DimensionEnvironmentInput {
+    pub has_sky_light: bool,
+    pub has_ceiling: bool,
+    pub is_end_world: bool,
+    pub ambient_light: Option<f32>,
+    pub sky_light_level: Option<f32>,
+    pub timeline_refs: Vec<String>,
+    pub timeline_entries: TimelineEntries,
+    pub timeline_entries_error: Option<String>,
+}
+
+pub fn resolve_dimension_environment(
+    input: &DimensionEnvironmentInput,
+    tags: &std::collections::HashMap<
+        azalea_registry::identifier::Identifier,
+        Vec<azalea_registry::identifier::Identifier>,
+    >,
+) -> Result<DimensionEnvironment, String> {
+    if !input.timeline_refs.is_empty() {
+        if let Some(error) = &input.timeline_entries_error {
+            return Err(error.clone());
+        }
+    }
+    let mut ids = Vec::new();
+    for reference in &input.timeline_refs {
+        if let Some(tag) = reference.strip_prefix('#') {
+            let key = tag
+                .parse::<azalea_registry::identifier::Identifier>()
+                .map_err(|_| format!("invalid timeline tag reference: {reference}"))?;
+            let members = tags
+                .get(&key)
+                .ok_or_else(|| format!("missing timeline tag: #{key}"))?;
+            ids.extend(members.iter().map(ToString::to_string));
+        } else {
+            ids.push(reference.clone());
+        }
+        if ids.len() > MAX_TIMELINES {
+            return Err("too many dimension timelines".into());
+        }
+    }
+    from_dimension_fields(
+        input.has_sky_light,
+        input.has_ceiling,
+        input.is_end_world,
+        input.ambient_light,
+        input.sky_light_level,
+        input.timeline_entries.as_slice(),
+        &ids,
+    )
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FloatKeyframe {
@@ -335,16 +391,21 @@ mod tests {
         day.insert("period_ticks", 24_000);
         day.insert("tracks", tracks);
 
-        let resolved = from_dimension_fields(
-            true,
-            false,
-            false,
-            Some(0.0),
-            Some(15.0),
-            &[("minecraft:day".into(), day)],
-            &["minecraft:day".into()],
-        )
-        .unwrap();
+        let input = DimensionEnvironmentInput {
+            has_sky_light: true,
+            has_ceiling: false,
+            is_end_world: false,
+            ambient_light: Some(0.0),
+            sky_light_level: Some(15.0),
+            timeline_refs: vec!["#custom:daily".into()],
+            timeline_entries: Arc::new(vec![("minecraft:day".into(), day)]),
+            timeline_entries_error: None,
+        };
+        let tags = std::collections::HashMap::from([(
+            "custom:daily".parse().unwrap(),
+            vec!["minecraft:day".parse().unwrap()],
+        )]);
+        let resolved = resolve_dimension_environment(&input, &tags).unwrap();
         let sky_track = &resolved.tracks[0];
         assert_eq!(sky_track.id, "minecraft:day");
         assert_eq!(sky_track.clock, "minecraft:overworld");
@@ -364,6 +425,26 @@ mod tests {
                 (13_670, 0.26666668),
                 (22_330, 0.26666668),
             ]
+        );
+        let missing = DimensionEnvironmentInput {
+            timeline_refs: vec!["#custom:later".into()],
+            ..input.clone()
+        };
+        assert!(
+            resolve_dimension_environment(&missing, &tags)
+                .unwrap_err()
+                .contains("missing timeline tag")
+        );
+        let later_tags = std::collections::HashMap::from([(
+            "custom:later".parse().unwrap(),
+            vec!["minecraft:day".parse().unwrap()],
+        )]);
+        assert_eq!(
+            resolve_dimension_environment(&missing, &later_tags)
+                .unwrap()
+                .tracks
+                .len(),
+            1
         );
     }
 

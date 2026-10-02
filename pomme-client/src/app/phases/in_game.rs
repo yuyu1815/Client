@@ -361,6 +361,7 @@ pub struct GameState {
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
     pub dimension_environment: crate::net::environment::DimensionEnvironment,
+    pub pending_dimension_environment: Option<crate::net::environment::DimensionEnvironmentInput>,
     /// Latest authoritative samples for every server clock, independent of the
     /// clock currently selected by the dimension's visual sky.
     pub world_clocks: HashMap<u32, crate::net::environment::ClockSample>,
@@ -823,6 +824,7 @@ impl GameState {
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
             dimension_environment: Default::default(),
+            pending_dimension_environment: None,
             world_clocks: HashMap::new(),
             world_clock_ids: HashMap::new(),
             world_clock_game_time: 0,
