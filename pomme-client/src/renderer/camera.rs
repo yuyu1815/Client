@@ -442,12 +442,14 @@ impl Camera {
         self.top_down = None;
     }
 
-    /// World-space camera quaternion, including native view effects (hurt/bob
-    /// roll).
+    /// World-space camera basis quaternion, matching `Camera.rotation()`;
+    /// view effects belong to the projection and are deliberately excluded.
     pub fn orientation(&self) -> glam::Quat {
         let (forward, up) = self.view_basis();
-        let view = self.view_effect_matrix() * view::look_to_mat4(Vec3::ZERO, forward, up);
-        view.inverse().to_scale_rotation_translation().1
+        view::look_to_mat4(Vec3::ZERO, forward, up)
+            .inverse()
+            .to_scale_rotation_translation()
+            .1
     }
 
     pub fn view_projection(&self) -> Mat4 {
@@ -662,6 +664,43 @@ mod tests {
                 assert!(up.distance(world_up) < 1e-5);
             }
         }
+    }
+
+    #[test]
+    fn orientation_matches_native_camera_rotation_angle_conventions() {
+        let mut camera = Camera::new(16.0 / 9.0);
+
+        // Native Camera.setRotation(0, 0) rotates around Y by PI.
+        camera.look_dir = LookDirection::new(0.0, 0.0);
+        let zero = camera.orientation().to_array();
+        for (actual, expected) in zero.into_iter().zip([0.0, 1.0, 0.0, 0.0]) {
+            assert!((actual - expected).abs() < 1e-6, "{zero:?}");
+        }
+
+        // Native rotationYXZ(PI - yaw, -pitch, 0) for yaw=pitch=45°.
+        camera.look_dir = LookDirection::new(45.0, 45.0);
+        let diagonal = camera.orientation().to_array();
+        for (actual, expected) in
+            diagonal
+                .into_iter()
+                .zip([-0.14644662, 0.8535534, 0.35355338, 0.35355338])
+        {
+            assert!((actual - expected).abs() < 1e-6, "{diagonal:?}");
+        }
+    }
+
+    #[test]
+    fn orientation_excludes_hurt_and_view_bob_but_projection_keeps_them() {
+        let mut camera = Camera::new(16.0 / 9.0);
+        camera.look_dir = LookDirection::new(45.0, -30.0);
+        let orientation = camera.orientation();
+        let view_projection = camera.view_projection();
+
+        camera.set_hurt(6, 35.0, 0.75);
+        camera.set_view_bob(1.25, 0.08, true);
+
+        assert!(camera.orientation().dot(orientation).abs() > 1.0 - 1e-6);
+        assert_ne!(camera.view_projection(), view_projection);
     }
 
     #[test]
