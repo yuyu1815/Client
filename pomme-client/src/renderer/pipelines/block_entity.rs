@@ -757,7 +757,7 @@ fn chest_instances(
 }
 
 fn closed_chest(info: &BlockEntityRenderInfo) -> bool {
-    info.kind == BlockEntityKind::Chest && info.lid_open == 0.0
+    info.kind == BlockEntityKind::Chest && info.lid_open == 0.0 && info.root_matrix.is_none()
 }
 
 // Baked closed single chest: body/lid x,z=[1,15]/16; lock x=[7,9]/16,
@@ -2389,6 +2389,78 @@ mod sign_text_tests {
         let fallback = chest_matrix(&info, anchor);
         info.root_matrix = None;
         assert_eq!(fallback, chest_matrix(&info, anchor));
+    }
+
+    #[test]
+    fn chest_batch_eligibility_excludes_every_root_override() {
+        let ordinary = chest(0, 0);
+        assert!(closed_chest(&ordinary));
+        assert_eq!(chest_run(&chest_order(&[ordinary, chest(3, 0)]), 0, 2), 2);
+
+        let root = glam::Mat4::from_translation(glam::Vec3::new(0.25, 1.0, -0.5));
+        let mut moving_chest = chest(0, 0);
+        moving_chest.root_matrix = Some(root);
+        assert!(!closed_chest(&moving_chest));
+        let moving = [moving_chest, chest(3, 0)];
+        let order = chest_order(&moving);
+        assert_eq!(
+            order.iter().map(|info| info.pos.x).collect::<Vec<_>>(),
+            [0, 3]
+        );
+        assert_eq!(chest_run(&order, 0, 2), 0);
+        assert_eq!(chest_run(&order, 1, 2), 0);
+
+        let mut nonfinite = chest(0, 0);
+        nonfinite.root_matrix = Some(glam::Mat4::from_cols(
+            glam::Vec4::splat(f32::NAN),
+            glam::Vec4::ZERO,
+            glam::Vec4::ZERO,
+            glam::Vec4::ZERO,
+        ));
+        assert!(!closed_chest(&nonfinite));
+        assert_eq!(chest_run(&chest_order(&[nonfinite, chest(3, 0)]), 0, 2), 0);
+
+        let mut open = chest(0, 0);
+        open.lid_open = 0.5;
+        assert!(!closed_chest(&open));
+        assert!(!closed_chest(&BlockEntityRenderInfo {
+            kind: BlockEntityKind::TrappedChest,
+            ..chest(0, 0)
+        }));
+        assert!(!closed_chest(&BlockEntityRenderInfo {
+            kind: BlockEntityKind::EnderChest,
+            ..chest(0, 0)
+        }));
+        // Copper chests use the existing Chest kind and remain eligible when static.
+        assert!(closed_chest(&BlockEntityRenderInfo {
+            variant: 6,
+            ..chest(0, 0)
+        }));
+    }
+
+    #[test]
+    fn moving_closed_chest_falls_back_to_all_root_transformed_parts() {
+        let mut moving = chest(0, 0);
+        let root = glam::Mat4::from_translation(glam::Vec3::new(-2.0, 3.0, 4.0))
+            * glam::Mat4::from_rotation_y(0.7);
+        moving.root_matrix = Some(root);
+        let items = [moving, chest(3, 0)];
+        let order = chest_order(&items);
+        assert_eq!(chest_run(&order, 0, 2), 0); // draw loop does not consume/skip it
+
+        let model = &block_entity_model::bake_chest_models()[0];
+        let poses = model.compute_part_transforms(&PartAnim::default());
+        let matrices: Vec<_> = model
+            .part_ranges
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, count))| *count > 0)
+            .map(|(part, _)| chest_matrix(&order[0], glam::DVec3::ZERO) * poses[part])
+            .collect();
+        assert_eq!(matrices.len(), 3);
+        assert!(matrices.iter().all(|matrix| matrix.is_finite()));
+        assert_eq!(matrices[0], root * poses[0]);
+        assert_eq!(order[0].root_matrix, Some(root));
     }
 
     #[test]
