@@ -5561,8 +5561,8 @@ mod tests {
 
         let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
         let sender = PacketSender::new(out_tx);
-        // One remaining queue slot must carry both spawn center and direction.
-        let (tx, rx) = crossbeam_channel::bounded(1);
+        // Direction metadata emits both its frame-specific event and raw scalar.
+        let (tx, rx) = crossbeam_channel::bounded(2);
         let registries = azalea_core::registry_holder::RegistryHolder::default();
         let tree = std::sync::Arc::new(parking_lot::Mutex::new(None));
         let dispatch = async |packet: &ClientboundGamePacket| {
@@ -5609,6 +5609,7 @@ mod tests {
                 .await;
                 let NetworkEvent::EntitySpawned {
                     id,
+                    uuid,
                     entity_type,
                     position,
                     spawn_data,
@@ -5621,6 +5622,7 @@ mod tests {
                 else {
                     panic!("expected atomic spawn");
                 };
+                assert_eq!(uuid, uuid::Uuid::nil());
                 assert!(rx.is_empty());
                 let mut store = EntityStore::new();
                 store.set_passengers(id, &[77]); // placeholder must be initialized first
@@ -5663,6 +5665,14 @@ mod tests {
                     else {
                         panic!("expected direction metadata");
                     };
+                    assert!(matches!(
+                        rx.try_recv().unwrap(),
+                        NetworkEvent::EntityData {
+                            id: event_id,
+                            index: 8,
+                            value: crate::entity::MetaValue::Direction(value),
+                        } if event_id == id && value == next
+                    ));
                     store.set_item_frame_direction(id, direction);
                     assert_eq!(store.vehicles[&id].item_frame_direction, Some(next));
                     assert_eq!(
