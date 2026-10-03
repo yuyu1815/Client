@@ -7,7 +7,7 @@ use azalea_registry::builtin::EntityKind;
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
-use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::assets::AssetIndex;
 use crate::entity::components::Position;
 use crate::renderer::camera::CameraUniform;
 use crate::renderer::chunk::mesher::ChunkVertex;
@@ -234,11 +234,14 @@ struct HarnessMesh {
     vertex_allocation: Allocation,
 }
 
+type ArmorMeshes = [HarnessMesh; 2];
+
 struct HarnessDraw {
     texture_key: String,
     tint: [f32; 4],
     range: (u32, u32),
     matrix: glam::Mat4,
+    inner: bool,
 }
 
 const EQUIPMENT_TEXTURE_CACHE_LIMIT: usize = 1024;
@@ -255,6 +258,88 @@ fn descriptor_result_or_cleanup<T, E>(result: Result<T, E>, cleanup: impl FnOnce
             None
         }
     }
+}
+
+pub(crate) fn humanoid_armor_target(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Player
+            | EntityKind::Mannequin
+            | EntityKind::ArmorStand
+            | EntityKind::Zombie
+            | EntityKind::Husk
+            | EntityKind::Drowned
+            | EntityKind::ZombieVillager
+            | EntityKind::Skeleton
+            | EntityKind::Stray
+            | EntityKind::WitherSkeleton
+            | EntityKind::Bogged
+            | EntityKind::Piglin
+            | EntityKind::PiglinBrute
+            | EntityKind::ZombifiedPiglin
+    )
+}
+
+fn humanoid_armor_draws(
+    kind: EntityKind,
+    model: &BakedEntityModel,
+    source_model: &BakedEntityModel,
+    source_transforms: &[glam::Mat4],
+    entity: glam::Mat4,
+    equipment: &std::collections::HashMap<
+        azalea_inventory::components::EquipmentSlot,
+        Vec<super::equipment::ResolvedEquipmentLayer>,
+    >,
+    armor_stand_flags: u8,
+) -> Vec<HarnessDraw> {
+    use azalea_inventory::components::EquipmentSlot as Slot;
+    if !humanoid_armor_target(kind) {
+        return Vec::new();
+    }
+    let mut draws = Vec::new();
+    for slot in [Slot::Head, Slot::Chest, Slot::Legs, Slot::Feet] {
+        let Some(layers) = equipment.get(&slot) else {
+            continue;
+        };
+        for layer in layers {
+            let tint = [
+                layer.tint_rgb[0] as f32 / 255.0,
+                layer.tint_rgb[1] as f32 / 255.0,
+                layer.tint_rgb[2] as f32 / 255.0,
+                1.0,
+            ];
+            for name in crate::renderer::entity_models::armor::armor_part_names(slot) {
+                let Some(ai) = model.parts.iter().position(|p| p.name == *name) else {
+                    continue;
+                };
+                let Some(si) = source_model.parts.iter().position(|p| p.name == *name) else {
+                    continue;
+                };
+                let Some(&range) = model.part_ranges.get(ai) else {
+                    continue;
+                };
+                let Some(&source) = source_transforms.get(si) else {
+                    continue;
+                };
+                if range.1 == 0 || !armor_stand_part_visible(kind, name, armor_stand_flags) {
+                    continue;
+                }
+                let delta = model.parts[ai].offset - source_model.parts[si].offset;
+                let pivot_shift = glam::Vec3::new(delta.x, -delta.y, delta.z) / 16.0;
+                let matrix = entity * glam::Mat4::from_translation(pivot_shift) * source;
+                if matrix.to_cols_array().iter().all(|v| v.is_finite()) {
+                    draws.push(HarnessDraw {
+                        texture_key: layer.texture_key.clone(),
+                        tint,
+                        range,
+                        matrix,
+                        inner: slot == Slot::Legs,
+                    });
+                }
+            }
+        }
+    }
+    draws
 }
 
 fn happy_ghast_harness_draws(
@@ -291,6 +376,7 @@ fn happy_ghast_harness_draws(
                     tint,
                     range,
                     matrix,
+                    inner: false,
                 });
             }
         }
@@ -329,7 +415,7 @@ pub struct EntityRenderInfo {
     pub armor_stand_flags: u8,
     /// head, body, left/right arm, left/right leg; native Euler degrees.
     pub armor_stand_pose: [[f32; 3]; 6],
-    /// Retained stacks for a later armor/hand equipment layer.
+    /// Equipment stacks retained for renderer-owned humanoid armor layers.
     pub armor_stand_equipment: std::collections::HashMap<
         azalea_inventory::components::EquipmentSlot,
         azalea_inventory::ItemStack,
@@ -344,6 +430,10 @@ pub struct EntityRenderInfo {
     pub cape_has_humanoid_layer: bool,
     /// Ordered CPU-resolved equipment input for the GPU renderer owner.
     pub happy_ghast_equipment_layers: Vec<super::equipment::ResolvedEquipmentLayer>,
+    pub humanoid_armor_layers: std::collections::HashMap<
+        azalea_inventory::components::EquipmentSlot,
+        Vec<super::equipment::ResolvedEquipmentLayer>,
+    >,
     /// Happy Ghast is ridden when it has a passenger (not when saddle is
     /// present).
     pub is_ridden: bool,
@@ -475,6 +565,7 @@ impl Default for EntityRenderInfo {
             cape_has_wings_layer: false,
             cape_has_humanoid_layer: false,
             happy_ghast_equipment_layers: Vec::new(),
+            humanoid_armor_layers: std::collections::HashMap::new(),
             is_ridden: false,
             overlay_tints: [None; MAX_OVERLAYS],
             overlay_variants: [0; MAX_OVERLAYS],
@@ -553,6 +644,8 @@ enum OverlayKind {
 
 struct MobVariant {
     model: BakedEntityModel,
+    texture_keys: &'static [&'static str],
+    texture_fallback_size: u32,
     vertex_buffer: vk::Buffer,
     vertex_allocation: Allocation,
     texture_image: vk::Image,
@@ -770,10 +863,12 @@ pub struct EntityRenderer {
     /// REPEAT-wrap sampler for the scrolling swirl overlay.
     texture_sampler_repeat: vk::Sampler,
     mobs: HashMap<EntityKind, MobEntry>,
+    entity_pack_dirs: Vec<std::path::PathBuf>,
     player_skins: HashMap<uuid::Uuid, PlayerSkinTexture>,
     equipment_textures: HashMap<String, EquipmentTexture>,
     equipment_pack_dirs: Vec<std::path::PathBuf>,
     happy_ghast_harness: [HarnessMesh; 2],
+    humanoid_armor: ArmorMeshes,
     cape_model: BakedEntityModel,
     cape_vertex_buffer: vk::Buffer,
     cape_vertex_allocation: Allocation,
@@ -2769,6 +2864,7 @@ impl EntityRenderer {
         allocator: &Arc<Mutex<Allocator>>,
         jar_assets_dir: &Path,
         asset_index: &Option<AssetIndex>,
+        pack_dirs: &[std::path::PathBuf],
     ) -> Self {
         let camera_layout = util::create_descriptor_set_layout(
             device,
@@ -2867,6 +2963,7 @@ impl EntityRenderer {
             texture_sampler_repeat,
             jar_assets_dir,
             asset_index,
+            pack_dirs,
             VariantDef {
                 model: beam_model,
                 tex_variants: &[&["minecraft/textures/entity/end_crystal/end_crystal_beam.png"]],
@@ -2910,6 +3007,21 @@ impl EntityRenderer {
                 vertex_allocation,
             }
         });
+        let humanoid_armor = [true, false].map(|leggings| {
+            let model = entity_models::armor::bake_humanoid_armor_model(leggings);
+            let (vertex_buffer, vertex_allocation) = util::create_mapped_buffer(
+                device,
+                allocator,
+                bytemuck::cast_slice(&model.vertices),
+                vk::BufferUsageFlags::VertexBuffer,
+                "humanoid_armor_vertices",
+            );
+            HarnessMesh {
+                model,
+                vertex_buffer,
+                vertex_allocation,
+            }
+        });
         let cape_model = entity_model::bake_player_cape_model();
         let (cape_vertex_buffer, cape_vertex_allocation) = util::create_mapped_buffer(
             device,
@@ -2933,6 +3045,7 @@ impl EntityRenderer {
                     texture_sampler_repeat,
                     jar_assets_dir,
                     asset_index,
+                    pack_dirs,
                     v,
                 )
             };
@@ -3004,10 +3117,12 @@ impl EntityRenderer {
             texture_sampler,
             texture_sampler_repeat,
             mobs,
+            entity_pack_dirs: pack_dirs.to_vec(),
             player_skins: HashMap::new(),
             equipment_textures: HashMap::new(),
             equipment_pack_dirs: Vec::new(),
             happy_ghast_harness,
+            humanoid_armor,
             cape_model,
             cape_vertex_buffer,
             cape_vertex_allocation,
@@ -3186,6 +3301,51 @@ impl EntityRenderer {
 
     pub fn set_equipment_pack_dirs(&mut self, dirs: &[std::path::PathBuf]) {
         self.equipment_pack_dirs = dirs.to_vec();
+    }
+
+    /// Replace ordinary mob GPU textures after the caller has waited for the
+    /// device to idle.
+    pub fn reload_entity_textures(
+        &mut self,
+        device: &vk::Device,
+        queue: vk::Queue,
+        command_pool: vk::CommandPool,
+        allocator: &Arc<Mutex<Allocator>>,
+        jar_assets_dir: &Path,
+        asset_index: &Option<AssetIndex>,
+        pack_dirs: &[std::path::PathBuf],
+    ) {
+        if !entity_texture_packs_changed(&self.entity_pack_dirs, pack_dirs) {
+            return;
+        }
+        self.entity_pack_dirs = pack_dirs.to_vec();
+        let mut variants: Vec<&mut MobVariant> = self
+            .mobs
+            .values_mut()
+            .flat_map(|entry| {
+                entry
+                    .adult_variants
+                    .iter_mut()
+                    .chain(entry.baby_variants.iter_mut().flatten())
+                    .chain(entry.adult_overlays.iter_mut().flatten())
+                    .chain(entry.baby_overlays.iter_mut().flatten())
+            })
+            .collect();
+        variants.push(&mut self.beam);
+        for variant in variants {
+            reload_entity_variant_texture(
+                device,
+                queue,
+                command_pool,
+                allocator,
+                jar_assets_dir,
+                asset_index,
+                pack_dirs,
+                self.texture_sampler,
+                self.texture_sampler_repeat,
+                variant,
+            );
+        }
     }
 
     pub fn clear_equipment_textures(
@@ -3938,6 +4098,41 @@ impl EntityRenderer {
                     ));
                 }
             }
+            for v in &vis {
+                if instances.len() >= MAX_INSTANCES {
+                    break;
+                }
+                for draw in humanoid_armor_draws(
+                    v.info.entity_kind,
+                    &self.humanoid_armor[1].model,
+                    v.base_model,
+                    &v.part_transforms,
+                    v.entity_mat,
+                    &v.info.humanoid_armor_layers,
+                    v.info.armor_stand_flags,
+                ) {
+                    if instances.len() >= MAX_INSTANCES {
+                        break;
+                    }
+                    let Some(texture) = self.equipment_textures.get(&draw.texture_key) else {
+                        continue;
+                    };
+                    let first_instance = instances.len() as u32;
+                    instances.push(EntityInstance {
+                        model: draw.matrix.to_cols_array_2d(),
+                        tint: draw.tint,
+                        overlay_color: [0.0; 4],
+                        uv_params: [0.0, 0.0, 1.0, 1.0],
+                    });
+                    let mesh = &self.humanoid_armor[usize::from(!draw.inner)];
+                    opaque_records.push(happy_ghast_harness_draw_record(
+                        &draw,
+                        texture.descriptor,
+                        mesh.vertex_buffer,
+                        first_instance,
+                    ));
+                }
+            }
             opaque_records.extend(collect_player_capes(
                 &vis,
                 &self.cape_model,
@@ -4145,7 +4340,11 @@ impl EntityRenderer {
         device.destroy_sampler(self.texture_sampler, None);
         device.destroy_sampler(self.texture_sampler_repeat, None);
 
-        for mesh in &mut self.happy_ghast_harness {
+        for mesh in self
+            .happy_ghast_harness
+            .iter_mut()
+            .chain(self.humanoid_armor.iter_mut())
+        {
             device.destroy_buffer(mesh.vertex_buffer, None);
             alloc
                 .free(std::mem::replace(&mut mesh.vertex_allocation, unsafe {
@@ -4828,6 +5027,71 @@ fn remap_part_anim(
     }
 }
 
+fn entity_texture_packs_changed(
+    current: &[std::path::PathBuf],
+    next: &[std::path::PathBuf],
+) -> bool {
+    current != next
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reload_entity_variant_texture(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    pack_dirs: &[std::path::PathBuf],
+    texture_sampler: vk::Sampler,
+    texture_sampler_repeat: vk::Sampler,
+    variant: &mut MobVariant,
+) {
+    let (image, view, allocation) = load_entity_texture(
+        device,
+        queue,
+        command_pool,
+        allocator,
+        jar_assets_dir,
+        asset_index,
+        pack_dirs,
+        variant.texture_keys,
+        variant.texture_fallback_size,
+    );
+    let sampler = match variant.overlay_kind {
+        OverlayKind::SwirlAdditive | OverlayKind::WindScroll | OverlayKind::TridentGlint => {
+            texture_sampler_repeat
+        }
+        _ => texture_sampler,
+    };
+    let image_info = vk::DescriptorImageInfo {
+        sampler,
+        image_view: view,
+        image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+    };
+    let write = vk::WriteDescriptorSet {
+        dst_set: variant.texture_set,
+        dst_binding: 0,
+        descriptor_type: vk::DescriptorType::CombinedImageSampler,
+        descriptor_count: 1,
+        image_info: &image_info,
+        ..Default::default()
+    };
+    device.update_descriptor_sets(&[write], &[]);
+    device.destroy_image_view(variant.texture_view, None);
+    device.destroy_image(variant.texture_image, None);
+    allocator
+        .lock()
+        .unwrap()
+        .free(std::mem::replace(
+            &mut variant.texture_allocation,
+            allocation,
+        ))
+        .ok();
+    variant.texture_image = image;
+    variant.texture_view = view;
+}
+
 fn link_overlays(base: &[MobVariant], overlays: &mut [Vec<MobVariant>]) {
     let Some(base_first) = base.first() else {
         return;
@@ -4854,6 +5118,7 @@ fn build_variants(
     texture_sampler_repeat: vk::Sampler,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
+    pack_dirs: &[std::path::PathBuf],
     variant: VariantDef,
 ) -> Vec<MobVariant> {
     let VariantDef {
@@ -4889,6 +5154,7 @@ fn build_variants(
                 allocator,
                 jar_assets_dir,
                 asset_index,
+                pack_dirs,
                 tex_keys,
                 tex_size,
             );
@@ -4921,6 +5187,8 @@ fn build_variants(
 
             MobVariant {
                 model: model.clone(),
+                texture_keys: tex_keys,
+                texture_fallback_size: tex_size,
                 vertex_buffer,
                 vertex_allocation,
                 texture_image,
@@ -4942,13 +5210,19 @@ fn load_entity_texture(
     allocator: &Arc<Mutex<Allocator>>,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
+    pack_dirs: &[std::path::PathBuf],
     asset_keys: &[&str],
     fallback_size: u32,
 ) -> (vk::Image, vk::ImageView, Allocation) {
     let (pixels, width, height) = asset_keys
         .iter()
         .find_map(|key| {
-            let path = resolve_asset_path(jar_assets_dir, asset_index, key);
+            let path = crate::assets::resolve_asset_path_with_pack_dirs(
+                jar_assets_dir,
+                asset_index,
+                key,
+                pack_dirs,
+            );
             util::load_png(&path)
         })
         .unwrap_or_else(|| {
@@ -5534,6 +5808,25 @@ mod tests {
     }
 
     #[test]
+    fn normal_entity_texture_cache_invalidates_for_pack_push_replace_and_pop() {
+        use super::entity_texture_packs_changed;
+
+        let base = vec![std::path::PathBuf::from("base")];
+        let pack_a = vec![
+            std::path::PathBuf::from("base"),
+            std::path::PathBuf::from("A"),
+        ];
+        let pack_b = vec![
+            std::path::PathBuf::from("base"),
+            std::path::PathBuf::from("B"),
+        ];
+        assert!(entity_texture_packs_changed(&base, &pack_a));
+        assert!(entity_texture_packs_changed(&pack_a, &pack_b));
+        assert!(entity_texture_packs_changed(&pack_b, &base));
+        assert!(!entity_texture_packs_changed(&base, &base));
+    }
+
+    #[test]
     fn equipment_texture_cache_is_texture_keyed_and_cleared_after_gpu_idle_on_reload() {
         let renderer = include_str!("../mod.rs");
         let reload = renderer.find("pub fn reload_assets(").unwrap();
@@ -5542,8 +5835,14 @@ mod tests {
             .find("self.ctx.device.wait_idle().unwrap()")
             .unwrap();
         let clear = after_reload.find("clear_equipment_textures").unwrap();
-        assert!(idle < clear);
+        let reload_entities = after_reload.find("reload_entity_textures").unwrap();
+        assert!(idle < clear && clear < reload_entities);
         let source = include_str!("entity_renderer.rs");
+        let entity_reload = source.find("pub fn reload_entity_textures(").unwrap();
+        let entity_reload_body = &source[entity_reload..];
+        assert!(entity_reload_body.contains("entity_texture_packs_changed"));
+        assert!(entity_reload_body.contains("reload_entity_variant_texture"));
+        assert!(entity_reload_body.contains("device.update_descriptor_sets"));
         assert!(source.contains("equipment_textures: HashMap<String, EquipmentTexture>"));
         assert!(source.contains("for (_, texture) in self.equipment_textures.drain()"));
     }
@@ -6704,6 +7003,191 @@ mod tests {
             assert!(variant.tex_variants[0][0].ends_with(texture));
             assert!(def.baby.is_none());
         }
+    }
+
+    #[test]
+    fn humanoid_armor_draws_expected_parts_from_baked_geometry_and_pose() {
+        use azalea_inventory::components::EquipmentSlot as Slot;
+        use azalea_registry::builtin::EntityKind;
+
+        use crate::renderer::entity_models::armor::bake_humanoid_armor_model;
+        use crate::renderer::pipelines::equipment::ResolvedEquipmentLayer;
+
+        let model = bake_humanoid_armor_model(false);
+        let mut equipment = std::collections::HashMap::new();
+        equipment.insert(
+            Slot::Head,
+            vec![ResolvedEquipmentLayer {
+                texture_key: "minecraft/test.png".into(),
+                tint_rgb: [12, 34, 56],
+            }],
+        );
+        let transforms = model.compute_part_transforms(&super::entity_model::PartAnim {
+            rotation: vec![(0, glam::Vec3::new(0.3, 0.2, -0.1))],
+            ..Default::default()
+        });
+        let draws = super::humanoid_armor_draws(
+            EntityKind::Zombie,
+            &model,
+            &model,
+            &transforms,
+            glam::Mat4::IDENTITY,
+            &equipment,
+            0,
+        );
+        assert_eq!(draws.len(), 1);
+        assert_eq!(draws[0].range, model.part_ranges[0]);
+        assert_eq!(draws[0].texture_key, "minecraft/test.png");
+        assert_eq!(draws[0].tint, [12. / 255., 34. / 255., 56. / 255., 1.]);
+        assert_ne!(draws[0].matrix, glam::Mat4::IDENTITY);
+        assert!(
+            super::humanoid_armor_draws(
+                EntityKind::Creeper,
+                &model,
+                &model,
+                &transforms,
+                glam::Mat4::IDENTITY,
+                &equipment,
+                0,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn humanoid_armor_slots_layer_order_targets_and_empty_updates() {
+        use azalea_inventory::components::EquipmentSlot as Slot;
+        use azalea_registry::builtin::EntityKind as K;
+
+        use crate::renderer::entity_models::armor::bake_humanoid_armor_model;
+        use crate::renderer::pipelines::equipment::ResolvedEquipmentLayer as Layer;
+        let outer = bake_humanoid_armor_model(false);
+        let inner = bake_humanoid_armor_model(true);
+        let mut slots = std::collections::HashMap::new();
+        for (slot, key) in [
+            (Slot::Head, "helmet"),
+            (Slot::Chest, "chest"),
+            (Slot::Feet, "boots"),
+        ] {
+            slots.insert(
+                slot,
+                vec![Layer {
+                    texture_key: key.into(),
+                    tint_rgb: [255, 255, 255],
+                }],
+            );
+        }
+        slots.insert(
+            Slot::Legs,
+            vec![
+                Layer {
+                    texture_key: "leggings-a".into(),
+                    tint_rgb: [1, 2, 3],
+                },
+                Layer {
+                    texture_key: "leggings-b".into(),
+                    tint_rgb: [4, 5, 6],
+                },
+            ],
+        );
+        let transforms = outer.compute_part_transforms(&Default::default());
+        let draws = super::humanoid_armor_draws(
+            K::Piglin,
+            &outer,
+            &outer,
+            &transforms,
+            glam::Mat4::IDENTITY,
+            &slots,
+            0,
+        );
+        assert_eq!(draws.len(), 12); // head 1 + chest 3 + legs 3*2 + boots 2
+        assert_eq!(
+            draws[4..10]
+                .iter()
+                .map(|d| d.texture_key.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "leggings-a",
+                "leggings-a",
+                "leggings-a",
+                "leggings-b",
+                "leggings-b",
+                "leggings-b"
+            ]
+        );
+        assert!(draws[4..10].iter().all(|d| d.inner));
+        assert_eq!(inner.part_ranges, outer.part_ranges);
+        slots.insert(Slot::Feet, Vec::new());
+        assert_eq!(
+            super::humanoid_armor_draws(
+                K::Zombie,
+                &outer,
+                &outer,
+                &transforms,
+                glam::Mat4::IDENTITY,
+                &slots,
+                0
+            )
+            .len(),
+            10
+        );
+        assert_eq!(
+            super::humanoid_armor_draws(
+                K::ArmorStand,
+                &outer,
+                &outer,
+                &transforms,
+                glam::Mat4::IDENTITY,
+                &slots,
+                0x00
+            )
+            .len(),
+            8
+        );
+        assert_eq!(
+            super::humanoid_armor_draws(
+                K::ArmorStand,
+                &outer,
+                &outer,
+                &transforms,
+                glam::Mat4::IDENTITY,
+                &slots,
+                0x04
+            )
+            .len(),
+            10
+        );
+        for kind in [
+            K::Zombie,
+            K::Husk,
+            K::Drowned,
+            K::ZombieVillager,
+            K::Skeleton,
+            K::Stray,
+            K::WitherSkeleton,
+            K::Bogged,
+            K::Piglin,
+            K::PiglinBrute,
+            K::ZombifiedPiglin,
+            K::Player,
+            K::Mannequin,
+            K::ArmorStand,
+        ] {
+            assert!(super::humanoid_armor_target(kind), "{kind:?}");
+        }
+        assert!(!super::humanoid_armor_target(K::Creeper));
+        assert!(
+            super::humanoid_armor_draws(
+                K::Zombie,
+                &outer,
+                &outer,
+                &transforms,
+                glam::Mat4::IDENTITY,
+                &std::collections::HashMap::new(),
+                0
+            )
+            .is_empty()
+        );
     }
 
     #[test]

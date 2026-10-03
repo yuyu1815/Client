@@ -621,6 +621,24 @@ pub struct PlayerInputState {
     sprint: bool,
 }
 
+fn clear_world_entities(
+    entities: &mut crate::entity::EntityStore,
+    items: &mut crate::entity::ItemEntityStore,
+    positions: &mut HashMap<i32, Position>,
+    silent: &mut HashSet<i32>,
+) {
+    *entities = crate::entity::EntityStore::new();
+    *items = crate::entity::ItemEntityStore::new();
+    positions.clear();
+    silent.clear();
+}
+
+fn neutral_tick_input(input: &InputState) -> InputState {
+    let mut neutral = InputState::released();
+    neutral.set_selected_slot(input.selected_slot());
+    neutral
+}
+
 fn player_input_state(input: &InputState, analog_move: glam::Vec2) -> PlayerInputState {
     PlayerInputState {
         forward: input.key_pressed(KEY_FORWARD) || analog_move.y > STICK_MOVEMENT_THRESHOLD,
@@ -1243,6 +1261,7 @@ pub struct AppCore {
     pub pending_pack_download: Vec<PendingPackDownload>,
     server_pack_generations: HashMap<uuid::Uuid, u64>,
     next_server_pack_generation: u64,
+    pending_pack_disconnect: Option<String>,
     pub asset_index: Option<AssetIndex>,
     pub audio: crate::audio::AudioEngine,
     pub tick_accumulator: f32,
@@ -1414,6 +1433,7 @@ impl AppCore {
             pending_pack_download: Vec::new(),
             server_pack_generations: HashMap::new(),
             next_server_pack_generation: 0,
+            pending_pack_disconnect: None,
             asset_index,
             audio,
             tick_accumulator: 0.0,
@@ -2078,6 +2098,56 @@ impl AppCore {
         }
     }
 
+    pub fn accept_server_pack(
+        &mut self,
+        connection: &ConnectionHandle,
+        prompt: crate::app::phases::in_game::ResourcePackPrompt,
+    ) {
+        if self.server_pack_generations.get(&prompt.id) != Some(&prompt.generation) {
+            return;
+        }
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::ResourcePack(
+                azalea_protocol::packets::game::s_resource_pack::ServerboundResourcePack {
+                    id: prompt.id,
+                    action: azalea_protocol::packets::game::s_resource_pack::Action::Accepted,
+                },
+            ));
+        let cache_dir = self.resource_packs.server_cache_dir().to_path_buf();
+        let id = prompt.id;
+        let url = prompt.url;
+        let download_hash = prompt.hash;
+        self.pending_pack_download.push(PendingPackDownload {
+            id,
+            generation: prompt.generation,
+            required: prompt.required,
+            hash: download_hash.clone(),
+            handle: std::thread::spawn(move || {
+                ResourcePackManager::download_server_pack(&cache_dir, id, &url, &download_hash)
+            }),
+        });
+    }
+
+    pub fn decline_server_pack(
+        &mut self,
+        connection: &ConnectionHandle,
+        prompt: crate::app::phases::in_game::ResourcePackPrompt,
+    ) {
+        self.server_pack_generations.remove(&prompt.id);
+        connection
+            .packet_tx
+            .send(ServerboundGamePacket::ResourcePack(
+                azalea_protocol::packets::game::s_resource_pack::ServerboundResourcePack {
+                    id: prompt.id,
+                    action: azalea_protocol::packets::game::s_resource_pack::Action::Declined,
+                },
+            ));
+        self.pending_pack_disconnect =
+            crate::app::phases::in_game::resource_pack_decline_reason(prompt.required)
+                .map(str::to_owned);
+    }
+
     pub fn drain_network_events(
         &mut self,
         connection: &ConnectionHandle,
@@ -2095,7 +2165,7 @@ impl AppCore {
         // Block edits go on the priority lane so they apply instantly even while
         // chunks stream in, instead of starving behind the load backlog.
         let mut priority_remesh: Vec<(azalea_core::position::ChunkPos, i32)> = Vec::new();
-        let mut disconnect_reason: Option<String> = None;
+        let mut disconnect_reason = self.pending_pack_disconnect.take();
         let mut processed = 0u32;
         self.drain_player_skin_results(renderer);
         if game
@@ -3949,6 +4019,14 @@ impl AppCore {
                     count,
                     stack,
                 } => {
+                    let item_name = stack
+                        .as_ref()
+                        .and_then(|stack| {
+                            crate::world::block::registry::BlockRegistry::item_model_name(
+                                &azalea_inventory::ItemStack::Present(stack.clone()),
+                            )
+                        })
+                        .unwrap_or(item_name);
                     renderer.ensure_item_mesh(&item_name);
                     game.item_entity_store
                         .set_item_data(id, item_name, item_id, damage, count, stack);
@@ -3972,9 +4050,12 @@ impl AppCore {
                     if let azalea_inventory::ItemStack::Present(data) = &item
                         && !data.is_empty()
                     {
-                        renderer.ensure_item_mesh(&crate::player::inventory::item_resource_name(
-                            data.kind,
-                        ));
+                        let name =
+                            crate::world::block::registry::BlockRegistry::item_model_name(&item)
+                                .unwrap_or_else(|| {
+                                    crate::player::inventory::item_resource_name(data.kind)
+                                });
+                        renderer.ensure_item_mesh(&name);
                     }
                     game.entity_store.set_item_frame_item(id, item);
                 }
@@ -4045,9 +4126,11 @@ impl AppCore {
                     game.entity_store.apply_entity_data(id, index, value);
                 }
                 NetworkEvent::EntityProjectileItem { id, stack } => {
-                    renderer.ensure_item_mesh(&crate::player::inventory::item_resource_name(
-                        stack.kind,
-                    ));
+                    let name = crate::world::block::registry::BlockRegistry::item_model_name(
+                        &azalea_inventory::ItemStack::Present(stack.clone()),
+                    )
+                    .unwrap_or_else(|| crate::player::inventory::item_resource_name(stack.kind));
+                    renderer.ensure_item_mesh(&name);
                     game.entity_store.set_projectile_item(id, stack);
                 }
                 NetworkEvent::EntityMainArm { id, right } => {
@@ -4198,6 +4281,12 @@ impl AppCore {
                     online_mode,
                 } => {
                     connection.packet_tx.chat_login(online_mode);
+                    clear_world_entities(
+                        &mut game.entity_store,
+                        &mut game.item_entity_store,
+                        &mut game.entity_positions,
+                        &mut game.silent_entities,
+                    );
                     game.player.entity_id = entity_id;
                     game.hardcore = hardcore;
                     game.show_death_screen = show_death_screen;
@@ -4283,6 +4372,7 @@ impl AppCore {
                     url,
                     hash,
                     required,
+                    prompt,
                 } => {
                     tracing::info!("Resource pack push: {id} url={url} required={required}");
                     self.next_server_pack_generation =
@@ -4290,16 +4380,21 @@ impl AppCore {
                     let generation = self.next_server_pack_generation;
                     self.server_pack_generations.insert(id, generation);
                     self.pending_pack_download.retain(|pack| pack.id != id);
-                    let cache_dir = self.resource_packs.server_cache_dir().to_path_buf();
-                    self.pending_pack_download.push(PendingPackDownload {
-                        id,
-                        generation,
-                        required,
-                        hash: hash.clone(),
-                        handle: std::thread::spawn(move || {
-                            ResourcePackManager::download_server_pack(&cache_dir, id, &url, &hash)
-                        }),
-                    });
+                    crate::app::phases::in_game::queue_resource_pack_prompt(
+                        &mut game.resource_pack_prompts,
+                        crate::app::phases::in_game::ResourcePackPrompt {
+                            id,
+                            url,
+                            hash,
+                            required,
+                            prompt,
+                            generation,
+                        },
+                    );
+                    // Don't let an input from the frame before the prompt appear approve it.
+                    self.input.clear_just_pressed_actions();
+                    self.input.consume_left_just_pressed();
+                    self.apply_cursor_grab(window, Some(game));
                 }
                 NetworkEvent::ResourcePackPop { id } => {
                     // A server may pop an id it already popped, or never pushed.
@@ -4307,17 +4402,26 @@ impl AppCore {
                         Some(id) => {
                             self.server_pack_generations.remove(&id);
                             self.pending_pack_download.retain(|pack| pack.id != id);
+                            crate::app::phases::in_game::remove_resource_pack_prompts(
+                                &mut game.resource_pack_prompts,
+                                Some(id),
+                            );
                             self.resource_packs.remove_server_pack(&id)
                         }
                         None => {
                             self.server_pack_generations.clear();
                             self.pending_pack_download.clear();
+                            crate::app::phases::in_game::remove_resource_pack_prompts(
+                                &mut game.resource_pack_prompts,
+                                None,
+                            );
                             self.resource_packs.clear_server_packs()
                         }
                     };
                     if removed {
                         self.reload_live_resource_assets(game, renderer);
                     }
+                    self.apply_cursor_grab(window, Some(game));
                 }
                 NetworkEvent::Reconfiguring => {
                     tracing::info!("Server re-entered configuration");
@@ -4335,6 +4439,7 @@ impl AppCore {
                     // `ServerReconfigScreen` replaces any dialog; the server
                     // links carry over.
                     game.server_dialog = None;
+                    game.resource_pack_prompts.clear();
                     game.configuring = true;
                     self.clear_server_ui(game, renderer);
                     self.apply_cursor_grab(window, Some(game));
@@ -4347,6 +4452,7 @@ impl AppCore {
                     set_first_disconnect_reason(&mut disconnect_reason, reason);
                     self.server_pack_generations.clear();
                     self.pending_pack_download.clear();
+                    game.resource_pack_prompts.clear();
                     game.pending_server_transfer = None;
                     self.clear_server_ui(game, renderer);
                     break;
@@ -4739,7 +4845,7 @@ impl AppCore {
         // A press queued while a menu or chat was open must not fire later.
         self.input.clear_click_counts();
 
-        let neutral = InputState::released();
+        let neutral = neutral_tick_input(&self.input);
         let input = if input_live { &self.input } else { &neutral };
 
         // Vanilla LocalPlayer.aiStep ride-jump charge. `was_jump_pressed`
@@ -4862,6 +4968,7 @@ impl AppCore {
             offhand_place_block,
             offhand_on_cooldown,
             hands_empty,
+            &game.player,
             &mut crate::player::interaction::BreakEffects {
                 particles: &mut game.particle_store,
                 registry: renderer.registry(),
@@ -7273,6 +7380,41 @@ mod mounted_tick_tests {
             };
             assert_vehicle(bytes, ride.horse());
         }
+    }
+
+    #[test]
+    fn login_world_reset_clears_entity_and_position_caches() {
+        let mut entities = crate::entity::EntityStore::new();
+        entities.spawn_living(
+            42,
+            azalea_registry::builtin::EntityKind::Shulker,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        let mut items = crate::entity::ItemEntityStore::new();
+        items.spawn_item(43, uuid::Uuid::nil(), Position::default(), glam::DVec3::ZERO);
+        let mut positions = HashMap::from([(42, Position::default()), (43, Position::default())]);
+        let mut silent = HashSet::from([42]);
+
+        clear_world_entities(&mut entities, &mut items, &mut positions, &mut silent);
+
+        assert!(entities.living.is_empty());
+        assert!(items.position(43).is_none());
+        assert!(positions.is_empty());
+        assert!(silent.is_empty());
+    }
+
+    #[test]
+    fn neutral_tick_releases_controls_but_keeps_the_selected_hotbar_slot() {
+        let mut actual = InputState::released();
+        actual.set_selected_slot(8);
+        let neutral = neutral_tick_input(&actual);
+        assert_eq!(neutral.selected_slot(), 8);
+        assert!(!neutral.is_cursor_captured());
+        assert!(!neutral.key_pressed(KEY_FORWARD));
+        assert_eq!(neutral_tick_input(&InputState::released()).selected_slot(), 0);
     }
 
     #[test]

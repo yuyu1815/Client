@@ -8,6 +8,7 @@ pub mod entity_model;
 mod entity_model_cape_tests;
 pub(crate) mod entity_models {
     pub mod aquatic;
+    pub mod armor;
     pub mod flying;
     pub mod humanoid;
     pub mod nonliving_special;
@@ -274,6 +275,7 @@ pub struct Renderer {
     block_overlay_pipeline: BlockOverlayPipeline,
     sky_pipeline: SkyPipeline,
     panorama_pipeline: PanoramaPipeline,
+    panorama_dir: PathBuf,
     menu_pipeline: MenuOverlayPipeline,
     blur_pipeline: BlurPipeline,
     skin_preview: SkinPreviewPipeline,
@@ -518,7 +520,12 @@ impl Renderer {
             ctx.command_pool,
             swapchain_state.render_pass,
             &ctx.allocator,
-            pipelines::panorama::resolve_panorama_faces(panorama_dir, jar_assets_dir, asset_index),
+            pipelines::panorama::resolve_panorama_faces(
+                panorama_dir,
+                jar_assets_dir,
+                asset_index,
+                &activation_pack_dirs,
+            ),
         );
         crate::app::startup_mark("renderer_pipelines_ready");
 
@@ -573,6 +580,7 @@ impl Renderer {
             &ctx.allocator,
             jar_assets_dir,
             asset_index,
+            &activation_pack_dirs,
         );
         entity_renderer.set_equipment_pack_dirs(&activation_pack_dirs);
 
@@ -703,6 +711,7 @@ impl Renderer {
             block_overlay_pipeline,
             sky_pipeline,
             panorama_pipeline,
+            panorama_dir: panorama_dir.to_path_buf(),
             menu_pipeline,
             blur_pipeline,
             skin_preview,
@@ -1759,7 +1768,10 @@ impl Renderer {
             ..
         }) = item_activation
         {
-            let item_name = crate::player::inventory::item_resource_name(stack.kind);
+            let item_name = crate::world::block::registry::BlockRegistry::item_model_name(
+                &azalea_inventory::ItemStack::Present(stack.clone()),
+            )
+            .unwrap_or_else(|| crate::player::inventory::item_resource_name(stack.kind));
             self.ensure_item_mesh(&item_name);
         }
         for map_quad in map_quads {
@@ -1861,6 +1873,29 @@ impl Renderer {
                 info.cape_has_humanoid_layer = false;
             }
 
+            info.humanoid_armor_layers.clear();
+            if pipelines::entity_renderer::humanoid_armor_target(info.entity_kind) {
+                for slot in [
+                    azalea_inventory::components::EquipmentSlot::Head,
+                    azalea_inventory::components::EquipmentSlot::Chest,
+                    azalea_inventory::components::EquipmentSlot::Legs,
+                    azalea_inventory::components::EquipmentSlot::Feet,
+                ] {
+                    let Some(stack) = info.armor_stand_equipment.get(&slot) else {
+                        continue;
+                    };
+                    let layers = pipelines::equipment::resolve_humanoid_equipment_layers(
+                        slot,
+                        stack,
+                        &self.jar_assets_dir,
+                        &self.asset_index,
+                        &self.activation_pack_dirs,
+                    );
+                    if !layers.is_empty() {
+                        info.humanoid_armor_layers.insert(slot, layers);
+                    }
+                }
+            }
             if info.entity_kind != azalea_registry::builtin::EntityKind::HappyGhast {
                 continue;
             }
@@ -1973,15 +2008,20 @@ impl Renderer {
         self.ctx.device.wait_idle().unwrap();
         self.entity_renderer
             .clear_equipment_textures(&self.ctx.device, &self.ctx.allocator);
-        self.entity_renderer.set_equipment_pack_dirs(
-            &packs
-                .active_pack_dirs()
-                .map(Path::to_path_buf)
-                .collect::<Vec<_>>(),
+        self.activation_pack_dirs = packs.active_pack_dirs().map(Path::to_path_buf).collect();
+        self.entity_renderer.reload_entity_textures(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &self.activation_pack_dirs,
         );
+        self.entity_renderer
+            .set_equipment_pack_dirs(&self.activation_pack_dirs);
         self.item_entity_pipeline
             .clear_head_textures(&self.ctx.device, &self.ctx.allocator);
-        self.activation_pack_dirs = packs.active_pack_dirs().map(Path::to_path_buf).collect();
         let replacement = BlockEntityPipeline::new(
             &self.ctx.device,
             self.ctx.graphics_queue,
@@ -2067,6 +2107,20 @@ impl Renderer {
         )
         .expect("failed to rebuild atlas");
 
+        let panorama_faces = pipelines::panorama::resolve_panorama_faces(
+            &self.panorama_dir,
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &self.activation_pack_dirs,
+        );
+        self.panorama_pipeline.reload_cubemap(
+            &self.ctx.device,
+            self.ctx.graphics_queue,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+            panorama_faces,
+        );
+
         self.chunk_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
         self.item_entity_pipeline
@@ -2110,10 +2164,12 @@ impl Renderer {
     }
 
     pub fn reload_panorama(&mut self, panorama_dir: &Path) {
+        self.panorama_dir = panorama_dir.to_path_buf();
         let faces = pipelines::panorama::resolve_panorama_faces(
             panorama_dir,
             &self.jar_assets_dir,
             &self.asset_index,
+            &self.activation_pack_dirs,
         );
         self.panorama_pipeline.reload_cubemap(
             &self.ctx.device,
@@ -2728,6 +2784,19 @@ impl Renderer {
                 // Only the entity-model path uses this cull; chunk/BE paths stay unchanged.
                 let entity_view_scale =
                     entity_view_scale(*render_distance, *entity_distance_percent);
+                for info in entities.iter() {
+                    for layer in info.humanoid_armor_layers.values().flatten() {
+                        self.entity_renderer.ensure_equipment_texture(
+                            &self.ctx.device,
+                            self.ctx.graphics_queue,
+                            self.ctx.command_pool,
+                            &self.ctx.allocator,
+                            &self.jar_assets_dir,
+                            &self.asset_index,
+                            &layer.texture_key,
+                        );
+                    }
+                }
                 for info in entities.iter().filter(|info| {
                     info.entity_kind == azalea_registry::builtin::EntityKind::HappyGhast
                 }) {
@@ -2993,7 +3062,13 @@ impl Renderer {
 
                 let activation_draw = item_activation.and_then(|draw| {
                     if let azalea_inventory::ItemStack::Present(stack) = draw.stack {
-                        let item_name = crate::player::inventory::item_resource_name(stack.kind);
+                        let item_name =
+                            crate::world::block::registry::BlockRegistry::item_model_name(
+                                draw.stack,
+                            )
+                            .unwrap_or_else(|| {
+                                crate::player::inventory::item_resource_name(stack.kind)
+                            });
                         let targets_ready =
                             self.activation_targets.is_some() && self.activation_pipeline.is_some();
                         (targets_ready

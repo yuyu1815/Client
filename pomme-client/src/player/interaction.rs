@@ -135,6 +135,57 @@ struct ActiveUse {
     remaining: i32,
 }
 
+#[derive(Clone, Copy)]
+struct MiningContext {
+    mining_efficiency: f32,
+    haste_amplifier: Option<u8>,
+    fatigue_amplifier: Option<u8>,
+    block_break_speed: f32,
+    submerged_mining_speed: f32,
+    eyes_in_water: bool,
+}
+
+impl Default for MiningContext {
+    fn default() -> Self {
+        Self {
+            mining_efficiency: 0.0,
+            haste_amplifier: None,
+            fatigue_amplifier: None,
+            block_break_speed: 1.0,
+            submerged_mining_speed: 0.2,
+            eyes_in_water: false,
+        }
+    }
+}
+
+impl MiningContext {
+    fn from_player(player: &crate::player::LocalPlayer) -> Self {
+        let mut result = Self {
+            mining_efficiency: player.attribute_value("minecraft:mining_efficiency", 0.0) as f32,
+            block_break_speed: player.attribute_value("minecraft:block_break_speed", 1.0) as f32,
+            submerged_mining_speed: player
+                .attribute_value("minecraft:submerged_mining_speed", 0.2)
+                as f32,
+            eyes_in_water: player.eyes_in_water,
+            ..Self::default()
+        };
+        for effect in player.effects.sorted_desc() {
+            match crate::mob_effect::info(effect.effect_id).map(|info| info.name) {
+                Some("haste" | "conduit_power") => {
+                    result.haste_amplifier = Some(
+                        result
+                            .haste_amplifier
+                            .map_or(effect.amplifier, |amp| amp.max(effect.amplifier)),
+                    );
+                }
+                Some("mining_fatigue") => result.fatigue_amplifier = Some(effect.amplifier),
+                _ => {}
+            }
+        }
+        result
+    }
+}
+
 pub struct InteractionState {
     pub target: Option<HitResult>,
     seq: u32,
@@ -177,6 +228,7 @@ pub struct InteractionState {
     attack_strength_ticker: u32,
     /// Vanilla `Player.lastItemInMainHand`; `None` is the empty hand.
     last_item_in_main_hand: Option<ItemStackData>,
+    mining_context: MiningContext,
 }
 
 impl InteractionState {
@@ -220,6 +272,7 @@ impl InteractionState {
             o_attack_anim: 0.0,
             attack_strength_ticker: 0,
             last_item_in_main_hand: None,
+            mining_context: MiningContext::default(),
         }
     }
 
@@ -542,8 +595,10 @@ impl InteractionState {
         offhand_place_block: Option<BlockState>,
         offhand_on_cooldown: bool,
         hands_empty: bool,
+        player: &crate::player::LocalPlayer,
         effects: &mut BreakEffects,
     ) -> Vec<BlockPos> {
+        self.mining_context = MiningContext::from_player(player);
         let mut dirty_chunks = Vec::new();
         self.tick_hand_animation(look);
         self.update_placement_heights(held_stack, offhand_stack);
@@ -1543,7 +1598,7 @@ impl InteractionState {
             return;
         }
 
-        let progress = destroy_progress(state, on_ground, creative, held_stack);
+        let progress = destroy_progress(state, on_ground, creative, held_stack, self.mining_context);
 
         if progress >= 1.0 {
             if self.is_destroying {
@@ -1653,7 +1708,13 @@ impl InteractionState {
             return;
         }
 
-        self.destroy_progress += destroy_progress(state, on_ground, creative, held_stack);
+        self.destroy_progress += destroy_progress(
+            state,
+            on_ground,
+            creative,
+            held_stack,
+            self.mining_context,
+        );
         if self.destroy_ticks % 4.0 == 0.0 {
             play_hit_sound(audio, state, hit.block_pos);
         }
@@ -1740,7 +1801,6 @@ impl InteractionState {
 /// `AttributeInstance.calculateValue`. Computed locally like vanilla's client;
 /// the server's `UpdateAttributes` snapshot is deliberately not used (it
 /// already bakes in the held item's modifier and lags item switches).
-/// TODO: haste / mining fatigue modifiers once mob effects are tracked.
 pub fn attack_speed(held: Option<&ItemStackData>) -> f64 {
     let base = 4.0f64;
     let mut add = 0.0f64;
@@ -1820,6 +1880,7 @@ fn destroy_progress(
     on_ground: bool,
     creative: bool,
     held_stack: Option<&ItemStackData>,
+    mining: MiningContext,
 ) -> f32 {
     if creative {
         return 1.0;
@@ -1845,9 +1906,24 @@ fn destroy_progress(
     let mut speed = tool.map_or(1.0, |t| {
         kind.map_or(t.default_mining_speed, |kind| tool_mining_speed(t, kind))
     });
-    // TODO: the `getDestroySpeed` modifier chain (mining efficiency, haste /
-    // mining fatigue, block break speed, submerged mining speed) needs
-    // attribute and mob-effect tracking.
+    if speed > 1.0 {
+        speed += mining.mining_efficiency;
+    }
+    if let Some(amplifier) = mining.haste_amplifier {
+        speed *= 1.0 + (f32::from(amplifier) + 1.0) * 0.2;
+    }
+    if let Some(amplifier) = mining.fatigue_amplifier {
+        speed *= match amplifier {
+            0 => 0.3,
+            1 => 0.09,
+            2 => 0.0027,
+            _ => 0.00081,
+        };
+    }
+    speed *= mining.block_break_speed;
+    if mining.eyes_in_water {
+        speed *= mining.submerged_mining_speed;
+    }
     if !on_ground {
         speed /= 5.0;
     }
@@ -3099,6 +3175,7 @@ mod tests {
                 None,
                 false,
                 false,
+                &crate::player::LocalPlayer::new(),
                 &mut BreakEffects {
                     particles: &mut particles,
                     registry: &registry,
@@ -4303,6 +4380,7 @@ mod tests {
                         None,
                         false,
                         false,
+                        &crate::player::LocalPlayer::new(),
                         &mut effects,
                     );
                     assert!(dirty.is_empty(), "air use must not dirty blocks: {name}");
@@ -4465,6 +4543,7 @@ mod tests {
                     None,
                     false,
                     true,
+                    &crate::player::LocalPlayer::new(),
                     &mut effects,
                 );
             };
@@ -5013,6 +5092,7 @@ mod tests {
                 None,
                 false,
                 true,
+                &crate::player::LocalPlayer::new(),
                 &mut effects,
             );
             input.clear_just_pressed_actions();
@@ -5031,6 +5111,35 @@ mod tests {
     }
 
     #[test]
+    fn neutral_gui_input_preserves_carried_slot_and_real_slot_changes_sync_once() {
+        use crate::net::sender::Outbound;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let mut interaction = InteractionState::new();
+        interaction.carried_slot = 8;
+
+        let mut neutral = InputState::released();
+        neutral.set_selected_slot(8);
+        interaction.ensure_has_sent_carried_item(&sender, neutral.selected_slot());
+        assert!(rx.try_recv().is_err(), "GUI neutral input must not resend slot 8");
+
+        interaction.ensure_has_sent_carried_item(&sender, 4);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Outbound::Packet(packet))
+                if matches!(*packet, ServerboundGamePacket::SetCarriedItem(ref p) if p.slot == 4)
+        ));
+        assert!(rx.try_recv().is_err(), "a slot change sends one packet");
+
+        interaction.ensure_has_sent_carried_item(&sender, 0);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Outbound::Packet(packet))
+                if matches!(*packet, ServerboundGamePacket::SetCarriedItem(ref p) if p.slot == 0)
+        ));
+    }
+
+    #[test]
     fn mining_uses_native_block_kind_instead_of_data_free_air_shim() {
         let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
@@ -5040,10 +5149,71 @@ mod tests {
         assert_eq!(crate::world::block::block_id(oak_wood), "oak_wood");
         assert_eq!(oak_wood.as_block_kind(), BlockKind::Air);
         assert_eq!(
-            destroy_progress(oak_wood, true, false, Some(&axe)),
+            destroy_progress(oak_wood, true, false, Some(&axe), MiningContext::default()),
             1.0 / 15.0
         );
-        assert_eq!(destroy_progress(oak_wood, true, false, None), 1.0 / 60.0);
+        assert_eq!(
+            destroy_progress(oak_wood, true, false, None, MiningContext::default()),
+            1.0 / 60.0
+        );
         assert_eq!(tool_mining_speed(&tool, "oak_wood".parse().unwrap()), 4.0);
+        let modified = MiningContext {
+            haste_amplifier: Some(0),
+            fatigue_amplifier: Some(u8::MAX),
+            ..MiningContext::default()
+        };
+        assert_eq!(
+            destroy_progress(oak_wood, true, false, Some(&axe), modified),
+            4.0 * 1.2 * 0.00081 / 2.0 / 30.0
+        );
+
+        let mut player = crate::player::LocalPlayer::new();
+        let effect = |effect_id, amplifier| crate::mob_effect::MobEffectInstance {
+            effect_id,
+            amplifier,
+            duration: -1,
+            ambient: false,
+            show_particles: true,
+            show_icon: true,
+        };
+        player.effects.update(effect(2, 0)); // Haste I
+        player.effects.update(effect(28, 1)); // Conduit Power II wins by amplifier
+        player.effects.update(effect(3, u8::MAX)); // indefinite Fatigue IV+
+        let context = MiningContext::from_player(&player);
+        assert_eq!(context.haste_amplifier, Some(1));
+        assert_eq!(context.fatigue_amplifier, Some(u8::MAX));
+        player.effects.remove(28);
+
+        let gold_ore = crate::world::block::default_state_of("gold_ore").unwrap();
+        let golden_pickaxe = ItemStackData::new(ItemKind::GoldenPickaxe, 1);
+        let gold_tool = crate::player::menu_click::component::<Tool>(&golden_pickaxe).unwrap();
+        assert_eq!(tool_mining_speed(&gold_tool, "gold_ore".parse().unwrap()), 12.0);
+        assert!(!tool_correct_for_drops(&gold_tool, "gold_ore".parse().unwrap()));
+        let gold_context = MiningContext::from_player(&player);
+        let increment = destroy_progress(gold_ore, true, false, Some(&golden_pickaxe), gold_context);
+        assert_eq!(increment, 12.0 * 1.2 * 0.00081 / 3.0 / 100.0);
+        assert!(increment * 25.0 < 1.0);
+
+        player.set_attribute_value("minecraft:mining_efficiency", 2.0);
+        player.set_attribute_value("minecraft:block_break_speed", 1.5);
+        player.set_attribute_value("minecraft:submerged_mining_speed", 0.25);
+        player.eyes_in_water = true;
+        let context = MiningContext::from_player(&player);
+        let water_increment = destroy_progress(gold_ore, true, false, Some(&golden_pickaxe), context);
+        assert_eq!(water_increment, 14.0 * 1.2 * 0.00081 * 1.5 * 0.25 / 3.0 / 100.0);
+        assert_eq!(
+            destroy_progress(
+                oak_wood,
+                true,
+                false,
+                None,
+                MiningContext {
+                    mining_efficiency: 100.0,
+                    ..MiningContext::default()
+                }
+            ),
+            1.0 / 60.0,
+            "mining efficiency does not increase a base speed of 1",
+        );
     }
 }

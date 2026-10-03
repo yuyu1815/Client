@@ -700,7 +700,7 @@ impl ApplicationHandler for App {
                                     if !game.handle_debug_key(code, f3_held, &connection) {
                                         self.core.input.on_menu_key_event(&event);
                                     }
-                                } else if server_dialog_takes_key(game.server_dialog.is_some(), &game.chat) {
+                                } else if server_dialog_takes_key(game.dialog_open(), &game.chat) {
                                     crate::app::phases::in_game::server_dialog_key(
                                         code,
                                         &event,

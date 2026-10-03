@@ -402,6 +402,15 @@ pub fn push_slot(
     hovered
 }
 
+/// Selects the baked icon key while preserving the legacy key for empty stacks.
+pub(super) fn item_icon_name(
+    stack: &ItemStack,
+    kind: azalea_registry::builtin::ItemKind,
+) -> String {
+    crate::world::block::registry::BlockRegistry::item_model_name(stack)
+        .unwrap_or_else(|| item_resource_name(kind))
+}
+
 /// Draws an item icon (and its stack count when > 1) at the given position.
 pub fn push_item_icon(
     elements: &mut Vec<MenuElement>,
@@ -411,16 +420,15 @@ pub fn push_item_icon(
     scale: f32,
     data: &ItemStackData,
 ) {
+    let stack = ItemStack::Present(data.clone());
     elements.push(MenuElement::ItemIcon {
         x,
         y,
         w: size,
         h: size,
-        item_name: item_resource_name(data.kind),
+        item_name: item_icon_name(&stack, data.kind),
         player_head_profile_source:
-            crate::world::block_entity::player_head_profile_source_from_item(&ItemStack::Present(
-                data.clone(),
-            )),
+            crate::world::block_entity::player_head_profile_source_from_item(&stack),
         tint: WHITE,
         stack_dye_rgb: crate::player::menu_click::component::<
             azalea_inventory::components::DyedColor,
@@ -675,6 +683,99 @@ pub struct SliderResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_item_icon_uses_each_stacks_item_model() {
+        use azalea_inventory::components::ItemModel;
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+        use azalea_registry::identifier::Identifier;
+
+        let mut first = ItemStackData::new(ItemKind::Stone, 1);
+        let mut second = ItemStackData::new(ItemKind::Stone, 1);
+        // SAFETY: ItemModel is inserted under its matching component kind.
+        unsafe {
+            first.component_patch.unchecked_insert_component(
+                DataComponentKind::ItemModel,
+                Some(
+                    ItemModel {
+                        resource_location: Identifier::new("minecraft:first"),
+                    }
+                    .into(),
+                ),
+            );
+            second.component_patch.unchecked_insert_component(
+                DataComponentKind::ItemModel,
+                Some(
+                    ItemModel {
+                        resource_location: Identifier::new("example:nested/second"),
+                    }
+                    .into(),
+                ),
+            );
+        }
+        let mut elements = Vec::new();
+        push_item_icon(&mut elements, 0.0, 0.0, 16.0, 1.0, &first);
+        push_item_icon(&mut elements, 16.0, 0.0, 16.0, 1.0, &second);
+        let names: Vec<_> = elements
+            .iter()
+            .filter_map(|element| match element {
+                MenuElement::ItemIcon { item_name, .. } => Some(item_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["first", "example:nested/second"]);
+    }
+
+    #[test]
+    fn item_icon_name_preserves_vanilla_nested_unknown_and_empty_keys() {
+        use azalea_inventory::components::ItemModel;
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+        use azalea_registry::identifier::Identifier;
+
+        let stone = ItemStack::new(ItemKind::Stone, 1);
+        let mut nested = stone.clone();
+        let ItemStack::Present(data) = &mut nested else {
+            unreachable!();
+        };
+        // SAFETY: ItemModel is inserted under its matching component kind.
+        unsafe {
+            data.component_patch.unchecked_insert_component(
+                DataComponentKind::ItemModel,
+                Some(
+                    ItemModel {
+                        resource_location: Identifier::new("minecraft:deep/path"),
+                    }
+                    .into(),
+                ),
+            );
+        }
+        let mut unknown = stone.clone();
+        let ItemStack::Present(data) = &mut unknown else {
+            unreachable!();
+        };
+        // SAFETY: ItemModel is inserted under its matching component kind.
+        unsafe {
+            data.component_patch.unchecked_insert_component(
+                DataComponentKind::ItemModel,
+                Some(
+                    ItemModel {
+                        resource_location: Identifier::new("missing:deep/path"),
+                    }
+                    .into(),
+                ),
+            );
+        }
+        assert_eq!(item_icon_name(&stone, ItemKind::Stone), "stone");
+        assert_eq!(item_icon_name(&nested, ItemKind::Stone), "deep/path");
+        assert_eq!(
+            item_icon_name(&unknown, ItemKind::Stone),
+            "missing:deep/path"
+        );
+        assert_eq!(
+            item_icon_name(&ItemStack::default(), ItemKind::Stone),
+            "stone"
+        );
+    }
 
     #[test]
     fn player_head_profile_survives_slot_and_cursor_extraction() {

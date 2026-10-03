@@ -160,9 +160,214 @@ pub fn resolve_equipment_texture(
     path.is_file().then_some(path)
 }
 
+/// Resolve the ordered humanoid texture layers for one equipped item.
+pub fn resolve_humanoid_equipment_layers(
+    slot: azalea_inventory::components::EquipmentSlot,
+    stack: &azalea_inventory::ItemStack,
+    jar_assets: &Path,
+    index: &Option<AssetIndex>,
+    pack_dirs: &[PathBuf],
+) -> Vec<ResolvedEquipmentLayer> {
+    let azalea_inventory::ItemStack::Present(stack) = stack else {
+        return Vec::new();
+    };
+    let layer_type = match slot {
+        azalea_inventory::components::EquipmentSlot::Head
+        | azalea_inventory::components::EquipmentSlot::Chest
+        | azalea_inventory::components::EquipmentSlot::Feet => "humanoid",
+        azalea_inventory::components::EquipmentSlot::Legs => "humanoid_leggings",
+        _ => return Vec::new(),
+    };
+    let Some(equippable) =
+        crate::player::menu_click::component::<azalea_inventory::components::Equippable>(stack)
+    else {
+        return Vec::new();
+    };
+    if equippable.slot != slot {
+        return Vec::new();
+    }
+    let Some(asset_id) = equippable.asset_id.map(|id| id.to_string()) else {
+        return Vec::new();
+    };
+    let Some(layers) = resolve_equipment_layers_with_pack_dirs(
+        jar_assets, index, pack_dirs, &asset_id, layer_type,
+    ) else {
+        return Vec::new();
+    };
+    let dyed_color =
+        crate::player::menu_click::component::<azalea_inventory::components::DyedColor>(stack)
+            .map(|color| color.rgb as u32);
+    layers
+        .iter()
+        .filter_map(|layer| {
+            let tint = match &layer.dyeable {
+                Some(dyeable) => dyed_color.or(dyeable.color_when_undyed).unwrap_or(u32::MAX),
+                None => u32::MAX,
+            };
+            Some(ResolvedEquipmentLayer {
+                texture_key: equipment_layer_asset_key(layer_type, &layer.texture)?,
+                tint_rgb: [(tint >> 16) as u8, (tint >> 8) as u8, tint as u8],
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standard_iron_helmet_resolves_vanilla_humanoid_texture() {
+        use azalea_inventory::components::EquipmentSlot;
+        use azalea_inventory::{ItemStack, ItemStackData};
+        use azalea_registry::builtin::ItemKind;
+
+        let temp =
+            std::env::temp_dir().join(format!("equipment-standard-{}", uuid::Uuid::new_v4()));
+        let definition = temp.join("minecraft/equipment/iron.json");
+        std::fs::create_dir_all(definition.parent().unwrap()).unwrap();
+        std::fs::write(
+            &definition,
+            r#"{"layers":{"humanoid":[{"texture":"minecraft:iron"}],"humanoid_leggings":[{"texture":"minecraft:iron"}]}}"#,
+        )
+        .unwrap();
+        let helmet = ItemStack::Present(ItemStackData::new(ItemKind::IronHelmet, 1));
+        let layers =
+            resolve_humanoid_equipment_layers(EquipmentSlot::Head, &helmet, &temp, &None, &[]);
+        assert_eq!(layers.len(), 1);
+        assert_eq!(
+            layers[0].texture_key,
+            "minecraft/textures/entity/equipment/humanoid/iron.png"
+        );
+        assert_eq!(layers[0].tint_rgb, [255, 255, 255]);
+        let leggings = ItemStack::Present(ItemStackData::new(ItemKind::IronLeggings, 1));
+        let layers =
+            resolve_humanoid_equipment_layers(EquipmentSlot::Legs, &leggings, &temp, &None, &[]);
+        assert_eq!(
+            layers[0].texture_key,
+            "minecraft/textures/entity/equipment/humanoid_leggings/iron.png"
+        );
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn custom_asset_keeps_order_tint_and_highest_pack_priority() {
+        use azalea_inventory::components::{DyedColor, EquipmentSlot, Equippable};
+        use azalea_inventory::{ItemStack, ItemStackData};
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+
+        let temp = std::env::temp_dir().join(format!("equipment-custom-{}", uuid::Uuid::new_v4()));
+        let jar = temp.join("jar");
+        let pack_a = temp.join("pack-a");
+        let pack_b = temp.join("pack-b");
+        let write = |root: &Path, texture: &str| {
+            let path = root.join("assets/custom/equipment/armor.json");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!(r#"{{"layers":{{"humanoid":[{{"texture":"{texture}","dyeable":{{"color_when_undyed":1122867}}}},{{"texture":"other:plain"}}]}}}}"#)).unwrap();
+        };
+        write(&jar, "other:jar");
+        write(&pack_a, "other:pack_a");
+        write(&pack_b, "other:pack_b");
+        let mut data = ItemStackData::new(ItemKind::LeatherChestplate, 1);
+        let mut equippable = Equippable::new();
+        equippable.slot = EquipmentSlot::Chest;
+        equippable.asset_id = Some("custom:armor".parse().unwrap());
+        unsafe {
+            data.component_patch
+                .unchecked_insert_component(DataComponentKind::Equippable, Some(equippable.into()));
+            data.component_patch.unchecked_insert_component(
+                DataComponentKind::DyedColor,
+                Some(DyedColor { rgb: 0x123456 }.into()),
+            );
+        }
+        let stack = ItemStack::Present(data);
+        let layers = resolve_humanoid_equipment_layers(
+            EquipmentSlot::Chest,
+            &stack,
+            &jar,
+            &None,
+            &[pack_a, pack_b],
+        );
+        assert_eq!(layers.len(), 2);
+        assert_eq!(
+            layers[0].texture_key,
+            "other/textures/entity/equipment/humanoid/pack_b.png"
+        );
+        assert_eq!(layers[0].tint_rgb, [0x12, 0x34, 0x56]);
+        assert_eq!(
+            layers[1].texture_key,
+            "other/textures/entity/equipment/humanoid/plain.png"
+        );
+        assert_eq!(layers[1].tint_rgb, [255, 255, 255]);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn explicit_equippable_removal_slot_mismatch_and_empty_stack_resolve_nothing() {
+        use azalea_inventory::components::{EquipmentSlot, Equippable};
+        use azalea_inventory::{ItemStack, ItemStackData};
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+
+        let temp = std::env::temp_dir().join(format!("equipment-empty-{}", uuid::Uuid::new_v4()));
+        let mut data = ItemStackData::new(ItemKind::IronHelmet, 1);
+        let mut wrong_slot = Equippable::new();
+        wrong_slot.slot = EquipmentSlot::Chest;
+        unsafe {
+            data.component_patch
+                .unchecked_insert_component(DataComponentKind::Equippable, Some(wrong_slot.into()));
+        }
+        assert!(
+            resolve_humanoid_equipment_layers(
+                EquipmentSlot::Head,
+                &ItemStack::Present(data.clone()),
+                &temp,
+                &None,
+                &[]
+            )
+            .is_empty()
+        );
+        let mut no_asset = Equippable::new();
+        no_asset.slot = EquipmentSlot::Head;
+        unsafe {
+            data.component_patch
+                .unchecked_insert_component(DataComponentKind::Equippable, Some(no_asset.into()));
+        }
+        assert!(
+            resolve_humanoid_equipment_layers(
+                EquipmentSlot::Head,
+                &ItemStack::Present(data.clone()),
+                &temp,
+                &None,
+                &[]
+            )
+            .is_empty()
+        );
+        unsafe {
+            data.component_patch
+                .unchecked_insert_component(DataComponentKind::Equippable, None);
+        }
+        assert!(
+            resolve_humanoid_equipment_layers(
+                EquipmentSlot::Head,
+                &ItemStack::Present(data),
+                &temp,
+                &None,
+                &[]
+            )
+            .is_empty()
+        );
+        assert!(
+            resolve_humanoid_equipment_layers(
+                EquipmentSlot::Head,
+                &ItemStack::Empty,
+                &temp,
+                &None,
+                &[]
+            )
+            .is_empty()
+        );
+        std::fs::remove_dir_all(temp).ok();
+    }
 
     #[test]
     fn equipment_layers_and_texture_paths_follow_vanilla_identifiers() {

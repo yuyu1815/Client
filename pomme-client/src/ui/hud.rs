@@ -7,7 +7,6 @@ use glam::DVec3;
 use super::common::{FONT_SIZE, TextWidthFn, WHITE, push_item_count};
 use crate::chat_component::{Component, Style};
 use crate::mob_effect::ActiveMobEffects;
-use crate::player::inventory::item_resource_name;
 use crate::renderer::pipelines::menu_overlay::{MenuElement, SpriteId};
 use crate::ui::boss_bar::BossBarState;
 use crate::ui::text::TextSpan;
@@ -716,7 +715,7 @@ pub fn build_hud(
                     y: iy,
                     w: item_size,
                     h: item_size,
-                    item_name: item_resource_name(data.kind),
+                    item_name: super::common::item_icon_name(item, data.kind),
                     player_head_profile_source:
                         crate::world::block_entity::player_head_profile_source_from_item(item),
                     tint: WHITE,

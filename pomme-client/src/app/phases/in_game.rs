@@ -230,6 +230,39 @@ fn tab_list_overlay_visible(
         && !death_screen_open
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResourcePackPrompt {
+    pub id: uuid::Uuid,
+    pub url: String,
+    pub hash: String,
+    pub required: bool,
+    pub prompt: Option<azalea_chat::FormattedText>,
+    pub generation: u64,
+}
+
+pub fn queue_resource_pack_prompt(
+    queue: &mut std::collections::VecDeque<ResourcePackPrompt>,
+    prompt: ResourcePackPrompt,
+) {
+    queue.retain(|queued| queued.id != prompt.id);
+    queue.push_back(prompt);
+}
+
+pub fn remove_resource_pack_prompts(
+    queue: &mut std::collections::VecDeque<ResourcePackPrompt>,
+    id: Option<uuid::Uuid>,
+) {
+    if let Some(id) = id {
+        queue.retain(|prompt| prompt.id != id);
+    } else {
+        queue.clear();
+    }
+}
+
+pub fn resource_pack_decline_reason(required: bool) -> Option<&'static str> {
+    required.then_some("Required resource pack declined")
+}
+
 pub struct GameState {
     pub chunk_store: ChunkStore,
     /// Client-side light engine (vanilla `LevelLightEngine`); recreated with
@@ -314,6 +347,7 @@ pub struct GameState {
     pub server_links: Vec<crate::ui::server_dialog::ServerLink>,
     pub code_of_conduct: Option<String>,
     pub code_of_conduct_scroll: usize,
+    pub resource_pack_prompts: std::collections::VecDeque<ResourcePackPrompt>,
     pub pending_server_transfer: Option<crate::net::ServerTransfer>,
     pub dialog_registry: Arc<crate::ui::server_dialog::DialogRegistry>,
     pub loom_patterns: Arc<crate::ui::loom::PatternData>,
@@ -795,6 +829,7 @@ impl GameState {
             server_links: Vec::new(),
             code_of_conduct: None,
             code_of_conduct_scroll: 0,
+            resource_pack_prompts: std::collections::VecDeque::new(),
             pending_server_transfer: None,
             dialog_registry: Arc::default(),
             loom_patterns: Arc::default(),
@@ -902,7 +937,9 @@ impl GameState {
     /// Vanilla runs no key mapping while a screen is up, and the screens under
     /// it neither draw nor take input.
     pub fn dialog_open(&self) -> bool {
-        self.server_dialog.is_some() || self.chat.has_pending_modal_prompt()
+        self.server_dialog.is_some()
+            || !self.resource_pack_prompts.is_empty()
+            || self.chat.has_pending_modal_prompt()
     }
 
     fn server_modal_blocks_credits(&self) -> bool {
@@ -2356,6 +2393,126 @@ pub(crate) fn build_server_screens(
     tick: Option<u64>,
     text_events: &[crate::ui::text_edit::TextInputEvent],
 ) {
+    if let Some(prompt) = game.resource_pack_prompts.front().cloned() {
+        let panel = [sw * 0.2, sh * 0.34, sw * 0.6, 150.0 * gs];
+        elements.push(MenuElement::Rect {
+            x: panel[0],
+            y: panel[1],
+            w: panel[2],
+            h: panel[3],
+            corner_radius: 5.0,
+            color: [0.04, 0.04, 0.06, 0.96],
+        });
+        elements.push(MenuElement::Text {
+            x: sw / 2.0,
+            y: panel[1] + 18.0 * gs,
+            text: crate::lang::ui("Server Resource Pack", "サーバーリソースパック").into(),
+            scale: common::FONT_SIZE * gs * 1.4,
+            color: [1.0; 4],
+            centered: true,
+        });
+        if let Some(server_prompt) = &prompt.prompt {
+            elements.push(MenuElement::TextSpans {
+                x: sw / 2.0,
+                y: panel[1] + 52.0 * gs,
+                spans: crate::ui::text::format_text_spans(server_prompt, [0.92, 0.92, 0.92, 1.0]),
+                scale: common::FONT_SIZE * gs,
+                centered: true,
+            });
+        } else {
+            let description = if prompt.url.is_empty() {
+                crate::lang::ui(
+                    "The server requests a resource pack.",
+                    "サーバーがリソースパックを要求しています。",
+                )
+            } else {
+                crate::lang::ui(
+                    "The server requests a resource pack download.",
+                    "サーバーがリソースパックのダウンロードを要求しています。",
+                )
+            };
+            elements.push(MenuElement::Text {
+                x: sw / 2.0,
+                y: panel[1] + 52.0 * gs,
+                text: description.into(),
+                scale: common::FONT_SIZE * gs,
+                color: [0.92, 0.92, 0.92, 1.0],
+                centered: true,
+            });
+        }
+        let required = if prompt.required {
+            crate::lang::ui(
+                "Required: declining disconnects you.",
+                "必須: 拒否すると切断されます。",
+            )
+        } else {
+            crate::lang::ui("Optional: you may decline.", "任意: 拒否できます。")
+        };
+        elements.push(MenuElement::Text {
+            x: sw / 2.0,
+            y: panel[1] + 72.0 * gs,
+            text: required.into(),
+            scale: common::FONT_SIZE * gs,
+            color: [0.92, 0.92, 0.92, 1.0],
+            centered: true,
+        });
+        let accept = [
+            sw / 2.0 - 108.0 * gs,
+            panel[1] + panel[3] - 42.0 * gs,
+            96.0 * gs,
+            24.0 * gs,
+        ];
+        let decline = [sw / 2.0 + 12.0 * gs, accept[1], 96.0 * gs, 24.0 * gs];
+        let decline_label = if prompt.required {
+            crate::lang::ui("Disconnect", "切断")
+        } else {
+            crate::lang::ui("Decline", "拒否")
+        };
+        for (r, label, color) in [
+            (
+                accept,
+                crate::lang::ui("Download", "ダウンロード"),
+                [0.12, 0.42, 0.18, 1.0],
+            ),
+            (decline, decline_label, [0.48, 0.14, 0.14, 1.0]),
+        ] {
+            elements.push(MenuElement::Rect {
+                x: r[0],
+                y: r[1],
+                w: r[2],
+                h: r[3],
+                corner_radius: 3.0,
+                color,
+            });
+            elements.push(MenuElement::Text {
+                x: r[0] + r[2] / 2.0,
+                y: r[1] + 7.0 * gs,
+                text: label.into(),
+                scale: common::FONT_SIZE * gs,
+                color: [1.0; 4],
+                centered: true,
+            });
+        }
+        let cursor = core.input.cursor_pos();
+        let hit = |r: [f32; 4]| {
+            cursor.0 >= r[0]
+                && cursor.0 <= r[0] + r[2]
+                && cursor.1 >= r[1]
+                && cursor.1 <= r[1] + r[3]
+        };
+        if core.input.escape_pressed() || (core.input.left_just_pressed() && hit(decline)) {
+            game.resource_pack_prompts.pop_front();
+            core.decline_server_pack(connection, prompt);
+            core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
+        } else if core.input.left_just_pressed() && hit(accept) {
+            game.resource_pack_prompts.pop_front();
+            core.accept_server_pack(connection, prompt);
+            core.apply_cursor_grab(gfx.window.as_ref(), Some(game));
+        }
+        core.input.consume_left_just_pressed();
+        core.input.clear_just_pressed_actions();
+        return;
+    }
     if game.command_block_edit.is_some() {
         let cursor = core.input.cursor_pos();
         let pressed = core.input.left_just_pressed();
@@ -2810,6 +2967,18 @@ pub(crate) fn server_dialog_key(
 ) {
     use winit::keyboard::KeyCode;
 
+    if game.code_of_conduct.is_none()
+        && let Some(prompt) = game.resource_pack_prompts.pop_front()
+    {
+        if code == KeyCode::Escape {
+            core.decline_server_pack(connection, prompt);
+            core.input.clear_just_pressed_actions();
+            core.apply_cursor_grab(window, Some(game));
+            return;
+        }
+        game.resource_pack_prompts.push_front(prompt);
+        return;
+    }
     if game.chat.has_pending_modal_prompt() {
         // `ConfirmScreen` answers Escape with `accept(false)`, which returns
         // to the screen under it.
@@ -5814,7 +5983,8 @@ pub fn update_game(
             let azalea_inventory::ItemStack::Present(stack) = &vehicle.item_display_stack else {
                 continue;
             };
-            let item_name = crate::player::inventory::item_resource_name(stack.kind);
+            let item_name = item_render_model_name(&vehicle.item_display_stack)
+                .unwrap_or_else(|| crate::player::inventory::item_resource_name(stack.kind));
             gfx.renderer.ensure_item_mesh(&item_name);
             let pos = vehicle
                 .prev_position
@@ -6128,7 +6298,8 @@ pub fn update_game(
     } else {
         let held_item = |held_stack: &azalea_inventory::ItemStack| match held_stack {
             azalea_inventory::ItemStack::Present(data) if data.count > 0 => {
-                let name = crate::player::inventory::item_resource_name(data.kind);
+                let name = item_render_model_name(held_stack)
+                    .unwrap_or_else(|| crate::player::inventory::item_resource_name(data.kind));
                 (name != "air").then(|| {
                     let light =
                         get_entity_light(&game.chunk_store, gfx.renderer.camera_pivot_position());
@@ -7285,8 +7456,62 @@ fn transform_item_bounds(
 #[cfg(test)]
 mod dropped_item_tests {
     use super::{
-        item_frame_base_matrix, item_frame_item_matrix, item_stack_seed, transform_item_bounds,
+        emit_item_copies, item_frame_base_matrix, item_frame_item_matrix, item_render_model_name,
+        item_stack_seed, transform_item_bounds,
     };
+
+    #[test]
+    fn dropped_render_info_uses_each_stack_item_model_override() {
+        use azalea_inventory::ItemStack;
+        use azalea_inventory::components::ItemModel;
+        use azalea_registry::builtin::ItemKind;
+
+        let first = ItemStack::new(ItemKind::Stone, 1).with_component(ItemModel {
+            resource_location: azalea_registry::identifier::Identifier::new("minecraft:first"),
+        });
+        let second = ItemStack::new(ItemKind::Stone, 1).with_component(ItemModel {
+            resource_location: azalea_registry::identifier::Identifier::new("other:nested/second"),
+        });
+        let vanilla_bow = ItemStack::new(ItemKind::Bow, 1);
+        assert_eq!(item_render_model_name(&vanilla_bow).as_deref(), Some("bow"));
+        let names = [&first, &second].map(|stack| item_render_model_name(stack).unwrap());
+        let mut infos = Vec::new();
+        for name in &names {
+            emit_item_copies(
+                &mut infos,
+                name,
+                None,
+                None,
+                1,
+                0,
+                1,
+                glam::Vec3::ZERO,
+                0.0,
+                0.0,
+                0.0,
+                false,
+                false,
+                glam::Mat4::IDENTITY,
+                0.0,
+                1.0,
+                1.0,
+                false,
+                None,
+                false,
+                None,
+                0.0,
+                glam::DVec3::ZERO,
+                1,
+            );
+        }
+        assert_eq!(
+            infos
+                .iter()
+                .map(|info| info.item_name.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "other:nested/second"]
+        );
+    }
 
     #[test]
     fn dropped_item_copies_preserve_player_head_profile() {
@@ -7437,6 +7662,10 @@ mod dropped_item_tests {
         assert!((min - glam::Vec3::new(-0.25, -0.0625, -0.25)).length() < 1.0e-6);
         assert!((max - glam::Vec3::new(0.25, 0.4375, 0.25)).length() < 1.0e-6);
     }
+}
+
+fn item_render_model_name(stack: &azalea_inventory::ItemStack) -> Option<String> {
+    crate::world::block::registry::BlockRegistry::item_model_name(stack)
 }
 
 fn dropped_item_geometry(renderer: &Renderer, item_name: &str) -> (glam::Mat4, f32, f32) {
@@ -7721,12 +7950,8 @@ fn snowball_render_infos(
                 azalea_registry::builtin::EntityKind::SplashPotion => ("splash_potion", 1.0, false),
                 _ => return None,
             };
-            let item_name = match &vehicle.projectile_item {
-                azalea_inventory::ItemStack::Present(stack) if !stack.is_empty() => {
-                    crate::player::inventory::item_resource_name(stack.kind)
-                }
-                _ => default_item_name.to_owned(),
-            };
+            let item_name = item_render_model_name(&vehicle.projectile_item)
+                .unwrap_or_else(|| default_item_name.to_owned());
             let ground_transform = ground_transform(&item_name)?;
             let raw_dye_rgb = match &vehicle.projectile_item {
                 azalea_inventory::ItemStack::Present(stack) => {
@@ -7846,10 +8071,18 @@ fn build_item_render_infos(
         };
         let lerped = item.prev_position.lerp(item.position, partial_tick as f64);
         let light = get_entity_light(chunk_store, lerped);
-        let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &item.item_name);
+        let item_name = item
+            .stack
+            .as_ref()
+            .map(|stack| {
+                item_render_model_name(&azalea_inventory::ItemStack::Present(stack.clone()))
+                    .unwrap_or_else(|| item.item_name.clone())
+            })
+            .unwrap_or_else(|| item.item_name.clone());
+        let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &item_name);
         emit_item_copies(
             &mut infos,
-            &item.item_name,
+            &item_name,
             item.stack
                 .as_ref()
                 .and_then(|stack| {
@@ -7894,10 +8127,18 @@ fn build_item_render_infos(
     for pickup in entity_store.active_pickups(partial_tick) {
         let age_f = pickup.age as f32 + partial_tick;
         let light = get_entity_light(chunk_store, pickup.position);
-        let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &pickup.item_name);
+        let item_name = pickup
+            .stack
+            .as_ref()
+            .map(|stack| {
+                item_render_model_name(&azalea_inventory::ItemStack::Present(stack.clone()))
+                    .unwrap_or_else(|| pickup.item_name.clone())
+            })
+            .unwrap_or_else(|| pickup.item_name.clone());
+        let (ground_transform, min_y, z_size) = dropped_item_geometry(renderer, &item_name);
         emit_item_copies(
             &mut infos,
-            &pickup.item_name,
+            &item_name,
             pickup
                 .stack
                 .as_ref()
@@ -8031,7 +8272,8 @@ fn build_item_render_infos(
             && crate::player::menu_click::component::<azalea_inventory::components::MapId>(stack)
                 .is_none()
         {
-            let name = crate::player::inventory::item_resource_name(stack.kind);
+            let name = item_render_model_name(&frame.item_frame_item)
+                .unwrap_or_else(|| crate::player::inventory::item_resource_name(stack.kind));
             let frame_item_transform = item_frame_item_matrix(
                 base_matrix,
                 frame.item_frame_rotation,
@@ -10997,5 +11239,39 @@ mod tests {
             minecart_cargo_state_for(K::ChestMinecart, Some(u32::from(custom)), false).unwrap();
         assert_eq!(override_state, custom);
         assert!(minecart_cargo_state_for(K::ChestMinecart, Some(u32::MAX), false).is_none());
+    }
+
+    #[test]
+    fn resource_pack_prompts_are_fifo_and_same_id_replaces_in_place_at_tail() {
+        let id = uuid::Uuid::nil();
+        let second = uuid::Uuid::from_u128(2);
+        let mut queue = std::collections::VecDeque::new();
+        let prompt = |id, required| super::ResourcePackPrompt {
+            id,
+            url: "url".into(),
+            hash: String::new(),
+            required,
+            prompt: None,
+            generation: 1,
+        };
+        super::queue_resource_pack_prompt(&mut queue, prompt(id, false));
+        super::queue_resource_pack_prompt(&mut queue, prompt(second, true));
+        super::queue_resource_pack_prompt(&mut queue, prompt(id, true));
+        assert_eq!(queue.iter().map(|p| p.id).collect::<Vec<_>>(), [second, id]);
+        assert!(queue.front().unwrap().required);
+        assert!(queue.pop_front().unwrap().required);
+        assert_eq!(queue.pop_front().unwrap().id, id);
+
+        super::queue_resource_pack_prompt(&mut queue, prompt(id, false));
+        super::queue_resource_pack_prompt(&mut queue, prompt(second, true));
+        super::remove_resource_pack_prompts(&mut queue, Some(id));
+        assert_eq!(queue.len(), 1);
+        super::remove_resource_pack_prompts(&mut queue, None);
+        assert!(queue.is_empty());
+        assert_eq!(super::resource_pack_decline_reason(false), None);
+        assert_eq!(
+            super::resource_pack_decline_reason(true),
+            Some("Required resource pack declined")
+        );
     }
 }

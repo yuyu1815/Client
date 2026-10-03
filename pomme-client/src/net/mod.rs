@@ -819,6 +819,7 @@ pub enum NetworkEvent {
         url: String,
         hash: String,
         required: bool,
+        prompt: Option<azalea_chat::FormattedText>,
     },
     ResourcePackPop {
         id: Option<uuid::Uuid>,

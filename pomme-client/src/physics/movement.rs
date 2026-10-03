@@ -718,6 +718,7 @@ fn apply_collision_with_context(
         player.main_supporting_block_pos = None;
         player.on_ground_no_blocks = false;
         player.horizontal_collision = false;
+        player.minor_horizontal_collision = false;
         return;
     }
 
@@ -809,6 +810,8 @@ fn apply_collision_with_context(
     player.position += resolved;
     player.on_ground = on_ground;
     player.horizontal_collision = horizontal_collision;
+    player.minor_horizontal_collision = horizontal_collision
+        && is_minor_horizontal_collision(forward, strafe, sin_y_rot, cos_y_rot, resolved);
     check_supporting_block(player, chunk_store, resolved, context);
     player.last_travel_observation.ground_decision = Some(on_ground);
     player.last_travel_observation.bbox_after = Some(player.bounding_box());
@@ -883,13 +886,6 @@ fn apply_collision_with_context(
     player.velocity.x *= speed_factor;
     player.velocity.z *= speed_factor;
 
-    if player.sprinting
-        && horizontal_collision
-        && forward > 0.0
-        && !is_minor_horizontal_collision(forward, strafe, sin_y_rot, cos_y_rot, resolved)
-    {
-        player.set_sprinting(false);
-    }
 }
 
 fn apply_bubble_column_effect(
@@ -1063,7 +1059,12 @@ fn update_sprint_state(
     }
 
     if player.sprinting
-        && (forward <= 0.0 || player.food <= SPRINT_HUNGER_THRESHOLD || slow_due_to_using_item)
+        && (forward <= 0.0
+            || player.food <= SPRINT_HUNGER_THRESHOLD
+            || slow_due_to_using_item
+            || (player.horizontal_collision
+                && !player.minor_horizontal_collision
+                && !player.swimming))
     {
         player.set_sprinting(false);
     }
@@ -2405,6 +2406,40 @@ mod tests {
             zero_small_velocity(&mut player);
             assert_eq!(player.velocity.y, y);
         }
+    }
+
+    #[test]
+    fn wall_collision_ends_sprint_before_the_following_tick_accelerates() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        let chunks = flat_floor();
+        let stone = crate::world::block::first_state_of("stone").unwrap();
+        for x in 3..=6 {
+            for y in [61, 62] {
+                chunks.set_block_state(x, y, 5, stone);
+            }
+        }
+        let mut player = LocalPlayer::new();
+        player.position = dvec3(4.5, 61.0, 4.0).into();
+        player.on_ground = true;
+        let mut input = InputState::released();
+        input.set_test_key(KeyCode::KeyW, true);
+        input.set_test_key(KeyCode::KeyD, true);
+        input.set_test_key(KeyCode::ControlLeft, true);
+
+        let mut contacted_wall = false;
+        let mut stopping_tick_speed = None;
+        for _ in 0..12 {
+            let previous_tick_collided = player.horizontal_collision;
+            tick(&mut player, &input, &chunks, 1.0, false);
+            contacted_wall |= player.horizontal_collision;
+            if previous_tick_collided && !player.sprinting {
+                stopping_tick_speed = Some(movement_speed(&player));
+            }
+        }
+
+        assert!(contacted_wall, "diagonal movement reaches the wall");
+        assert_eq!(stopping_tick_speed, Some(0.1_f32), "stop precedes the next tick's travel");
+        assert_eq!(movement_speed(&player), 0.1_f32);
     }
 
     #[test]

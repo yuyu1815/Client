@@ -7,7 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use pomme_gpu_allocator::vulkan::{Allocation, Allocator};
 use pyronyx::vk;
 
-use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::assets::{AssetIndex, resolve_asset_path_with_packs};
 use crate::renderer::{packing, shader, util};
 use crate::ui::font::{FontSources, GLYPH_ATLAS_SIZE, GlyphAtlasPixels, GlyphInfo, GlyphMap};
 use crate::ui::text::{InlineObject, TextSpan};
@@ -485,6 +485,7 @@ impl MenuOverlayPipeline {
             allocator,
             font_sources.jar_assets_dir,
             font_sources.asset_index,
+            Some(font_sources.packs),
         );
 
         let sprite_sampler = unsafe { util::create_nearest_sampler(device) };
@@ -591,6 +592,7 @@ impl MenuOverlayPipeline {
                 allocator,
                 font_sources.jar_assets_dir,
                 font_sources.asset_index,
+                Some(font_sources.packs),
             );
         // Both source textures ship mcmeta `blur: true`.
         let overlay_sampler = unsafe { util::create_linear_sampler(device) };
@@ -602,6 +604,7 @@ impl MenuOverlayPipeline {
             allocator,
             font_sources.jar_assets_dir,
             font_sources.asset_index,
+            Some(font_sources.packs),
             "minecraft/textures/misc/underwater.png",
             "underwater_overlay",
         );
@@ -732,6 +735,122 @@ impl MenuOverlayPipeline {
         allocator: &Arc<Mutex<Allocator>>,
         font_sources: FontSources<'_>,
     ) -> Result<(), String> {
+        let (
+            sprite_atlas,
+            sprite_image,
+            sprite_view,
+            sprite_allocation,
+            sprite_staging_buffer,
+            sprite_staging_allocation,
+        ) = build_sprite_atlas(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            font_sources.jar_assets_dir,
+            font_sources.asset_index,
+            Some(font_sources.packs),
+        );
+        let sprite_info = vk::DescriptorImageInfo {
+            sampler: self.sprite_sampler,
+            image_view: sprite_view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let sprite_write = vk::WriteDescriptorSet {
+            dst_set: self.tex_set,
+            dst_binding: 1,
+            descriptor_count: 1,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            image_info: &sprite_info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[sprite_write], &[]);
+        device.destroy_buffer(self.sprite_staging_buffer, None);
+        device.destroy_image_view(self.sprite_view, None);
+        device.destroy_image(self.sprite_image, None);
+        {
+            let mut alloc = util::lock_allocator(allocator);
+            if let Some(allocation) = self.sprite_staging_allocation.take() {
+                alloc.free(allocation).ok();
+            }
+            if let Some(allocation) = self.sprite_allocation.take() {
+                alloc.free(allocation).ok();
+            }
+        }
+        self.sprite_atlas = sprite_atlas;
+        self.sprite_image = sprite_image;
+        self.sprite_view = sprite_view;
+        self.sprite_allocation = Some(sprite_allocation);
+        self.sprite_staging_buffer = sprite_staging_buffer;
+        self.sprite_staging_allocation = sprite_staging_allocation;
+
+        let (overlay_image, overlay_view, overlay_allocation, vignette_uv, pumpkin_uv) =
+            build_camera_overlay_texture(
+                device,
+                queue,
+                command_pool,
+                allocator,
+                font_sources.jar_assets_dir,
+                font_sources.asset_index,
+                Some(font_sources.packs),
+            );
+        let (underwater_image, underwater_view, underwater_allocation) = load_single_texture(
+            device,
+            queue,
+            command_pool,
+            allocator,
+            font_sources.jar_assets_dir,
+            font_sources.asset_index,
+            Some(font_sources.packs),
+            "minecraft/textures/misc/underwater.png",
+            "underwater_overlay",
+        );
+        let overlay_infos = [
+            vk::DescriptorImageInfo {
+                sampler: self.overlay_sampler,
+                image_view: overlay_view,
+                image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+            },
+            vk::DescriptorImageInfo {
+                sampler: self.underwater_sampler,
+                image_view: underwater_view,
+                image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+            },
+        ];
+        let overlay_writes =
+            [(6, &overlay_infos[0]), (7, &overlay_infos[1])].map(|(binding, info)| {
+                vk::WriteDescriptorSet {
+                    dst_set: self.tex_set,
+                    dst_binding: binding,
+                    descriptor_count: 1,
+                    descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                    image_info: info,
+                    ..Default::default()
+                }
+            });
+        device.update_descriptor_sets(&overlay_writes, &[]);
+        device.destroy_image_view(self.overlay_view, None);
+        device.destroy_image(self.overlay_image, None);
+        device.destroy_image_view(self.underwater_view, None);
+        device.destroy_image(self.underwater_image, None);
+        {
+            let mut alloc = util::lock_allocator(allocator);
+            if let Some(allocation) = self.overlay_allocation.take() {
+                alloc.free(allocation).ok();
+            }
+            if let Some(allocation) = self.underwater_allocation.take() {
+                alloc.free(allocation).ok();
+            }
+        }
+        self.overlay_image = overlay_image;
+        self.overlay_view = overlay_view;
+        self.overlay_allocation = Some(overlay_allocation);
+        self.overlay_vignette_uv = vignette_uv;
+        self.overlay_pumpkin_uv = pumpkin_uv;
+        self.underwater_image = underwater_image;
+        self.underwater_view = underwater_view;
+        self.underwater_allocation = Some(underwater_allocation);
+
         let (glyph_map, pixels) = GlyphMap::load(font_sources, self.font_layer_limit)?;
         let (gray, color) =
             create_font_textures(device, queue, command_pool, allocator, Some(&pixels))?;
@@ -2836,6 +2955,7 @@ fn build_sprite_atlas(
     allocator: &Arc<Mutex<Allocator>>,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
+    packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> (
     SpriteAtlas,
     vk::Image,
@@ -2844,6 +2964,9 @@ fn build_sprite_atlas(
     vk::Buffer,
     Option<Allocation>,
 ) {
+    let resolve_asset_path = |jar: &Path, index: &Option<AssetIndex>, key: &str| {
+        resolve_asset_path_with_packs(jar, index, key, packs)
+    };
     let sprites: &[(SpriteId, &str, f32)] = &[
         (
             SpriteId::BookBackground,
@@ -4395,9 +4518,10 @@ fn build_sprite_atlas(
 fn load_overlay_rgba(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
+    packs: Option<&crate::resource_pack::ResourcePackManager>,
     asset_key: &str,
 ) -> (Vec<u8>, u32, u32) {
-    let path = resolve_asset_path(jar_assets_dir, asset_index, asset_key);
+    let path = resolve_asset_path_with_packs(jar_assets_dir, asset_index, asset_key, packs);
     match crate::assets::load_image(&path) {
         Ok(img) => {
             let rgba = img.to_rgba8();
@@ -4440,15 +4564,18 @@ fn build_camera_overlay_texture(
     allocator: &Arc<Mutex<Allocator>>,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
+    packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> (vk::Image, vk::ImageView, Allocation, [f32; 4], [f32; 4]) {
     let (vig, vw, vh) = load_overlay_rgba(
         jar_assets_dir,
         asset_index,
+        packs,
         "minecraft/textures/misc/vignette.png",
     );
     let (pump, pw, ph) = load_overlay_rgba(
         jar_assets_dir,
         asset_index,
+        packs,
         "minecraft/textures/misc/pumpkinblur.png",
     );
 
@@ -4496,10 +4623,11 @@ fn load_single_texture(
     allocator: &Arc<Mutex<Allocator>>,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
+    packs: Option<&crate::resource_pack::ResourcePackManager>,
     asset_key: &str,
     name: &str,
 ) -> (vk::Image, vk::ImageView, Allocation) {
-    let (pixels, w, h) = load_overlay_rgba(jar_assets_dir, asset_index, asset_key);
+    let (pixels, w, h) = load_overlay_rgba(jar_assets_dir, asset_index, packs, asset_key);
     let (image, view, allocation) = util::create_gpu_image(device, allocator, w, h, name);
     upload_and_free_staging(
         device,

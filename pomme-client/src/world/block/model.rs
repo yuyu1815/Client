@@ -754,30 +754,82 @@ pub struct BakedItemModels {
     pub fixed_transforms: HashMap<String, Mat4>,
 }
 
-/// Every `minecraft/items/*.json` name across the jar and the active packs,
-/// so a pack can add an item, not only replace one. Vanilla walks every pack
-/// in `FallbackResourceManager`.
+/// Item definition ids across the jar and active packs, including custom
+/// namespaces and nested paths. Symlinked directories are deliberately not
+/// followed, avoiding cycles in user-provided resource packs.
 fn item_definition_names(
     jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
 ) -> std::collections::BTreeSet<String> {
-    let pack_dirs = packs
-        .into_iter()
-        .flat_map(|packs| packs.active_pack_dirs())
-        .map(|dir| dir.join("assets"));
-    std::iter::once(jar_assets_dir.to_path_buf())
-        .chain(pack_dirs)
-        .filter_map(|root| std::fs::read_dir(root.join("minecraft").join("items")).ok())
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            entry
-                .file_name()
-                .to_str()?
-                .strip_suffix(".json")
-                .map(str::to_owned)
-        })
-        .collect()
+    let roots = std::iter::once(jar_assets_dir.to_path_buf()).chain(
+        packs
+            .into_iter()
+            .flat_map(|packs| packs.active_pack_dirs())
+            .map(|dir| dir.join("assets")),
+    );
+    let mut names = std::collections::BTreeSet::new();
+    for root in roots {
+        collect_item_definition_names(&root, &mut names);
+    }
+    if let Some(index) = asset_index {
+        for key in index.keys() {
+            let Some((namespace, rest)) = key.split_once("/items/") else {
+                continue;
+            };
+            let Some(path) = rest.strip_suffix(".json") else {
+                continue;
+            };
+            let asset_key = format!("{namespace}/items/{path}.json");
+            if crate::assets::valid_asset_key(&asset_key) {
+                names.insert(AssetId { namespace, path }.canonical());
+            }
+        }
+    }
+    names
+}
+
+fn collect_item_definition_names(root: &Path, names: &mut std::collections::BTreeSet<String>) {
+    let Ok(namespaces) = std::fs::read_dir(root) else {
+        return;
+    };
+    for namespace in namespaces.flatten() {
+        let Ok(file_type) = namespace.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let namespace = namespace.file_name();
+        let Some(namespace) = namespace.to_str() else {
+            continue;
+        };
+        let items = root.join(namespace).join("items");
+        let mut pending = vec![(items.clone(), String::new())];
+        while let Some((dir, prefix)) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if file_type.is_dir() {
+                    pending.push((entry.path(), format!("{prefix}{name}/")));
+                } else if file_type.is_file()
+                    && let Some(path) = format!("{prefix}{name}").strip_suffix(".json")
+                {
+                    let asset_key = format!("{namespace}/items/{path}.json");
+                    if crate::assets::valid_asset_key(&asset_key) {
+                        names.insert(AssetId { namespace, path }.canonical());
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub fn bake_item_models(
@@ -793,10 +845,11 @@ pub fn bake_item_models(
     let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut fixed_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
+    let item_names = item_definition_names(jar_assets_dir, asset_index, packs);
 
-    for item_name in item_definition_names(jar_assets_dir, packs) {
+    for item_name in &item_names {
         let item_name = item_name.as_str();
-        let item_asset_key = format!("minecraft/items/{item_name}.json");
+        let item_asset_key = AssetId::parse(item_name).asset_key("items", ".json");
         let item_path =
             resolve_asset_path_with_packs(jar_assets_dir, asset_index, &item_asset_key, packs);
         let Ok(contents) = std::fs::read_to_string(item_path) else {
@@ -1077,14 +1130,17 @@ pub fn bake_item_models(
 
     // Special shulker item definitions have an empty base model; bake their
     // closed vanilla cuboids as ordinary CPU item quads (not the BE GPU mesh).
-    for item_name in item_definition_names(jar_assets_dir, packs) {
-        if item_name != "shulker_box" && !item_name.ends_with("_shulker_box") {
+    for item_name in &item_names {
+        let id = AssetId::parse(item_name);
+        if id.namespace != "minecraft"
+            || (id.path != "shulker_box" && !id.path.ends_with("_shulker_box"))
+        {
             continue;
         }
         let path = resolve_asset_path_with_packs(
             jar_assets_dir,
             asset_index,
-            &format!("minecraft/items/{item_name}.json"),
+            &id.asset_key("items", ".json"),
             packs,
         );
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -1121,7 +1177,7 @@ pub fn bake_item_models(
             }
         );
         item_models.insert(item_name.clone(), bake_shulker_item_model(&texture));
-        ground_transforms.insert(item_name, default_block_ground_transform());
+        ground_transforms.insert(item_name.clone(), default_block_ground_transform());
     }
 
     let trapped_item = resolve_asset_path_with_packs(
@@ -2054,28 +2110,42 @@ fn for_each_blockstate(
     packs: Option<&crate::resource_pack::ResourcePackManager>,
     mut callback: impl FnMut(&str, &BlockstateFile) -> Option<()>,
 ) {
-    let Some(blockstates_dir) = resolve_blockstates_dir(jar_assets_dir, asset_index, packs) else {
-        tracing::warn!("Blockstates directory not found");
-        return;
-    };
-
-    let entries = match std::fs::read_dir(&blockstates_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!("Failed to read blockstates dir: {e}");
-            return;
+    let base_dir = resolve_blockstates_dir(jar_assets_dir, asset_index, None);
+    let prefix = "minecraft/blockstates/";
+    let mut names: HashSet<String> = asset_index
+        .iter()
+        .flat_map(AssetIndex::keys)
+        .filter_map(|key| key.strip_prefix(prefix))
+        .filter_map(|path| path.strip_suffix(".json"))
+        .map(str::to_owned)
+        .collect();
+    if let Some(dir) = &base_dir {
+        collect_blockstate_names(dir, &mut names);
+    }
+    if let Some(packs) = packs {
+        for dir in packs.active_pack_dirs() {
+            collect_blockstate_names(&dir.join("assets/minecraft/blockstates"), &mut names);
         }
-    };
+    }
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+    if names.is_empty() {
+        tracing::warn!("Blockstates directory not found");
+    }
+    for name in names {
+        let asset_key = format!("minecraft/blockstates/{name}.json");
+        let resolved =
+            resolve_asset_path_with_packs(jar_assets_dir, asset_index, &asset_key, packs);
+        let path = if resolved.is_file() {
+            resolved
+        } else if let Some(path) = base_dir
+            .as_ref()
+            .map(|dir| dir.join(format!("{name}.json")))
+            .filter(|path| path.is_file())
+        {
+            path
+        } else {
             continue;
         };
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-
         let Ok(contents) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -2090,8 +2160,21 @@ fn for_each_blockstate(
                 continue;
             }
         };
+        callback(&name, &blockstate);
+    }
+}
 
-        callback(name, &blockstate);
+fn collect_blockstate_names(dir: &Path, names: &mut HashSet<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            if let Some(name) = path.file_stem().and_then(|name| name.to_str()) {
+                names.insert(name.to_owned());
+            }
+        }
     }
 }
 
@@ -2842,6 +2925,69 @@ fn determine_tint_for_index(block_name: &str, tint_index: Option<i32>) -> Tint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blockstates_merge_pack_names_and_resolve_highest_priority_with_base_fallback() {
+        let root = std::env::temp_dir().join(format!("pomme-blockstates-{}", uuid::Uuid::new_v4()));
+        let jar = root.join("jar");
+        let packs_dir = root.join("resourcepacks");
+        let base = jar.join("assets/minecraft/blockstates");
+        std::fs::create_dir_all(&base).unwrap();
+        let write_state = |dir: &Path, name: &str, model: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{name}.json")),
+                format!(r#"{{"variants":{{"":{{"model":"{model}"}}}}}}"#),
+            )
+            .unwrap();
+        };
+        write_state(&base, "stone", "base:stone");
+        write_state(&base, "dirt", "base:dirt");
+        for (pack, stone_model, extra) in [
+            ("lower", "lower:stone", "lower_only"),
+            ("higher", "higher:stone", "higher_only"),
+        ] {
+            let pack_dir = packs_dir.join(pack);
+            std::fs::create_dir_all(&pack_dir).unwrap();
+            std::fs::write(pack_dir.join("pack.mcmeta"), "{}").unwrap();
+            write_state(
+                &pack_dir.join("assets/minecraft/blockstates"),
+                "stone",
+                stone_model,
+            );
+            write_state(
+                &pack_dir.join("assets/minecraft/blockstates"),
+                extra,
+                "pack:extra",
+            );
+        }
+        let mut packs = crate::resource_pack::ResourcePackManager::new(&root);
+        packs.enable_local_pack("lower");
+        packs.enable_local_pack("higher");
+
+        let collect = |packs: Option<&crate::resource_pack::ResourcePackManager>| {
+            let mut states = HashMap::new();
+            for_each_blockstate(&jar, &None, packs, |name, state| {
+                states.insert(
+                    name.to_string(),
+                    extract_default_model_ref(state).unwrap().model,
+                );
+                Some(())
+            });
+            states
+        };
+        let active = collect(Some(&packs));
+        assert_eq!(active["stone"], "higher:stone");
+        assert_eq!(active["dirt"], "base:dirt");
+        assert!(active.contains_key("lower_only"));
+        assert!(active.contains_key("higher_only"));
+
+        packs.disable_local_pack("higher");
+        assert_eq!(collect(Some(&packs))["stone"], "lower:stone");
+        packs.disable_local_pack("lower");
+        assert_eq!(collect(Some(&packs))["stone"], "base:stone");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn shield_special_mesh_has_plate_handle_faces_and_valid_uvs() {
@@ -3792,6 +3938,49 @@ mod tests {
             r#"{"parent":"minecraft:item/generated","textures":{"layer0":"other:item/replacement"}}"#,
         )
         .unwrap();
+        let lower_pack = instance.join("resourcepacks/lower_pack");
+        std::fs::create_dir_all(&lower_pack).unwrap();
+        std::fs::write(
+            lower_pack.join("pack.mcmeta"),
+            r#"{"pack":{"pack_format":84,"description":"lower"}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(lower_pack.join("assets/other/items/sub")).unwrap();
+        std::fs::write(
+            lower_pack.join("assets/other/items/sub/custom.json"),
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/base"}}"#,
+        )
+        .unwrap();
+        // Items with nested paths and a custom namespace are static assets too.
+        for (asset, model) in [
+            (
+                jar.join("minecraft/items/sub/nested.json"),
+                "minecraft:item/base",
+            ),
+            (
+                jar.join("other/items/sub/custom.json"),
+                "minecraft:item/base",
+            ),
+            (
+                instance.join("resourcepacks/test_pack/assets/minecraft/items/sub/nested.json"),
+                "other:item/replacement",
+            ),
+            (
+                instance.join("resourcepacks/test_pack/assets/other/items/sub/custom.json"),
+                "other:item/replacement",
+            ),
+            (
+                instance.join("resourcepacks/test_pack/assets/other/items/sub/pack_only.json"),
+                "other:item/replacement",
+            ),
+        ] {
+            std::fs::create_dir_all(asset.parent().unwrap()).unwrap();
+            std::fs::write(
+                asset,
+                format!(r#"{{"model":{{"type":"minecraft:model","model":"{model}"}}}}"#),
+            )
+            .unwrap();
+        }
         // An item the jar does not define at all.
         std::fs::write(
             pack_items.join("pack_only.json"),
@@ -3800,6 +3989,7 @@ mod tests {
         .unwrap();
 
         let mut packs = crate::resource_pack::ResourcePackManager::new(&instance);
+        packs.enable_local_pack("lower_pack");
         packs.enable_local_pack("test_pack");
         let baked = bake_item_models(&jar, &None, Some(&packs));
         assert_eq!(
@@ -3808,6 +3998,27 @@ mod tests {
         );
         assert_eq!(
             baked.flat_texture_keys.get("pack_only").map(String::as_str),
+            Some("other:item/replacement")
+        );
+        assert_eq!(
+            baked
+                .flat_texture_keys
+                .get("sub/nested")
+                .map(String::as_str),
+            Some("other:item/replacement")
+        );
+        assert_eq!(
+            baked
+                .flat_texture_keys
+                .get("other:sub/custom")
+                .map(String::as_str),
+            Some("other:item/replacement")
+        );
+        assert_eq!(
+            baked
+                .flat_texture_keys
+                .get("other:sub/pack_only")
+                .map(String::as_str),
             Some("other:item/replacement")
         );
         assert_eq!(

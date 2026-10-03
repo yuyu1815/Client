@@ -2023,15 +2023,10 @@ pub(super) async fn handle_game_packet_with_display_text(
                     url: p.url.clone(),
                     hash: p.hash.clone(),
                     required: p.required,
+                    prompt: p.prompt.clone(),
                 },
             )
             .await?;
-            sender.send(ServerboundGamePacket::ResourcePack(
-                azalea_protocol::packets::game::s_resource_pack::ServerboundResourcePack {
-                    id: p.id,
-                    action: azalea_protocol::packets::game::s_resource_pack::Action::Accepted,
-                },
-            ));
         }
         ClientboundGamePacket::ResourcePackPop(p) => {
             tracing::info!("Server popping resource pack {:?}", p.id);

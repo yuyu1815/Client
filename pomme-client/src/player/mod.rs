@@ -129,6 +129,8 @@ pub(crate) fn sanitize_attribute(id: &str, value: f64) -> f64 {
         "step_height" => (0.0, 10.0),
         "gravity" => (-1.0, 1.0),
         "sneaking_speed" | "water_movement_efficiency" => (0.0, 1.0),
+        "mining_efficiency" | "block_break_speed" => (0.0, 1024.0),
+        "submerged_mining_speed" => (0.0, 20.0),
         "max_health" => (1.0, 1024.0),
         "armor" => (0.0, 30.0),
         _ => return value,
@@ -190,6 +192,7 @@ pub struct LocalPlayer {
     pub bob: f32,
     pub prev_bob: f32,
     pub horizontal_collision: bool,
+    pub minor_horizontal_collision: bool,
     pub sprint_toggle_timer: u32,
     pub was_forward_pressed: bool,
     pub in_water: bool,
@@ -277,6 +280,7 @@ impl LocalPlayer {
             bob: 0.0,
             prev_bob: 0.0,
             horizontal_collision: false,
+            minor_horizontal_collision: false,
             sprint_toggle_timer: 0,
             was_forward_pressed: false,
             in_water: false,
@@ -418,6 +422,7 @@ impl LocalPlayer {
         self.bob = 0.0;
         self.prev_bob = 0.0;
         self.horizontal_collision = false;
+        self.minor_horizontal_collision = false;
         self.sprint_toggle_timer = 0;
         self.was_forward_pressed = false;
         self.in_water = false;
@@ -769,6 +774,38 @@ impl LocalPlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mining_attributes_use_native_ranged_clamps_after_modifiers() {
+        for (id, max) in [
+            ("minecraft:mining_efficiency", 1024.0),
+            ("minecraft:block_break_speed", 1024.0),
+            ("minecraft:submerged_mining_speed", 20.0),
+        ] {
+            assert_eq!(sanitize_attribute(id, f64::NAN), 0.0, "{id}");
+            assert_eq!(sanitize_attribute(id, -1.0), 0.0, "{id}");
+            assert_eq!(sanitize_attribute(id, max + 1.0), max, "{id}");
+            assert_eq!(sanitize_attribute(id, f64::INFINITY), max, "{id}");
+            assert_eq!(sanitize_attribute(id, f64::NEG_INFINITY), 0.0, "{id}");
+        }
+
+        let mut player = LocalPlayer::new();
+        assert_eq!(player.attribute_value("minecraft:mining_efficiency", 0.0), 0.0);
+        assert_eq!(player.attribute_value("minecraft:block_break_speed", 1.0), 1.0);
+        assert_eq!(player.attribute_value("minecraft:submerged_mining_speed", 0.2), 0.2);
+        player.attributes.insert(
+            "mining_efficiency".into(),
+            AttributeData {
+                base: 1024.0,
+                modifiers: vec![AttributeModifier {
+                    id: "test:bonus".into(),
+                    amount: 1.0,
+                    operation: Op::AddValue,
+                }],
+            },
+        );
+        assert_eq!(player.attribute_value("minecraft:mining_efficiency", 0.0), 1024.0);
+    }
 
     #[test]
     fn swimming_uses_vanilla_entry_and_exit_conditions() {

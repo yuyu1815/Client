@@ -1102,6 +1102,7 @@ async fn config_sequence(
                             url: p.url.clone(),
                             hash: p.hash.clone(),
                             required: p.required,
+                            prompt: p.prompt.clone(),
                         },
                     ),
                     conn,
@@ -1110,16 +1111,6 @@ async fn config_sequence(
                     &mut code_of_conduct_accepted,
                 )
                 .await??;
-                write_config_packet(
-                    conn,
-                    ServerboundConfigPacket::ResourcePack(
-                        s_resource_pack::ServerboundResourcePack {
-                            id: p.id,
-                            action: s_resource_pack::Action::Accepted,
-                        },
-                    ),
-                )
-                .await?;
             }
             ClientboundConfigPacket::ResourcePackPop(p) => {
                 tracing::info!("Server popping resource pack {:?}", p.id);
@@ -3244,6 +3235,7 @@ mod tests {
     async fn full_config_delivery_pumps_pack_status_conduct_and_custom_click() {
         use azalea_protocol::packets::config::c_code_of_conduct::ClientboundCodeOfConduct;
         use azalea_protocol::packets::config::c_finish_configuration::ClientboundFinishConfiguration;
+        use azalea_protocol::packets::config::c_resource_pack_push::ClientboundResourcePackPush;
         use azalea_protocol::packets::game::s_resource_pack::{Action, ServerboundResourcePack};
         let (client_end, peer_end) = super::super::conn::memory_pipes();
         let mut peer = Conn::from_memory(peer_end);
@@ -3276,6 +3268,35 @@ mod tests {
         .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert!(!client.is_finished());
+        assert_eq!(rx.len(), 1);
+        assert!(matches!(
+            recv_event(&rx).await,
+            NetworkEvent::LevelChunksLoadStart
+        ));
+        assert!(
+            matches!(recv_event(&rx).await, NetworkEvent::CodeOfConduct { text } if text == "Rules")
+        );
+        let pack_id = uuid::Uuid::from_u128(10);
+        peer.write_packet(ClientboundResourcePackPush {
+            id: pack_id,
+            url: "https://example.invalid/pack.zip".into(),
+            hash: String::new(),
+            required: true,
+            prompt: Some(azalea_chat::FormattedText::from("Please download")),
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            recv_event(&rx).await,
+            NetworkEvent::ResourcePackPush { id, required: true, prompt: Some(prompt), .. }
+                if id == pack_id && prompt.to_string() == "Please download"
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), peer.reader.read())
+                .await
+                .is_err(),
+            "server pack push must not be auto-accepted"
+        );
         let id = uuid::Uuid::nil();
         out_tx
             .send(Outbound::Packet(Box::new(
@@ -3312,14 +3333,6 @@ mod tests {
             read_test_packet::<ServerboundConfigPacket>(&mut peer).await,
             ServerboundConfigPacket::AcceptCodeOfConduct(_)
         ));
-        assert_eq!(rx.len(), 1);
-        assert!(matches!(
-            recv_event(&rx).await,
-            NetworkEvent::LevelChunksLoadStart
-        ));
-        assert!(
-            matches!(recv_event(&rx).await, NetworkEvent::CodeOfConduct { text } if text == "Rules")
-        );
         peer.write_packet(ClientboundFinishConfiguration)
             .await
             .unwrap();

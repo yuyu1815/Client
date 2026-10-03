@@ -437,15 +437,19 @@ fn parse_meta_value(v: &serde_json::Value, fallback: &str) -> (String, String, P
         .to_owned();
 
     let compat = pack
-        .map(|p| {
-            let (min, max) = parse_format_range(p);
-            if CURRENT_PACK_FORMAT < min {
-                PackCompat::TooNew
-            } else if CURRENT_PACK_FORMAT > max {
-                PackCompat::TooOld
-            } else {
-                PackCompat::Compatible
+        .map(|p| match parse_format_range(p) {
+            Ok(Some((min, max))) => {
+                let current = (CURRENT_PACK_FORMAT, 0);
+                if current < min {
+                    PackCompat::TooNew
+                } else if current > max {
+                    PackCompat::TooOld
+                } else {
+                    PackCompat::Compatible
+                }
             }
+            Ok(None) => PackCompat::Compatible,
+            Err(()) => PackCompat::TooNew,
         })
         .unwrap_or(PackCompat::Compatible);
 
@@ -496,57 +500,68 @@ fn parse_pack_meta_zip(path: &Path, fallback_name: &str) -> Option<PackInfo> {
     })
 }
 
-fn parse_format_range(pack: &serde_json::Value) -> (u32, u32) {
-    if let (Some(min), Some(max)) = (pack.get("min_format"), pack.get("max_format")) {
-        let min_v = format_value(min);
-        let max_v = format_value(max);
-        if min_v > 0 && max_v > 0 {
-            return (min_v, max_v);
-        }
+fn parse_format_range(pack: &serde_json::Value) -> Result<Option<((u32, u32), (u32, u32))>, ()> {
+    if pack.get("min_format").is_some() || pack.get("max_format").is_some() {
+        let min = pack.get("min_format").and_then(|v| format_value(v, 0));
+        let max = pack
+            .get("max_format")
+            .and_then(|v| format_value(v, i32::MAX as u32));
+        return match (min, max) {
+            (Some(min), Some(max)) if min <= max => Ok(Some((min, max))),
+            _ => Err(()),
+        };
     }
 
     if let Some(supported) = pack.get("supported_formats") {
-        if let Some(arr) = supported.as_array()
-            && arr.len() == 2
-        {
-            return (
-                arr[0].as_u64().unwrap_or(0) as u32,
-                arr[1].as_u64().unwrap_or(0) as u32,
-            );
-        }
-        if let Some(obj) = supported.as_object() {
-            let min = obj
-                .get("min_inclusive")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            let max = obj
-                .get("max_inclusive")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            return (min, max);
-        }
-        if let Some(n) = supported.as_u64() {
-            return (n as u32, n as u32);
-        }
+        let range = if let Some(arr) = supported.as_array().filter(|arr| arr.len() == 2) {
+            Some((legacy_format(&arr[0])?, legacy_format(&arr[1])?))
+        } else if let Some(obj) = supported.as_object() {
+            Some((
+                legacy_format(obj.get("min_inclusive").ok_or(())?)?,
+                legacy_format(obj.get("max_inclusive").ok_or(())?)?,
+            ))
+        } else {
+            let n = legacy_format(supported)?;
+            Some((n, n))
+        };
+        return match range {
+            Some((min, max)) if min <= max => Ok(Some((min, max))),
+            _ => Err(()),
+        };
     }
 
-    if let Some(fmt) = pack.get("pack_format").and_then(|v| v.as_u64()) {
-        return (fmt as u32, fmt as u32);
+    if let Some(fmt) = pack.get("pack_format") {
+        let format = legacy_format(fmt)?;
+        return Ok(Some((format, format)));
     }
 
-    (0, u32::MAX)
+    Ok(None)
 }
 
-fn format_value(v: &serde_json::Value) -> u32 {
-    if let Some(n) = v.as_u64() {
-        return n as u32;
+fn format_value(v: &serde_json::Value, default_minor: u32) -> Option<(u32, u32)> {
+    let parse = |v: &serde_json::Value| {
+        v.as_u64()
+            .filter(|&n| n <= i32::MAX as u64)
+            .map(|n| n as u32)
+    };
+    if let Some(n) = parse(v) {
+        return Some((n, default_minor));
     }
-    if let Some(arr) = v.as_array()
-        && let Some(major) = arr.first().and_then(|v| v.as_u64())
-    {
-        return major as u32;
+    let arr = v.as_array()?;
+    if arr.is_empty() || arr.len() > 256 || arr.iter().any(|v| parse(v).is_none()) {
+        return None;
     }
-    0
+    Some((
+        parse(&arr[0])?,
+        arr.get(1).and_then(parse).unwrap_or(default_minor),
+    ))
+}
+
+fn legacy_format(v: &serde_json::Value) -> Result<(u32, u32), ()> {
+    v.as_u64()
+        .filter(|&n| n <= i32::MAX as u64)
+        .map(|n| (n as u32, 0))
+        .ok_or(())
 }
 
 fn extract_zip(data: &[u8], dest: &Path) -> Result<(), PackError> {
@@ -627,6 +642,53 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn pack_compat_uses_major_minor_ranges_and_rejects_invalid_formats() {
+        let compat = |pack: &str| {
+            let metadata: serde_json::Value = serde_json::from_str(pack).unwrap();
+            parse_meta_value(&metadata, "fallback").2
+        };
+
+        assert!(matches!(
+            compat(r#"{"pack":{"min_format":[88,1],"max_format":[89,0]}}"#),
+            PackCompat::TooNew
+        ));
+        assert!(matches!(
+            compat(r#"{"pack":{"min_format":[87,0],"max_format":[88,0]}}"#),
+            PackCompat::Compatible
+        ));
+        assert!(matches!(
+            compat(
+                r#"{"pack":{"pack_format":88,"supported_formats":{"min_inclusive":87,"max_inclusive":88}}}"#
+            ),
+            PackCompat::Compatible
+        ));
+        assert!(matches!(
+            compat(r#"{"pack":{"pack_format":88}}"#),
+            PackCompat::Compatible
+        ));
+        assert!(matches!(
+            compat(r#"{"pack":{"supported_formats":[87,88]}}"#),
+            PackCompat::Compatible
+        ));
+        assert!(matches!(
+            compat(r#"{"pack":{"min_format":89,"max_format":89}}"#),
+            PackCompat::TooNew
+        ));
+        assert!(matches!(
+            compat(r#"{"pack":{"min_format":[4294967384,0],"max_format":[4294967385,0]}}"#),
+            PackCompat::TooNew
+        ));
+        assert!(matches!(
+            compat(r#"{"pack":{"min_format":[-1,0],"max_format":[88,0]}}"#),
+            PackCompat::TooNew
+        ));
+        assert!(matches!(
+            compat(r#"{"pack":{"min_format":[89,0],"max_format":[88,0]}}"#),
+            PackCompat::TooNew
+        ));
+    }
 
     fn zip_pack(asset: &str, contents: &[u8]) -> Vec<u8> {
         let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));

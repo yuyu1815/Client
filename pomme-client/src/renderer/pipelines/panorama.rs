@@ -6,7 +6,7 @@ use pomme_gpu_allocator::MemoryLocation;
 use pomme_gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use pyronyx::vk;
 
-use crate::assets::{AssetIndex, resolve_asset_path};
+use crate::assets::{AssetIndex, resolve_asset_path_with_pack_dirs};
 use crate::renderer::{shader, util};
 
 // Minecraft panorama face order differs from Vulkan cubemap layer order
@@ -306,13 +306,15 @@ fn resolve_panorama_face(
     i: u32,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
+    pack_dirs: &[PathBuf],
 ) -> Option<PathBuf> {
     let flat = jar_assets_dir.join(format!("panorama_{i}.png"));
     if flat.exists() {
         return Some(flat);
     }
     let asset_key = format!("minecraft/textures/gui/title/background/panorama_{i}.png");
-    let path = resolve_asset_path(jar_assets_dir, asset_index, &asset_key);
+    let path =
+        resolve_asset_path_with_pack_dirs(jar_assets_dir, asset_index, &asset_key, pack_dirs);
     path.exists().then_some(path)
 }
 
@@ -322,6 +324,7 @@ pub fn resolve_panorama_faces(
     panorama_dir: &Path,
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
+    pack_dirs: &[PathBuf],
 ) -> Option<[PathBuf; 6]> {
     let collect = |resolve: &dyn Fn(u32) -> Option<PathBuf>| -> Option<[PathBuf; 6]> {
         let faces: Vec<PathBuf> = (0..6).map(resolve).collect::<Option<_>>()?;
@@ -331,7 +334,47 @@ pub fn resolve_panorama_faces(
         let flat = panorama_dir.join(format!("panorama_{i}.png"));
         flat.exists().then_some(flat)
     })
-    .or_else(|| collect(&|i| resolve_panorama_face(i, jar_assets_dir, asset_index)))
+    .or_else(|| collect(&|i| resolve_panorama_face(i, jar_assets_dir, asset_index, pack_dirs)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panorama_pack_priority_fallback_and_reselection() {
+        let root = std::env::temp_dir().join(format!("panorama-pack-{}", uuid::Uuid::new_v4()));
+        let panorama = root.join("custom");
+        let jar = root.join("jar");
+        let low = root.join("low");
+        let high = root.join("high");
+        let key = |i| format!("minecraft/textures/gui/title/background/panorama_{i}.png");
+        for i in 0..6 {
+            for base in [&jar, &low, &high] {
+                let path = base.join("assets").join(key(i));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, [i as u8]).unwrap();
+            }
+            let jar_path = jar.join("assets").join(key(i));
+            let vanilla = jar.join(&key(i));
+            std::fs::create_dir_all(vanilla.parent().unwrap()).unwrap();
+            std::fs::copy(jar_path, vanilla).unwrap();
+        }
+        let dirs = vec![low.clone(), high.clone()];
+        let selected = resolve_panorama_faces(&panorama, &jar, &None, &dirs).unwrap();
+        assert!(selected.iter().all(|p| p.starts_with(&high)));
+        std::fs::remove_file(high.join("assets").join(key(3))).unwrap();
+        let selected = resolve_panorama_faces(&panorama, &jar, &None, &dirs).unwrap();
+        assert!(selected[..3].iter().all(|p| p.starts_with(&high)));
+        assert!(selected[3].starts_with(&low));
+        std::fs::remove_file(low.join("assets").join(key(3))).unwrap();
+        let selected = resolve_panorama_faces(&panorama, &jar, &None, &dirs).unwrap();
+        assert!(selected[3].starts_with(&jar));
+        let selected = resolve_panorama_faces(&panorama, &jar, &None, &[low.clone()]).unwrap();
+        assert!(selected[..3].iter().all(|p| p.starts_with(&low)));
+        assert!(selected[3].starts_with(&jar));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn flip_horizontal(data: &[u8], w: u32, h: u32) -> Vec<u8> {

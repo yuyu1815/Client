@@ -197,22 +197,27 @@ impl BlockRegistry {
         self.flat_item_texture_keys.get(name).map(String::as_str)
     }
 
+    /// Canonical item-definition key selected for this stack. Explicit item
+    /// models are preserved even when no corresponding asset was baked.
+    pub fn item_model_name(stack: &azalea_inventory::ItemStack) -> Option<String> {
+        let item = stack.as_present().filter(|item| !item.is_empty())?;
+        Some(
+            item.component_patch
+                .get::<azalea_inventory::components::ItemModel>()
+                .map(|model| {
+                    crate::assets::AssetId::parse(&model.resource_location.to_string()).canonical()
+                })
+                .unwrap_or_else(|| crate::player::inventory::item_resource_name(item.kind)),
+        )
+    }
+
     /// Particle material of the selected item definition, never its first quad.
     /// Only a static model/composite definition can supply an icon: dynamic
     /// selectors (including CustomModelData) are not yet resolved by the item
     /// renderer, so returning its representative leaf would be a guess.
     pub fn get_item_particle_icon(&self, stack: &azalea_inventory::ItemStack) -> Option<&str> {
-        let item = stack.as_present().filter(|item| !item.is_empty())?;
-        let selected = item
-            .component_patch
-            .get::<azalea_inventory::components::ItemModel>()
-            .map(|model| model.resource_location.to_string());
-        let base = crate::player::inventory::item_resource_name(item.kind);
-        let name = selected
-            .as_deref()
-            .map(|key| key.strip_prefix("minecraft:").unwrap_or(key))
-            .unwrap_or(&base);
-        self.item_particle_icons.get(name).map(String::as_str)
+        let name = Self::item_model_name(stack)?;
+        self.item_particle_icons.get(&name).map(String::as_str)
     }
 
     pub fn get_flat_item_tint(&self, name: &str) -> model::ItemTint {
@@ -587,9 +592,16 @@ mod item_particle_tests {
             item_particle_icons: HashMap::from([
                 ("stone".into(), "base_particle".into()),
                 ("alternate".into(), "override_particle".into()),
+                ("sub/nested".into(), "nested_particle".into()),
+                ("other:sub/custom".into(), "custom_particle".into()),
             ]),
         };
         let base = ItemStack::new(ItemKind::Stone, 1);
+        assert_eq!(BlockRegistry::item_model_name(&ItemStack::default()), None);
+        assert_eq!(
+            BlockRegistry::item_model_name(&base).as_deref(),
+            Some("stone")
+        );
         assert_eq!(
             registry.get_item_particle_icon(&base),
             Some("base_particle")
@@ -598,12 +610,42 @@ mod item_particle_tests {
             resource_location: Identifier::new("minecraft:alternate"),
         });
         assert_eq!(
+            BlockRegistry::item_model_name(&mapped).as_deref(),
+            Some("alternate")
+        );
+        assert_eq!(
             registry.get_item_particle_icon(&mapped),
             Some("override_particle")
+        );
+        let nested = base.clone().with_component(ItemModel {
+            resource_location: Identifier::new("minecraft:sub/nested"),
+        });
+        assert_eq!(
+            BlockRegistry::item_model_name(&nested).as_deref(),
+            Some("sub/nested")
+        );
+        assert_eq!(
+            registry.get_item_particle_icon(&nested),
+            Some("nested_particle")
+        );
+        let custom = base.clone().with_component(ItemModel {
+            resource_location: Identifier::new("other:sub/custom"),
+        });
+        assert_eq!(
+            BlockRegistry::item_model_name(&custom).as_deref(),
+            Some("other:sub/custom")
+        );
+        assert_eq!(
+            registry.get_item_particle_icon(&custom),
+            Some("custom_particle")
         );
         let missing = base.with_component(ItemModel {
             resource_location: Identifier::new("minecraft:unknown"),
         });
+        assert_eq!(
+            BlockRegistry::item_model_name(&missing).as_deref(),
+            Some("unknown")
+        );
         assert_eq!(registry.get_item_particle_icon(&missing), None);
     }
 }

@@ -298,7 +298,7 @@ fn map_quad_vertices() -> [Vertex; 6] {
         },
         Vertex {
             position: [0.5, 0.5, 0.0],
-            uv: [1.0, 0.0],
+            uv: [1.0, 1.0],
         },
         Vertex {
             position: [-0.5, 0.5, 0.0],
@@ -317,6 +317,30 @@ fn map_model(position: Vec3, frame_rotation: Quat) -> Mat4 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_quad_triangles_share_continuous_corner_uvs() {
+        let vertices = map_quad_vertices();
+        let expected_uvs = [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+        ];
+
+        for (vertex, expected_uv) in vertices.iter().zip(expected_uvs) {
+            assert_eq!(vertex.uv, expected_uv, "position {:?}", vertex.position);
+        }
+        for i in 0..vertices.len() {
+            for j in i + 1..vertices.len() {
+                if vertices[i].position == vertices[j].position {
+                    assert_eq!(vertices[i].uv, vertices[j].uv);
+                }
+            }
+        }
+    }
 
     #[test]
     fn map_quad_corners_match_official_frame_transform() {
@@ -391,7 +415,7 @@ mod tests {
                     [1.0, 0.0],
                     [1.0, 1.0],
                     [0.0, 0.0],
-                    [1.0, 0.0],
+                    [1.0, 1.0],
                     [0.0, 1.0]
                 ]
             );
