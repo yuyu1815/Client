@@ -1674,6 +1674,32 @@ pub(super) async fn handle_game_packet_with_display_text(
                     )
                     .await?;
                 }
+                if item.index == 10
+                    && let azalea_entity::EntityDataValue::Particles(particles) = &item.value
+                {
+                    send_event(
+                        event_tx,
+                        NetworkEvent::EntityEffectParticles {
+                            id: p.id.0,
+                            particles: Some(particles.to_vec()),
+                            ambient: None,
+                        },
+                    )
+                    .await?;
+                }
+                if item.index == 11
+                    && let azalea_entity::EntityDataValue::Boolean(ambient) = &item.value
+                {
+                    send_event(
+                        event_tx,
+                        NetworkEvent::EntityEffectParticles {
+                            id: p.id.0,
+                            particles: None,
+                            ambient: Some(*ambient),
+                        },
+                    )
+                    .await?;
+                }
                 // Scalar values are forwarded raw; the store resolves their
                 // meaning per (kind, index) like vanilla `onSyncedDataUpdated`
                 // (`EntityStore::apply_entity_data`).
@@ -2619,6 +2645,11 @@ fn parse_level_particles(
         return Ok(None);
     };
     let options = match kind {
+        crate::particle::ServerParticleKind::EntityEffect => {
+            crate::particle::ServerParticleOptions::EntityEffect {
+                color: i32::azalea_read(cur)? as u32,
+            }
+        }
         crate::particle::ServerParticleKind::Dust => crate::particle::ServerParticleOptions::Dust {
             packed_color: i32::azalea_read(cur)?,
             scale: f32::azalea_read(cur)?,
@@ -2991,6 +3022,35 @@ mod tests {
         handle_raw_game_packet as handle_raw_game_packet_async, *,
     };
 
+    #[test]
+    fn level_particles_entity_effect_decodes_full_argb_tint() {
+        let mut raw = Vec::new();
+        false.azalea_write(&mut raw).unwrap();
+        true.azalea_write(&mut raw).unwrap();
+        for value in [1.0f64, 2.0, 3.0] {
+            value.azalea_write(&mut raw).unwrap();
+        }
+        for value in [0.0f32, 0.0, 0.0, 1.0] {
+            value.azalea_write(&mut raw).unwrap();
+        }
+        1i32.azalea_write(&mut raw).unwrap();
+        28u32.azalea_write_var(&mut raw).unwrap();
+        raw.extend_from_slice(&0x2612_3456u32.to_be_bytes());
+        let event = parse_level_particles(&mut std::io::Cursor::new(raw.as_slice()))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event,
+            NetworkEvent::LevelParticles {
+                kind: crate::particle::ServerParticleKind::EntityEffect,
+                options: crate::particle::ServerParticleOptions::EntityEffect {
+                    color: 0x2612_3456
+                },
+                ..
+            }
+        ));
+    }
+
     fn handle_raw_game_packet(raw: &[u8], tx: &Sender<NetworkEvent>) -> bool {
         tokio::runtime::Runtime::new()
             .unwrap()
@@ -3126,6 +3186,54 @@ mod tests {
             dispatch_world_packet(&packet, &tx).await,
             Err(SendError(NetworkEvent::EntitiesRemoved { ids })) if ids == [12, 34]
         ));
+    }
+
+    #[tokio::test]
+    async fn living_effect_particle_metadata_is_forwarded_with_native_types() {
+        use azalea_core::entity_id::MinecraftEntityId;
+        use azalea_entity::{EntityDataItem, EntityDataValue, EntityMetadataItems};
+        use azalea_protocol::packets::game::c_set_entity_data::ClientboundSetEntityData;
+
+        let particles = vec![azalea_entity::particle::Particle::EntityEffect(
+            azalea_entity::particle::ColorParticle::default(),
+        )];
+        let packet = ClientboundGamePacket::SetEntityData(ClientboundSetEntityData {
+            id: MinecraftEntityId(12),
+            packed_items: EntityMetadataItems(vec![
+                EntityDataItem {
+                    index: 10,
+                    value: EntityDataValue::Particles(particles.clone().into_boxed_slice()),
+                },
+                EntityDataItem {
+                    index: 11,
+                    value: EntityDataValue::Boolean(true),
+                },
+            ]),
+        });
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        dispatch_world_packet(&packet, &tx).await.unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::EntityEffectParticles { id: 12, particles: Some(v), ambient: None }
+                if v == particles
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::EntityEffectParticles {
+                id: 12,
+                particles: None,
+                ambient: Some(true)
+            }
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::EntityData {
+                id: 12,
+                index: 11,
+                value: MetaValue::Bool(true)
+            }
+        ));
+        assert!(rx.is_empty());
     }
 
     #[tokio::test]

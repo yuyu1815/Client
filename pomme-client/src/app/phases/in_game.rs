@@ -44,6 +44,32 @@ use crate::world::block::model::CardinalLightType;
 use crate::world::block_entity_anim::BlockEntityAnimStore;
 use crate::world::chunk::ChunkStore;
 
+type EffectParticleSource<'a> = (
+    i32,
+    DVec3,
+    f32,
+    f32,
+    &'a [azalea_entity::particle::Particle],
+    bool,
+    bool,
+);
+
+fn living_effect_sources<'a>(
+    local: EffectParticleSource<'a>,
+    remote: impl IntoIterator<Item = EffectParticleSource<'a>>,
+    singleplayer: bool,
+    paused: bool,
+) -> Vec<EffectParticleSource<'a>> {
+    if singleplayer && paused {
+        return Vec::new();
+    }
+
+    std::iter::once(local)
+        .chain(remote.into_iter().filter(|source| source.0 != local.0))
+        .filter(|source| !source.4.is_empty())
+        .collect()
+}
+
 /// Which screen a server-opened container renders as.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ContainerScreen {
@@ -3718,6 +3744,53 @@ pub fn update_game(
                 );
                 game.particle_store.add_campfire_smoke(spawn, signal);
             }
+        }
+        let local_height = game.player.height();
+        let local_effect_particles = if game.dead {
+            &[][..]
+        } else {
+            game.player.effect_particles.as_slice()
+        };
+        let local = (
+            game.player.entity_id,
+            DVec3::from(*game.player.position),
+            (crate::player::PLAYER_HALF_WIDTH * 2.0) as f32,
+            local_height as f32,
+            local_effect_particles,
+            game.player.effect_particles_ambient,
+            game.player.invisible,
+        );
+        let remote = game.entity_store.living.iter().filter_map(|(&id, entity)| {
+            let dimensions = azalea_entity::dimensions::EntityDimensions::from(entity.entity_type);
+            let dimensions = EntityStore::dimensions_for_pose(
+                crate::entity::EntityDimensions {
+                    width: f64::from(dimensions.width),
+                    height: f64::from(dimensions.height),
+                },
+                entity.pose,
+            );
+            Some((
+                id,
+                DVec3::from(*entity.position),
+                dimensions.width as f32,
+                dimensions.height as f32,
+                entity.effect_particles.as_slice(),
+                entity.effect_particles_ambient,
+                entity.flags.invisible,
+            ))
+        });
+        for (_, pos, width, height, particles, ambient, invisible) in
+            living_effect_sources(local, remote, game.singleplayer, game.paused)
+        {
+            game.particle_store.add_living_effect_particles(
+                pos,
+                width,
+                height,
+                particles,
+                ambient,
+                invisible,
+                particle_camera,
+            );
         }
         let chunks = &game.chunk_store;
         let player = &game.player;
@@ -11273,5 +11346,46 @@ mod tests {
             super::resource_pack_decline_reason(true),
             Some("Required resource pack declined")
         );
+    }
+}
+
+#[cfg(test)]
+mod living_effect_source_tests {
+    use azalea_entity::particle::{ColorParticle, Particle};
+
+    use super::{DVec3, living_effect_sources};
+
+    #[test]
+    fn fixed_tick_sources_include_local_and_remote_once_and_ignore_empty_metadata() {
+        let particles = [Particle::EntityEffect(ColorParticle {
+            color: azalea_core::color::RgbColor::new(0x12, 0x34, 0x56),
+        })];
+        let empty = [];
+        let local = (7, DVec3::ZERO, 0.6, 1.8, &particles[..], true, true);
+        let remote = [
+            (7, DVec3::X, 0.6, 1.8, &particles[..], false, false),
+            (8, DVec3::Y, 0.8, 1.0, &particles[..], false, false),
+            (9, DVec3::Z, 0.6, 1.8, &empty[..], false, false),
+        ];
+        let sources = living_effect_sources(local, remote, false, false);
+        assert_eq!(
+            sources.iter().map(|source| source.0).collect::<Vec<_>>(),
+            [7, 8]
+        );
+        assert_eq!(sources[0].1, DVec3::ZERO);
+        assert!(sources[0].5 && sources[0].6);
+        assert_eq!(sources[1].1, DVec3::Y);
+    }
+
+    #[test]
+    fn effect_particle_sources_respect_world_pause_not_menu_pause() {
+        let particles = [Particle::EntityEffect(ColorParticle {
+            color: azalea_core::color::RgbColor::new(0x12, 0x34, 0x56),
+        })];
+        let local = (7, DVec3::ZERO, 0.6, 1.8, &particles[..], false, false);
+
+        assert!(living_effect_sources(local, [], true, true).is_empty());
+        assert_eq!(living_effect_sources(local, [], true, false).len(), 1);
+        assert_eq!(living_effect_sources(local, [], false, true).len(), 1);
     }
 }

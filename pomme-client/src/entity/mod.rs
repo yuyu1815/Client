@@ -243,6 +243,8 @@ pub struct LivingEntity {
     pub is_crouching: bool,
     pub pose: EntityPose,
     pub sleeping_pos: Option<BlockPos>,
+    pub effect_particles: Vec<azalea_entity::particle::Particle>,
+    pub effect_particles_ambient: bool,
     pub flags: EntityFlags,
     /// LivingEntity DATA_LIVING_ENTITY_FLAGS: using-item hand bits / riptide
     /// bit.
@@ -433,6 +435,8 @@ impl LivingEntity {
             is_crouching: false,
             pose: EntityPose::Standing,
             sleeping_pos: None,
+            effect_particles: Vec::new(),
+            effect_particles_ambient: false,
             flags: EntityFlags::default(),
             using_item: false,
             using_offhand: false,
@@ -2549,6 +2553,22 @@ impl EntityStore {
     /// Resolves a raw synched-entity-data scalar per (kind, index), the
     /// direct analogue of vanilla's per-class `onSyncedDataUpdated`. Index
     /// arithmetic follows the registration chain: `Entity` 0-7,
+    pub fn set_effect_particles(
+        &mut self,
+        id: i32,
+        particles: Option<Vec<azalea_entity::particle::Particle>>,
+        ambient: Option<bool>,
+    ) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            if let Some(particles) = particles {
+                entity.effect_particles = particles;
+            }
+            if let Some(ambient) = ambient {
+                entity.effect_particles_ambient = ambient;
+            }
+        }
+    }
+
     /// `LivingEntity` 8-14, `Mob` 15, `AgeableMob` 16 baby + 17 age-locked,
     /// first subclass field 18, in the 26.x numbering
     /// (`normalize_ageable_index`).
@@ -4363,6 +4383,31 @@ mod tests {
         );
         assert!(entity.using_item && entity.using_offhand && entity.riptide_spin);
         assert!(entity.is_sprinting);
+    }
+
+    #[test]
+    fn effect_particle_metadata_is_partial_and_empty_list_clears() {
+        let mut store = EntityStore::new();
+        store.spawn_living(
+            7,
+            EntityKind::Zombie,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        let particles = vec![azalea_entity::particle::Particle::EntityEffect(
+            azalea_entity::particle::ColorParticle::default(),
+        )];
+        store.set_effect_particles(7, Some(particles.clone()), None);
+        store.set_effect_particles(7, None, Some(true));
+        assert_eq!(store.living[&7].effect_particles, particles);
+        assert!(store.living[&7].effect_particles_ambient);
+        store.set_effect_particles(7, Some(Vec::new()), None);
+        assert!(store.living[&7].effect_particles.is_empty());
+        assert!(store.living[&7].effect_particles_ambient);
+        store.set_effect_particles(99, Some(particles), Some(false));
+        assert_eq!(store.living.len(), 1);
     }
 
     #[test]

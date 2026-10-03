@@ -2229,6 +2229,11 @@ impl AppCore {
                     game.interaction.pending_command_block = None;
                     game.command_block_edit = None;
                     clear_dimension_projectiles(&mut game.entity_store, &mut game.entity_positions);
+                    for entity in game.entity_store.living.values_mut() {
+                        entity.effect_particles.clear();
+                        entity.effect_particles_ambient = false;
+                        entity.flags.invisible = false;
+                    }
                     game.item_cooldowns = Default::default();
                     game.world_border = Default::default();
                     tracing::info!(
@@ -2260,6 +2265,9 @@ impl AppCore {
                     game.riding_vehicle_id = None;
                     game.player.jump_riding_ticks = 0;
                     game.player.jump_riding_scale = 0.0;
+                    game.player.effect_particles.clear();
+                    game.player.effect_particles_ambient = false;
+                    game.player.invisible = false;
                     game.player.reset_hurt_state();
 
                     renderer.clear_chunk_meshes();
@@ -4086,8 +4094,8 @@ impl AppCore {
                         && index == 0
                         && let crate::entity::MetaValue::Byte(flags) = value
                     {
-                        // Entity shared-flags bit 7 is fall-flying; this is
-                        // distinct from the pose metadata used for rendering.
+                        // Entity shared-flags bits 5 and 7 are invisibility and fall-flying.
+                        game.player.invisible = flags & 0x20 != 0;
                         game.player.fall_flying = flags & 0x80 != 0;
                     }
                     // LivingEntity.DATA_AIR_SUPPLY is metadata index 1, an Int.
@@ -4124,6 +4132,23 @@ impl AppCore {
                     game.entity_store
                         .set_text_display_metadata(id, index, value);
                     game.entity_store.apply_entity_data(id, index, value);
+                }
+                NetworkEvent::EntityEffectParticles {
+                    id,
+                    particles,
+                    ambient,
+                } => {
+                    if id == game.player.entity_id {
+                        if let Some(particles) = particles {
+                            game.player.effect_particles = particles;
+                        }
+                        if let Some(ambient) = ambient {
+                            game.player.effect_particles_ambient = ambient;
+                        }
+                    } else {
+                        game.entity_store
+                            .set_effect_particles(id, particles, ambient);
+                    }
                 }
                 NetworkEvent::EntityProjectileItem { id, stack } => {
                     let name = crate::world::block::registry::BlockRegistry::item_model_name(

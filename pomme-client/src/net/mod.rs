@@ -694,6 +694,11 @@ pub enum NetworkEvent {
         index: u8,
         value: MetaValue,
     },
+    EntityEffectParticles {
+        id: i32,
+        particles: Option<Vec<azalea_entity::particle::Particle>>,
+        ambient: Option<bool>,
+    },
     EntityProjectileItem {
         id: i32,
         stack: azalea_inventory::ItemStackData,

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use azalea_block::BlockState;
+use azalea_buf::AzBuf;
 use azalea_core::position::BlockPos;
 use azalea_entity::particle::Particle as ParticleOptions;
 use azalea_protocol::packets::game::c_explode::{ExplosionParticleInfo, Weighted};
@@ -105,6 +106,8 @@ enum Kind {
     /// full-bright, 8-frame animation, fades after half-life, translucent
     /// layer.
     EndRod,
+    /// `SpellParticle.MobEffectProvider`: rising, animated, translucent.
+    EntityEffect,
     /// `TotemParticle` (`SimpleAnimatedParticle`), independently parameterized
     /// from EndRod despite sharing its official `glitter_7..0` sprite frames.
     Totem,
@@ -131,6 +134,7 @@ impl Kind {
             self,
             Kind::ItemTranslucent
                 | Kind::EndRod
+                | Kind::EntityEffect
                 | Kind::Totem
                 | Kind::CampfireCosySmoke
                 | Kind::CampfireSignalSmoke
@@ -684,6 +688,39 @@ impl Particle {
         particle
     }
 
+    fn entity_effect(pos: DVec3, velocity: DVec3, color: u32, frames: &[AtlasRegion; 8]) -> Self {
+        let lifetime = (8.0 / (fastrand::f32() * 0.8 + 0.2)) as i32;
+        let jitter = || (fastrand::f64() * 2.0 - 1.0) * 0.4;
+        let mut p = Self::special(
+            Kind::EntityEffect,
+            pos,
+            dvec3(
+                0.5 - fastrand::f64() + jitter(),
+                velocity.y + jitter(),
+                0.5 - fastrand::f64() + jitter(),
+            ),
+            None,
+            lifetime,
+            0.15,
+            frames[0],
+        );
+        p.vel.y *= 0.2;
+        if velocity.x == 0.0 && velocity.z == 0.0 {
+            p.vel.x *= 0.1;
+            p.vel.z *= 0.1;
+        }
+        p.color = [
+            ((color >> 16) & 0xff) as f32 / 255.0,
+            ((color >> 8) & 0xff) as f32 / 255.0,
+            (color & 0xff) as f32 / 255.0,
+        ];
+        p.alpha = ((color >> 24) & 0xff) as f32 / 255.0;
+        p.gravity = -0.1;
+        p.friction = 0.96;
+        p.light = 0.0;
+        p
+    }
+
     fn special(
         kind: Kind,
         pos: DVec3,
@@ -810,7 +847,7 @@ impl Particle {
             Kind::CampfireCosySmoke | Kind::CampfireSignalSmoke => {
                 self.move_with_collision_width(chunks, 0.125)
             }
-            Kind::EndRod | Kind::Crit | Kind::Shriek => self.pos += self.vel,
+            Kind::EndRod | Kind::EntityEffect | Kind::Crit | Kind::Shriek => self.pos += self.vel,
             Kind::Totem => self.move_with_collision(chunks),
             Kind::Trail | Kind::Vibration => {
                 if let Some((entity_id, y_offset)) = self.entity_target {
@@ -870,6 +907,14 @@ impl Particle {
             }
             Kind::Explosion => {
                 self.set_sprite(&explosion_frames[explosion_frame_index(self.age, self.lifetime)])
+            }
+            Kind::EntityEffect => {
+                self.light = world_brightness(
+                    chunks,
+                    self.pos.x.floor() as i32,
+                    self.pos.y.floor() as i32,
+                    self.pos.z.floor() as i32,
+                );
             }
             Kind::Crit => {
                 self.color[1] *= 0.96;
@@ -1000,6 +1045,23 @@ fn animated_frame_index(age: i32, lifetime: i32, frames: usize) -> usize {
     ((age.max(0) as usize * (frames - 1)) / lifetime.max(1) as usize).min(frames - 1)
 }
 
+fn effect_particle_denominator(ambient: bool, invisible: bool) -> u32 {
+    (if invisible { 15 } else { 4 }) * if ambient { 5 } else { 1 }
+}
+
+fn effect_particle_selected(sample: u32, ambient: bool, invisible: bool) -> bool {
+    sample % effect_particle_denominator(ambient, invisible) == 0
+}
+
+fn color_particle_argb(color: &azalea_core::color::RgbColor) -> u32 {
+    let mut bytes = [0u8; 4];
+    let mut output = &mut bytes[..];
+    color
+        .azalea_write(&mut output)
+        .expect("writing a particle color to a fixed byte array cannot fail");
+    u32::from_be_bytes(bytes)
+}
+
 fn dust_quad_size(base_size: f32, age: i32, lifetime: i32, partial_tick: f32) -> f32 {
     base_size * (((age as f32 + partial_tick) / lifetime as f32) * 32.0).clamp(0.0, 1.0)
 }
@@ -1022,6 +1084,18 @@ pub const CAMPFIRE_COSY_SMOKE_SPRITES: [&str; 8] = [
     "particle/big_smoke_7",
 ];
 pub const CAMPFIRE_SIGNAL_SMOKE_SPRITES: [&str; 8] = CAMPFIRE_COSY_SMOKE_SPRITES;
+
+/// Frame order from entity_effect.json / ambient_entity_effect.json.
+pub const ENTITY_EFFECT_SPRITES: [&str; 8] = [
+    "particle/effect_7",
+    "particle/effect_6",
+    "particle/effect_5",
+    "particle/effect_4",
+    "particle/effect_3",
+    "particle/effect_2",
+    "particle/effect_1",
+    "particle/effect_0",
+];
 
 pub const GENERIC_PARTICLE_SPRITES: [&str; 12] = [
     "particle/generic_7",
@@ -1078,6 +1152,7 @@ pub const END_ROD_SPRITES: [&str; 8] = [
 #[derive(Clone, Copy, Debug)]
 pub enum ServerParticleKind {
     EndRod,
+    EntityEffect,
     ExplosionEmitter,
     Explosion,
     Poof,
@@ -1098,6 +1173,9 @@ pub enum ServerParticleKind {
 #[derive(Clone, Debug)]
 pub enum ServerParticleOptions {
     Simple,
+    EntityEffect {
+        color: u32,
+    },
     Dust {
         packed_color: i32,
         scale: f32,
@@ -1133,6 +1211,7 @@ impl ServerParticleKind {
     /// because azalea's particle wire enum is out of sync with the registry.
     pub fn from_id(id: u32) -> Option<Self> {
         match id {
+            28 => Some(Self::EntityEffect),
             27 => Some(Self::EndRod),
             29 => Some(Self::ExplosionEmitter),
             30 => Some(Self::Explosion),
@@ -1348,6 +1427,7 @@ pub struct ParticleStore {
     pending: Vec<Particle>,
     uv_map: AtlasUVMap,
     end_rod_frames: [AtlasRegion; 8],
+    entity_effect_frames: [AtlasRegion; 8],
     generic_frames: [AtlasRegion; 8],
     explosion_frames: [AtlasRegion; 16],
     campfire_cosy_frames: [AtlasRegion; 8],
@@ -1402,6 +1482,51 @@ impl ParticleStore {
         accept_particle(self.mode, false, always_visible, 0.0, rng)
     }
 
+    pub fn add_living_effect_particles(
+        &mut self,
+        pos: DVec3,
+        width: f32,
+        height: f32,
+        particles: &[ParticleOptions],
+        ambient: bool,
+        invisible: bool,
+        camera_pos: DVec3,
+    ) {
+        if particles.is_empty() {
+            return;
+        }
+        for option in particles {
+            let ParticleOptions::EntityEffect(effect) = option else {
+                continue;
+            };
+            if !effect_particle_selected(fastrand::u32(..), ambient, invisible) {
+                continue;
+            }
+            let color = color_particle_argb(&effect.color);
+            let particle_pos = pos
+                + dvec3(
+                    (fastrand::f64() - 0.5) * f64::from(width),
+                    fastrand::f64() * f64::from(height),
+                    (fastrand::f64() - 0.5) * f64::from(width),
+                );
+            if !accept_particle(
+                self.mode,
+                false,
+                false,
+                camera_pos.distance_squared(particle_pos),
+                &mut || fastrand::u32(..),
+            ) {
+                continue;
+            }
+            self.push(Particle::entity_effect(
+                particle_pos,
+                DVec3::ZERO,
+                color,
+                &self.entity_effect_frames,
+            ));
+        }
+    }
+
     pub fn add_campfire_food_smoke(&mut self, pos: DVec3, camera_pos: DVec3) {
         if accept_particle(
             self.mode,
@@ -1441,6 +1566,7 @@ impl ParticleStore {
         dry_foliage_colormap: Arc<Colormap>,
     ) -> Self {
         let end_rod_frames = END_ROD_SPRITES.map(|k| uv_map.get_region(k));
+        let entity_effect_frames = ENTITY_EFFECT_SPRITES.map(|k| uv_map.get_region(k));
         let generic_frames =
             std::array::from_fn(|i| uv_map.get_region(GENERIC_PARTICLE_SPRITES[i]));
         let explosion_frames = EXPLOSION_SPRITES.map(|k| uv_map.get_region(k));
@@ -1460,6 +1586,7 @@ impl ParticleStore {
             enchanted_hit_sprite,
             uv_map,
             end_rod_frames,
+            entity_effect_frames,
             generic_frames,
             explosion_frames,
             campfire_cosy_frames,
@@ -1811,6 +1938,16 @@ impl ParticleStore {
             ServerParticleKind::EndRod => {
                 self.push(Particle::end_rod(pos, vel, &self.end_rod_frames));
             }
+            ServerParticleKind::EntityEffect => {
+                if let ServerParticleOptions::EntityEffect { color } = options {
+                    self.push(Particle::entity_effect(
+                        pos,
+                        vel,
+                        color,
+                        &self.entity_effect_frames,
+                    ));
+                }
+            }
             ServerParticleKind::ExplosionEmitter => {
                 self.pending_emitters.push(ExplosionEmitter { pos, age: 0 });
             }
@@ -2126,15 +2263,20 @@ impl ParticleStore {
         }
         let end_frames = self.end_rod_frames;
         let generic_frames = self.generic_frames;
+        let effect_frames = self.entity_effect_frames;
         let explosion_frames = self.explosion_frames;
         self.particles.retain_mut(|p| {
-            p.tick_with_entity_lookup(
+            let alive = p.tick_with_entity_lookup(
                 chunks,
                 &end_frames,
                 &generic_frames,
                 &explosion_frames,
                 &mut lookup,
-            )
+            );
+            if alive && p.kind == Kind::EntityEffect {
+                p.set_sprite(&effect_frames[animated_frame_index(p.age, p.lifetime, 8)]);
+            }
+            alive
         });
         self.particles.append(&mut self.pending);
     }
@@ -2222,6 +2364,8 @@ pub(crate) fn packet_particle_count(count: i32) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use azalea_buf::AzBuf;
+
     use super::{
         AtlasRegion, AtlasUVMap, ExplosionParticleInfo, Particle, ParticleOptions,
         ServerParticleKind, TrackedExplosion, Weighted, animated_frame_index, dust_quad_size,
@@ -2229,6 +2373,185 @@ mod tests {
         plan_explosion_particles, supports_explosion_particle,
     };
     use crate::world::chunk::ChunkStore;
+
+    #[test]
+    fn living_effect_metadata_spawns_colored_particle() {
+        use std::sync::Arc;
+
+        use azalea_core::color::RgbColor;
+
+        use crate::renderer::chunk::mesher::Colormap;
+
+        let colors = Arc::new(Colormap::test_empty());
+        let mut store = super::ParticleStore::new(
+            AtlasUVMap::test_empty(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        let packed_color = 0x2612_3456u32.to_be_bytes();
+        let metadata_color =
+            RgbColor::azalea_read(&mut std::io::Cursor::new(packed_color.as_slice())).unwrap();
+        let metadata = vec![
+            ParticleOptions::EntityEffect(azalea_entity::particle::ColorParticle {
+                color: metadata_color,
+            });
+            75
+        ];
+        fastrand::seed(0x454646454354);
+        store.add_living_effect_particles(
+            dvec3(0.0, 0.0, 0.0),
+            0.6,
+            1.8,
+            &metadata,
+            true,
+            false,
+            dvec3(0.0, 0.0, 0.0),
+        );
+        assert!(!store.pending.is_empty());
+        assert!(store.pending.iter().all(|p| p.alpha == 38.0 / 255.0));
+        let p = &store.pending[0];
+        assert_eq!(
+            p.color,
+            [
+                0x12 as f32 / 255.0,
+                0x34 as f32 / 255.0,
+                0x56 as f32 / 255.0
+            ]
+        );
+        assert_eq!(p.alpha, 38.0 / 255.0);
+        assert_eq!((p.gravity, p.friction, p.size), (-0.1, 0.96, 0.15));
+        assert!(matches!(p.kind, super::Kind::EntityEffect));
+        let spawned = store.pending.len();
+        store.tick(&ChunkStore::new(2));
+        let quad = store.extract(0.0, dvec3(0.0, 0.0, 0.0));
+        assert_eq!(quad.len(), spawned);
+        assert!(quad.iter().all(|q| q.translucent && q.color >> 24 == 38));
+    }
+
+    #[test]
+    fn living_effect_metadata_respects_empty_mode_and_distance_filters() {
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut store = super::ParticleStore::new(
+            AtlasUVMap::test_empty(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        let metadata = [ParticleOptions::EntityEffect(
+            azalea_entity::particle::ColorParticle {
+                color: azalea_core::color::RgbColor::new(10, 20, 30),
+            },
+        )];
+        store.add_living_effect_particles(
+            dvec3(0.0, 0.0, 0.0),
+            0.6,
+            1.8,
+            &[],
+            false,
+            false,
+            dvec3(0.0, 0.0, 0.0),
+        );
+        assert!(store.pending.is_empty());
+        store.add_living_effect_particles(
+            dvec3(0.0, 0.0, 0.0),
+            0.6,
+            1.8,
+            &metadata,
+            false,
+            false,
+            dvec3(100.0, 0.0, 0.0),
+        );
+        assert!(store.pending.is_empty());
+        store.set_mode(super::ParticleMode::Minimal);
+        store.add_living_effect_particles(
+            dvec3(0.0, 0.0, 0.0),
+            0.6,
+            1.8,
+            &metadata,
+            false,
+            false,
+            dvec3(0.0, 0.0, 0.0),
+        );
+        assert!(store.pending.is_empty());
+
+        store.set_mode(super::ParticleMode::All);
+        for _ in 0..super::MAX_PARTICLES {
+            store.particles.push(Particle::entity_effect(
+                dvec3(0.0, 0.0, 0.0),
+                dvec3(0.0, 0.0, 0.0),
+                0xFF0A_141E,
+                &store.entity_effect_frames,
+            ));
+        }
+        store.add_living_effect_particles(
+            dvec3(0.0, 0.0, 0.0),
+            0.6,
+            1.8,
+            &metadata,
+            false,
+            false,
+            dvec3(0.0, 0.0, 0.0),
+        );
+        assert_eq!(
+            store.particles.len() + store.pending.len(),
+            super::MAX_PARTICLES
+        );
+    }
+
+    #[test]
+    fn effect_spawn_probability_boundaries_and_alpha_are_exact() {
+        for (ambient, invisible, denominator) in [
+            (false, false, 4),
+            (true, false, 20),
+            (false, true, 15),
+            (true, true, 75),
+        ] {
+            assert!(super::effect_particle_selected(0, ambient, invisible));
+            assert!(!super::effect_particle_selected(
+                denominator - 1,
+                ambient,
+                invisible
+            ));
+            assert!(super::effect_particle_selected(
+                denominator,
+                ambient,
+                invisible
+            ));
+        }
+        let frame = AtlasRegion {
+            u_min: 0.1,
+            v_min: 0.2,
+            u_max: 0.3,
+            v_max: 0.4,
+            pixel_rect: [0; 4],
+            sprite: 3,
+            opaque: false,
+            translucent: true,
+            alpha_counts: [0; 3],
+        };
+        let particle = Particle::entity_effect(
+            dvec3(0.0, 0.0, 0.0),
+            dvec3(0.0, 0.0, 0.0),
+            0x26123456,
+            &[frame; 8],
+        );
+        assert_eq!(
+            particle.color,
+            [
+                0x12 as f32 / 255.0,
+                0x34 as f32 / 255.0,
+                0x56 as f32 / 255.0
+            ]
+        );
+        assert_eq!(particle.alpha, 38.0 / 255.0);
+        assert_eq!(
+            (particle.u0, particle.u1, particle.v0, particle.v1),
+            (0.1, 0.3, 0.2, 0.4)
+        );
+        assert!((8..=40).contains(&particle.lifetime));
+        assert!(particle.kind.translucent());
+    }
 
     #[test]
     fn campfire_ambient_smoke_requires_lit_and_dry_state() {
@@ -3445,6 +3768,7 @@ mod tests {
         use super::ServerParticleKind as Kind;
 
         assert!(matches!(Kind::from_id(27), Some(Kind::EndRod)));
+        assert!(matches!(Kind::from_id(28), Some(Kind::EntityEffect)));
         assert!(matches!(Kind::from_id(29), Some(Kind::ExplosionEmitter)));
         assert!(matches!(Kind::from_id(30), Some(Kind::Explosion)));
         assert!(matches!(Kind::from_id(66), Some(Kind::Poof)));
