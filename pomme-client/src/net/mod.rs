@@ -200,6 +200,10 @@ pub enum NetworkEvent {
         change: azalea_protocol::common::movements::PositionMoveRotation,
         relative: azalea_protocol::common::movements::RelativeMovements,
     },
+    /// PLAY ping, answered on the main thread after earlier network events.
+    Ping {
+        id: i32,
+    },
     /// Vehicle correction has no entity or teleport id in the protocol.
     MoveVehicle {
         pos: DVec3,

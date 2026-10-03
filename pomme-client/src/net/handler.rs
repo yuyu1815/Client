@@ -474,9 +474,7 @@ pub(super) async fn handle_game_packet_with_display_text(
             ));
         }
         ClientboundGamePacket::Ping(p) => {
-            sender.send(ServerboundGamePacket::Pong(
-                azalea_protocol::packets::game::s_pong::ServerboundPong { id: p.id },
-            ));
+            send_event(event_tx, NetworkEvent::Ping { id: p.id as i32 }).await?;
         }
         ClientboundGamePacket::StoreCookie(p) => {
             server_cookies.insert(p.key.clone(), p.payload.clone());
@@ -4084,6 +4082,22 @@ mod tests {
         };
 
         dispatch(
+            &ClientboundGamePacket::PlayerPosition(
+                azalea_protocol::packets::game::c_player_position::ClientboundPlayerPosition {
+                    id: 7,
+                    change: azalea_protocol::common::movements::PositionMoveRotation {
+                        pos: azalea_core::position::Vec3::default(),
+                        delta: azalea_core::position::Vec3::default(),
+                        look_direction: azalea_entity::LookDirection::default(),
+                    },
+                    relative: azalea_protocol::common::movements::RelativeMovements::default(),
+                },
+            ),
+            &mut cookies,
+            &mut batches,
+        )
+        .await;
+        dispatch(
             &ClientboundGamePacket::Ping(azalea_protocol::packets::game::c_ping::ClientboundPing {
                 id: 0x1234,
             }),
@@ -4091,10 +4105,18 @@ mod tests {
             &mut batches,
         )
         .await;
-        let Outbound::Packet(packet) = out_rx.try_recv().unwrap() else {
-            panic!("expected pong packet");
-        };
-        assert!(matches!(*packet, ServerboundGamePacket::Pong(ref p) if p.id == 0x1234));
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            NetworkEvent::PlayerPosition { id: 7, .. }
+        ));
+        assert!(matches!(
+            event_rx.try_recv().unwrap(),
+            NetworkEvent::Ping { id: 0x1234 }
+        ));
+        assert!(
+            out_rx.try_recv().is_err(),
+            "PLAY pong must wait for main-thread FIFO"
+        );
 
         let key = Identifier::new("minecraft:test");
         dispatch(

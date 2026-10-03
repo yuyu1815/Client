@@ -263,8 +263,8 @@ fn show_block_edits(
             previous,
         );
     }
-    // The clicked face is already sent; repick for next input/this outline.
-    // Physics keeps its existing movement-before-interaction tick ordering.
+    // The clicked face is already sent; repick against the predicted world for
+    // the next input and this frame's outline.
     game.interaction.update_target(
         game.player.eye_pos(),
         game.player.look_dir,
@@ -368,6 +368,18 @@ fn set_first_disconnect_reason(reason: &mut Option<String>, next: String) {
     if reason.is_none() {
         *reason = Some(next);
     }
+}
+
+pub(crate) fn reply_to_play_ping(sender: &crate::net::sender::PacketSender, id: i32) {
+    sender.send(ServerboundGamePacket::Pong(
+        azalea_protocol::packets::game::s_pong::ServerboundPong { id: id as u32 },
+    ));
+}
+
+pub(crate) fn reply_to_configuration_start(sender: &crate::net::sender::PacketSender) {
+    sender.send(ServerboundGamePacket::ConfigurationAcknowledged(
+        azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged,
+    ));
 }
 
 fn set_player_experience(
@@ -984,7 +996,7 @@ fn post_teleport_echo(player: &LocalPlayer) -> ServerboundGamePacket {
     )
 }
 
-fn apply_player_correction(
+pub(crate) fn apply_player_correction(
     player: &mut LocalPlayer,
     passenger: bool,
     change: azalea_protocol::common::movements::PositionMoveRotation,
@@ -2267,6 +2279,7 @@ impl AppCore {
                     game.chunk_store
                         .set_center(azalea_core::position::ChunkPos::new(x, z));
                 }
+                NetworkEvent::Ping { id } => reply_to_play_ping(&connection.packet_tx, id),
                 NetworkEvent::PlayerPosition {
                     id,
                     change,
@@ -4325,6 +4338,7 @@ impl AppCore {
                     game.configuring = true;
                     self.clear_server_ui(game, renderer);
                     self.apply_cursor_grab(window, Some(game));
+                    reply_to_configuration_start(&connection.packet_tx);
                 }
                 NetworkEvent::Disconnected { reason } => {
                     game.interaction.pending_command_block = None;
@@ -4524,6 +4538,14 @@ impl AppCore {
             ));
     }
 
+    fn tick_other_entities(game: &mut GameState) {
+        game.entity_store.tick_living(
+            &game.chunk_store,
+            game.player.position,
+            game.server_simulation_distance,
+        );
+    }
+
     pub fn tick_physics(
         &mut self,
         renderer: &mut Renderer,
@@ -4566,13 +4588,11 @@ impl AppCore {
             }
         }
 
-        // Vanilla ClientLevel keeps ticking other entities while the local
-        // player is dead.
-        game.entity_store.tick_living(
-            &game.chunk_store,
-            game.player.position,
-            game.server_simulation_distance,
-        );
+        // Keep world ticking on parked/dead-player ticks. On a live tick, defer
+        // entity interpolation until after the pre-movement interaction pick.
+        if !game.client_loaded || game.dead {
+            Self::tick_other_entities(game);
+        }
 
         // Vanilla `LocalPlayer.tick` returns immediately until the client has
         // loaded: no physics, no interaction, and no input, sprint or movement
@@ -4765,57 +4785,6 @@ impl AppCore {
             ));
         }
 
-        if game.chunk_load_bench.is_some() {
-            game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
-        }
-        let region = game
-            .player
-            .bounding_box()
-            .expand(glam::dvec3(-2.0, -2.0, -2.0))
-            .expand(glam::dvec3(2.0, 2.0, 2.0));
-        let entity_boxes = game
-            .entity_store
-            .collision_aabbs(game.player.entity_id, &region);
-        let use_speed_multiplier = game.interaction.use_speed_multiplier();
-        let slow_due_to_using_item = game.interaction.slow_due_to_using_item();
-        if !tick_ridden_horse(
-            &mut game.entity_store,
-            &game.chunk_store,
-            &mut game.player,
-            input,
-            game.riding_vehicle_id,
-            Some(game.world_border.bounds_at(0.0)),
-        ) {
-            movement::tick_with_context(
-                &mut game.player,
-                input,
-                &game.chunk_store,
-                &entity_boxes,
-                Some(game.world_border.bounds_at(0.0)),
-                use_speed_multiplier,
-                slow_due_to_using_item,
-            );
-        }
-        // Mounted movement skips movement::tick_with_context, which normally
-        // records this edge state for the next tick's ride-jump charge logic.
-        if game.riding_vehicle_id.is_some() {
-            game.player.was_jump_pressed = jump_held;
-        }
-        let dx = game.player.position.x - game.player.prev_position.x;
-        let dz = game.player.position.z - game.player.prev_position.z;
-        crate::entity::update_walk_animation(
-            dx,
-            dz,
-            &mut game.player_walk_pos,
-            &mut game.player_walk_speed,
-            &mut game.player_prev_walk_speed,
-        );
-        game.player.tick_bob(dx, dz, false);
-
-        Self::send_abilities_packet(connection, game);
-        Self::send_input_packet(input, connection, game);
-        self.send_position_packet(connection, game);
-
         let eye_pos = game.player.eye_pos();
         game.interaction.update_target(
             eye_pos,
@@ -4899,6 +4868,60 @@ impl AppCore {
                 biome_climate: &game.biome_climate,
             },
         );
+        // Vanilla handleKeybinds/pick runs before ClientLevel advances remote
+        // entities; retain the regular tick before local collision/movement.
+        Self::tick_other_entities(game);
+        if game.chunk_load_bench.is_some() {
+            game.player.velocity = crate::entity::components::Velocity::new(0.0, 0.0, 0.0);
+        }
+        let region = game
+            .player
+            .bounding_box()
+            .expand(glam::dvec3(-2.0, -2.0, -2.0))
+            .expand(glam::dvec3(2.0, 2.0, 2.0));
+        let entity_boxes = game
+            .entity_store
+            .collision_aabbs(game.player.entity_id, &region);
+        let use_speed_multiplier = game.interaction.use_speed_multiplier();
+        let slow_due_to_using_item = game.interaction.slow_due_to_using_item();
+        if !tick_ridden_horse(
+            &mut game.entity_store,
+            &game.chunk_store,
+            &mut game.player,
+            input,
+            game.riding_vehicle_id,
+            Some(game.world_border.bounds_at(0.0)),
+        ) {
+            movement::tick_with_context(
+                &mut game.player,
+                input,
+                &game.chunk_store,
+                &entity_boxes,
+                Some(game.world_border.bounds_at(0.0)),
+                use_speed_multiplier,
+                slow_due_to_using_item,
+            );
+        }
+        // Mounted movement skips movement::tick_with_context, which normally
+        // records this edge state for the next tick's ride-jump charge logic.
+        if game.riding_vehicle_id.is_some() {
+            game.player.was_jump_pressed = jump_held;
+        }
+        let dx = game.player.position.x - game.player.prev_position.x;
+        let dz = game.player.position.z - game.player.prev_position.z;
+        crate::entity::update_walk_animation(
+            dx,
+            dz,
+            &mut game.player_walk_pos,
+            &mut game.player_walk_speed,
+            &mut game.player_prev_walk_speed,
+        );
+        game.player.tick_bob(dx, dz, false);
+
+        Self::send_abilities_packet(connection, game);
+        Self::send_input_packet(input, connection, game);
+        self.send_position_packet(connection, game);
+
         connection.packet_tx.recorder.record("local", "movement_tick", || Some(serde_json::json!({"player":crate::movement_record::player(game),"input":movement_input(input),"item_speed_multiplier":use_speed_multiplier,"slow_due_to_using_item":slow_due_to_using_item})));
         if let Some(hand) = game.interaction.take_writable_book_open() {
             use azalea_inventory::ItemStack;
@@ -5280,7 +5303,7 @@ mod tests {
         apply_vehicle_teleport, chest_open_event, cursor_step, death_route, entity_look_direction,
         explosion_sound_pitch, load_network_chunk, local_player_motion, pack_download_action,
         player_command_packet, player_input_state, player_ride_state, player_rotation_packet,
-        post_teleport_echo, register_nonliving_spawn, resolve_entity_teleport,
+        post_teleport_echo, register_nonliving_spawn, reply_to_play_ping, resolve_entity_teleport,
         resolve_head_profile, resolve_rotation, server_view_distance_update,
         serverbound_player_input, set_first_disconnect_reason, set_player_experience,
         set_player_inventory_slot, take_finished_pack_downloads, time_update_clock,
@@ -5292,6 +5315,18 @@ mod tests {
     use crate::player::valid_player_name;
     use crate::resource_pack::ResourcePackManager;
     use crate::ui::chat::ChatMessageTag;
+
+    #[test]
+    fn play_ping_reply_preserves_protocol_id_bits() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = crate::net::sender::PacketSender::new(tx);
+        let id = -1_234_567;
+        reply_to_play_ping(&sender, id);
+        let crate::net::sender::Outbound::Packet(packet) = rx.try_recv().unwrap() else {
+            panic!("expected pong packet");
+        };
+        assert!(matches!(*packet, ServerboundGamePacket::Pong(ref pong) if pong.id as i32 == id));
+    }
 
     #[test]
     fn immediate_edit_same_frame_routes_and_generation_registration() {
@@ -5310,8 +5345,85 @@ mod tests {
             .0;
         before(
             tick,
+            "game.interaction.update_target(",
+            "game.interaction.tick(",
+        );
+        let after_interaction = tick
+            .split_once("let dirty = game.interaction.tick(")
+            .unwrap()
+            .1;
+        before(
+            after_interaction,
+            "Self::tick_other_entities(game)",
+            "if game.chunk_load_bench.is_some()",
+        );
+        assert_eq!(tick.matches("Self::tick_other_entities(game)").count(), 2);
+        before(
+            tick,
+            "game.interaction.tick(",
+            "movement::tick_with_context(",
+        );
+        before(
+            tick,
+            "movement::tick_with_context(",
+            "Self::send_input_packet(input, connection, game)",
+        );
+        before(
+            tick,
+            "game.interaction.tick(",
+            "Self::send_input_packet(input, connection, game)",
+        );
+        let live_movement_tail = tick
+            .rsplit_once("Self::send_input_packet(input, connection, game)")
+            .unwrap()
+            .1;
+        assert!(
+            live_movement_tail.find("self.send_position_packet(connection, game)")
+                < live_movement_tail
+                    .find("connection.packet_tx.recorder.record(\"local\", \"movement_tick\"")
+        );
+        let interaction = include_str!("../player/interaction.rs");
+        let attack = interaction
+            .split_once("    fn start_attack(")
+            .unwrap()
+            .1
+            .split_once("    fn continue_attack(")
+            .unwrap()
+            .0;
+        let entity_attack = attack
+            .split_once("Some(HitResult::Entity(hit)) => {")
+            .unwrap()
+            .1
+            .split_once("Some(HitResult::Block(hit)) =>")
+            .unwrap()
+            .0;
+        before(
+            entity_attack,
+            "wire::encode_attack(hit.entity_id)",
+            "self.swing(sender)",
+        );
+        let movement_packets = source
+            .split_once("    pub fn send_position_packet(")
+            .unwrap()
+            .1
+            .split_once("fn container_screen_for_menu(")
+            .unwrap()
+            .0;
+        before(
+            movement_packets,
+            "self.send_sprint_command(connection, game)",
+            "sender.send(ServerboundGamePacket::MovePlayerPos",
+        );
+        before(
+            tick,
             "game.interaction.tick(",
             "game.interaction.take_visual_edits()",
+        );
+        let fixed_tick = include_str!("phases/in_game.rs");
+        before(
+            fixed_tick,
+            "core.tick_physics(",
+            "AppCore::send_client_tick_end(connection)",
         );
         before(
             tick,

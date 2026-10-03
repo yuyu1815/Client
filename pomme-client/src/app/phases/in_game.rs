@@ -2002,6 +2002,18 @@ pub(crate) const fn server_tick_runs(frozen: bool, steps: u32) -> bool {
     !frozen || steps > 0
 }
 
+const MAX_FIXED_TICKS_PER_FRAME: u32 = 10;
+
+/// Mirrors vanilla's per-frame catch-up ceiling: discard excess whole ticks,
+/// but keep the fractional render-tick remainder.
+fn take_fixed_tick_budget(accumulator: &mut f32, elapsed: f32) -> u32 {
+    let period = 1.0 / 20.0;
+    let total = f64::from(*accumulator) + f64::from(elapsed);
+    let whole_ticks = (total / period).floor();
+    *accumulator = (total - whole_ticks * period) as f32;
+    whole_ticks.min(f64::from(MAX_FIXED_TICKS_PER_FRAME)) as u32
+}
+
 pub(crate) fn server_time_tick_period(rate: f32) -> f32 {
     if rate.is_finite() && rate >= 1.0 {
         TICK_RATE.max(1.0 / rate)
@@ -2965,6 +2977,105 @@ fn build_hopper(
     }
 }
 
+#[derive(serde::Serialize)]
+struct FixedProfileIdentityFields {
+    #[serde(serialize_with = "serialize_profile_uuid")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<uuid::Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(
+        skip_serializing_if = "azalea_auth::game_profile::SerializableProfileProperties::is_empty"
+    )]
+    properties: azalea_auth::game_profile::SerializableProfileProperties,
+}
+
+fn serialize_profile_uuid<S: serde::Serializer>(
+    id: &Option<uuid::Uuid>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    azalea_core::codec_utils::uuid(id, serializer)
+}
+
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum FixedProfileIdentity {
+    Partial(FixedProfileIdentityFields),
+    Full(FixedProfileIdentityFields),
+}
+
+#[derive(serde::Serialize)]
+struct FixedProfileHashView {
+    #[serde(flatten)]
+    profile: FixedProfileIdentity,
+    #[serde(flatten)]
+    skin_patch: azalea_inventory::components::PlayerSkinPatch,
+}
+
+fn corrected_hashed_stack(
+    item: &azalea_inventory::ItemStack,
+    registries: &azalea_core::registry_holder::RegistryHolder,
+) -> azalea_protocol::packets::game::s_container_click::HashedStack {
+    use azalea_inventory::ItemStack;
+    use azalea_inventory::components::{PartialOrFullProfile, Profile};
+
+    let mut hashed =
+        azalea_protocol::packets::game::s_container_click::HashedStack::from_item_stack(
+            item, registries,
+        );
+    let ItemStack::Present(data) = item else {
+        return hashed;
+    };
+    let Some(profile) = crate::player::menu_click::component::<Profile>(data) else {
+        return hashed;
+    };
+    let identity = match profile.unpack.as_ref() {
+        PartialOrFullProfile::Partial(partial) => {
+            let properties = azalea_auth::game_profile::SerializableProfileProperties::from(
+                partial.properties.clone(),
+            );
+            FixedProfileIdentity::Partial(FixedProfileIdentityFields {
+                id: partial.id,
+                name: partial.name.clone(),
+                properties,
+            })
+        }
+        PartialOrFullProfile::Full(full) => {
+            let properties = azalea_auth::game_profile::SerializableProfileProperties::from(
+                (*full.properties).clone(),
+            );
+            FixedProfileIdentity::Full(FixedProfileIdentityFields {
+                id: Some(full.uuid),
+                name: Some(full.name.clone()),
+                properties,
+            })
+        }
+    };
+    let id_is_present = match &identity {
+        FixedProfileIdentity::Partial(fields) | FixedProfileIdentity::Full(fields) => {
+            fields.id.is_some()
+        }
+    };
+    if id_is_present
+        && let Ok(checksum) = azalea_core::checksum::get_checksum(
+            &FixedProfileHashView {
+                profile: identity,
+                skin_patch: *profile.skin_patch,
+            },
+            registries,
+        )
+        && let Some(actual) = hashed.0.as_mut()
+        && let Some((_, hash)) = actual
+            .components
+            .added_components
+            .iter_mut()
+            .find(|(kind, _)| *kind == azalea_registry::builtin::DataComponentKind::Profile)
+    {
+        *hash = checksum;
+    }
+    hashed
+}
+
 /// Predict each container click locally (instant UI + drag preview), then send
 /// the predicted diff as `HashedStack`es so the server suppresses corrections
 /// when the prediction is right (vanilla lockstep).
@@ -2977,9 +3088,7 @@ fn send_container_clicks(
     use azalea_inventory::operations::{
         ClickOperation, QuickCraftClick, QuickCraftKind, QuickCraftStatus,
     };
-    use azalea_protocol::packets::game::s_container_click::{
-        HashedStack, ServerboundContainerClick,
-    };
+    use azalea_protocol::packets::game::s_container_click::ServerboundContainerClick;
 
     use crate::player::menu_click;
 
@@ -3044,12 +3153,12 @@ fn send_container_clicks(
             button_num: op.button_num(),
             click_type: op.click_type(),
             changed_slots: Default::default(),
-            carried_item: HashedStack::from_item_stack(&carried, &game.registries),
+            carried_item: corrected_hashed_stack(&carried, &game.registries),
         };
         for (s, item) in &changed {
             click
                 .changed_slots
-                .insert(*s, HashedStack::from_item_stack(item, &game.registries));
+                .insert(*s, corrected_hashed_stack(item, &game.registries));
         }
         connection
             .packet_tx
@@ -3300,10 +3409,12 @@ pub fn update_game(
         .recorder
         .set_context(game.movement_frame_id, game.tick_count);
     let accumulator_before = core.tick_accumulator;
-    core.tick_accumulator += dt;
+    // Fixed client simulation follows raw frame time; visual work above and
+    // below continues to use the clamped `dt`.
+    let fixed_tick_budget = take_fixed_tick_budget(&mut core.tick_accumulator, raw_dt);
     let fixed_tick_start = game.benchmark.is_some().then(std::time::Instant::now);
     let mut fixed_tick_count = 0;
-    while core.tick_accumulator >= TICK_RATE {
+    for _ in 0..fixed_tick_budget {
         fixed_tick_count += 1;
         game.tick_count = game.tick_count.wrapping_add(1);
         connection
@@ -3489,10 +3600,9 @@ pub fn update_game(
             Some(serde_json::json!({"frame_id":game.movement_frame_id,"tick_in_frame":fixed_tick_count,"player":crate::movement_record::player(game),"client_loaded":game.client_loaded,"dead":game.dead}))
         });
         AppCore::send_client_tick_end(connection);
-        core.tick_accumulator -= TICK_RATE;
     }
     connection.packet_tx.recorder.record("local", "movement_frame", || {
-        Some(serde_json::json!({"frame_id":game.movement_frame_id,"raw_dt":raw_dt,"simulation_dt":dt,"accumulator_before":accumulator_before,"accumulator_after":core.tick_accumulator,"ticks":fixed_tick_count}))
+        Some(serde_json::json!({"frame_id":game.movement_frame_id,"raw_dt":raw_dt,"visual_dt":dt,"simulation_dt":fixed_tick_count as f32 * TICK_RATE,"accumulator_before":accumulator_before,"accumulator_after":core.tick_accumulator,"ticks":fixed_tick_count}))
     });
     game.last_update_phases.fixed_tick_count = fixed_tick_count;
     game.last_update_phases.fixed_tick_ms = fixed_tick_start
@@ -8546,6 +8656,148 @@ fn client_information_changed(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    #[test]
+    fn profile_hash_views_use_official_uuid_codec_and_preserve_variant_fields() {
+        use azalea_auth::game_profile::SerializableProfileProperties;
+        use azalea_inventory::components::PlayerSkinPatch;
+
+        use super::{FixedProfileHashView, FixedProfileIdentity, FixedProfileIdentityFields};
+
+        let id = uuid::Uuid::from_u128(0x123456789abcdeffedcba9876543210);
+        let registries = azalea_core::registry_holder::RegistryHolder::default();
+        let partial = FixedProfileHashView {
+            profile: FixedProfileIdentity::Partial(FixedProfileIdentityFields {
+                id: Some(id),
+                name: None,
+                properties: SerializableProfileProperties::default(),
+            }),
+            skin_patch: PlayerSkinPatch::default(),
+        };
+        let partial_hash = azalea_core::checksum::get_checksum(&partial, &registries).unwrap();
+        assert_eq!(partial_hash.0, 837_887_339);
+
+        let full = FixedProfileHashView {
+            profile: FixedProfileIdentity::Full(FixedProfileIdentityFields {
+                id: Some(id),
+                name: Some("Fixture".into()),
+                properties: SerializableProfileProperties::default(),
+            }),
+            skin_patch: PlayerSkinPatch::default(),
+        };
+        let full_hash = azalea_core::checksum::get_checksum(&full, &registries).unwrap();
+        assert_eq!(full_hash.0, 253_408_574);
+        assert_ne!(partial_hash, full_hash);
+
+        let absent = FixedProfileHashView {
+            profile: FixedProfileIdentity::Partial(FixedProfileIdentityFields {
+                id: None,
+                name: Some("Fixture".into()),
+                properties: SerializableProfileProperties::default(),
+            }),
+            skin_patch: PlayerSkinPatch::default(),
+        };
+        assert!(azalea_core::checksum::get_checksum(&absent, &registries).is_ok());
+
+        let mut properties = azalea_auth::game_profile::GameProfileProperties::default();
+        properties.map.insert(
+            "textures".into(),
+            azalea_auth::game_profile::ProfilePropertyValue {
+                value: "redacted-fixture-texture".into(),
+                signature: Some("fixture-signature".into()),
+            },
+        );
+        let with_properties = FixedProfileHashView {
+            profile: FixedProfileIdentity::Partial(FixedProfileIdentityFields {
+                id: Some(id),
+                name: None,
+                properties: SerializableProfileProperties::from(properties),
+            }),
+            skin_patch: PlayerSkinPatch::default(),
+        };
+        let encoded = serde_json::to_value(with_properties).unwrap();
+        assert_eq!(encoded["properties"][0]["name"], "textures");
+        assert_eq!(encoded["properties"][0]["signature"], "fixture-signature");
+    }
+
+    #[test]
+    fn corrected_hashed_stack_only_replaces_profile_hash_when_uuid_exists() {
+        use azalea_inventory::components::{PartialOrFullProfile, PartialProfile, Profile};
+        use azalea_inventory::{ItemStack, ItemStackData};
+        use azalea_registry::builtin::{DataComponentKind, ItemKind};
+
+        use super::corrected_hashed_stack;
+
+        let registries = azalea_core::registry_holder::RegistryHolder::default();
+        let make_stack = |id| {
+            let profile = Profile {
+                unpack: Box::new(PartialOrFullProfile::Partial(PartialProfile {
+                    id,
+                    ..Default::default()
+                })),
+                skin_patch: Box::default(),
+            };
+            let mut item = ItemStackData::new(ItemKind::PlayerHead, 1);
+            // SAFETY: the inserted component union matches DataComponentKind::Profile.
+            unsafe {
+                item.component_patch
+                    .unchecked_insert_component(DataComponentKind::Profile, Some(profile.into()));
+            }
+            ItemStack::Present(item)
+        };
+        let id = Some(uuid::Uuid::from_u128(0x123456789abcdeffedcba9876543210));
+        let with_id = make_stack(id);
+        let original =
+            azalea_protocol::packets::game::s_container_click::HashedStack::from_item_stack(
+                &with_id,
+                &registries,
+            );
+        let fixed = corrected_hashed_stack(&with_id, &registries);
+        let profile_hash =
+            |stack: &azalea_protocol::packets::game::s_container_click::HashedStack| {
+                stack
+                    .0
+                    .as_ref()
+                    .unwrap()
+                    .components
+                    .added_components
+                    .iter()
+                    .find(|(kind, _)| *kind == DataComponentKind::Profile)
+                    .unwrap()
+                    .1
+            };
+        assert_ne!(profile_hash(&original), profile_hash(&fixed));
+        assert_eq!(profile_hash(&fixed).0, 837_887_339);
+
+        let without_id = make_stack(None);
+        assert_eq!(
+            corrected_hashed_stack(&without_id, &registries),
+            azalea_protocol::packets::game::s_container_click::HashedStack::from_item_stack(
+                &without_id,
+                &registries,
+            ),
+        );
+    }
+
+    #[test]
+    fn fixed_tick_budget_catches_up_once_and_keeps_only_fraction() {
+        let mut accumulator = 0.0;
+        assert_eq!(super::take_fixed_tick_budget(&mut accumulator, 0.473), 9);
+        assert!((accumulator - 0.023).abs() < 1e-6);
+
+        accumulator = 0.0;
+        assert_eq!(super::take_fixed_tick_budget(&mut accumulator, 3.0), 10);
+        assert!(accumulator.abs() < 1e-6);
+        assert_eq!(super::take_fixed_tick_budget(&mut accumulator, 0.0), 0);
+
+        accumulator = 0.033;
+        assert_eq!(super::take_fixed_tick_budget(&mut accumulator, 0.473), 10);
+        assert!((accumulator - 0.006).abs() < 1e-6);
+
+        accumulator = 0.0;
+        assert_eq!(super::take_fixed_tick_budget(&mut accumulator, 0.150), 3);
+        assert!(accumulator.abs() < 1e-6);
+    }
 
     use super::{
         advance_level_time, advance_world_clock_tick, armor_stand_render_infos, arrow_render_infos,

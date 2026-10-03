@@ -283,7 +283,6 @@ impl InteractionState {
             chunks,
             effects.biome_climate,
         );
-        self.destroy_delay = DESTROY_COOLDOWN;
     }
 
     /// Vanilla `endPredictionsUpTo` + `ClientLevel.syncBlockState`: resolves
@@ -1576,6 +1575,9 @@ impl InteractionState {
                 dirty_chunks,
                 &sender.recorder,
             );
+            if creative {
+                self.destroy_delay = DESTROY_COOLDOWN;
+            }
             return;
         }
 
@@ -1677,6 +1679,7 @@ impl InteractionState {
                 dirty_chunks,
                 &sender.recorder,
             );
+            self.destroy_delay = DESTROY_COOLDOWN;
             self.is_destroying = false;
             self.destroy_progress = 0.0;
             self.destroy_ticks = 0.0;
@@ -1833,9 +1836,15 @@ fn destroy_progress(
 
     let tool = held_stack.and_then(crate::player::menu_click::component::<Tool>);
     let tool = tool.as_ref();
-    let kind = state.as_block_kind();
+    // BlockState is a data-free shim in pomme-block; resolve the native block
+    // name from the client registry instead of treating every state as Air.
+    let kind = crate::world::block::block_id(state)
+        .parse::<BlockKind>()
+        .ok();
 
-    let mut speed = tool.map_or(1.0, |t| tool_mining_speed(t, kind));
+    let mut speed = tool.map_or(1.0, |t| {
+        kind.map_or(t.default_mining_speed, |kind| tool_mining_speed(t, kind))
+    });
     // TODO: the `getDestroySpeed` modifier chain (mining efficiency, haste /
     // mining fatigue, block break speed, submerged mining speed) needs
     // attribute and mob-effect tracking.
@@ -1844,7 +1853,7 @@ fn destroy_progress(
     }
 
     let correct_tool = !behavior.requires_correct_tool_for_drops
-        || tool.is_some_and(|t| tool_correct_for_drops(t, kind));
+        || tool.is_some_and(|t| kind.is_some_and(|kind| tool_correct_for_drops(t, kind)));
     let divisor = if correct_tool { 30.0 } else { 100.0 };
     speed / hardness / divisor
 }
@@ -4901,5 +4910,140 @@ mod tests {
         assert!(tool_correct_for_drops(&tool, BlockKind::Stone));
         assert_eq!(tool_mining_speed(&tool, BlockKind::Dirt), 1.0);
         assert!(!tool_correct_for_drops(&tool, BlockKind::Dirt));
+    }
+
+    #[test]
+    fn survival_instant_break_start_does_not_apply_creative_five_tick_delay() {
+        use crate::net::sender::Outbound;
+
+        let (chunks, mut audio, _, mut particles, registry) = headless_use_fixture();
+        let pos = BlockPos::new(2, 64, 2);
+        chunks.set_block_state(
+            pos.x,
+            pos.y,
+            pos.z,
+            crate::world::block::first_state_of("wheat").unwrap(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let biome_climate = HashMap::new();
+        let mut effects = BreakEffects {
+            particles: &mut particles,
+            registry: &registry,
+            biome_climate: &biome_climate,
+        };
+        let mut interaction = InteractionState::new();
+        let mut dirty = Vec::new();
+        interaction.start_destroy_block(
+            BlockHitResult {
+                block_pos: pos,
+                face: Direction::Up,
+                hit_point: dvec3(2.5, 65.0, 2.5),
+                inside: false,
+                world_border: false,
+            },
+            &chunks,
+            &sender,
+            &mut audio,
+            DVec3::ZERO,
+            true,
+            false,
+            None,
+            &mut effects,
+            &mut dirty,
+        );
+        assert_eq!(interaction.destroy_delay, 0);
+        assert!(!interaction.is_destroying);
+        assert_eq!(dirty, vec![pos]);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Outbound::Packet(packet))
+                if matches!(*packet, ServerboundGamePacket::PlayerAction(ref action)
+                    if action.action == Action::StartDestroyBlock)
+        ));
+    }
+
+    #[test]
+    fn catchup_ticks_consume_entity_attack_edge_once() {
+        use winit::event::{ElementState, MouseButton};
+
+        use crate::net::sender::Outbound;
+
+        let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let biome_climate = HashMap::new();
+        let mut effects = BreakEffects {
+            particles: &mut particles,
+            registry: &registry,
+            biome_climate: &biome_climate,
+        };
+        let pos = dvec3(0.5, 64.0, 0.5);
+        let eye = pos + dvec3(0.0, 1.62, 0.0);
+        let mut input = crate::app::input::InputState::new();
+        input.on_mouse_button(MouseButton::Left, ElementState::Pressed);
+        let mut interaction = InteractionState::new();
+        interaction.target = Some(HitResult::Entity(EntityHitResult {
+            entity_id: 42,
+            location: eye + dvec3(0.0, 0.0, 1.0),
+            entity_pos: eye + dvec3(0.0, 0.0, 1.0),
+        }));
+        for _ in 0..10 {
+            interaction.tick(
+                &input,
+                &chunks,
+                &sender,
+                &mut audio,
+                pos,
+                Aabb::from_center(pos, 0.3, 0.9),
+                eye,
+                LookDirection::default(),
+                true,
+                false,
+                false,
+                &entities,
+                InteractionHand::MainHand,
+                false,
+                MAX_FOOD_LEVEL,
+                0,
+                None,
+                None,
+                false,
+                None,
+                None,
+                false,
+                true,
+                &mut effects,
+            );
+            input.clear_just_pressed_actions();
+        }
+        let mut packets = Vec::new();
+        while let Ok(packet) = rx.try_recv() {
+            packets.push(packet);
+        }
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|p| matches!(p, Outbound::Raw(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn mining_uses_native_block_kind_instead_of_data_free_air_shim() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let oak_wood = crate::world::block::default_state_of("oak_wood").unwrap();
+        let axe = ItemStackData::new(ItemKind::StoneAxe, 1);
+        let tool = crate::player::menu_click::component::<Tool>(&axe).unwrap();
+        assert_eq!(crate::world::block::block_id(oak_wood), "oak_wood");
+        assert_eq!(oak_wood.as_block_kind(), BlockKind::Air);
+        assert_eq!(
+            destroy_progress(oak_wood, true, false, Some(&axe)),
+            1.0 / 15.0
+        );
+        assert_eq!(destroy_progress(oak_wood, true, false, None), 1.0 / 60.0);
+        assert_eq!(tool_mining_speed(&tool, "oak_wood".parse().unwrap()), 4.0);
     }
 }

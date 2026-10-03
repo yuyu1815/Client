@@ -269,6 +269,7 @@ async fn connect_recorded(
                 &event_tx,
                 &mut game_packet_rx,
                 &mut server_cookies,
+                std::collections::VecDeque::new(),
                 None,
             )
             .await?,
@@ -742,6 +743,7 @@ async fn config_sequence(
         azalea_registry::identifier::Identifier,
         Vec<u8>,
     >,
+    mut prefetched: std::collections::VecDeque<(Box<[u8]>, bool, bool)>,
     // `Some` on a mid-session reconfiguration: the previous registries,
     // kept when the server re-sends nothing (vanilla's RegistryDataCollector
     // returns the original registries unchanged in that case).
@@ -856,47 +858,65 @@ async fn config_sequence(
         let packet = if let Some(packet) = pending.pop_front() {
             packet
         } else {
-            tokio::select! {
-                raw = tokio::time::timeout(PHASE_READ_TIMEOUT, conn.reader.read()) => {
-                    let raw = match raw {
-                        Err(_) => return Err(phase_read_timeout()),
-                        Ok(Ok(raw)) => raw,
-                        Ok(Err(e)) => {
-                            skip_malformed_packet(e)?;
-                            continue;
-                        }
-                    };
-                    recorder.raw_packet("inbound", "configuration", &raw);
-                    let frames = match super::translate::active() {
-                        Some(t) => t.translate_config_frame(raw),
-                        None => vec![raw],
-                    };
-                    for frame in frames {
-                        if pump_config_future(
-                            super::dialog::handle_raw_dialog_packet(Phase::Configuration, &frame, event_tx),
-                            conn, outbound_rx, code_of_conduct_seen, &mut code_of_conduct_accepted,
-                        ).await?? {
-                            continue;
-                        }
-                        match deserialize_packet::<ClientboundConfigPacket>(
-                            &mut std::io::Cursor::new(&frame),
-                        ) {
-                            Ok(packet) => pending.push_back(packet),
-                            Err(e) => skip_malformed_packet(e)?,
-                        }
+            let (raw, already_recorded, already_translated) = if let Some(frame) =
+                prefetched.pop_front()
+            {
+                frame
+            } else {
+                tokio::select! {
+                    raw = tokio::time::timeout(PHASE_READ_TIMEOUT, conn.reader.read()) => {
+                        let raw = match raw {
+                            Err(_) => return Err(phase_read_timeout()),
+                            Ok(Ok(raw)) => raw,
+                            Ok(Err(e)) => {
+                                skip_malformed_packet(e)?;
+                                continue;
+                            }
+                        };
+                        (raw, false, false)
                     }
+                    // `Some(..)` disables the branch when the channel closes instead
+                    // of busy-looping on a closed receiver.
+                    Some(outbound) = outbound_rx.recv() => {
+                        write_config_outbound(conn, outbound, code_of_conduct_seen, &mut code_of_conduct_accepted).await?;
+                        // Anything else is discarded: vanilla defers its outbound
+                        // queue, but pomme's game keeps ticking through a
+                        // reconfiguration, so stale movement/actions are best dropped.
+                        continue;
+                    }
+                }
+            };
+            if !already_recorded {
+                recorder.raw_packet("inbound", "configuration", &raw);
+            }
+            let frames = if already_translated {
+                vec![raw]
+            } else {
+                match super::translate::active() {
+                    Some(t) => t.translate_config_frame(raw),
+                    None => vec![raw],
+                }
+            };
+            for frame in frames {
+                if pump_config_future(
+                    super::dialog::handle_raw_dialog_packet(Phase::Configuration, &frame, event_tx),
+                    conn,
+                    outbound_rx,
+                    code_of_conduct_seen,
+                    &mut code_of_conduct_accepted,
+                )
+                .await??
+                {
                     continue;
                 }
-                // `Some(..)` disables the branch when the channel closes instead
-                // of busy-looping on a closed receiver.
-                Some(outbound) = outbound_rx.recv() => {
-                    write_config_outbound(conn, outbound, code_of_conduct_seen, &mut code_of_conduct_accepted).await?;
-                    // Anything else is discarded: vanilla defers its outbound
-                    // queue, but pomme's game keeps ticking through a
-                    // reconfiguration, so stale movement/actions are best dropped.
-                    continue;
+                match deserialize_packet::<ClientboundConfigPacket>(&mut std::io::Cursor::new(
+                    &frame,
+                )) {
+                    Ok(packet) => pending.push_back(packet),
+                    Err(e) => skip_malformed_packet(e)?,
                 }
             }
+            continue;
         };
         match packet {
             ClientboundConfigPacket::RegistryData(p) => {
@@ -1516,6 +1536,7 @@ async fn game_loop(
     let mut inbound_chat = super::chat::InboundChat::new(crate::version::session_protocol() >= 770);
     let mut chat_tick = tokio::time::interval(std::time::Duration::from_millis(50));
     chat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut configuration_ack_written = false;
     macro_rules! pump {
         ($future:expr) => {
             pump_game_future(
@@ -1528,6 +1549,7 @@ async fn game_loop(
                 translation,
                 &shared_tree,
                 &recorder,
+                &mut configuration_ack_written,
             )
             .await?
         };
@@ -1714,44 +1736,41 @@ async fn game_loop(
             Ok(mut packet) => {
                 recorder.inbound(recorded_metadata.as_ref().unwrap_or(&packet), wire_id);
                 if matches!(packet, ClientboundGamePacket::StartConfiguration(_)) {
-                    // Vanilla clears the client level before acknowledging
-                    // (ClientPacketListener.handleConfigurationStart); chat
-                    // survives the transition. Whatever the game queued goes
-                    // first, then the pending chat acknowledgement.
-                    // TODO: chat events still in flight to the game thread
-                    // miss this ack; the next login resets the tracker anyway.
-                    pump!(send_event(event_tx, NetworkEvent::Reconfiguring))?;
-                    while let Ok(out) = outbound_rx.try_recv() {
-                        if let Some((frame, trace)) = recorded_outbound_frame(
-                            out,
-                            translation,
-                            &mut chat,
-                            &shared_tree,
-                            &recorder,
-                        )? {
-                            write_game_frame_traced(
-                                &mut conn.writer,
-                                translation,
-                                frame,
-                                &recorder,
-                                trace,
-                            )
-                            .await?;
-                        }
-                    }
-                    if let Some(frame) = chat.flush_ack() {
-                        write_game_frame(&mut conn.writer, translation, frame, &recorder).await?;
-                    }
-                    let ack = ServerboundGamePacket::ConfigurationAcknowledged(
-                        azalea_protocol::packets::game::s_configuration_acknowledged::ServerboundConfigurationAcknowledged,
-                    );
-                    write_game_frame(
+                    // The phase timeout starts when the server requests reconfiguration,
+                    // not when the main-thread event queue happens to have room.
+                    let ack_deadline = tokio::time::Instant::now() + PHASE_READ_TIMEOUT;
+                    configuration_ack_written = false;
+                    // Vanilla's main-thread handler applies prior game events,
+                    // then queues ConfigurationAcknowledged. Keep reading in
+                    // PLAY only until this exact queued packet reaches the wire.
+                    send_reconfiguring_through_pump(
+                        event_tx,
+                        ack_deadline,
                         &mut conn.writer,
+                        &mut outbound_rx,
+                        &mut key_pair_rx,
+                        &mut chat,
+                        &mut chat_tick,
                         translation,
-                        serialize_frame(&ack)?,
+                        &shared_tree,
                         &recorder,
+                        &mut configuration_ack_written,
                     )
                     .await?;
+                    let prefetched = flush_game_outbound_through_configuration_ack(
+                        &mut conn,
+                        &mut outbound_rx,
+                        &mut key_pair_rx,
+                        &mut chat,
+                        &mut chat_tick,
+                        translation,
+                        &shared_tree,
+                        &recorder,
+                        ack_deadline,
+                        &mut configuration_ack_written,
+                    )
+                    .await?;
+                    configuration_ack_written = false;
                     let next = config_sequence(
                         &mut conn,
                         view_distance,
@@ -1763,6 +1782,7 @@ async fn game_loop(
                         event_tx,
                         &mut outbound_rx,
                         &mut server_cookies,
+                        prefetched,
                         Some(&configured),
                     )
                     .await?;
@@ -1883,19 +1903,143 @@ async fn pump_game_future<F: std::future::Future>(
     translation: Option<&super::translate::Translation>,
     tree: &crate::net::commands::SharedCommandTree,
     recorder: &crate::movement_record::Recorder,
+    configuration_ack_written: &mut bool,
 ) -> Result<F::Output, ConnectionError> {
     tokio::pin!(future);
     loop {
         tokio::select! {
             result = &mut future => return Ok(result),
             Some(out) = outbound_rx.recv() => {
+                let is_ack = is_configuration_ack(&out);
                 if let Some((frame, trace)) = recorded_outbound_frame(out, translation, chat, tree, recorder)? {
                     write_game_frame_traced(writer, translation, frame, recorder, trace).await?;
+                    if is_ack {
+                        *configuration_ack_written = true;
+                    }
                 }
             }
             Some(key_pair) = key_pair_rx.recv() => {
                 if let Some(frame) = chat.key_pair_ready(key_pair) {
                     write_game_frame(writer, translation, frame, recorder).await?;
+                }
+            }
+            _ = chat_tick.tick() => chat.tick(),
+        }
+    }
+}
+
+async fn send_reconfiguring_through_pump(
+    event_tx: &Sender<NetworkEvent>,
+    ack_deadline: tokio::time::Instant,
+    writer: &mut RawWriter,
+    outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
+    key_pair_rx: &mut mpsc::UnboundedReceiver<Option<std::sync::Arc<ProfileKeyPair>>>,
+    chat: &mut ChatSender,
+    chat_tick: &mut tokio::time::Interval,
+    translation: Option<&super::translate::Translation>,
+    tree: &crate::net::commands::SharedCommandTree,
+    recorder: &crate::movement_record::Recorder,
+    configuration_ack_written: &mut bool,
+) -> Result<(), ConnectionError> {
+    tokio::time::timeout_at(ack_deadline, async {
+        pump_game_future(
+            send_event(event_tx, NetworkEvent::Reconfiguring),
+            writer,
+            outbound_rx,
+            key_pair_rx,
+            chat,
+            chat_tick,
+            translation,
+            tree,
+            recorder,
+            configuration_ack_written,
+        )
+        .await??;
+        Ok::<_, ConnectionError>(())
+    })
+    .await
+    .map_err(|_| phase_read_timeout())??;
+    Ok(())
+}
+
+fn is_configuration_ack(out: &Outbound) -> bool {
+    match out {
+        Outbound::Packet(packet) => matches!(
+            packet.as_ref(),
+            ServerboundGamePacket::ConfigurationAcknowledged(_)
+        ),
+        Outbound::Traced { packet, .. } => is_configuration_ack(packet),
+        _ => false,
+    }
+}
+
+async fn flush_game_outbound_through_configuration_ack(
+    conn: &mut Conn,
+    outbound_rx: &mut mpsc::UnboundedReceiver<Outbound>,
+    key_pair_rx: &mut mpsc::UnboundedReceiver<Option<std::sync::Arc<ProfileKeyPair>>>,
+    chat: &mut ChatSender,
+    chat_tick: &mut tokio::time::Interval,
+    translation: Option<&super::translate::Translation>,
+    tree: &crate::net::commands::SharedCommandTree,
+    recorder: &crate::movement_record::Recorder,
+    ack_deadline: tokio::time::Instant,
+    configuration_ack_written: &mut bool,
+) -> Result<std::collections::VecDeque<(Box<[u8]>, bool, bool)>, ConnectionError> {
+    let mut prefetched = std::collections::VecDeque::new();
+    if *configuration_ack_written {
+        return Ok(prefetched);
+    }
+    loop {
+        tokio::select! {
+            outbound = outbound_rx.recv() => {
+                let Some(outbound) = outbound else {
+                    return Err(ConnectionError::Disconnected(
+                        "outbound queue closed before ConfigurationAcknowledged".into(),
+                    ));
+                };
+                let is_ack = is_configuration_ack(&outbound);
+                if is_ack && let Some(frame) = chat.flush_ack() {
+                    write_game_frame(&mut conn.writer, translation, frame, recorder).await?;
+                }
+                if let Some((frame, trace)) = recorded_outbound_frame(
+                    outbound, translation, chat, tree, recorder,
+                )? {
+                    write_game_frame_traced(
+                        &mut conn.writer, translation, frame, recorder, trace,
+                    ).await?;
+                    if is_ack {
+                        *configuration_ack_written = true;
+                    }
+                }
+                if is_ack && *configuration_ack_written {
+                    return Ok(prefetched);
+                }
+            }
+            raw = tokio::time::timeout_at(ack_deadline, conn.reader.read()) => {
+                let raw = match raw {
+                    Err(_) => return Err(phase_read_timeout()),
+                    Ok(Ok(raw)) => raw,
+                    Ok(Err(e)) => return Err(e.into()),
+                };
+                recorder.raw_packet("inbound", "configuration", &raw);
+                let frames = match translation {
+                    Some(translation) => translation.translate_config_frame(raw),
+                    None => vec![raw],
+                };
+                for frame in frames {
+                    if let Ok(azalea_protocol::packets::config::ClientboundConfigPacket::Disconnect(p)) =
+                        azalea_protocol::read::deserialize_packet::<azalea_protocol::packets::config::ClientboundConfigPacket>(
+                            &mut std::io::Cursor::new(&frame),
+                        )
+                    {
+                        return Err(ConnectionError::Disconnected(format!("{}", p.reason)));
+                    }
+                    prefetched.push_back((frame, true, true));
+                }
+            }
+            Some(key_pair) = key_pair_rx.recv() => {
+                if let Some(frame) = chat.key_pair_ready(key_pair) {
+                    write_game_frame(&mut conn.writer, translation, frame, recorder).await?;
                 }
             }
             _ = chat_tick.tick() => chat.tick(),
@@ -2320,6 +2464,333 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[tokio::test]
+    async fn reconfiguration_ack_waits_for_main_lane_teleport_and_play_ping_replies() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
+        use azalea_protocol::packets::config::{ClientboundConfigPacket, ServerboundConfigPacket};
+        use azalea_protocol::packets::game::c_keep_alive::ClientboundKeepAlive;
+        use azalea_protocol::packets::game::c_ping::ClientboundPing;
+        use azalea_protocol::packets::game::c_player_position::ClientboundPlayerPosition;
+        use azalea_protocol::packets::game::c_start_configuration::ClientboundStartConfiguration;
+        use azalea_protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
+
+        let (client_end, server_end) = super::super::conn::memory_pipes();
+        let mut peer = Conn::from_memory(server_end);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(32);
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+        let client_outbound_tx = outbound_tx.clone();
+        let (key_pair_tx, key_pair_rx) = mpsc::unbounded_channel();
+        let client_events = event_tx.clone();
+        let client = tokio::spawn(async move {
+            game_loop(
+                Conn::from_memory(client_end),
+                &client_events,
+                GameLoopArgs {
+                    connected_profile: None,
+                    recorder: Default::default(),
+                    outbound_tx: client_outbound_tx,
+                    outbound_rx,
+                    joined: Joined {
+                        configured: Configured {
+                            registries: std::sync::Arc::default(),
+                            timeline_entries: std::sync::Arc::default(),
+                            timeline_entries_error: None,
+                            timeline_ids: None,
+                            world_clock_ids: None,
+                            timeline_tags: Default::default(),
+                            dialogs: std::sync::Arc::default(),
+                            loom_patterns: std::sync::Arc::default(),
+                        },
+                        deferred_login: None,
+                    },
+                    view_distance: 8,
+                    chat_options: Default::default(),
+                    main_hand_right: true,
+                    particle_mode: crate::particle::ParticleMode::All,
+                    skin_parts_mask: 127,
+                    chat: ChatSender::new(uuid::Uuid::nil(), uuid::Uuid::nil(), None, key_pair_tx),
+                    key_pair_rx,
+                    server_cookies: Default::default(),
+                },
+            )
+            .await
+        });
+
+        for _ in 0..5 {
+            let _ = recv_event(&event_rx).await;
+        }
+
+        // PLAY keepalive remains an immediate network-thread response.
+        peer.write_packet(ClientboundGamePacket::KeepAlive(ClientboundKeepAlive {
+            id: 17,
+        }))
+        .await
+        .unwrap();
+        assert!(matches!(
+            read_test_packet::<ServerboundGamePacket>(&mut peer).await,
+            ServerboundGamePacket::KeepAlive(packet) if packet.id == 17
+        ));
+
+        peer.write_packet(ClientboundGamePacket::PlayerPosition(
+            ClientboundPlayerPosition {
+                id: 29,
+                change: PositionMoveRotation {
+                    pos: azalea_core::position::Vec3::new(8.0, 70.0, -4.0),
+                    delta: azalea_core::position::Vec3::ZERO,
+                    look_direction: azalea_entity::LookDirection::default(),
+                },
+                relative: RelativeMovements::default(),
+            },
+        ))
+        .await
+        .unwrap();
+        peer.write_packet(ClientboundGamePacket::Ping(ClientboundPing { id: 0x1234 }))
+            .await
+            .unwrap();
+
+        let position = recv_event(&event_rx).await;
+        let ping = recv_event(&event_rx).await;
+        let (
+            NetworkEvent::PlayerPosition {
+                id,
+                change,
+                relative,
+            },
+            NetworkEvent::Ping { id: ping_id },
+        ) = (position, ping)
+        else {
+            panic!("expected ordered Position and Ping events");
+        };
+        assert_eq!(id, 29);
+        assert_eq!(change.pos.x, 8.0);
+        assert_eq!(ping_id, 0x1234);
+
+        // Hold the main event lane full while a mandatory Reconfiguring event
+        // is pending; the network pump must still write the queued PLAY pong.
+        let sender = PacketSender::new(outbound_tx);
+        let mut player = crate::player::LocalPlayer::new();
+        crate::app::core::apply_player_correction(
+            &mut player,
+            false,
+            change,
+            &relative,
+            id,
+            &sender,
+        );
+        assert_eq!(*player.position, glam::dvec3(8.0, 70.0, -4.0));
+        crate::app::core::reply_to_play_ping(&sender, ping_id);
+        for queued in 0..32 {
+            event_tx
+                .try_send(NetworkEvent::Ping { id: 1000 + queued })
+                .unwrap();
+        }
+        peer.write_packet(ClientboundGamePacket::StartConfiguration(
+            ClientboundStartConfiguration,
+        ))
+        .await
+        .unwrap();
+        // CONFIG frames may already be in the socket; they remain buffered
+        // until the main-thread acknowledgement has crossed the PLAY queue.
+        peer.write_packet(ClientboundConfigPacket::Ping(
+            azalea_protocol::packets::config::c_ping::ClientboundPing { id: 0x5678 },
+        ))
+        .await
+        .unwrap();
+        assert!(matches!(
+            read_test_packet::<ServerboundGamePacket>(&mut peer).await,
+            ServerboundGamePacket::AcceptTeleportation(packet) if packet.id == 29
+        ));
+        assert!(matches!(
+            read_test_packet::<ServerboundGamePacket>(&mut peer).await,
+            ServerboundGamePacket::MovePlayerPosRot(packet)
+                if packet.pos.x == 8.0 && packet.pos.y == 70.0 && packet.pos.z == -4.0
+        ));
+        assert!(matches!(
+            read_test_packet::<ServerboundGamePacket>(&mut peer).await,
+            ServerboundGamePacket::Pong(packet) if packet.id == 0x1234
+        ));
+
+        for queued in 0..32 {
+            assert!(matches!(
+                recv_event(&event_rx).await,
+                NetworkEvent::Ping { id } if id == 1000 + queued
+            ));
+        }
+        assert!(matches!(
+            recv_event(&event_rx).await,
+            NetworkEvent::Reconfiguring
+        ));
+        crate::app::core::reply_to_configuration_start(&sender);
+
+        assert!(matches!(
+            read_test_packet::<ServerboundGamePacket>(&mut peer).await,
+            ServerboundGamePacket::ConfigurationAcknowledged(_)
+        ));
+
+        // Only after that wire barrier does the client answer buffered CONFIG IDs.
+        assert!(matches!(
+            read_test_packet::<ServerboundConfigPacket>(&mut peer).await,
+            ServerboundConfigPacket::Pong(packet) if packet.id == 0x5678
+        ));
+        client.abort();
+    }
+
+    #[tokio::test]
+    async fn disconnect_while_configuration_ack_waits_ends_barrier() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        let (client_end, server_end) = super::super::conn::memory_pipes();
+        let mut peer = Conn::from_memory(server_end);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(16);
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+        let (key_pair_tx, key_pair_rx) = mpsc::unbounded_channel();
+        let client_events = event_tx.clone();
+        let client = tokio::spawn(async move {
+            game_loop(
+                Conn::from_memory(client_end),
+                &client_events,
+                GameLoopArgs {
+                    connected_profile: None,
+                    recorder: Default::default(),
+                    outbound_tx,
+                    outbound_rx,
+                    joined: Joined {
+                        configured: Configured {
+                            registries: std::sync::Arc::default(),
+                            timeline_entries: std::sync::Arc::default(),
+                            timeline_entries_error: None,
+                            timeline_ids: None,
+                            world_clock_ids: None,
+                            timeline_tags: Default::default(),
+                            dialogs: std::sync::Arc::default(),
+                            loom_patterns: std::sync::Arc::default(),
+                        },
+                        deferred_login: None,
+                    },
+                    view_distance: 8,
+                    chat_options: Default::default(),
+                    main_hand_right: true,
+                    particle_mode: crate::particle::ParticleMode::All,
+                    skin_parts_mask: 127,
+                    chat: ChatSender::new(uuid::Uuid::nil(), uuid::Uuid::nil(), None, key_pair_tx),
+                    key_pair_rx,
+                    server_cookies: Default::default(),
+                },
+            )
+            .await
+        });
+        for _ in 0..5 {
+            let _ = recv_event(&event_rx).await;
+        }
+        peer.write_packet(
+            azalea_protocol::packets::game::ClientboundGamePacket::StartConfiguration(
+                azalea_protocol::packets::game::c_start_configuration::ClientboundStartConfiguration,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            recv_event(&event_rx).await,
+            NetworkEvent::Reconfiguring
+        ));
+        peer.write_packet(
+            azalea_protocol::packets::config::ClientboundConfigPacket::Disconnect(
+                azalea_protocol::packets::config::c_disconnect::ClientboundDisconnect {
+                    reason: azalea_chat::FormattedText::from("test disconnect"),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), client)
+            .await
+            .expect("disconnect must release configuration barrier")
+            .unwrap();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn configuration_ack_deadline_does_not_restart_on_chat_ticks() {
+        let (client_end, _peer) = super::super::conn::memory_pipes();
+        let mut conn = Conn::from_memory(client_end);
+        let (_outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let (key_pair_tx, mut key_pair_rx) = mpsc::unbounded_channel();
+        let mut chat = ChatSender::new(uuid::Uuid::nil(), uuid::Uuid::nil(), None, key_pair_tx);
+        let mut chat_tick = tokio::time::interval(std::time::Duration::from_millis(10));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(140);
+        let started = tokio::time::Instant::now();
+        let mut ack_written = false;
+        let result = flush_game_outbound_through_configuration_ack(
+            &mut conn,
+            &mut outbound_rx,
+            &mut key_pair_rx,
+            &mut chat,
+            &mut chat_tick,
+            None,
+            &Default::default(),
+            &crate::movement_record::Recorder::default(),
+            deadline,
+            &mut ack_written,
+        )
+        .await;
+        assert!(matches!(result, Err(ConnectionError::Disconnected(_))));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(120));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert!(!ack_written);
+    }
+
+    #[tokio::test]
+    async fn full_live_event_queue_bounds_reconfiguring_notification_and_pumps_outbound() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        use azalea_protocol::packets::game::ServerboundGamePacket;
+        use azalea_protocol::packets::game::s_pong::ServerboundPong;
+
+        let (client_end, server_end) = super::super::conn::memory_pipes();
+        let mut conn = Conn::from_memory(client_end);
+        let mut peer = Conn::from_memory(server_end);
+        let (event_tx, _event_rx) = crossbeam_channel::bounded(1);
+        event_tx
+            .try_send(NetworkEvent::LevelChunksLoadStart)
+            .unwrap();
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        outbound_tx
+            .send(Outbound::Packet(Box::new(ServerboundGamePacket::Pong(
+                ServerboundPong { id: 0x2468 },
+            ))))
+            .unwrap();
+        let (_key_pair_tx, mut key_pair_rx) = mpsc::unbounded_channel();
+        let mut chat = ChatSender::new(uuid::Uuid::nil(), uuid::Uuid::nil(), None, _key_pair_tx);
+        let mut chat_tick = tokio::time::interval(std::time::Duration::from_millis(10));
+        let recorder = crate::movement_record::Recorder::default();
+        let tree = Default::default();
+        let mut ack_written = false;
+        let started = tokio::time::Instant::now();
+        let deadline = started + std::time::Duration::from_millis(140);
+        let (notify_result, written) = tokio::join!(
+            send_reconfiguring_through_pump(
+                &event_tx,
+                deadline,
+                &mut conn.writer,
+                &mut outbound_rx,
+                &mut key_pair_rx,
+                &mut chat,
+                &mut chat_tick,
+                None,
+                &tree,
+                &recorder,
+                &mut ack_written,
+            ),
+            read_test_packet::<ServerboundGamePacket>(&mut peer),
+        );
+        assert!(matches!(
+            notify_result,
+            Err(ConnectionError::Disconnected(_))
+        ));
+        assert!(matches!(written, ServerboundGamePacket::Pong(packet) if packet.id == 0x2468));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert!(!ack_written);
+    }
+
     #[test]
     fn movement_capture_uses_real_queue_and_shared_transport_dispatcher() {
         use azalea_protocol::common::movements::{PositionMoveRotation, RelativeMovements};
@@ -2725,6 +3196,7 @@ mod tests {
                 &tx,
                 &mut out_rx,
                 &mut Default::default(),
+                std::collections::VecDeque::new(),
                 None,
             )
             .await
@@ -2790,6 +3262,7 @@ mod tests {
                 &tx,
                 &mut out_rx,
                 &mut Default::default(),
+                std::collections::VecDeque::new(),
                 None,
             )
             .await
