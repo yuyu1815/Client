@@ -82,6 +82,9 @@ pub enum ModelConvention {
     /// block's min corner, pivots at `offset/16`, vanilla ZYX euler with
     /// unmodified signs. Used by the chest models.
     BlockYUp,
+    /// Vanilla skull model coordinates: raw baked vertices and part pivots;
+    /// the attachment matrix owns all model-space reflection/rebasing.
+    SkullRaw,
 }
 
 #[derive(Clone)]
@@ -177,7 +180,7 @@ impl BakedEntityModel {
                     };
                     Vec3::new(pivot.x, rebase - pivot.y, pivot.z)
                 }
-                ModelConvention::BlockYUp => pivot,
+                ModelConvention::BlockYUp | ModelConvention::SkullRaw => pivot,
             } / 16.0;
 
             // Vanilla's `translateAndRotate` ZYX euler product. Only the
@@ -191,7 +194,7 @@ impl BakedEntityModel {
                         * Mat4::from_rotation_y(rot.y)
                         * Mat4::from_rotation_x(-rot.x)
                 }
-                ModelConvention::BlockYUp => {
+                ModelConvention::BlockYUp | ModelConvention::SkullRaw => {
                     Mat4::from_rotation_z(rot.z)
                         * Mat4::from_rotation_y(rot.y)
                         * Mat4::from_rotation_x(rot.x)

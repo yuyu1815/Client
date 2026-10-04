@@ -11,6 +11,7 @@ use projectile::{Flight, Frame, HORIZON, Input, Job, MAX_BATCH, THRESHOLD, Worke
 static WORLD_EPOCH: AtomicU64 = AtomicU64::new(1);
 static PROJECTILE_REVISION: AtomicU64 = AtomicU64::new(1);
 
+use azalea_buf::AzBuf;
 use azalea_core::position::{BlockPos, ChunkPos};
 use azalea_registry::builtin::EntityKind;
 use glam::DVec3;
@@ -36,6 +37,24 @@ pub enum MetaValue {
     BlockPos(BlockPos),
     BlockState(u32),
     Direction(azalea_core::direction::Direction),
+}
+
+pub(crate) fn legacy_effect_particles(
+    color: u32,
+    ambient: bool,
+) -> Vec<azalea_entity::particle::Particle> {
+    if color == 0 {
+        return Vec::new();
+    }
+    // Decode the four-byte codec value so legacy particles retain their vanilla
+    // alpha.
+    let argb = ((if ambient { 0x26 } else { 0xff }) << 24) | (color & 0x00ff_ffff);
+    let bytes = argb.to_be_bytes();
+    let color = azalea_entity::particle::ColorParticle::azalea_read(&mut std::io::Cursor::new(
+        bytes.as_slice(),
+    ))
+    .expect("four-byte ARGB color is a fixed codec value");
+    vec![azalea_entity::particle::Particle::EntityEffect(color)]
 }
 
 /// `AgeableMob` descendants on every supported version (Slime joined only
@@ -245,6 +264,7 @@ pub struct LivingEntity {
     pub sleeping_pos: Option<BlockPos>,
     pub effect_particles: Vec<azalea_entity::particle::Particle>,
     pub effect_particles_ambient: bool,
+    pub legacy_effect_color: Option<u32>,
     pub flags: EntityFlags,
     /// LivingEntity DATA_LIVING_ENTITY_FLAGS: using-item hand bits / riptide
     /// bit.
@@ -437,6 +457,7 @@ impl LivingEntity {
             sleeping_pos: None,
             effect_particles: Vec::new(),
             effect_particles_ambient: false,
+            legacy_effect_color: None,
             flags: EntityFlags::default(),
             using_item: false,
             using_offhand: false,
@@ -2562,6 +2583,7 @@ impl EntityStore {
         if let Some(entity) = self.living.get_mut(&id) {
             if let Some(particles) = particles {
                 entity.effect_particles = particles;
+                entity.legacy_effect_color = None;
             }
             if let Some(ambient) = ambient {
                 entity.effect_particles_ambient = ambient;
@@ -2580,6 +2602,19 @@ impl EntityStore {
         let kind = entity.entity_type;
         let index = normalize_player_index(kind, normalize_ageable_index(kind, index));
         match (kind, index, value) {
+            // Protocols 763-765 stored effect color and ambient separately.
+            (_, 10, Int(color)) => {
+                let color = color as u32 & 0x00ff_ffff;
+                entity.legacy_effect_color = Some(color);
+                entity.effect_particles =
+                    legacy_effect_particles(color, entity.effect_particles_ambient);
+            }
+            (_, 11, Bool(ambient)) => {
+                entity.effect_particles_ambient = ambient;
+                if let Some(color) = entity.legacy_effect_color {
+                    entity.effect_particles = legacy_effect_particles(color, ambient);
+                }
+            }
             // Shared entity flags byte, as registered by Entity.DATA_SHARED_FLAGS_ID.
             (_, 0, Byte(f)) => {
                 entity.flags = f.into();
@@ -4383,6 +4418,74 @@ mod tests {
         );
         assert!(entity.using_item && entity.using_offhand && entity.riptide_spin);
         assert!(entity.is_sprinting);
+    }
+
+    #[test]
+    fn legacy_living_effect_color_and_ambient_metadata_become_particle_state() {
+        use azalea_buf::AzBuf;
+
+        let mut store = EntityStore::new();
+        store.spawn_living(
+            7,
+            EntityKind::Zombie,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        store.set_vehicle_transform(8, Position::default(), DVec3::ZERO);
+        store.set_vehicle_kind(8, EntityKind::OakBoat);
+
+        let color = legacy_effect_particles(0x12_3456, false);
+        store.apply_entity_data(7, 10, MetaValue::Int(0x2612_3456));
+        assert_eq!(store.living[&7].legacy_effect_color, Some(0x12_3456));
+        assert_eq!(store.living[&7].effect_particles, color);
+        let azalea_entity::particle::Particle::EntityEffect(effect) =
+            &store.living[&7].effect_particles[0]
+        else {
+            panic!("legacy effect metadata must create EntityEffect");
+        };
+        let mut encoded_color = Vec::new();
+        effect.color.azalea_write(&mut encoded_color).unwrap();
+        assert_eq!(
+            u32::from_be_bytes(encoded_color.try_into().unwrap()),
+            0xff12_3456
+        );
+        assert!(!store.living[&7].effect_particles_ambient);
+
+        store.apply_entity_data(7, 11, MetaValue::Bool(true));
+        assert_eq!(
+            store.living[&7].effect_particles,
+            legacy_effect_particles(0x12_3456, true)
+        );
+        assert!(store.living[&7].effect_particles_ambient);
+        store.apply_entity_data(7, 11, MetaValue::Bool(false));
+        assert!(!store.living[&7].effect_particles_ambient);
+
+        // A native typed particle list replaces the derived legacy color;
+        // changing only ambient must not recreate the old color.
+        let native = vec![azalea_entity::particle::Particle::EntityEffect(
+            azalea_entity::particle::ColorParticle {
+                color: azalea_core::color::RgbColor::new(0x65, 0x43, 0x21),
+            },
+        )];
+        store.set_effect_particles(7, Some(native.clone()), None);
+        assert_eq!(store.living[&7].legacy_effect_color, None);
+        store.apply_entity_data(7, 11, MetaValue::Bool(true));
+        assert_eq!(store.living[&7].effect_particles, native);
+        assert!(store.living[&7].effect_particles_ambient);
+        store.set_effect_particles(7, Some(Vec::new()), None);
+        store.apply_entity_data(7, 11, MetaValue::Bool(false));
+        assert!(store.living[&7].effect_particles.is_empty());
+        assert_eq!(store.living[&7].legacy_effect_color, None);
+
+        store.apply_entity_data(7, 10, MetaValue::Int(0));
+        assert!(store.living[&7].effect_particles.is_empty());
+        assert_eq!(store.living[&7].legacy_effect_color, Some(0));
+        store.apply_entity_data(8, 10, MetaValue::Int(0x2612_3456));
+        store.apply_entity_data(8, 11, MetaValue::Bool(true));
+        assert_eq!(store.vehicles[&8].kind, Some(EntityKind::OakBoat));
+        assert!(!store.living.contains_key(&8));
     }
 
     #[test]

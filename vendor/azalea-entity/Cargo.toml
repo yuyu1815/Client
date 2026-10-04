@@ -1,0 +1,29 @@
+[package]
+name = "azalea-entity"
+description = "Things related to Minecraft entities used by Azalea"
+version = "0.16.0+mc26.2"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/azalea-rs/azalea"
+
+[dependencies]
+azalea-block = { version = "0.16", default-features = false }
+azalea-buf = { version = "0.16", default-features = false }
+azalea-chat = { version = "0.16", default-features = false, features = ["azalea-buf"] }
+azalea-core = { version = "0.16", default-features = false }
+azalea-inventory = { version = "0.16", default-features = false }
+azalea-registry = { version = "0.16", default-features = false }
+azalea-world = { version = "0.16", default-features = false, optional = true }
+bevy_app = { version = "0.18.1", optional = true }
+bevy_ecs = { version = "0.18.1", default-features = false, features = ["multi_threaded"], optional = true }
+derive_more = "2.1.1"
+enum-as-inner = "0.7.0"
+nohash-hasher = "0.2.0"
+parking_lot = "0.12.5"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+uuid = "1.23.1"
+
+[features]
+bevy_ecs = ["dep:bevy_ecs", "dep:bevy_app", "dep:azalea-world"]
+

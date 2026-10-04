@@ -207,6 +207,7 @@ pub struct LocalPlayer {
     pub invisible: bool,
     pub effect_particles: Vec<azalea_entity::particle::Particle>,
     pub effect_particles_ambient: bool,
+    pub legacy_effect_color: Option<u32>,
     /// Shared LivingEntity flag bit 0x80; packet authority remains external.
     pub fall_flying: bool,
     pub fall_flying_ticks: u32,
@@ -296,6 +297,7 @@ impl LocalPlayer {
             invisible: false,
             effect_particles: Vec::new(),
             effect_particles_ambient: false,
+            legacy_effect_color: None,
             fall_flying: false,
             fall_flying_ticks: 0,
             fall_distance: 0.0,
@@ -315,6 +317,38 @@ impl LocalPlayer {
             collision_delta: [glam::DVec3::ZERO; 2],
             last_travel_observation: Default::default(),
             observe_collision_shapes: false,
+        }
+    }
+
+    pub fn apply_effect_metadata(&mut self, index: u8, value: crate::entity::MetaValue) {
+        match (index, value) {
+            (10, crate::entity::MetaValue::Int(color)) => {
+                let color = color as u32 & 0x00ff_ffff;
+                self.legacy_effect_color = Some(color);
+                self.effect_particles =
+                    crate::entity::legacy_effect_particles(color, self.effect_particles_ambient);
+            }
+            (11, crate::entity::MetaValue::Bool(ambient)) => {
+                self.effect_particles_ambient = ambient;
+                if let Some(color) = self.legacy_effect_color {
+                    self.effect_particles = crate::entity::legacy_effect_particles(color, ambient);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_effect_particles(
+        &mut self,
+        particles: Option<Vec<azalea_entity::particle::Particle>>,
+        ambient: Option<bool>,
+    ) {
+        if let Some(particles) = particles {
+            self.effect_particles = particles;
+            self.legacy_effect_color = None;
+        }
+        if let Some(ambient) = ambient {
+            self.effect_particles_ambient = ambient;
         }
     }
 
@@ -399,6 +433,9 @@ impl LocalPlayer {
         self.death_time = 0;
         self.reset_hurt_state();
         self.effects = crate::mob_effect::ActiveMobEffects::default();
+        self.effect_particles.clear();
+        self.effect_particles_ambient = false;
+        self.legacy_effect_color = None;
         self.attributes.clear();
         self.inventory = Inventory::new();
         self.food = 20;
@@ -782,6 +819,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_effect_metadata_tracks_ambient_order_and_native_source_switch() {
+        use azalea_buf::AzBuf;
+
+        let mut player = LocalPlayer::new();
+        player.apply_effect_metadata(11, crate::entity::MetaValue::Bool(true));
+        player.apply_effect_metadata(10, crate::entity::MetaValue::Int(0x2612_3456));
+        assert!(player.effect_particles_ambient);
+        assert_eq!(player.legacy_effect_color, Some(0x12_3456));
+        assert_eq!(
+            player.effect_particles,
+            crate::entity::legacy_effect_particles(0x12_3456, true)
+        );
+        let azalea_entity::particle::Particle::EntityEffect(effect) = &player.effect_particles[0]
+        else {
+            panic!("legacy effect metadata must create EntityEffect");
+        };
+        let mut encoded_color = Vec::new();
+        effect.color.azalea_write(&mut encoded_color).unwrap();
+        assert_eq!(
+            u32::from_be_bytes(encoded_color.try_into().unwrap()),
+            0x2612_3456
+        );
+
+        player.set_effect_particles(Some(Vec::new()), None);
+        player.apply_effect_metadata(11, crate::entity::MetaValue::Bool(false));
+        assert!(player.effect_particles.is_empty());
+        assert_eq!(player.legacy_effect_color, None);
+        assert!(!player.effect_particles_ambient);
+    }
+
+    #[test]
     fn mining_attributes_use_native_ranged_clamps_after_modifiers() {
         for (id, max) in [
             ("minecraft:mining_efficiency", 1024.0),
@@ -796,9 +864,18 @@ mod tests {
         }
 
         let mut player = LocalPlayer::new();
-        assert_eq!(player.attribute_value("minecraft:mining_efficiency", 0.0), 0.0);
-        assert_eq!(player.attribute_value("minecraft:block_break_speed", 1.0), 1.0);
-        assert_eq!(player.attribute_value("minecraft:submerged_mining_speed", 0.2), 0.2);
+        assert_eq!(
+            player.attribute_value("minecraft:mining_efficiency", 0.0),
+            0.0
+        );
+        assert_eq!(
+            player.attribute_value("minecraft:block_break_speed", 1.0),
+            1.0
+        );
+        assert_eq!(
+            player.attribute_value("minecraft:submerged_mining_speed", 0.2),
+            0.2
+        );
         player.attributes.insert(
             "mining_efficiency".into(),
             AttributeData {
@@ -810,7 +887,10 @@ mod tests {
                 }],
             },
         );
-        assert_eq!(player.attribute_value("minecraft:mining_efficiency", 0.0), 1024.0);
+        assert_eq!(
+            player.attribute_value("minecraft:mining_efficiency", 0.0),
+            1024.0
+        );
     }
 
     #[test]

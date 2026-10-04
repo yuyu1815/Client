@@ -3489,6 +3489,10 @@ fn tick_tool_highlight(core: &AppCore, game: &mut GameState) {
     game.last_tool_highlight = selected;
 }
 
+fn local_player_render_flags(invisible: bool, game_mode: u8) -> (bool, bool) {
+    (invisible, crate::player::is_spectator(game_mode))
+}
+
 pub fn update_game(
     core: &mut AppCore,
     dt: f32,
@@ -5616,10 +5620,23 @@ pub fn update_game(
                     is_sleeping: e.sleeping_pos.is_some(),
                     sleeping_yaw_deg: sleep_orientation.map(|(angle, _, _)| angle),
                     walk_anim_pos: e.walk_pos(partial_tick),
+                    skull_walk_anim_pos: Some(
+                        crate::renderer::pipelines::entity_renderer::skull_phase_from_store(
+                            &game.entity_store,
+                            entity_id,
+                            game.entity_store.vehicle_of.get(&entity_id).copied(),
+                            e.walk_pos(partial_tick),
+                            partial_tick,
+                        ),
+                    ),
                     walk_anim_speed: e.walk_speed(partial_tick),
                     entity_kind: e.entity_type,
                     player_uuid: e.player_uuid,
                     is_invisible: e.flags.invisible,
+                    is_spectator: e.entity_type == EntityKind::Player
+                        && e.player_uuid.is_some_and(|uuid| {
+                            game.tab_list.players.get(&uuid).is_some_and(|player| player.game_mode == 3)
+                        }),
                     skin_parts_mask: match e.entity_type {
                         EntityKind::Player if entity_id == game.player.entity_id => {
                             game.local_skin_parts_mask
@@ -5770,8 +5787,28 @@ pub fn update_game(
             partial_tick,
         );
 
+        let (is_invisible, is_spectator) =
+            local_player_render_flags(game.player.invisible, game.player.game_mode);
         entity_renders.push(EntityRenderInfo {
             happy_ghast_equipment_layers: Vec::new(),
+            armor_stand_equipment: [
+                azalea_inventory::components::EquipmentSlot::Head,
+                azalea_inventory::components::EquipmentSlot::Chest,
+                azalea_inventory::components::EquipmentSlot::Legs,
+                azalea_inventory::components::EquipmentSlot::Feet,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                (
+                    slot,
+                    game.player
+                        .inventory
+                        .slot(crate::player::inventory::ARMOR_START + index)
+                        .clone(),
+                )
+            })
+            .collect(),
             chest_equipment: game
                 .player
                 .inventory
@@ -5799,11 +5836,22 @@ pub fn update_game(
             ),
             is_crouching: game.player.crouching && (!game.dead || game.player.death_time > 0),
             walk_anim_pos: game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
+            skull_walk_anim_pos: Some(
+                crate::renderer::pipelines::entity_renderer::skull_phase_from_store(
+                    &game.entity_store,
+                    game.player.entity_id,
+                    game.riding_vehicle_id,
+                    game.player_walk_pos - game.player_walk_speed * (1.0 - partial_tick),
+                    partial_tick,
+                ),
+            ),
             walk_anim_speed: (game.player_prev_walk_speed
                 + (game.player_walk_speed - game.player_prev_walk_speed) * partial_tick)
                 .min(1.0),
             entity_kind: EntityKind::Player,
             player_uuid: Some(core.user.uuid),
+            is_invisible,
+            is_spectator,
             skin_parts_mask: game.local_skin_parts_mask,
             has_red_overlay: has_red_overlay(game.player.hurt_time, game.player.death_time),
             death_time: render_death_time(game.player.death_time, partial_tick),
@@ -6302,6 +6350,7 @@ pub fn update_game(
                 Some(crate::renderer::BlockEntityRenderInfo {
                     pos: *pos,
                     root_matrix: None,
+                    skull_animation_pos: None,
                     player_head_profile_source,
                     bell_swing: be.bell_swing,
                     decorated_pot_sherds: be.decorated_pot_sherds.clone(),
@@ -6445,6 +6494,20 @@ pub fn update_game(
         .and_then(|draw| {
             crate::world::block_entity::player_head_profile_source_from_item(draw.stack)
         });
+    let equipped_head_profiles: Vec<_> = entity_renders
+        .iter()
+        .filter_map(|info| {
+            let stack = info
+                .armor_stand_equipment
+                .get(&azalea_inventory::components::EquipmentSlot::Head)?;
+            let azalea_inventory::ItemStack::Present(data) = stack else {
+                return None;
+            };
+            crate::world::block_entity::player_head_profile_source_from_item(
+                &azalea_inventory::ItemStack::Present(data.clone()),
+            )
+        })
+        .collect();
     gfx.renderer.update_head_skins(
         block_entity_renders
             .iter()
@@ -6463,7 +6526,8 @@ pub fn update_game(
             }))
             .chain(held_item.0.as_ref().and_then(|item| item.3.as_ref()))
             .chain(held_item.1.as_ref().and_then(|item| item.3.as_ref()))
-            .chain(activation_profile.as_ref()),
+            .chain(activation_profile.as_ref())
+            .chain(equipped_head_profiles.iter()),
         &core.tokio_rt,
     );
     game.last_update_phases.cpu_update_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
@@ -6962,6 +7026,7 @@ fn minecart_cargo_render_infos(
                         block_pos[2],
                     ),
                     root_matrix: Some(root_matrix),
+                    skull_animation_pos: None,
                     player_head_profile_source: None,
                     bell_swing: None,
                     decorated_pot_sherds: crate::world::block_entity::default_pot_sherds(),
@@ -7089,9 +7154,9 @@ fn armor_stand_render_infos(
 ) -> Vec<EntityRenderInfo> {
     store
         .vehicles
-        .values()
-        .filter_map(|stand| {
-            if stand.kind != Some(EntityKind::ArmorStand) || stand.shared_flags & 0x20 != 0 {
+        .iter()
+        .filter_map(|(&id, stand)| {
+            if stand.kind != Some(EntityKind::ArmorStand) {
                 return None;
             }
             let position = stand
@@ -7109,7 +7174,17 @@ fn armor_stand_render_infos(
                 position,
                 simulation_position: stand.position,
                 entity_kind: EntityKind::ArmorStand,
+                skull_walk_anim_pos: Some(
+                    crate::renderer::pipelines::entity_renderer::skull_phase_from_store(
+                        store,
+                        id,
+                        store.vehicle_of.get(&id).copied(),
+                        0.0,
+                        partial_tick,
+                    ),
+                ),
                 body_y_rot_deg: yaw,
+                is_invisible: stand.shared_flags & 0x20 != 0,
                 armor_stand_flags: stand.armor_stand_flags,
                 armor_stand_pose: stand.armor_stand_pose,
                 armor_stand_equipment: stand.armor_stand_equipment.clone(),
@@ -7161,9 +7236,9 @@ fn mannequin_render_infos(
 ) -> Vec<EntityRenderInfo> {
     store
         .vehicles
-        .values()
-        .filter_map(|mannequin| {
-            if mannequin.kind != Some(EntityKind::Mannequin) || mannequin.shared_flags & 0x20 != 0 {
+        .iter()
+        .filter_map(|(&id, mannequin)| {
+            if mannequin.kind != Some(EntityKind::Mannequin) {
                 return None;
             }
             let yaw = match (mannequin.prev_look_dir, mannequin.look_dir) {
@@ -7210,6 +7285,17 @@ fn mannequin_render_infos(
                 position,
                 simulation_position: mannequin.position,
                 entity_kind: EntityKind::Mannequin,
+                skull_walk_anim_pos: Some(
+                    crate::renderer::pipelines::entity_renderer::skull_phase_from_store(
+                        store,
+                        id,
+                        store.vehicle_of.get(&id).copied(),
+                        0.0,
+                        partial_tick,
+                    ),
+                ),
+                is_invisible: mannequin.shared_flags & 0x20 != 0,
+                armor_stand_equipment: mannequin.armor_stand_equipment.clone(),
                 body_y_rot_deg: yaw,
                 player_uuid: Some(skin_uuid),
                 variant_index:
@@ -8973,6 +9059,12 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn local_player_render_flags_preserve_invisibility_and_spectator_mode() {
+        assert_eq!(super::local_player_render_flags(true, 0), (true, false));
+        assert_eq!(super::local_player_render_flags(false, 3), (false, true));
+    }
+
+    #[test]
     fn profile_hash_views_use_official_uuid_codec_and_preserve_variant_fields() {
         use azalea_auth::game_profile::SerializableProfileProperties;
         use azalea_inventory::components::PlayerSkinPatch;
@@ -9280,6 +9372,43 @@ mod tests {
     }
 
     #[test]
+    fn armor_stand_render_extraction_uses_living_vehicle_phase_for_head_only() {
+        use azalea_registry::builtin::EntityKind;
+
+        use crate::entity::components::{LookDirection, Position};
+        use crate::entity::EntityStore;
+
+        let mut store = EntityStore::new();
+        store.spawn_living(
+            2,
+            EntityKind::Pig,
+            Position::default(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        let vehicle = store.living.get_mut(&2).unwrap();
+        vehicle.walk_anim_pos = 8.0;
+        vehicle.walk_anim_speed = 2.0;
+        vehicle.prev_walk_anim_speed = 6.0;
+        store.set_vehicle_transform(1, Position::default(), glam::DVec3::ZERO);
+        store.set_vehicle_kind(1, EntityKind::ArmorStand);
+        store.vehicle_of.insert(1, 2);
+
+        let rendered = armor_stand_render_infos(&store, 0.25);
+        assert_eq!(rendered[0].walk_anim_pos, 0.0);
+        assert_eq!(rendered[0].skull_walk_anim_pos, Some(6.5));
+
+        store.vehicle_of.remove(&1);
+        assert_eq!(armor_stand_render_infos(&store, 0.25)[0].skull_walk_anim_pos, Some(0.0));
+
+        store.set_vehicle_transform(3, Position::default(), glam::DVec3::ZERO);
+        store.set_vehicle_kind(3, EntityKind::AcaciaBoat);
+        store.vehicle_of.insert(1, 3);
+        assert_eq!(armor_stand_render_infos(&store, 0.25)[0].skull_walk_anim_pos, Some(0.0));
+    }
+
+    #[test]
     fn armor_stand_render_extraction_keeps_marker_visible_and_filters_entity_invisible() {
         use azalea_registry::builtin::EntityKind;
 
@@ -9316,7 +9445,9 @@ mod tests {
         let renders = armor_stand_render_infos(&store, 0.5);
         assert_eq!(renders[0].body_transform.unwrap().x_axis.x, 0.5);
         store.apply_vehicle_metadata(1, 0, MetaValue::Byte(0x20));
-        assert!(armor_stand_render_infos(&store, 0.5).is_empty());
+        let invisible = armor_stand_render_infos(&store, 0.5);
+        assert_eq!(invisible.len(), 1, "equipment inputs must survive invisibility");
+        assert!(invisible[0].is_invisible);
     }
 
     #[test]

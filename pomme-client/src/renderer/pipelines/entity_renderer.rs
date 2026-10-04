@@ -267,6 +267,8 @@ pub(crate) fn humanoid_armor_target(kind: EntityKind) -> bool {
             | EntityKind::Mannequin
             | EntityKind::ArmorStand
             | EntityKind::Zombie
+            | EntityKind::Giant
+            | EntityKind::Parched
             | EntityKind::Husk
             | EntityKind::Drowned
             | EntityKind::ZombieVillager
@@ -290,14 +292,14 @@ fn humanoid_armor_draws(
         azalea_inventory::components::EquipmentSlot,
         Vec<super::equipment::ResolvedEquipmentLayer>,
     >,
-    armor_stand_flags: u8,
+    _armor_stand_flags: u8,
 ) -> Vec<HarnessDraw> {
     use azalea_inventory::components::EquipmentSlot as Slot;
     if !humanoid_armor_target(kind) {
         return Vec::new();
     }
     let mut draws = Vec::new();
-    for slot in [Slot::Head, Slot::Chest, Slot::Legs, Slot::Feet] {
+    for slot in [Slot::Chest, Slot::Legs, Slot::Feet, Slot::Head] {
         let Some(layers) = equipment.get(&slot) else {
             continue;
         };
@@ -321,7 +323,7 @@ fn humanoid_armor_draws(
                 let Some(&source) = source_transforms.get(si) else {
                     continue;
                 };
-                if range.1 == 0 || !armor_stand_part_visible(kind, name, armor_stand_flags) {
+                if range.1 == 0 {
                     continue;
                 }
                 let delta = model.parts[ai].offset - source_model.parts[si].offset;
@@ -404,10 +406,13 @@ pub struct EntityRenderInfo {
     /// unavailable.
     pub sleeping_yaw_deg: Option<f32>,
     pub walk_anim_pos: f32,
+    /// Living vehicle walk phase for CustomHeadLayer skull animations only.
+    pub skull_walk_anim_pos: Option<f32>,
     pub walk_anim_speed: f32,
     pub entity_kind: EntityKind,
     pub player_uuid: Option<uuid::Uuid>,
     pub is_invisible: bool,
+    pub is_spectator: bool,
     /// Effective vanilla player-model visibility bits; non-players use native
     /// defaults.
     pub skin_parts_mask: u8,
@@ -535,6 +540,30 @@ pub struct CrystalBeamRenderInfo {
 
 /// Everything inert: mob-family animation inputs zeroed, no overlays, white
 /// tint. Construction sites spell out only the fields that apply to them.
+impl EntityRenderInfo {
+    pub fn skull_animation_pos(&self) -> f32 {
+        self.skull_walk_anim_pos.unwrap_or(self.walk_anim_pos)
+    }
+}
+
+pub(crate) fn skull_phase_from_store(
+    store: &crate::entity::EntityStore,
+    passenger_id: i32,
+    riding_vehicle_id: Option<i32>,
+    own_phase: f32,
+    partial_tick: f32,
+) -> f32 {
+    let Some(vehicle_id) = riding_vehicle_id else {
+        return own_phase;
+    };
+    store
+        .vehicle_of
+        .get(&passenger_id)
+        .filter(|&&id| id == vehicle_id)
+        .and_then(|&id| store.living.get(&id))
+        .map_or(0.0, |vehicle| vehicle.walk_pos(partial_tick))
+}
+
 impl Default for EntityRenderInfo {
     fn default() -> Self {
         Self {
@@ -551,10 +580,12 @@ impl Default for EntityRenderInfo {
             is_sleeping: false,
             sleeping_yaw_deg: None,
             walk_anim_pos: 0.0,
+            skull_walk_anim_pos: None,
             walk_anim_speed: 0.0,
             entity_kind: EntityKind::Player,
             player_uuid: None,
             is_invisible: false,
+            is_spectator: false,
             skin_parts_mask: 0x7f,
             variant_index: 0,
             armor_stand_flags: 0,
@@ -3834,6 +3865,47 @@ impl EntityRenderer {
 
     /// The translation is anchor-relative, subtracted in f64 (see
     /// `Camera::anchor`).
+    /// Transform for vanilla's CustomHeadLayer attachment point. Item rendering
+    /// remains in ItemEntityPipeline so blocks, generated items and skull skins
+    /// share the normal item mesh/texture path.
+    pub(crate) fn custom_head_attachment(
+        &self,
+        info: &EntityRenderInfo,
+        anchor: glam::DVec3,
+    ) -> Option<glam::Mat4> {
+        self.custom_head_transform(info, anchor, false)
+    }
+
+    pub(crate) fn custom_head_skull_attachment(
+        &self,
+        info: &EntityRenderInfo,
+        anchor: glam::DVec3,
+    ) -> Option<glam::Mat4> {
+        self.custom_head_transform(info, anchor, true)
+    }
+
+    fn custom_head_transform(
+        &self,
+        info: &EntityRenderInfo,
+        anchor: glam::DVec3,
+        skull: bool,
+    ) -> Option<glam::Mat4> {
+        if !custom_head_supported(info.entity_kind) {
+            return None;
+        }
+        let entry = self.mobs.get(&info.entity_kind)?;
+        let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
+        let anim = self.compute_anim(entry.anim, &variant.model, info);
+        let transforms = variant.model.compute_part_transforms(&anim);
+        let head = variant.model.parts.iter().position(|part| part.name == "head")?;
+        let entity = Self::entity_matrix(info, anchor);
+        Some(if skull {
+            custom_head_skull_matrix(info.entity_kind, entity, transforms[head])
+        } else {
+            custom_head_attachment_matrix(info.entity_kind, entity, transforms[head])
+        })
+    }
+
     fn entity_matrix(info: &EntityRenderInfo, anchor: glam::DVec3) -> glam::Mat4 {
         if info.entity_kind == EntityKind::ExperienceOrb {
             return glam::Mat4::from_translation((*info.position - anchor).as_vec3())
@@ -4070,7 +4142,7 @@ impl EntityRenderer {
 
             let mut opaque_records = opaque.emit(&vis, &mut instances);
             for v in &vis {
-                if v.info.entity_kind != EntityKind::HappyGhast || v.info.is_invisible {
+                if v.info.entity_kind != EntityKind::HappyGhast {
                     continue;
                 }
                 let mesh = &self.happy_ghast_harness[usize::from(v.info.is_baby)];
@@ -4087,7 +4159,7 @@ impl EntityRenderer {
                     instances.push(EntityInstance {
                         model: draw.matrix.to_cols_array_2d(),
                         tint: draw.tint,
-                        overlay_color: [0.0; 4],
+                        overlay_color: NO_OVERLAY,
                         uv_params: [0.0, 0.0, 1.0, 1.0],
                     });
                     opaque_records.push(happy_ghast_harness_draw_record(
@@ -4099,8 +4171,8 @@ impl EntityRenderer {
                 }
             }
             for v in &vis {
-                if instances.len() >= MAX_INSTANCES {
-                    break;
+                if !equipment_visible(v.info) || instances.len() >= MAX_INSTANCES {
+                    continue;
                 }
                 for draw in humanoid_armor_draws(
                     v.info.entity_kind,
@@ -4121,7 +4193,7 @@ impl EntityRenderer {
                     instances.push(EntityInstance {
                         model: draw.matrix.to_cols_array_2d(),
                         tint: draw.tint,
-                        overlay_color: [0.0; 4],
+                        overlay_color: NO_OVERLAY,
                         uv_params: [0.0, 0.0, 1.0, 1.0],
                     });
                     let mesh = &self.humanoid_armor[usize::from(!draw.inner)];
@@ -4571,6 +4643,67 @@ fn armor_stand_pose(info: &EntityRenderInfo) -> entity_model::PartAnim {
     pose
 }
 
+fn base_model_visible(info: &EntityRenderInfo) -> bool {
+    !info.is_invisible
+}
+
+fn equipment_visible(info: &EntityRenderInfo) -> bool {
+    !info.is_spectator
+}
+
+fn model_layer_visible(info: &EntityRenderInfo, kind: OverlayKind) -> bool {
+    base_model_visible(info) || kind == OverlayKind::EyesTranslucent
+}
+
+fn custom_head_supported(kind: EntityKind) -> bool {
+    matches!(kind,
+        EntityKind::Player | EntityKind::Mannequin | EntityKind::ArmorStand
+            | EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned
+            | EntityKind::ZombieVillager | EntityKind::Skeleton | EntityKind::Stray
+            | EntityKind::Bogged | EntityKind::Parched | EntityKind::WitherSkeleton
+            | EntityKind::Piglin | EntityKind::PiglinBrute | EntityKind::ZombifiedPiglin
+            | EntityKind::Villager | EntityKind::WanderingTrader
+            | EntityKind::Pillager | EntityKind::Vindicator | EntityKind::Evoker
+            | EntityKind::Illusioner | EntityKind::CopperGolem
+    )
+}
+
+fn custom_head_y_offset(kind: EntityKind) -> f32 {
+    if kind == EntityKind::Villager { -0.1171875 } else { 0.0 }
+}
+
+fn custom_head_skull_matrix(kind: EntityKind, entity: glam::Mat4, head: glam::Mat4) -> glam::Mat4 {
+    let piglin_scale = if matches!(kind, EntityKind::Piglin | EntityKind::PiglinBrute | EntityKind::ZombifiedPiglin) { 1.0019531 } else { 1.0 };
+    let copper = if kind == EntityKind::CopperGolem {
+        glam::Mat4::from_translation(glam::Vec3::Y * 0.125)
+            * glam::Mat4::from_scale(glam::Vec3::splat(1.0625))
+    } else { glam::Mat4::IDENTITY };
+    let skull_offset = if kind == EntityKind::Villager { -0.07421875 } else { 0.0 };
+    entity
+        * glam::Mat4::from_scale(glam::Vec3::new(piglin_scale, 1.0, piglin_scale))
+        * head
+        * glam::Mat4::from_scale(glam::Vec3::new(1.0, -1.0, 1.0))
+        * copper
+        * glam::Mat4::from_translation(glam::Vec3::new(0.0, skull_offset, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::splat(1.1875))
+}
+
+fn custom_head_attachment_matrix(kind: EntityKind, entity: glam::Mat4, head: glam::Mat4) -> glam::Mat4 {
+    let piglin_scale = if matches!(kind, EntityKind::Piglin | EntityKind::PiglinBrute | EntityKind::ZombifiedPiglin) { 1.0019531 } else { 1.0 };
+    let copper = if kind == EntityKind::CopperGolem {
+        glam::Mat4::from_translation(glam::Vec3::Y * 0.125)
+            * glam::Mat4::from_scale(glam::Vec3::splat(1.0625))
+    } else { glam::Mat4::IDENTITY };
+    entity
+        * glam::Mat4::from_scale(glam::Vec3::new(piglin_scale, 1.0, piglin_scale))
+        * head
+        * glam::Mat4::from_scale(glam::Vec3::new(1.0, -1.0, 1.0))
+        * copper
+        * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.25 + custom_head_y_offset(kind), 0.0))
+        * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+        * glam::Mat4::from_scale(glam::Vec3::new(0.625, -0.625, -0.625))
+}
+
 fn armor_stand_part_visible(kind: EntityKind, name: &str, flags: u8) -> bool {
     kind != EntityKind::ArmorStand
         || match name {
@@ -4640,6 +4773,11 @@ impl<'a> VariantGroups<'a> {
                 let first_instance = instances.len() as u32;
                 let mut instance_count = 0;
                 for (k, (vi, tint, overlay, uv)) in members.iter().enumerate() {
+                    // LivingEntityRenderer suppresses the base model for an invisible
+                    // entity, but still invokes its equipment layers below.
+                    if !model_layer_visible(vis[*vi].info, variant.overlay_kind) {
+                        continue;
+                    }
                     if !player_model_part_visible(
                         vis[*vi].info.entity_kind,
                         &variant.model.parts[p].name,
@@ -4715,6 +4853,9 @@ fn collect_player_capes(
 ) -> Vec<DrawRecord> {
     let mut records = Vec::new();
     for entity in vis {
+        if !equipment_visible(entity.info) {
+            continue;
+        }
         let Some(skin) = entity
             .info
             .player_uuid
@@ -4779,6 +4920,9 @@ fn collect_player_capes(
 fn collect_overlays<'a>(vis: &[VisEntity<'a>], kind: OverlayKind) -> VariantGroups<'a> {
     let mut groups = VariantGroups::default();
     for (vi, v) in vis.iter().enumerate() {
+        if !model_layer_visible(v.info, kind) {
+            continue;
+        }
         for slot in 0..v.entry.overlays(v.info.is_baby).len() {
             let overlay =
                 v.entry
@@ -5644,6 +5788,17 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn worn_skull_phase_uses_store_vehicle_type_and_preserves_body_phase() {
+        let mut store = crate::entity::EntityStore::new();
+        let passenger_phase = 12.5;
+        assert_eq!(super::skull_phase_from_store(&store, 4, None, passenger_phase, 0.5), passenger_phase);
+        store.vehicle_of.insert(4, 9); // nonliving vehicle: in vehicle map, absent from living map
+        assert_eq!(super::skull_phase_from_store(&store, 4, Some(9), passenger_phase, 0.5), 0.0);
+        assert_eq!(passenger_phase, 12.5); // body walk phase remains passenger-owned
+        assert_eq!(super::skull_phase_from_store(&store, 4, Some(8), passenger_phase, 0.5), 0.0);
+    }
+
     #[test]
     fn independent_breeze_wind_layer_uses_its_own_part_transforms() {
         let base = super::entity_models::flying::bake_breeze_model();
@@ -6735,6 +6890,68 @@ mod tests {
     }
 
     #[test]
+    fn custom_head_attachment_transform_and_target_set_match_vanilla() {
+        use azalea_registry::builtin::EntityKind;
+        let bridge = glam::Mat4::from_scale(glam::Vec3::new(1.0, -1.0, 1.0));
+        let translated = bridge
+            * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.25, 0.0))
+            * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+            * glam::Mat4::from_scale(glam::Vec3::new(0.625, -0.625, -0.625));
+        let origin = translated.transform_point3(glam::Vec3::ZERO);
+        assert!((origin.y - 0.25).abs() < 1.0e-6);
+        let up = translated.transform_vector3(glam::Vec3::Y);
+        assert!((up.y - 0.625).abs() < 1.0e-6);
+        assert_eq!(super::custom_head_y_offset(EntityKind::Villager), -0.1171875);
+        assert_eq!(super::custom_head_y_offset(EntityKind::WanderingTrader), 0.0);
+        assert!(super::custom_head_supported(EntityKind::Parched));
+        assert!(super::custom_head_supported(EntityKind::CopperGolem));
+        assert!(super::custom_head_supported(EntityKind::Parched));
+        assert!(super::custom_head_supported(EntityKind::ArmorStand));
+        let copper = super::custom_head_attachment_matrix(EntityKind::CopperGolem, glam::Mat4::IDENTITY, glam::Mat4::IDENTITY);
+        let copper_origin = copper.transform_point3(glam::Vec3::ZERO);
+        assert!((copper_origin.y - 0.140625).abs() < 1e-6);
+        let copper_x = copper.transform_vector3(glam::Vec3::X).length();
+        assert!((copper_x - 0.625 * 1.0625).abs() < 1e-6);
+        let piglin = super::custom_head_attachment_matrix(EntityKind::Piglin, glam::Mat4::IDENTITY, glam::Mat4::IDENTITY);
+        assert!((piglin.transform_vector3(glam::Vec3::X).length() - 0.625 * 1.0019531).abs() < 1e-6);
+        let skull = super::custom_head_skull_matrix(
+            EntityKind::Player,
+            glam::Mat4::IDENTITY,
+            glam::Mat4::IDENTITY,
+        );
+        assert_eq!(skull.transform_point3(glam::Vec3::ZERO), glam::Vec3::ZERO);
+        assert_eq!(skull.transform_vector3(glam::Vec3::X), glam::Vec3::X * 1.1875);
+        assert_eq!(skull.transform_vector3(glam::Vec3::Y), glam::Vec3::Y * -1.1875);
+        assert_eq!(skull.transform_vector3(glam::Vec3::Z), glam::Vec3::Z * 1.1875);
+        let no_yaw = super::custom_head_attachment_matrix(EntityKind::Villager, glam::Mat4::IDENTITY, glam::Mat4::IDENTITY);
+        let trader = super::custom_head_attachment_matrix(EntityKind::WanderingTrader, glam::Mat4::IDENTITY, glam::Mat4::IDENTITY);
+        assert!((no_yaw.w_axis.y - trader.w_axis.y - 0.1171875).abs() < 1e-6);
+        for (pitch, roll) in [(0.0, 0.0), (0.4, 0.0), (0.0, -0.3)] {
+            let head = glam::Mat4::from_rotation_x(pitch) * glam::Mat4::from_rotation_z(roll);
+            assert!(super::custom_head_attachment_matrix(EntityKind::Villager, glam::Mat4::IDENTITY, head).is_finite());
+        }
+        assert!(super::equipment_visible(&super::EntityRenderInfo::default()));
+        assert!(!super::equipment_visible(&super::EntityRenderInfo { is_spectator: true, ..Default::default() }));
+        for kind in [EntityKind::Giant, EntityKind::Spider, EntityKind::Witch] {
+            assert!(!super::custom_head_supported(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn invisible_entity_keeps_equipment_but_suppresses_its_base_model() {
+        let visible = super::EntityRenderInfo::default();
+        let invisible = super::EntityRenderInfo {
+            is_invisible: true,
+            ..Default::default()
+        };
+        assert!(super::base_model_visible(&visible));
+        assert!(!super::base_model_visible(&invisible));
+        assert!(invisible.is_invisible, "equipment visibility is independent");
+        assert!(super::model_layer_visible(&invisible, super::OverlayKind::EyesTranslucent));
+        assert!(!super::model_layer_visible(&invisible, super::OverlayKind::Opaque));
+    }
+
+    #[test]
     fn armor_stand_has_real_body_mesh_native_poses_and_visibility_flags() {
         use azalea_registry::builtin::EntityKind;
 
@@ -7102,7 +7319,7 @@ mod tests {
         );
         assert_eq!(draws.len(), 12); // head 1 + chest 3 + legs 3*2 + boots 2
         assert_eq!(
-            draws[4..10]
+            draws[3..9]
                 .iter()
                 .map(|d| d.texture_key.as_str())
                 .collect::<Vec<_>>(),
@@ -7115,7 +7332,7 @@ mod tests {
                 "leggings-b"
             ]
         );
-        assert!(draws[4..10].iter().all(|d| d.inner));
+        assert!(draws[3..9].iter().all(|d| d.inner));
         assert_eq!(inner.part_ranges, outer.part_ranges);
         slots.insert(Slot::Feet, Vec::new());
         assert_eq!(
@@ -7142,7 +7359,7 @@ mod tests {
                 0x00
             )
             .len(),
-            8
+            10
         );
         assert_eq!(
             super::humanoid_armor_draws(
@@ -7159,6 +7376,8 @@ mod tests {
         );
         for kind in [
             K::Zombie,
+            K::Giant,
+            K::Parched,
             K::Husk,
             K::Drowned,
             K::ZombieVillager,

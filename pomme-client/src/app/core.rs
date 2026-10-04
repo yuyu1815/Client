@@ -46,6 +46,20 @@ pub struct PendingPackDownload {
 
 pub type PackDownloadResult = Result<std::path::PathBuf, crate::resource_pack::PackError>;
 
+pub(crate) fn apply_entity_effect_particles(
+    player: &mut LocalPlayer,
+    entities: &mut crate::entity::EntityStore,
+    id: i32,
+    particles: Option<Vec<azalea_entity::particle::Particle>>,
+    ambient: Option<bool>,
+) {
+    if id == player.entity_id {
+        player.set_effect_particles(particles, ambient);
+    } else {
+        entities.set_effect_particles(id, particles, ambient);
+    }
+}
+
 fn take_finished_pack_downloads(
     pending: &mut Vec<PendingPackDownload>,
     generations: &HashMap<uuid::Uuid, u64>,
@@ -2232,6 +2246,7 @@ impl AppCore {
                     for entity in game.entity_store.living.values_mut() {
                         entity.effect_particles.clear();
                         entity.effect_particles_ambient = false;
+                        entity.legacy_effect_color = None;
                         entity.flags.invisible = false;
                     }
                     game.item_cooldowns = Default::default();
@@ -2267,6 +2282,7 @@ impl AppCore {
                     game.player.jump_riding_scale = 0.0;
                     game.player.effect_particles.clear();
                     game.player.effect_particles_ambient = false;
+                    game.player.legacy_effect_color = None;
                     game.player.invisible = false;
                     game.player.reset_hurt_state();
 
@@ -3840,10 +3856,31 @@ impl AppCore {
                     pos,
                     data,
                 } => {
-                    // Vanilla `LevelEventHandler` case 2001 (block break).
-                    // The server excludes the breaking player from the
-                    // broadcast; the local break's effects come from
-                    // `predict_destroy`. TODO: the other level events.
+                    if event_type == 2002 || event_type == 2007 {
+                        let particle_pos =
+                            glam::dvec3(pos.x as f64 + 0.5, pos.y as f64, pos.z as f64 + 0.5);
+                        let color = data as u32;
+                        game.particle_store.add_potion_break_particles(
+                            particle_pos,
+                            color,
+                            event_type == 2007,
+                            renderer.camera_render_position(),
+                            renderer.registry(),
+                            &game.chunk_store,
+                        );
+                        self.audio.play_world_sound(
+                            &crate::audio::SoundRef::event("entity.splash_potion.break"),
+                            crate::audio::SoundCategory::Neutral as u8,
+                            crate::entity::components::Position::new(
+                                particle_pos.x,
+                                particle_pos.y,
+                                particle_pos.z,
+                            ),
+                            1.0,
+                            0.9 + fastrand::f32() * 0.1,
+                            fastrand::u64(..),
+                        );
+                    }
                     if event_type == 2001
                         && let Some(state) = crate::world::block::try_state(data)
                     {
@@ -4122,6 +4159,9 @@ impl AppCore {
                             game.silent_entities.remove(&id);
                         }
                     }
+                    if id == game.player.entity_id {
+                        game.player.apply_effect_metadata(index, value);
+                    }
                     if index == 0
                         && let crate::entity::MetaValue::Byte(flags) = value
                     {
@@ -4137,19 +4177,13 @@ impl AppCore {
                     id,
                     particles,
                     ambient,
-                } => {
-                    if id == game.player.entity_id {
-                        if let Some(particles) = particles {
-                            game.player.effect_particles = particles;
-                        }
-                        if let Some(ambient) = ambient {
-                            game.player.effect_particles_ambient = ambient;
-                        }
-                    } else {
-                        game.entity_store
-                            .set_effect_particles(id, particles, ambient);
-                    }
-                }
+                } => apply_entity_effect_particles(
+                    &mut game.player,
+                    &mut game.entity_store,
+                    id,
+                    particles,
+                    ambient,
+                ),
                 NetworkEvent::EntityProjectileItem { id, stack } => {
                     let name = crate::world::block::registry::BlockRegistry::item_model_name(
                         &azalea_inventory::ItemStack::Present(stack.clone()),
@@ -7419,7 +7453,12 @@ mod mounted_tick_tests {
             None,
         );
         let mut items = crate::entity::ItemEntityStore::new();
-        items.spawn_item(43, uuid::Uuid::nil(), Position::default(), glam::DVec3::ZERO);
+        items.spawn_item(
+            43,
+            uuid::Uuid::nil(),
+            Position::default(),
+            glam::DVec3::ZERO,
+        );
         let mut positions = HashMap::from([(42, Position::default()), (43, Position::default())]);
         let mut silent = HashSet::from([42]);
 
@@ -7439,7 +7478,10 @@ mod mounted_tick_tests {
         assert_eq!(neutral.selected_slot(), 8);
         assert!(!neutral.is_cursor_captured());
         assert!(!neutral.key_pressed(KEY_FORWARD));
-        assert_eq!(neutral_tick_input(&InputState::released()).selected_slot(), 0);
+        assert_eq!(
+            neutral_tick_input(&InputState::released()).selected_slot(),
+            0
+        );
     }
 
     #[test]

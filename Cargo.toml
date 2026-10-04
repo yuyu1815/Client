@@ -50,7 +50,7 @@ azalea-buf-macros = { path = "vendor/azalea-buf/azalea-buf-macros" }
 azalea-protocol = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
 azalea-crypto = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
 azalea-auth = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
-azalea-entity = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
+azalea-entity = { path = "vendor/azalea-entity" }
 azalea-world = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
 azalea-block = { path = "pomme-block" }
 azalea-chat = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
@@ -62,6 +62,7 @@ azalea-inventory = { git = "https://github.com/azalea-rs/azalea", branch = "26.2
 azalea-block = { path = "pomme-block" }
 azalea-buf = { path = "vendor/azalea-buf" }
 azalea-buf-macros = { path = "vendor/azalea-buf/azalea-buf-macros" }
+azalea-entity = { path = "vendor/azalea-entity" }
 
 [profile.dev]
 opt-level = 1

@@ -20,8 +20,29 @@ pub struct EquipmentLayer {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Dyeable {
-    #[serde(default)]
-    pub color_when_undyed: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_rgb_color")]
+    pub color_when_undyed: Option<i32>,
+}
+
+fn deserialize_rgb_color<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Color {
+        Integer(i32),
+        Components([f32; 3]),
+    }
+    Ok(
+        Option::<Color>::deserialize(deserializer)?.map(|color| match color {
+            Color::Integer(color) => color,
+            Color::Components([r, g, b]) => {
+                let channel = |value: f32| (value * 255.0).floor() as u32;
+                ((channel(r) << 16) | (channel(g) << 8) | channel(b)) as i32
+            }
+        }),
+    )
 }
 
 /// Frame-ready Happy Ghast layer input for the renderer/GPU owner.
@@ -42,15 +63,11 @@ pub fn resolve_happy_ghast_layer_inputs(
         .filter_map(|layer| {
             let color = match &layer.dyeable {
                 Some(dyeable) => {
-                    let color = dyed_rgb
-                        .filter(|&color| color != 0)
-                        .map(|color| color as u32)
-                        .or(dyeable.color_when_undyed)
-                        .unwrap_or(0);
-                    if color == 0 {
+                    let Some(color) = dyed_rgb.or(dyeable.color_when_undyed)
+                    else {
                         return None;
-                    }
-                    color | 0xff00_0000
+                    };
+                    (color as u32) | 0xff00_0000
                 }
                 None => u32::MAX,
             };
@@ -196,12 +213,17 @@ pub fn resolve_humanoid_equipment_layers(
     };
     let dyed_color =
         crate::player::menu_click::component::<azalea_inventory::components::DyedColor>(stack)
-            .map(|color| color.rgb as u32);
+            .map(|color| color.rgb as i32);
     layers
         .iter()
         .filter_map(|layer| {
             let tint = match &layer.dyeable {
-                Some(dyeable) => dyed_color.or(dyeable.color_when_undyed).unwrap_or(u32::MAX),
+                Some(dyeable) => {
+                    let Some(color) = dyed_color.or(dyeable.color_when_undyed) else {
+                        return None;
+                    };
+                    color as u32
+                }
                 None => u32::MAX,
             };
             Some(ResolvedEquipmentLayer {
@@ -492,10 +514,13 @@ mod tests {
             use_player_texture: false,
         });
         let resolved = resolve_happy_ghast_layer_inputs(&layers, None);
-        assert_eq!(resolved.len(), 16, "native color 0 skips its layer");
+        assert_eq!(
+            resolved.len(),
+            17,
+            "configured RGB black remains renderable"
+        );
         let expected: Vec<_> = colors
             .iter()
-            .skip(1)
             .map(|color| [(*color >> 16) as u8, (*color >> 8) as u8, *color as u8])
             .chain([[255, 255, 255]])
             .collect();
@@ -506,17 +531,53 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected,
         );
-        assert_eq!(resolved[0].tint_rgb, [255, 255, 255]);
+        assert_eq!(resolved[0].tint_rgb, [0, 0, 0]);
+        assert_eq!(resolved[1].tint_rgb, [255, 255, 255]);
         assert_eq!(
-            resolved[0].texture_key,
+            resolved[1].texture_key,
             "custom/textures/entity/equipment/happy_ghast_body/body/ffffff.png"
         );
-        assert_eq!(resolved[15].tint_rgb, [255, 255, 255]);
+        assert_eq!(resolved[16].tint_rgb, [255, 255, 255]);
         assert_eq!(
             resolve_happy_ghast_layer_inputs(&layers[1..2], Some(0x123456))[0].tint_rgb,
             [0x12, 0x34, 0x56],
         );
-        assert!(resolve_happy_ghast_layer_inputs(&layers[0..1], None).is_empty());
+        assert_eq!(
+            resolve_happy_ghast_layer_inputs(&layers[0..1], None)[0].tint_rgb,
+            [0, 0, 0]
+        );
+        assert_eq!(
+            resolve_happy_ghast_layer_inputs(&layers[0..1], Some(0))[0].tint_rgb,
+            [0, 0, 0],
+            "explicit black dye overrides the undyed default"
+        );
+        let no_default = [EquipmentLayer {
+            texture: "custom:no-default".into(),
+            dyeable: Some(Dyeable {
+                color_when_undyed: None,
+            }),
+            use_player_texture: false,
+        }];
+        assert!(resolve_happy_ghast_layer_inputs(&no_default, None).is_empty());
+    }
+
+    #[test]
+    fn rgb_color_accepts_signed_integer_and_float_components() {
+        let negative: EquipmentLayer = serde_json::from_str(
+            r#"{"texture":"minecraft:leather","dyeable":{"color_when_undyed":-6265536}}"#,
+        )
+        .unwrap();
+        assert_eq!(negative.dyeable.unwrap().color_when_undyed, Some(-6265536));
+        let floats: EquipmentLayer = serde_json::from_str(
+            r#"{"texture":"minecraft:leather","dyeable":{"color_when_undyed":[1.0,0.5,0.0]}}"#,
+        )
+        .unwrap();
+        assert_eq!(floats.dyeable.unwrap().color_when_undyed, Some(0x00ff_7f00));
+        let positive: EquipmentLayer = serde_json::from_str(
+            r#"{"texture":"minecraft:leather","dyeable":{"color_when_undyed":1122867}}"#,
+        )
+        .unwrap();
+        assert_eq!(positive.dyeable.unwrap().color_when_undyed, Some(1122867));
     }
 
     #[test]

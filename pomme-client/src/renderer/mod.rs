@@ -417,6 +417,11 @@ impl Renderer {
             .chain(generated_item_textures.iter().copied())
             .chain(crate::particle::END_ROD_SPRITES)
             .chain(crate::particle::ENTITY_EFFECT_SPRITES)
+            .chain(crate::particle::SPELL_SPRITES)
+            .chain([
+                crate::particle::RAID_OMEN_SPRITE,
+                crate::particle::TRIAL_OMEN_SPRITE,
+            ])
             .chain(crate::particle::GENERIC_PARTICLE_SPRITES)
             .chain(crate::particle::CAMPFIRE_COSY_SMOKE_SPRITES)
             .chain(crate::particle::CAMPFIRE_SIGNAL_SMOKE_SPRITES)
@@ -1824,7 +1829,7 @@ impl Renderer {
         } else {
             sky.clear_color_linear(dimension, render_distance)
         };
-        let item_entities: Vec<_> = item_entities
+        let mut item_entities: Vec<_> = item_entities
             .iter()
             .cloned()
             .map(|mut info| {
@@ -1839,6 +1844,9 @@ impl Renderer {
                 let asset_id = crate::player::menu_click::component::<
                     azalea_inventory::components::Equippable,
                 >(stack)
+                .filter(|equippable| {
+                    equippable.slot == azalea_inventory::components::EquipmentSlot::Chest
+                })
                 .and_then(|equippable| equippable.asset_id.map(|id| id.to_string()));
                 if let Some(asset_id) = asset_id {
                     info.cape_has_wings_layer = equipment_definitions
@@ -1877,10 +1885,10 @@ impl Renderer {
             info.humanoid_armor_layers.clear();
             if pipelines::entity_renderer::humanoid_armor_target(info.entity_kind) {
                 for slot in [
-                    azalea_inventory::components::EquipmentSlot::Head,
                     azalea_inventory::components::EquipmentSlot::Chest,
                     azalea_inventory::components::EquipmentSlot::Legs,
                     azalea_inventory::components::EquipmentSlot::Feet,
+                    azalea_inventory::components::EquipmentSlot::Head,
                 ] {
                     let Some(stack) = info.armor_stand_equipment.get(&slot) else {
                         continue;
@@ -1908,6 +1916,9 @@ impl Renderer {
             >(stack) else {
                 continue;
             };
+            if equippable.slot != azalea_inventory::components::EquipmentSlot::Body {
+                continue;
+            }
             let Some(asset_id) = equippable.asset_id.map(|id| id.to_string()) else {
                 continue;
             };
@@ -1931,6 +1942,106 @@ impl Renderer {
                     pipelines::equipment::resolve_happy_ghast_layer_inputs(layers, dyed_rgb);
             }
         }
+        // Vanilla CustomHeadLayer renders skulls and non-armor HEAD items
+        // independently from HumanoidArmorLayer. Reuse item meshes and profile
+        // skin resolution instead of treating every head stack as armor.
+        let mut head_display = pipelines::item_display::DisplayResolver::new(
+            &self.jar_assets_dir,
+            "head",
+        );
+        head_display.update_resources(
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &self.activation_pack_dirs,
+        );
+        let anchor = self.camera.anchor();
+        let mut rendered_block_entities = block_entities.to_vec();
+        for info in &frame_entities {
+            if info.is_spectator {
+                continue;
+            }
+            let Some(stack) = info
+                .armor_stand_equipment
+                .get(&azalea_inventory::components::EquipmentSlot::Head)
+            else {
+                continue;
+            };
+            let azalea_inventory::ItemStack::Present(stack_data) = stack else {
+                continue;
+            };
+            let stack = azalea_inventory::ItemStack::Present(stack_data.clone());
+            let item_resource_name = crate::player::inventory::item_resource_name(stack_data.kind);
+            let item_name = crate::world::block::registry::BlockRegistry::item_model_name(&stack)
+                .unwrap_or_else(|| item_resource_name.clone());
+            // Skull identity comes from the actual item, never an ItemModel override.
+            let skull_type = worn_skull_type(&item_resource_name);
+            if skull_type.is_none()
+                && crate::player::menu_click::component::<
+                    azalea_inventory::components::Equippable,
+                >(stack_data)
+                .is_some_and(|equippable| {
+                    equippable.slot == azalea_inventory::components::EquipmentSlot::Head
+                        && equippable.asset_id.is_some()
+                })
+            {
+                continue;
+            }
+            let Some(attachment) = (if skull_type.is_some() {
+                self.entity_renderer.custom_head_skull_attachment(info, anchor)
+            } else {
+                self.entity_renderer.custom_head_attachment(info, anchor)
+            }) else {
+                continue;
+            };
+            if skull_type.is_some() {
+                let player_profile = (skull_type == Some("player"))
+                    .then(|| crate::world::block_entity::player_head_profile_source_from_item(&stack))
+                    .flatten();
+                let block_pos = azalea_core::position::BlockPos::new(
+                    info.position.x.floor() as i32,
+                    info.position.y.floor() as i32,
+                    info.position.z.floor() as i32,
+                );
+                if let Some(skull) = pipelines::block_entity::worn_skull_render_info(
+                    &item_resource_name,
+                    attachment,
+                    info.skull_animation_pos(),
+                    player_profile,
+                    block_pos,
+                ) {
+                    rendered_block_entities.push(skull);
+                }
+                // The dedicated skull draw above owns this stack; never submit its item mesh.
+                continue;
+            }
+            self.ensure_item_mesh(&item_name);
+            let display = head_display.resolve(
+                &item_name,
+                pipelines::item_display::DisplayTransform::IDENTITY,
+            );
+            item_entities.push(pipelines::item_entity::ItemRenderInfo {
+                item_name,
+                raw_dye_rgb: None,
+                player_head_profile_source: None,
+                model_matrix: attachment * display.to_matrix(),
+                light: 1.0,
+                white_overlay: 0.0,
+                nether_lighting: dimension == "minecraft:the_nether",
+                entity_uuid: None,
+                invisible: info.is_invisible,
+                actual_age: None,
+                actual_render_age: 0.0,
+                age_f: 0.0,
+                actual_spin: 0.0,
+                spin: 0.0,
+                bob_offset: 0.0,
+                actual_bob_offset: 0.0,
+                controlled_phase: false,
+                bob_controlled: false,
+                position: [info.position.x, info.position.y, info.position.z],
+                stack_count: 1,
+            });
+        }
         if let Some(start) = prepare_start {
             self.last_timings.render_prepare_ms = start.elapsed().as_secs_f32() * 1000.0;
         }
@@ -1953,7 +2064,7 @@ impl Renderer {
                 entities: &frame_entities,
                 text_display_source,
                 item_entities: &item_entities,
-                block_entities,
+                block_entities: &rendered_block_entities,
                 particles,
                 weather,
                 cloud_mode,
@@ -2079,6 +2190,11 @@ impl Renderer {
             .chain(generated_item_textures.iter().copied())
             .chain(crate::particle::END_ROD_SPRITES)
             .chain(crate::particle::ENTITY_EFFECT_SPRITES)
+            .chain(crate::particle::SPELL_SPRITES)
+            .chain([
+                crate::particle::RAID_OMEN_SPRITE,
+                crate::particle::TRIAL_OMEN_SPRITE,
+            ])
             .chain(crate::particle::GENERIC_PARTICLE_SPRITES)
             .chain(crate::particle::CAMPFIRE_COSY_SMOKE_SPRITES)
             .chain(crate::particle::CAMPFIRE_SIGNAL_SMOKE_SPRITES)
@@ -3407,6 +3523,19 @@ impl Renderer {
     }
 }
 
+fn worn_skull_type(name: &str) -> Option<&'static str> {
+    match name {
+        "player_head" => Some("player"),
+        "skeleton_skull" => Some("skeleton"),
+        "wither_skeleton_skull" => Some("wither_skeleton"),
+        "zombie_head" => Some("zombie"),
+        "creeper_head" => Some("creeper"),
+        "dragon_head" => Some("dragon"),
+        "piglin_head" => Some("piglin"),
+        _ => None,
+    }
+}
+
 fn build_gui_item_atlas(
     device: &vk::Device,
     allocator: &Arc<std::sync::Mutex<pomme_gpu_allocator::vulkan::Allocator>>,
@@ -3898,6 +4027,24 @@ impl Drop for Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worn_skull_classification_is_exact_and_type_specific() {
+        for (name, expected) in [
+            ("player_head", Some("player")),
+            ("skeleton_skull", Some("skeleton")),
+            ("wither_skeleton_skull", Some("wither_skeleton")),
+            ("zombie_head", Some("zombie")),
+            ("creeper_head", Some("creeper")),
+            ("dragon_head", Some("dragon")),
+            ("piglin_head", Some("piglin")),
+        ] {
+            assert_eq!(worn_skull_type(name), expected);
+        }
+        for name in ["not_a_head", "custom_skull", "skeleton_wall_skull"] {
+            assert_eq!(worn_skull_type(name), None, "{name}");
+        }
+    }
 
     #[test]
     fn validates_skin_url_boundary() {

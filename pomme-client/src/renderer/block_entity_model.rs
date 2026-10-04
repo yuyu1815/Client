@@ -355,6 +355,7 @@ pub fn bake_skull_model(texture_height: u32) -> BakedEntityModel {
         vertices,
         vec![(0, 36)],
     )
+    .with_convention(ModelConvention::SkullRaw)
 }
 
 /// 26.2 DragonHeadModel: scaled head with the upper lip, skull, horns and
@@ -424,6 +425,12 @@ pub fn bake_dragon_head_model() -> BakedEntityModel {
         parent: Some(0),
     };
     let mut model = bake_model(vec![head, jaw], 256, 256);
+    // bake_model uses the mob convention; skull attachments supply this
+    // reflection themselves, so restore the authored model-space Y vertices.
+    for vertex in &mut model.vertices {
+        vertex.position[1] = -vertex.position[1];
+    }
+    model.convention = ModelConvention::SkullRaw;
     model.part_scales[0] = 0.75;
     model
 }
@@ -493,7 +500,12 @@ pub fn bake_piglin_head_model() -> BakedEntityModel {
         }],
         parent: Some(0),
     };
-    bake_model(vec![head, left_ear, right_ear], 64, 64)
+    let mut model = bake_model(vec![head, left_ear, right_ear], 64, 64);
+    for vertex in &mut model.vertices {
+        vertex.position[1] = -vertex.position[1];
+    }
+    model.convention = ModelConvention::SkullRaw;
+    model
 }
 
 /// Unknown skull blocks stay hidden rather than borrowing another type's mesh.
@@ -528,6 +540,7 @@ pub fn bake_player_head_model() -> BakedEntityModel {
         vertices,
         vec![(0, 72)],
     )
+    .with_convention(ModelConvention::SkullRaw)
 }
 
 /// Shulker box, closed state. Matches vanilla `ShulkerModel`: a 16x12x16 lid

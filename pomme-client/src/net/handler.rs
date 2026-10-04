@@ -2616,6 +2616,13 @@ fn sound_packet_ids() -> SoundPacketIds {
 fn parse_level_particles(
     cur: &mut std::io::Cursor<&[u8]>,
 ) -> Result<Option<NetworkEvent>, azalea_buf::BufReadError> {
+    parse_level_particles_for_protocol(cur, super::translate::active().map(|t| t.protocol()))
+}
+
+fn parse_level_particles_for_protocol(
+    cur: &mut std::io::Cursor<&[u8]>,
+    protocol: Option<i32>,
+) -> Result<Option<NetworkEvent>, azalea_buf::BufReadError> {
     let override_limiter = bool::azalea_read(cur)?;
     let always_show = bool::azalea_read(cur)?;
     let pos = glam::dvec3(
@@ -2649,6 +2656,16 @@ fn parse_level_particles(
             crate::particle::ServerParticleOptions::EntityEffect {
                 color: i32::azalea_read(cur)? as u32,
             }
+        }
+        crate::particle::ServerParticleKind::Effect
+        | crate::particle::ServerParticleKind::InstantEffect => {
+            let (color, power) = if protocol.is_some_and(|p| p < 773) {
+                // Through 1.21.8 these are payload-free SimpleParticleTypes.
+                (-1, 1.0)
+            } else {
+                (i32::azalea_read(cur)?, f32::azalea_read(cur)?)
+            };
+            crate::particle::ServerParticleOptions::Spell { color, power }
         }
         crate::particle::ServerParticleKind::Dust => crate::particle::ServerParticleOptions::Dust {
             packed_color: i32::azalea_read(cur)?,
@@ -3051,6 +3068,60 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn level_particles_effect_decodes_rgb_and_power() {
+        let mut raw = Vec::new();
+        false.azalea_write(&mut raw).unwrap();
+        true.azalea_write(&mut raw).unwrap();
+        for value in [1.0f64, 2.0, 3.0] {
+            value.azalea_write(&mut raw).unwrap();
+        }
+        for value in [0.0f32, 0.0, 0.0, 1.0] {
+            value.azalea_write(&mut raw).unwrap();
+        }
+        1i32.azalea_write(&mut raw).unwrap();
+        23u32.azalea_write_var(&mut raw).unwrap();
+        0x123456i32.azalea_write(&mut raw).unwrap();
+        1.5f32.azalea_write(&mut raw).unwrap();
+        raw.push(0x5a);
+        let mut cur = std::io::Cursor::new(raw.as_slice());
+        let event = parse_level_particles_for_protocol(&mut cur, Some(775))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, NetworkEvent::LevelParticles {
+            kind: crate::particle::ServerParticleKind::Effect,
+            options: crate::particle::ServerParticleOptions::Spell { color: 0x123456, power },
+            ..
+        } if power == 1.5));
+        assert_eq!(cur.get_ref()[cur.position() as usize], 0x5a);
+    }
+
+    #[test]
+    fn level_particles_spell_is_payload_free_on_protocol_767() {
+        let mut raw = Vec::new();
+        false.azalea_write(&mut raw).unwrap();
+        true.azalea_write(&mut raw).unwrap();
+        for value in [1.0f64, 2.0, 3.0] {
+            value.azalea_write(&mut raw).unwrap();
+        }
+        for value in [0.0f32, 0.0, 0.0, 1.0] {
+            value.azalea_write(&mut raw).unwrap();
+        }
+        1i32.azalea_write(&mut raw).unwrap();
+        23u32.azalea_write_var(&mut raw).unwrap();
+        raw.push(0x5a);
+        let mut cur = std::io::Cursor::new(raw.as_slice());
+        let event = parse_level_particles_for_protocol(&mut cur, Some(767))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, NetworkEvent::LevelParticles {
+            kind: crate::particle::ServerParticleKind::Effect,
+            options: crate::particle::ServerParticleOptions::Spell { color: -1, power },
+            ..
+        } if power == 1.0));
+        assert_eq!(cur.get_ref()[cur.position() as usize], 0x5a);
+    }
+
     fn handle_raw_game_packet(raw: &[u8], tx: &Sender<NetworkEvent>) -> bool {
         tokio::runtime::Runtime::new()
             .unwrap()
@@ -3234,6 +3305,158 @@ mod tests {
             }
         ));
         assert!(rx.is_empty());
+    }
+
+    #[tokio::test]
+    async fn effect_particle_event_updates_local_and_remote_and_spawns_from_saved_options() {
+        use azalea_entity::particle::{ColorPowerParticle, Particle};
+        use glam::{DVec3, dvec3};
+        use pomme_protocol::packets::{Direction, PacketTable, Phase};
+        use pomme_protocol::{ClientRegistry, RegistryTable, wire};
+
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut particles = crate::particle::ParticleStore::new(
+            crate::renderer::chunk::atlas::AtlasUVMap::test_empty(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        let mut player = crate::player::LocalPlayer::new();
+        player.entity_id = 7;
+        let mut entities = crate::entity::EntityStore::new();
+        entities.spawn_living(
+            8,
+            azalea_registry::builtin::EntityKind::Zombie,
+            Default::default(),
+            Default::default(),
+            0.0,
+            None,
+        );
+
+        for (id, instant) in [(7, false), (8, false), (7, true), (8, true)] {
+            let mut selected_seed = None;
+            let mut baseline = None;
+            for power in [1.0f32, 0.0, 0.5] {
+                let protocol = 775;
+                let table = RegistryTable::for_protocol(protocol).unwrap();
+                let mut frame = Vec::new();
+                wire::write_varint(
+                    &mut frame,
+                    PacketTable::for_protocol(protocol)
+                        .unwrap()
+                        .id(Phase::Game, Direction::Clientbound, "set_entity_data")
+                        .unwrap(),
+                );
+                wire::write_varint(&mut frame, id as u32);
+                frame.extend_from_slice(&[10, 17, 1]);
+                wire::write_varint(
+                    &mut frame,
+                    table
+                        .id_of(
+                            ClientRegistry::ParticleType,
+                            if instant { "instant_effect" } else { "effect" },
+                        )
+                        .unwrap(),
+                );
+                frame.extend_from_slice(&0x123456i32.to_be_bytes());
+                frame.extend_from_slice(&power.to_be_bytes());
+                frame.push(0xff);
+                let packet =
+                    crate::net::azalea_compat::test_translate_decode_and_remap(protocol, frame);
+                let (tx, rx) = crossbeam_channel::bounded(2);
+                dispatch_world_packet(&packet, &tx).await.unwrap();
+                let event = rx.try_recv().expect("handler emits effect particle event");
+                let NetworkEvent::EntityEffectParticles {
+                    id,
+                    particles: Some(saved),
+                    ambient,
+                } = event
+                else {
+                    panic!("handler did not emit effect particle event");
+                };
+                let expected = if instant {
+                    Particle::InstantEffect(ColorPowerParticle {
+                        color: 0x123456,
+                        power,
+                    })
+                } else {
+                    Particle::Effect(ColorPowerParticle {
+                        color: 0x123456,
+                        power,
+                    })
+                };
+                assert_eq!(saved, vec![expected.clone()]);
+                crate::app::core::apply_entity_effect_particles(
+                    &mut player,
+                    &mut entities,
+                    id,
+                    Some(saved),
+                    ambient,
+                );
+                let stored = if id == player.entity_id {
+                    &player.effect_particles
+                } else {
+                    &entities.living[&id].effect_particles
+                };
+                assert_eq!(stored, &[expected]);
+
+                let seed = if let Some(seed) = selected_seed {
+                    seed
+                } else {
+                    (0..256)
+                        .find(|seed| {
+                            particles.clear();
+                            fastrand::seed(*seed);
+                            particles.add_living_effect_particles(
+                                DVec3::ZERO,
+                                0.6,
+                                1.8,
+                                stored,
+                                false,
+                                false,
+                                DVec3::ZERO,
+                            );
+                            !particles.test_pending().is_empty()
+                        })
+                        .expect("selected living effect particle within 256 seeds")
+                };
+                selected_seed = Some(seed);
+                particles.clear();
+                fastrand::seed(seed);
+                particles.add_living_effect_particles(
+                    DVec3::ZERO,
+                    0.6,
+                    1.8,
+                    stored,
+                    false,
+                    false,
+                    DVec3::ZERO,
+                );
+                assert_eq!(particles.test_pending().len(), 1, "at most one particle");
+                let (color, velocity) = particles.test_pending_color_velocity(0);
+                assert_eq!(
+                    color,
+                    [
+                        0x12 as f32 / 255.0,
+                        0x34 as f32 / 255.0,
+                        0x56 as f32 / 255.0,
+                    ]
+                );
+                if power == 1.0 {
+                    baseline = Some(velocity);
+                } else {
+                    let base = baseline.unwrap();
+                    assert_eq!(
+                        velocity,
+                        dvec3(
+                            base.x * f64::from(power),
+                            (base.y - 0.1) * f64::from(power) + 0.1,
+                            base.z * f64::from(power),
+                        )
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

@@ -367,6 +367,7 @@ use pomme_protocol::{
 };
 
 pub struct Translation {
+    protocol: i32,
     /// Server-provided dynamic ids, replaced per registry on reconfiguration.
     dynamic_registries: Mutex<DynamicRegistries>,
     creative_slot_delimited: bool,
@@ -439,6 +440,8 @@ struct GameIds {
     /// Whether the wire version's `entity_effect`/`tinted_leaves` particles
     /// carry a color int (1.20.5 added it); see [`translate_particles`].
     color_particles: bool,
+    /// 26.2 SpellParticleOptions add a power float after the RGB int.
+    spell_particle_power: bool,
     /// The rewrites 26.3 introduced, for wire versions at or above it.
     v777: Option<Ids777>,
     /// The rewrites 1.21.9 introduced, for wire versions at or below it.
@@ -886,6 +889,7 @@ impl Translation {
         let native = PacketTable::native();
         let id = |phase, name| required_id(native, phase, Direction::Clientbound, name);
         Some(Translation {
+            protocol,
             dynamic_registries: Mutex::new(DynamicRegistries::default()),
             // 1.21.5 (770) changed serverbound creative-slot component values
             // to length-prefixed entries; Azalea's typed writer still emits the
@@ -918,6 +922,10 @@ impl Translation {
 
     pub(crate) fn creative_slot_delimited(&self) -> bool {
         self.creative_slot_delimited
+    }
+
+    pub(crate) fn protocol(&self) -> i32 {
+        self.protocol
     }
 
     /// Rewrites a native-layout serverbound login frame into the wire
@@ -1260,7 +1268,23 @@ impl Translation {
     /// Whether outbound game frames need translation before hitting the
     /// wire (the version's serverbound ids or layouts diverge from native).
     pub fn translates_outbound(&self) -> bool {
-        self.game_ids.is_some()
+        self.game_ids.as_ref().is_some_and(|ids| {
+            ids.v763.is_some()
+                || ids.v764.is_some()
+                || ids.v765.is_some()
+                || ids.v766.is_some()
+                || ids.v767.is_some()
+                || ids.v768.is_some()
+                || ids.v769.is_some()
+                || ids.v770.is_some()
+                || ids.v774.is_some()
+                || ids.v777.is_some()
+                || ids
+                    .outbound
+                    .iter()
+                    .enumerate()
+                    .any(|(id, wire)| wire.is_some_and(|wire| wire != id as u32))
+        })
     }
 
     /// Translates a native-layout serverbound game frame into the wire
@@ -1425,9 +1449,13 @@ impl Translation {
                 true
             }
             ClientboundGamePacket::SetEntityData(p) => {
-                for item in &mut p.packed_items.0 {
-                    if let azalea_entity::EntityDataValue::ItemStack(stack) = &mut item.value {
-                        remap_stack(self.to_native, stack);
+                // Component-stack metadata (1.20.5+) was already nativeized by
+                // translate_entity_data; older metadata still has wire item ids.
+                if self.protocol < 766 {
+                    for item in &mut p.packed_items.0 {
+                        if let azalea_entity::EntityDataValue::ItemStack(stack) = &mut item.value {
+                            remap_stack(self.to_native, stack);
+                        }
                     }
                 }
                 true
@@ -1549,7 +1577,9 @@ impl GameIds {
         use Direction::{Clientbound, Serverbound};
         let inbound = id_map(table, native, Phase::Game, Clientbound);
         let outbound = id_map(native, table, Phase::Game, Serverbound);
-        if identity_maps(&inbound, &outbound) {
+        // Protocol 775 shares packet IDs with native 776 but its dynamic
+        // particle registry IDs still differ, so it needs payload-aware rewrites.
+        if identity_maps(&inbound, &outbound) && protocol != 775 {
             return None;
         }
         let id = |dir, name| required_id(native, Phase::Game, dir, name);
@@ -1557,7 +1587,9 @@ impl GameIds {
             inbound,
             outbound,
             serializer_map: match protocol {
-                777 => remap_serializer_777,
+                // 26.1 and 26.3 share native serializer ids 0..=42 and
+                // append dye_color at 43; native 26.2 lacks that last type.
+                775 | 777 => remap_serializer_777,
                 774 => remap_serializer_774,
                 773 => remap_serializer_773,
                 // 1.21.5 through 1.21.8 register identical serializer sets,
@@ -1578,6 +1610,9 @@ impl GameIds {
                 interact_old_id: required_id(table, Phase::Game, Serverbound, "interact"),
             }),
             color_particles: protocol >= 766,
+            // 1.21.9 introduced SpellParticleOption; protocol 767 (1.21.1)
+            // still encodes these particle types as payload-free simple types.
+            spell_particle_power: protocol >= 773,
             v777: (protocol >= 777).then(|| Ids777 {
                 move_entity_pos_id: id(Clientbound, "move_entity_pos"),
                 move_entity_pos_rot_id: id(Clientbound, "move_entity_pos_rot"),
@@ -3819,13 +3854,11 @@ fn translate_game_login(id: u32, payload: &[u8]) -> Option<Vec<u8>> {
 /// serializer, value)` entries terminated by `0xFF`) by remapping each
 /// entry's serializer id through the wire version's `serializer_map`. Value
 /// layouts are identical between the versions (verified serializer by
-/// serializer); they're skipped, not decoded, except particle values, whose
-/// type ids are remapped in place ([`translate_particles`]). An entry using
-/// a serializer the native version dropped (1.21.8's `compound_tag`) is
-/// stripped rather than failing the packet. An item-stack value can't
-/// always be walked without full component codecs — the remainder is copied
-/// verbatim, which is correct unless a shifted serializer follows one (no
-/// vanilla entity sends one after an untranslatable stack).
+/// serializer); they're skipped, not decoded, except item stacks and particle
+/// values, whose component/type ids are translated. An entry using a serializer
+/// the native version dropped (1.21.8's `compound_tag`) is stripped. An item
+/// stack with an unsupported component codec rejects the entire packet instead
+/// of copying a mixed native/wire tail.
 /// TODO: translate shoulder-parrot NBT to 26.2's OptionalInt variant
 /// instead of stripping it, so shoulder parrots show on old servers.
 /// TODO: lift pre-1.21.6 hanging-entity indices (an item frame's item/rotation
@@ -3889,13 +3922,9 @@ fn translate_entity_data(
             } else {
                 translate_item_stack(&mut cur, &mut stack, remaps, ids.v772.is_some())
             };
-            if translated.is_some() {
-                out.extend_from_slice(&stack);
-                continue;
-            }
-            tracing::debug!("Copying entity data tail verbatim past an item stack");
-            out.extend_from_slice(&payload[value_at..]);
-            return Some(out);
+            translated?;
+            out.extend_from_slice(&stack);
+            continue;
         }
         if new == 16 || new == 17 {
             let mut particles = Vec::new();
@@ -3904,9 +3933,8 @@ fn translate_entity_data(
             continue;
         }
         if !skip_metadata_value(&mut cur, new)? {
-            tracing::debug!("Copying entity data tail verbatim past serializer {old}");
-            out.extend_from_slice(&payload[value_at..]);
-            return Some(out);
+            tracing::warn!("Cannot translate metadata serializer {old} for protocol data");
+            return None;
         }
         out.extend_from_slice(&payload[value_at..cur.position() as usize]);
     }
@@ -3925,7 +3953,7 @@ pub(crate) const COMPONENT_PROFILE: u32 = 70;
 /// the native registry space. `old_profile` marks the pre-1.21.9 `profile`
 /// component layout (see [`translate_old_profile`]). `None` means a
 /// component payload the walker doesn't know (or a malformed stack); the
-/// caller falls back to the verbatim-tail copy.
+/// metadata packet is rejected rather than mixing native and wire layouts.
 fn translate_item_stack(
     cur: &mut Cursor<&[u8]>,
     out: &mut Vec<u8>,
@@ -3962,7 +3990,10 @@ fn translate_item_stack(
             COMPONENT_PROFILE => {
                 Profile::azalea_read(cur).ok()?;
             }
-            _ => return None,
+            _ => {
+                let kind = DataComponentKind::from_u32(native)?;
+                DataComponentUnion::azalea_read_as(kind, cur).ok()?;
+            }
         }
         out.extend_from_slice(&cur.get_ref()[value_at..cur.position() as usize]);
     }
@@ -4124,6 +4155,7 @@ fn translate_particles(
                     ids.v765.is_some(),
                     ids.v763.is_some(),
                     ids.color_particles,
+                    ids.spell_particle_power,
                     ids.v765.as_ref().map(|v| v.registry),
                 )?;
             }
@@ -4145,6 +4177,7 @@ fn copy_particle_payload(
     old_item: bool,
     named_nbt: bool,
     color_particles: bool,
+    spell_particle_power: bool,
     registry: Option<&RegistryTable>,
 ) -> Option<()> {
     let at = cur.position() as usize;
@@ -4156,7 +4189,18 @@ fn copy_particle_payload(
             advance(cur, 4)?;
         }
         "entity_effect" | "tinted_leaves" if color_particles => advance(cur, 4)?,
-        "dust" | "effect" | "instant_effect" | "geyser_base" | "geyser_poof" => advance(cur, 8)?,
+        "effect" | "instant_effect" => {
+            if spell_particle_power {
+                advance(cur, 8)?;
+            } else {
+                // Older simple particle types have no wire payload. The native
+                // decoder expects a SpellParticleOption, so materialize defaults.
+                out.extend_from_slice(&(-1i32).to_be_bytes());
+                out.extend_from_slice(&1.0f32.to_be_bytes());
+                return Some(());
+            }
+        }
+        "dust" | "geyser_base" | "geyser_poof" => advance(cur, 8)?,
         "dust_color_transition" => advance(cur, 12)?,
         "trail" => {
             advance(cur, 28)?; // target, color
@@ -4174,7 +4218,20 @@ fn copy_particle_payload(
             varint_span(cur)?; // arrival ticks
         }
         "item" if old_item => {
-            translate_item_765(cur, out, named_nbt, registry)?;
+            let mut stack = Vec::new();
+            translate_item_765(cur, &mut stack, named_nbt, registry)?;
+            let mut stack = Cursor::new(stack.as_slice());
+            let count = varint_span(&mut stack)?;
+            let count_value =
+                u32::azalea_read_var(&mut Cursor::new(&stack.get_ref()[count.clone()])).ok()?;
+            if count_value == 0 {
+                return None;
+            } else {
+                let item = u32::azalea_read_var(&mut stack).ok()?;
+                wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+                out.extend_from_slice(&stack.get_ref()[count]);
+                out.extend_from_slice(&stack.get_ref()[stack.position() as usize..]);
+            }
             return Some(());
         }
         "item" => {
@@ -4183,12 +4240,12 @@ fn copy_particle_payload(
             let count = varint_span(cur)?;
             let count_value =
                 u32::azalea_read_var(&mut Cursor::new(&cur.get_ref()[count.clone()])).ok()?;
-            out.extend_from_slice(&cur.get_ref()[count]);
             if count_value == 0 {
-                return Some(());
+                return None;
             }
             let item = u32::azalea_read_var(cur).ok()?;
             wire::write_varint(out, remaps.remap(ClientRegistry::Item, item)?);
+            out.extend_from_slice(&cur.get_ref()[count]);
             return copy_component_patch(cur, out, remaps);
         }
         _ => return None,
@@ -5059,6 +5116,7 @@ fn translate_level_particles_777(
             remaps,
             false,
             false,
+            true,
             true,
             None,
         )?;
@@ -6011,7 +6069,314 @@ mod tests {
     }
 
     #[test]
-    fn item_particle_uses_count_then_item_and_accepts_empty_stack() {
+    fn native_metadata_item_stack_keeps_following_values_aligned() {
+        use azalea_entity::EntityDataValue;
+
+        let mut raw = Vec::new();
+        wire::write_varint(
+            &mut raw,
+            PacketTable::native()
+                .id(Phase::Game, Direction::Clientbound, "set_entity_data")
+                .unwrap(),
+        );
+        wire::write_varint(&mut raw, 9);
+        // ItemStack.STREAM_CODEC: count=1, item=stone (1), empty component patch.
+        raw.extend_from_slice(&[10, 7, 1, 1, 0, 0]);
+        // A Boolean following the variable-length stack must remain readable.
+        raw.extend_from_slice(&[11, 8, 1, 0xff]);
+
+        let packet = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut Cursor::new(&raw),
+        )
+        .expect("stack and following metadata decode");
+        let ClientboundGamePacket::SetEntityData(packet) = packet else {
+            panic!("set_entity_data");
+        };
+        assert!(matches!(
+            packet.packed_items.0[0].value,
+            EntityDataValue::ItemStack(_)
+        ));
+        assert!(matches!(
+            packet.packed_items.0[1].value,
+            EntityDataValue::Boolean(true)
+        ));
+    }
+
+    #[test]
+    fn native_entity_effect_metadata_uses_azalea_enum_ordinal() {
+        use azalea_entity::EntityDataValue;
+        use azalea_entity::particle::Particle;
+
+        let mut raw = Vec::new();
+        wire::write_varint(
+            &mut raw,
+            PacketTable::native()
+                .id(Phase::Game, Direction::Clientbound, "set_entity_data")
+                .unwrap(),
+        );
+        wire::write_varint(&mut raw, 9);
+        raw.extend_from_slice(&[10, 17, 1, 28]); // particles list, registry id
+        raw.extend_from_slice(&0x12345678i32.to_be_bytes());
+        raw.push(0xff);
+        let packet = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut Cursor::new(&raw),
+        )
+        .unwrap();
+        let ClientboundGamePacket::SetEntityData(packet) = packet else {
+            panic!("set_entity_data");
+        };
+        let EntityDataValue::Particles(particles) = &packet.packed_items.0[0].value else {
+            panic!("particle list");
+        };
+        let [Particle::EntityEffect(effect)] = particles.as_ref() else {
+            panic!("entity effect particle");
+        };
+        let mut encoded_color = Vec::new();
+        effect.color.azalea_write(&mut encoded_color).unwrap();
+        assert_eq!(encoded_color, 0x12345678i32.to_be_bytes());
+    }
+
+    #[test]
+    fn metadata_particle_list_omen_and_entity_effect_mix_keeps_following_entry() {
+        use azalea_entity::EntityDataValue;
+        use azalea_entity::particle::Particle;
+
+        let mut raw = Vec::new();
+        wire::write_varint(
+            &mut raw,
+            PacketTable::native()
+                .id(Phase::Game, Direction::Clientbound, "set_entity_data")
+                .unwrap(),
+        );
+        wire::write_varint(&mut raw, 9);
+        raw.extend_from_slice(&[10, 17, 3, 28]);
+        raw.extend_from_slice(&0x12345678i32.to_be_bytes());
+        raw.extend_from_slice(&[120, 121, 11, 8, 1, 0xff]);
+        let packet = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut Cursor::new(&raw),
+        )
+        .expect("subsequent metadata remains aligned");
+        let ClientboundGamePacket::SetEntityData(packet) = packet else {
+            panic!("set_entity_data");
+        };
+        assert!(matches!(
+            &packet.packed_items.0[0].value,
+            EntityDataValue::Particles(particles)
+                if matches!(particles.as_ref(), [Particle::EntityEffect(_), Particle::RaidOmen, Particle::TrialOmen])
+        ));
+        assert!(matches!(
+            packet.packed_items.0[1].value,
+            EntityDataValue::Boolean(true)
+        ));
+    }
+
+    #[test]
+    fn native_spell_and_witch_metadata_decode_without_payload_desync() {
+        use azalea_entity::EntityDataValue;
+        use azalea_entity::particle::Particle;
+
+        let mut raw = Vec::new();
+        wire::write_varint(
+            &mut raw,
+            PacketTable::native()
+                .id(Phase::Game, Direction::Clientbound, "set_entity_data")
+                .unwrap(),
+        );
+        wire::write_varint(&mut raw, 9);
+        // Native registry IDs plus the full 26.2 effect payloads.
+        raw.extend_from_slice(&[10, 17, 3, 23]);
+        raw.extend_from_slice(&0x123456i32.to_be_bytes());
+        raw.extend_from_slice(&0.75f32.to_be_bytes());
+        raw.push(53);
+        raw.extend_from_slice(&0x654321i32.to_be_bytes());
+        raw.extend_from_slice(&1.25f32.to_be_bytes());
+        raw.extend_from_slice(&[78, 11, 8, 1, 0xff]);
+        let ClientboundGamePacket::SetEntityData(packet) =
+            azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(&mut Cursor::new(
+                &raw,
+            ))
+            .expect("native metadata payloads decode directly")
+        else {
+            panic!("set_entity_data");
+        };
+        let EntityDataValue::Particles(particles) = &packet.packed_items.0[0].value else {
+            panic!("particle list");
+        };
+        let [
+            Particle::Effect(effect),
+            Particle::InstantEffect(instant),
+            Particle::Witch,
+        ] = particles.as_ref()
+        else {
+            panic!("effect, instant effect, witch");
+        };
+        assert_eq!((effect.color, effect.power), (0x123456, 0.75));
+        assert_eq!((instant.color, instant.power), (0x654321, 1.25));
+        assert!(matches!(
+            packet.packed_items.0[1].value,
+            EntityDataValue::Boolean(true)
+        ));
+    }
+
+    #[test]
+    fn trail_particle_payload_and_following_metadata_decode_together() {
+        use azalea_entity::EntityDataValue;
+        use azalea_entity::particle::Particle;
+
+        let mut raw = Vec::new();
+        wire::write_varint(
+            &mut raw,
+            PacketTable::native()
+                .id(Phase::Game, Direction::Clientbound, "set_entity_data")
+                .unwrap(),
+        );
+        wire::write_varint(&mut raw, 9);
+        raw.extend_from_slice(&[10, 17, 1, 56]);
+        raw.extend_from_slice(&1.0f64.to_be_bytes());
+        raw.extend_from_slice(&2.0f64.to_be_bytes());
+        raw.extend_from_slice(&3.0f64.to_be_bytes());
+        raw.extend_from_slice(&0x12345678i32.to_be_bytes());
+        raw.push(7); // VarInt duration
+        raw.extend_from_slice(&[11, 8, 1, 0xff]);
+
+        let ClientboundGamePacket::SetEntityData(packet) =
+            azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(&mut Cursor::new(
+                &raw,
+            ))
+            .expect("trail codec consumes exactly its native payload")
+        else {
+            panic!("set_entity_data");
+        };
+        let EntityDataValue::Particles(particles) = &packet.packed_items.0[0].value else {
+            panic!("particle list");
+        };
+        let [Particle::Trail(trail)] = particles.as_ref() else {
+            panic!("trail particle");
+        };
+        assert_eq!(
+            (trail.target.x, trail.target.y, trail.target.z),
+            (1.0, 2.0, 3.0)
+        );
+        assert_eq!(trail.color, 0x12345678);
+        assert_eq!(trail.duration, 7);
+        assert!(matches!(
+            packet.packed_items.0[1].value,
+            EntityDataValue::Boolean(true)
+        ));
+    }
+
+    #[test]
+    fn low_registry_particle_ids_decode_without_a_whitelist() {
+        use azalea_entity::EntityDataValue;
+        use azalea_entity::particle::Particle;
+
+        let mut raw = Vec::new();
+        wire::write_varint(
+            &mut raw,
+            PacketTable::native()
+                .id(Phase::Game, Direction::Clientbound, "set_entity_data")
+                .unwrap(),
+        );
+        wire::write_varint(&mut raw, 9);
+        raw.extend_from_slice(&[10, 17, 2, 0, 18, 0xff]); // angry_villager, landing_lava
+        let ClientboundGamePacket::SetEntityData(packet) =
+            azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(&mut Cursor::new(
+                &raw,
+            ))
+            .expect("registered low particle IDs decode")
+        else {
+            panic!("set_entity_data");
+        };
+        assert!(matches!(
+            &packet.packed_items.0[0].value,
+            EntityDataValue::Particles(particles)
+                if matches!(particles.as_ref(), [Particle::AngryVillager, Particle::LandingLava])
+        ));
+    }
+
+    #[test]
+    fn standalone_raid_omen_particle_metadata_preserves_following_value() {
+        use azalea_entity::EntityDataValue;
+        use azalea_entity::particle::Particle;
+
+        let mut raw = Vec::new();
+        wire::write_varint(
+            &mut raw,
+            PacketTable::native()
+                .id(Phase::Game, Direction::Clientbound, "set_entity_data")
+                .unwrap(),
+        );
+        wire::write_varint(&mut raw, 9);
+        raw.extend_from_slice(&[10, 16, 120, 11, 8, 1, 0xff]);
+        let ClientboundGamePacket::SetEntityData(packet) =
+            azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(&mut Cursor::new(
+                &raw,
+            ))
+            .expect("metadata remains aligned")
+        else {
+            panic!("set_entity_data");
+        };
+        assert!(matches!(
+            packet.packed_items.0[0].value,
+            EntityDataValue::Particle(Particle::RaidOmen)
+        ));
+        assert!(matches!(
+            packet.packed_items.0[1].value,
+            EntityDataValue::Boolean(true)
+        ));
+    }
+
+    #[test]
+    fn protocol_775_spell_particle_rgb_power_payload_is_preserved() {
+        let remaps = RegistryRemaps::to_native(775).expect("embedded legacy registry");
+        let color = 0x123456i32.to_be_bytes();
+        let power = 0.75f32.to_be_bytes();
+        let payload = [color.as_slice(), power.as_slice(), &[0xff]].concat();
+        let mut input = Cursor::new(payload.as_slice());
+        let mut output = Vec::new();
+        copy_particle_payload(
+            &mut input,
+            &mut output,
+            "effect",
+            remaps,
+            false,
+            false,
+            true,
+            true,
+            None,
+        )
+        .expect("translates protocol 775 SpellParticleOption");
+        assert_eq!(&output[..4], &color);
+        assert_eq!(&output[4..], &power);
+        assert_eq!(input.position(), 8);
+        assert_eq!(input.get_ref()[input.position() as usize], 0xff);
+    }
+
+    #[test]
+    fn protocol_767_spell_particles_have_no_wire_payload_and_keep_the_next_field() {
+        let remaps = RegistryRemaps::to_native(767).expect("embedded 1.21.1 registry");
+        let source = [0x5a, 0xa5]; // payload-free particle, then next field
+        let mut input = Cursor::new(&source[..]);
+        let mut output = Vec::new();
+        copy_particle_payload(
+            &mut input,
+            &mut output,
+            "effect",
+            remaps,
+            false,
+            false,
+            true,
+            false,
+            None,
+        )
+        .expect("translates simple spell particle");
+        assert_eq!(output, [0xff, 0xff, 0xff, 0xff, 0x3f, 0x80, 0, 0]);
+        assert_eq!(input.position(), 0);
+        assert_eq!(input.get_ref()[input.position() as usize], 0x5a);
+    }
+
+    #[test]
+    fn item_particle_uses_count_then_item_and_rejects_empty_stack() {
         let protocol = 777;
         let remaps = RegistryRemaps::to_native(protocol).expect("embedded 26.3 registry");
         let source = RegistryTable::for_protocol(protocol).expect("embedded registry");
@@ -6022,7 +6387,7 @@ mod tests {
             .unwrap() as u32;
         let native_item = remaps.remap(ClientRegistry::Item, item).unwrap();
 
-        let mut payload = vec![2]; // count first
+        let mut payload = vec![2]; // wire item-stack codec: count first
         wire::write_varint(&mut payload, item);
         payload.extend_from_slice(&[0, 0]); // empty component patch
         let mut input = Cursor::new(payload.as_slice());
@@ -6035,29 +6400,33 @@ mod tests {
             false,
             false,
             true,
+            true,
             None,
         )
         .expect("translates item particle");
-        let mut expected = vec![2];
+        let mut expected = Vec::new(); // native ItemStackTemplate: item, count, patch
         wire::write_varint(&mut expected, native_item);
-        expected.extend_from_slice(&[0, 0]);
+        expected.extend_from_slice(&[2, 0, 0]);
         assert_eq!(output, expected);
         assert_eq!(input.position() as usize, payload.len());
 
         let mut empty = Cursor::new(&[0][..]);
         let mut output = Vec::new();
-        copy_particle_payload(
-            &mut empty,
-            &mut output,
-            "item",
-            remaps,
-            false,
-            false,
-            true,
-            None,
-        )
-        .expect("translates empty particle stack");
-        assert_eq!(output, [0]);
+        assert!(
+            copy_particle_payload(
+                &mut empty,
+                &mut output,
+                "item",
+                remaps,
+                false,
+                false,
+                true,
+                true,
+                None,
+            )
+            .is_none()
+        );
+        assert!(output.is_empty());
         assert_eq!(empty.position(), 1);
     }
 

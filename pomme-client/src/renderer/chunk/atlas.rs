@@ -1558,6 +1558,73 @@ mod tests {
     use crate::test_util::test_temp_dir;
 
     #[test]
+    fn entity_effect_sprites_load_alpha_and_receive_distinct_atlas_regions() {
+        let root = test_temp_dir("entity_effect_atlas");
+        let assets = root.join("assets");
+        let mut sources = Vec::new();
+
+        for (frame, name) in crate::particle::ENTITY_EFFECT_SPRITES.iter().enumerate() {
+            let path = assets.join(atlas_asset_path(name));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let image = image::ImageBuffer::from_fn(8, 8, |x, y| {
+                let alpha = if (x + y + frame as u32) % 5 == 0 {
+                    0
+                } else if (x * 3 + y + frame as u32) % 7 == 0 {
+                    128
+                } else {
+                    255
+                };
+                image::LumaA([((frame as u8) * 23).wrapping_add(x as u8), alpha])
+            });
+            image.save(&path).unwrap();
+
+            let source = load_source(name, &assets, &None, None, false);
+            assert_eq!((source.w, source.h), (8, 8), "{name}");
+            assert_eq!(source.data.len(), 8 * 8 * 4, "{name}");
+            assert!(
+                source.data.chunks_exact(4).any(|pixel| pixel[3] == 0),
+                "{name}"
+            );
+            assert!(
+                source.data.chunks_exact(4).any(|pixel| pixel[3] == 128),
+                "{name}"
+            );
+            assert!(
+                source.data.chunks_exact(4).any(|pixel| pixel[3] == 255),
+                "{name}"
+            );
+            for y in 0..8 {
+                for x in 0..8 {
+                    let expected = image.get_pixel(x, y).0;
+                    let pixel = &source.data[((y * 8 + x) * 4) as usize..][..4];
+                    assert_eq!(
+                        pixel,
+                        &[expected[0], expected[0], expected[0], expected[1]],
+                        "{name} at ({x}, {y})"
+                    );
+                }
+            }
+            sources.push(source);
+        }
+
+        let (pack_result, all_fit) = pack(&sources, 256, 16, 16);
+        assert!(all_fit);
+        let (placements, missing) = pack_result;
+        let regions: Vec<_> = sources
+            .iter()
+            .map(|source| {
+                let (x, y) = placements[source.name.as_str()].expect("sprite must be placed");
+                let (x, y) = content_origin(x, y, 16);
+                let region = pixel_region(x, y, source.w, source.h, 256);
+                assert_ne!(region.pixel_rect, missing.pixel_rect, "{}", source.name);
+                region.pixel_rect
+            })
+            .collect();
+        assert_eq!(regions.iter().collect::<HashSet<_>>().len(), sources.len());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn official_water_flow_animation_metadata_infers_32px_frames() {
         let file: TextureMetadataFile = serde_json::from_str(r#"{"animation":{}}"#).unwrap();
         let layout = animation_layout_from_metadata(file.animation.as_ref(), 32, 1024).unwrap();

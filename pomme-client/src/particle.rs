@@ -108,6 +108,8 @@ enum Kind {
     EndRod,
     /// `SpellParticle.MobEffectProvider`: rising, animated, translucent.
     EntityEffect,
+    SpellEffect,
+    FixedEffect,
     /// `TotemParticle` (`SimpleAnimatedParticle`), independently parameterized
     /// from EndRod despite sharing its official `glitter_7..0` sprite frames.
     Totem,
@@ -135,6 +137,8 @@ impl Kind {
             Kind::ItemTranslucent
                 | Kind::EndRod
                 | Kind::EntityEffect
+                | Kind::SpellEffect
+                | Kind::FixedEffect
                 | Kind::Totem
                 | Kind::CampfireCosySmoke
                 | Kind::CampfireSignalSmoke
@@ -689,36 +693,73 @@ impl Particle {
     }
 
     fn entity_effect(pos: DVec3, velocity: DVec3, color: u32, frames: &[AtlasRegion; 8]) -> Self {
-        let lifetime = (8.0 / (fastrand::f32() * 0.8 + 0.2)) as i32;
-        let jitter = || (fastrand::f64() * 2.0 - 1.0) * 0.4;
-        let mut p = Self::special(
+        Self::spell_particle(
             Kind::EntityEffect,
             pos,
-            dvec3(
-                0.5 - fastrand::f64() + jitter(),
-                velocity.y + jitter(),
-                0.5 - fastrand::f64() + jitter(),
-            ),
-            None,
-            lifetime,
-            0.15,
-            frames[0],
+            velocity,
+            [
+                ((color >> 16) & 0xff) as f32 / 255.0,
+                ((color >> 8) & 0xff) as f32 / 255.0,
+                (color & 0xff) as f32 / 255.0,
+            ],
+            ((color >> 24) & 0xff) as f32 / 255.0,
+            frames,
+        )
+    }
+
+    fn spell_effect(pos: DVec3, velocity: DVec3, color: u32, frames: &[AtlasRegion; 8]) -> Self {
+        Self::spell_particle(
+            Kind::SpellEffect,
+            pos,
+            velocity,
+            [
+                ((color >> 16) & 0xff) as f32 / 255.0,
+                ((color >> 8) & 0xff) as f32 / 255.0,
+                (color & 0xff) as f32 / 255.0,
+            ],
+            1.0,
+            frames,
+        )
+    }
+
+    fn spell_particle(
+        kind: Kind,
+        pos: DVec3,
+        velocity: DVec3,
+        color: [f32; 3],
+        alpha: f32,
+        frames: &[AtlasRegion; 8],
+    ) -> Self {
+        // SpellParticle evaluates its two random horizontal base velocities
+        // before Particle's lifetime and randomized velocity constructor.
+        let xa = 0.5 - fastrand::f64();
+        let za = 0.5 - fastrand::f64();
+        let _base_lifetime = (4.0 / (fastrand::f32() * 0.9 + 0.1)) as i32;
+        let jitter = || (fastrand::f32() * 2.0 - 1.0) * 0.4;
+        let mut vel = dvec3(
+            xa + f64::from(jitter()),
+            velocity.y + f64::from(jitter()),
+            za + f64::from(jitter()),
         );
-        p.vel.y *= 0.2;
+        let speed = f64::from((fastrand::f32() + fastrand::f32() + 1.0) * 0.15);
+        vel = vel / vel.length() * speed * 0.4;
+        vel.y += 0.1;
+        let base_size = 0.1 * (fastrand::f32() * 0.5 + 0.5) * 2.0;
+        let lifetime = (8.0 / (fastrand::f32() * 0.8 + 0.2)) as i32;
+        vel.y *= 0.2;
         if velocity.x == 0.0 && velocity.z == 0.0 {
-            p.vel.x *= 0.1;
-            p.vel.z *= 0.1;
+            vel.x *= 0.1;
+            vel.z *= 0.1;
         }
-        p.color = [
-            ((color >> 16) & 0xff) as f32 / 255.0,
-            ((color >> 8) & 0xff) as f32 / 255.0,
-            (color & 0xff) as f32 / 255.0,
-        ];
-        p.alpha = ((color >> 24) & 0xff) as f32 / 255.0;
-        p.gravity = -0.1;
-        p.friction = 0.96;
-        p.light = 0.0;
-        p
+        let mut particle =
+            Self::special(kind, pos, vel, None, lifetime, base_size * 0.75, frames[0]);
+        particle.base_size = base_size * 0.75;
+        particle.color = color;
+        particle.alpha = alpha;
+        particle.gravity = -0.1;
+        particle.friction = 0.96;
+        particle.light = 0.0;
+        particle
     }
 
     fn special(
@@ -847,7 +888,12 @@ impl Particle {
             Kind::CampfireCosySmoke | Kind::CampfireSignalSmoke => {
                 self.move_with_collision_width(chunks, 0.125)
             }
-            Kind::EndRod | Kind::EntityEffect | Kind::Crit | Kind::Shriek => self.pos += self.vel,
+            Kind::EndRod
+            | Kind::EntityEffect
+            | Kind::SpellEffect
+            | Kind::FixedEffect
+            | Kind::Crit
+            | Kind::Shriek => self.pos += self.vel,
             Kind::Totem => self.move_with_collision(chunks),
             Kind::Trail | Kind::Vibration => {
                 if let Some((entity_id, y_offset)) = self.entity_target {
@@ -908,7 +954,7 @@ impl Particle {
             Kind::Explosion => {
                 self.set_sprite(&explosion_frames[explosion_frame_index(self.age, self.lifetime)])
             }
-            Kind::EntityEffect => {
+            Kind::EntityEffect | Kind::SpellEffect | Kind::FixedEffect => {
                 self.light = world_brightness(
                     chunks,
                     self.pos.x.floor() as i32,
@@ -1053,6 +1099,15 @@ fn effect_particle_selected(sample: u32, ambient: bool, invisible: bool) -> bool
     sample % effect_particle_denominator(ambient, invisible) == 0
 }
 
+fn spell_brightness(random: f32) -> f32 {
+    random * 0.5 + 0.35
+}
+
+fn gaussian_sample() -> f64 {
+    (-2.0 * fastrand::f64().max(f64::MIN_POSITIVE).ln()).sqrt()
+        * (std::f64::consts::TAU * fastrand::f64()).cos()
+}
+
 fn color_particle_argb(color: &azalea_core::color::RgbColor) -> u32 {
     let mut bytes = [0u8; 4];
     let mut output = &mut bytes[..];
@@ -1096,6 +1151,18 @@ pub const ENTITY_EFFECT_SPRITES: [&str; 8] = [
     "particle/effect_1",
     "particle/effect_0",
 ];
+pub const SPELL_SPRITES: [&str; 8] = [
+    "particle/spell_7",
+    "particle/spell_6",
+    "particle/spell_5",
+    "particle/spell_4",
+    "particle/spell_3",
+    "particle/spell_2",
+    "particle/spell_1",
+    "particle/spell_0",
+];
+pub const RAID_OMEN_SPRITE: &str = "particle/raid_omen";
+pub const TRIAL_OMEN_SPRITE: &str = "particle/trial_omen";
 
 pub const GENERIC_PARTICLE_SPRITES: [&str; 12] = [
     "particle/generic_7",
@@ -1149,10 +1216,15 @@ pub const END_ROD_SPRITES: [&str; 8] = [
 /// Server-sent particle types with implemented vanilla-like effects. Payload
 /// codecs are decoded separately; unsupported types are dropped, never treated
 /// as simple options.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerParticleKind {
     EndRod,
     EntityEffect,
+    Effect,
+    InstantEffect,
+    Witch,
+    TrialOmen,
+    RaidOmen,
     ExplosionEmitter,
     Explosion,
     Poof,
@@ -1175,6 +1247,10 @@ pub enum ServerParticleOptions {
     Simple,
     EntityEffect {
         color: u32,
+    },
+    Spell {
+        color: i32,
+        power: f32,
     },
     Dust {
         packed_color: i32,
@@ -1211,7 +1287,12 @@ impl ServerParticleKind {
     /// because azalea's particle wire enum is out of sync with the registry.
     pub fn from_id(id: u32) -> Option<Self> {
         match id {
+            23 => Some(Self::Effect),
             28 => Some(Self::EntityEffect),
+            53 => Some(Self::InstantEffect),
+            78 => Some(Self::Witch),
+            120 => Some(Self::RaidOmen),
+            121 => Some(Self::TrialOmen),
             27 => Some(Self::EndRod),
             29 => Some(Self::ExplosionEmitter),
             30 => Some(Self::Explosion),
@@ -1428,6 +1509,9 @@ pub struct ParticleStore {
     uv_map: AtlasUVMap,
     end_rod_frames: [AtlasRegion; 8],
     entity_effect_frames: [AtlasRegion; 8],
+    spell_frames: [AtlasRegion; 8],
+    raid_omen_sprite: AtlasRegion,
+    trial_omen_sprite: AtlasRegion,
     generic_frames: [AtlasRegion; 8],
     explosion_frames: [AtlasRegion; 16],
     campfire_cosy_frames: [AtlasRegion; 8],
@@ -1474,6 +1558,17 @@ pub(crate) fn campfire_slot_smoke_pos(pos: BlockPos, facing: &str, slot: usize) 
 }
 
 impl ParticleStore {
+    #[cfg(test)]
+    pub(crate) fn test_pending(&self) -> &[Particle] {
+        &self.pending
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pending_color_velocity(&self, index: usize) -> ([f32; 3], DVec3) {
+        let particle = &self.pending[index];
+        (particle.color, particle.vel)
+    }
+
     pub fn set_mode(&mut self, mode: ParticleMode) {
         self.mode = mode;
     }
@@ -1495,35 +1590,173 @@ impl ParticleStore {
         if particles.is_empty() {
             return;
         }
-        for option in particles {
-            let ParticleOptions::EntityEffect(effect) = option else {
-                continue;
-            };
-            if !effect_particle_selected(fastrand::u32(..), ambient, invisible) {
-                continue;
+        let option = &particles[fastrand::usize(..particles.len())];
+        if !effect_particle_selected(fastrand::u32(..), ambient, invisible) {
+            return;
+        }
+        let raid_frames = [self.raid_omen_sprite; 8];
+        let trial_frames = [self.trial_omen_sprite; 8];
+        let (color, frames, spell_kind, power) = match option {
+            ParticleOptions::EntityEffect(effect) => (
+                color_particle_argb(&effect.color),
+                &self.entity_effect_frames,
+                false,
+                1.0,
+            ),
+            ParticleOptions::Effect(effect) => (
+                0xff00_0000 | (effect.color as u32 & 0x00ff_ffff),
+                &self.entity_effect_frames,
+                false,
+                effect.power,
+            ),
+            ParticleOptions::InstantEffect(effect) => (
+                0xff00_0000 | (effect.color as u32 & 0x00ff_ffff),
+                &self.spell_frames,
+                true,
+                effect.power,
+            ),
+            ParticleOptions::Witch => (0xffff_ffff, &self.spell_frames, true, 1.0),
+            ParticleOptions::RaidOmen => (0xffff_ffff, &raid_frames, false, 1.0),
+            ParticleOptions::TrialOmen => (0xffff_ffff, &trial_frames, false, 1.0),
+            _ => return,
+        };
+        let particle_pos = pos
+            + dvec3(
+                (fastrand::f64() - 0.5) * f64::from(width),
+                fastrand::f64() * f64::from(height),
+                (fastrand::f64() - 0.5) * f64::from(width),
+            );
+        if !accept_particle(
+            self.mode,
+            false,
+            false,
+            camera_pos.distance_squared(particle_pos),
+            &mut || fastrand::u32(..),
+        ) {
+            return;
+        }
+        let mut particle = if spell_kind {
+            Particle::spell_effect(particle_pos, DVec3::ONE, color, frames)
+        } else {
+            Particle::entity_effect(particle_pos, DVec3::ONE, color, frames)
+        };
+        if matches!(
+            option,
+            ParticleOptions::Effect(_) | ParticleOptions::InstantEffect(_)
+        ) {
+            let power = if power.is_finite() { power } else { 1.0 };
+            particle.vel = dvec3(
+                particle.vel.x * f64::from(power),
+                (particle.vel.y - 0.1) * f64::from(power) + 0.1,
+                particle.vel.z * f64::from(power),
+            );
+        }
+        if matches!(option, ParticleOptions::Witch) {
+            let brightness = spell_brightness(fastrand::f32());
+            particle.color = [brightness, 0.0, brightness];
+            particle.kind = Kind::SpellEffect;
+        } else if !matches!(option, ParticleOptions::EntityEffect(_))
+            && !matches!(
+                option,
+                ParticleOptions::RaidOmen | ParticleOptions::TrialOmen
+            )
+        {
+            particle.kind = Kind::SpellEffect;
+        }
+        if matches!(
+            option,
+            ParticleOptions::RaidOmen | ParticleOptions::TrialOmen
+        ) {
+            particle.kind = Kind::FixedEffect;
+        }
+        self.push(particle);
+    }
+
+    pub fn add_potion_break_particles(
+        &mut self,
+        pos: DVec3,
+        color: u32,
+        instant_effect: bool,
+        camera_pos: DVec3,
+        registry: &BlockRegistry,
+        chunks: &ChunkStore,
+    ) {
+        let stack = azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData {
+            kind: azalea_registry::builtin::ItemKind::SplashPotion,
+            count: 1,
+            component_patch: azalea_inventory::DataComponentPatch::default(),
+        });
+        if let Some(texture) = registry.get_item_particle_icon(&stack)
+            && self.uv_map.has_region(texture)
+        {
+            let sprite = self.uv_map.get_region(texture);
+            for _ in 0..8 {
+                let item_pos = pos;
+                if accept_particle(
+                    self.mode,
+                    false,
+                    false,
+                    camera_pos.distance_squared(item_pos),
+                    &mut || fastrand::u32(..),
+                ) {
+                    self.push(Particle::breaking_item(
+                        item_pos,
+                        dvec3(
+                            gaussian_sample() * 0.15,
+                            fastrand::f64() * 0.2,
+                            gaussian_sample() * 0.15,
+                        ),
+                        sprite,
+                        world_brightness(
+                            chunks,
+                            pos.x.floor() as i32,
+                            pos.y.floor() as i32,
+                            pos.z.floor() as i32,
+                        ),
+                    ));
+                }
             }
-            let color = color_particle_argb(&effect.color);
-            let particle_pos = pos
-                + dvec3(
-                    (fastrand::f64() - 0.5) * f64::from(width),
-                    fastrand::f64() * f64::from(height),
-                    (fastrand::f64() - 0.5) * f64::from(width),
-                );
-            if !accept_particle(
+        }
+        let frames = self.potion_break_frames(instant_effect);
+        for _ in 0..100 {
+            let distance = fastrand::f64() * 4.0;
+            let angle = fastrand::f64() * std::f64::consts::TAU;
+            let velocity = dvec3(
+                angle.cos() * distance,
+                0.01 + fastrand::f64() * 0.5,
+                angle.sin() * distance,
+            );
+            let brightness = 0.75 + fastrand::f32() * 0.25;
+            let bright_color = 0xff00_0000
+                | ((((color >> 16) & 255) as f32 * brightness) as u32) << 16
+                | ((((color >> 8) & 255) as f32 * brightness) as u32) << 8
+                | ((color & 255) as f32 * brightness) as u32;
+            let particle_pos = pos + dvec3(velocity.x * 0.1, 0.3, velocity.z * 0.1);
+            if accept_particle(
                 self.mode,
                 false,
                 false,
                 camera_pos.distance_squared(particle_pos),
                 &mut || fastrand::u32(..),
             ) {
-                continue;
+                let mut particle =
+                    Particle::entity_effect(particle_pos, velocity, bright_color, &frames);
+                if instant_effect {
+                    particle.kind = Kind::SpellEffect;
+                }
+                particle.vel.x *= distance;
+                particle.vel.y = (particle.vel.y - 0.1) * distance + 0.1;
+                particle.vel.z *= distance;
+                self.push(particle);
             }
-            self.push(Particle::entity_effect(
-                particle_pos,
-                DVec3::ZERO,
-                color,
-                &self.entity_effect_frames,
-            ));
+        }
+    }
+
+    fn potion_break_frames(&self, instant_effect: bool) -> [AtlasRegion; 8] {
+        if instant_effect {
+            self.spell_frames
+        } else {
+            self.entity_effect_frames
         }
     }
 
@@ -1567,6 +1800,9 @@ impl ParticleStore {
     ) -> Self {
         let end_rod_frames = END_ROD_SPRITES.map(|k| uv_map.get_region(k));
         let entity_effect_frames = ENTITY_EFFECT_SPRITES.map(|k| uv_map.get_region(k));
+        let spell_frames = SPELL_SPRITES.map(|k| uv_map.get_region(k));
+        let raid_omen_sprite = uv_map.get_region(RAID_OMEN_SPRITE);
+        let trial_omen_sprite = uv_map.get_region(TRIAL_OMEN_SPRITE);
         let generic_frames =
             std::array::from_fn(|i| uv_map.get_region(GENERIC_PARTICLE_SPRITES[i]));
         let explosion_frames = EXPLOSION_SPRITES.map(|k| uv_map.get_region(k));
@@ -1587,6 +1823,9 @@ impl ParticleStore {
             uv_map,
             end_rod_frames,
             entity_effect_frames,
+            spell_frames,
+            raid_omen_sprite,
+            trial_omen_sprite,
             generic_frames,
             explosion_frames,
             campfire_cosy_frames,
@@ -1948,6 +2187,62 @@ impl ParticleStore {
                     ));
                 }
             }
+            ServerParticleKind::Effect | ServerParticleKind::InstantEffect => {
+                let ServerParticleOptions::Spell { color, power } = options else {
+                    return;
+                };
+                let instant = matches!(kind, ServerParticleKind::InstantEffect);
+                let frames = if instant {
+                    &self.spell_frames
+                } else {
+                    &self.entity_effect_frames
+                };
+                let mut particle = if instant {
+                    Particle::spell_effect(
+                        pos,
+                        vel,
+                        0xff00_0000 | (color as u32 & 0x00ff_ffff),
+                        frames,
+                    )
+                } else {
+                    Particle::entity_effect(
+                        pos,
+                        vel,
+                        0xff00_0000 | (color as u32 & 0x00ff_ffff),
+                        frames,
+                    )
+                };
+                let power = if power.is_finite() { power } else { 1.0 };
+                particle.vel = dvec3(
+                    particle.vel.x * f64::from(power),
+                    (particle.vel.y - 0.1) * f64::from(power) + 0.1,
+                    particle.vel.z * f64::from(power),
+                );
+                self.push(particle);
+            }
+            ServerParticleKind::Witch => {
+                let mut particle = Particle::spell_particle(
+                    Kind::SpellEffect,
+                    pos,
+                    vel,
+                    [1.0; 3],
+                    1.0,
+                    &self.spell_frames,
+                );
+                let brightness = spell_brightness(fastrand::f32());
+                particle.color = [brightness, 0.0, brightness];
+                self.push(particle);
+            }
+            ServerParticleKind::TrialOmen | ServerParticleKind::RaidOmen => {
+                let sprite = if matches!(kind, ServerParticleKind::TrialOmen) {
+                    self.trial_omen_sprite
+                } else {
+                    self.raid_omen_sprite
+                };
+                let mut particle = Particle::entity_effect(pos, vel, 0xffff_ffff, &[sprite; 8]);
+                particle.kind = Kind::FixedEffect;
+                self.push(particle);
+            }
             ServerParticleKind::ExplosionEmitter => {
                 self.pending_emitters.push(ExplosionEmitter { pos, age: 0 });
             }
@@ -2264,6 +2559,7 @@ impl ParticleStore {
         let end_frames = self.end_rod_frames;
         let generic_frames = self.generic_frames;
         let effect_frames = self.entity_effect_frames;
+        let spell_frames = self.spell_frames;
         let explosion_frames = self.explosion_frames;
         self.particles.retain_mut(|p| {
             let alive = p.tick_with_entity_lookup(
@@ -2273,8 +2569,13 @@ impl ParticleStore {
                 &explosion_frames,
                 &mut lookup,
             );
-            if alive && p.kind == Kind::EntityEffect {
-                p.set_sprite(&effect_frames[animated_frame_index(p.age, p.lifetime, 8)]);
+            if alive && matches!(p.kind, Kind::EntityEffect | Kind::SpellEffect) {
+                let frames = if p.kind == Kind::SpellEffect {
+                    &spell_frames
+                } else {
+                    &effect_frames
+                };
+                p.set_sprite(&frames[animated_frame_index(p.age, p.lifetime, 8)]);
             }
             alive
         });
@@ -2398,16 +2699,25 @@ mod tests {
             });
             75
         ];
-        fastrand::seed(0x454646454354);
-        store.add_living_effect_particles(
-            dvec3(0.0, 0.0, 0.0),
-            0.6,
-            1.8,
-            &metadata,
-            true,
-            false,
-            dvec3(0.0, 0.0, 0.0),
-        );
+        for seed in 0..256 {
+            fastrand::seed(seed);
+            store.add_living_effect_particles(
+                dvec3(0.0, 0.0, 0.0),
+                0.6,
+                1.8,
+                &metadata,
+                true,
+                false,
+                dvec3(0.0, 0.0, 0.0),
+            );
+            assert!(
+                store.pending.len() <= 1,
+                "living update emits at most one particle"
+            );
+            if !store.pending.is_empty() {
+                break;
+            }
+        }
         assert!(!store.pending.is_empty());
         assert!(store.pending.iter().all(|p| p.alpha == 38.0 / 255.0));
         let p = &store.pending[0];
@@ -2420,13 +2730,499 @@ mod tests {
             ]
         );
         assert_eq!(p.alpha, 38.0 / 255.0);
-        assert_eq!((p.gravity, p.friction, p.size), (-0.1, 0.96, 0.15));
+        assert_eq!((p.gravity, p.friction), (-0.1, 0.96));
+        assert!((0.075..=0.15).contains(&p.size));
         assert!(matches!(p.kind, super::Kind::EntityEffect));
         let spawned = store.pending.len();
         store.tick(&ChunkStore::new(2));
         let quad = store.extract(0.0, dvec3(0.0, 0.0, 0.0));
         assert_eq!(quad.len(), spawned);
         assert!(quad.iter().all(|q| q.translucent && q.color >> 24 == 38));
+    }
+
+    #[test]
+    fn living_spell_power_scales_effect_and_instant_effect_velocities() {
+        use azalea_entity::particle::ColorPowerParticle;
+
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut store = super::ParticleStore::new(
+            AtlasUVMap::test_empty(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        let options = [
+            ParticleOptions::Effect(ColorPowerParticle {
+                color: 0x123456,
+                power: 1.0,
+            }),
+            ParticleOptions::InstantEffect(ColorPowerParticle {
+                color: 0x123456,
+                power: 1.0,
+            }),
+        ];
+        let mut seed_with_spawn = None;
+        for seed in 0..256 {
+            store.clear();
+            fastrand::seed(seed);
+            store.add_living_effect_particles(
+                dvec3(0.0, 0.0, 0.0),
+                0.6,
+                1.8,
+                &options[..1],
+                true,
+                false,
+                dvec3(0.0, 0.0, 0.0),
+            );
+            if !store.pending.is_empty() {
+                seed_with_spawn = Some(seed);
+                break;
+            }
+        }
+        let seed = seed_with_spawn.expect("Effect living particle spawns within 256 seeds");
+        let mut baseline = [dvec3(0.0, 0.0, 0.0); 2];
+        for (index, option) in options.iter().enumerate() {
+            for power in [1.0, 0.5, 0.0] {
+                let option = match option {
+                    ParticleOptions::Effect(effect) => {
+                        ParticleOptions::Effect(ColorPowerParticle {
+                            color: effect.color,
+                            power,
+                        })
+                    }
+                    ParticleOptions::InstantEffect(effect) => {
+                        ParticleOptions::InstantEffect(ColorPowerParticle {
+                            color: effect.color,
+                            power,
+                        })
+                    }
+                    _ => unreachable!(),
+                };
+                store.clear();
+                fastrand::seed(seed);
+                store.add_living_effect_particles(
+                    dvec3(0.0, 0.0, 0.0),
+                    0.6,
+                    1.8,
+                    &[option],
+                    true,
+                    false,
+                    dvec3(0.0, 0.0, 0.0),
+                );
+                assert_eq!(store.pending.len(), 1);
+                let velocity = store.pending[0].vel;
+                assert_eq!(store.pending[0].color, [0x12 as f32 / 255.0, 0x34 as f32 / 255.0, 0x56 as f32 / 255.0]);
+                if power == 1.0 {
+                    baseline[index] = velocity;
+                    assert!(matches!(
+                        store.pending[0].kind,
+                        super::Kind::EntityEffect | super::Kind::SpellEffect
+                    ));
+                } else {
+                    let raw = baseline[index];
+                    assert_eq!(
+                        velocity,
+                        dvec3(
+                            raw.x * f64::from(power),
+                            (raw.y - 0.1) * f64::from(power) + 0.1,
+                            raw.z * f64::from(power),
+                        )
+                    );
+                    if power == 0.0 {
+                        assert_eq!(velocity, dvec3(0.0, 0.1, 0.0));
+                    }
+                }
+            }
+        }
+        assert_eq!(baseline[0], baseline[1]);
+    }
+
+    #[test]
+    fn potion_break_spawns_use_radial_power_positions_and_effect_specific_frames() {
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut store = super::ParticleStore::new(
+            AtlasUVMap::test_empty(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        store.set_mode(super::ParticleMode::All);
+        let registry = crate::world::block::registry::BlockRegistry::test_empty();
+        let chunks = ChunkStore::new(2);
+        for (instant, expected_kind) in [
+            (false, super::Kind::EntityEffect),
+            (true, super::Kind::SpellEffect),
+        ] {
+            store.pending.clear();
+            fastrand::seed(if instant { 2007 } else { 2002 });
+            store.add_potion_break_particles(
+                dvec3(10.5, 20.0, 30.5),
+                0xff80_40c0,
+                instant,
+                dvec3(10.5, 20.0, 30.5),
+                &registry,
+                &chunks,
+            );
+            assert_eq!(store.pending.len(), 100);
+            let first = &store.pending[0];
+            let (expected_pos, expected_vel) = if instant {
+                (
+                    dvec3(10.519969812814976, 20.3, 30.463667547049543),
+                    dvec3(
+                        0.0024226041849925812,
+                        0.07321635713778515,
+                        -0.048858681950659615,
+                    ),
+                )
+            } else {
+                (
+                    dvec3(10.39992841852073, 20.3, 30.48689430317673),
+                    dvec3(
+                        0.06648506741623453,
+                        0.0261234664098903,
+                        -0.09859339035413625,
+                    ),
+                )
+            };
+            assert!((first.pos - expected_pos).length() < 1.0e-12);
+            assert!((first.vel - expected_vel).length() < 1.0e-12);
+            assert!(store.pending.iter().all(|p| {
+                p.kind == expected_kind
+                    && (p.pos.y - 20.3).abs() < 1e-12
+                    && (p.pos.x - 10.5).abs() <= 0.4
+                    && (p.pos.z - 30.5).abs() <= 0.4
+            }));
+            assert!(
+                store
+                    .pending
+                    .iter()
+                    .any(|p| { (p.pos.x - 10.5).abs() > 0.1 || (p.pos.z - 30.5).abs() > 0.1 })
+            );
+        }
+    }
+
+    #[test]
+    fn potion_event_2002_and_2007_use_distinct_eight_frame_sprites() {
+        assert_eq!(super::ENTITY_EFFECT_SPRITES.len(), 8);
+        assert_eq!(super::SPELL_SPRITES.len(), 8);
+        assert_ne!(super::ENTITY_EFFECT_SPRITES, super::SPELL_SPRITES);
+        assert_ne!(super::RAID_OMEN_SPRITE, super::TRIAL_OMEN_SPRITE);
+    }
+
+    #[test]
+    fn packet_effect_families_keep_their_own_animated_or_fixed_atlas_frames() {
+        let mut uv = AtlasUVMap::test_empty();
+        for (index, name) in super::ENTITY_EFFECT_SPRITES
+            .iter()
+            .chain(super::SPELL_SPRITES.iter())
+            .chain([super::RAID_OMEN_SPRITE, super::TRIAL_OMEN_SPRITE].iter())
+            .enumerate()
+        {
+            let mut region = uv.missing_region();
+            region.u_min = index as f32 / 32.0;
+            region.u_max = (index as f32 + 1.0) / 32.0;
+            region.v_min = 0.25;
+            region.v_max = 0.5;
+            uv.test_insert_region(name, region);
+        }
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut store = super::ParticleStore::new(uv, colors.clone(), colors.clone(), colors);
+        let registry = crate::world::block::registry::BlockRegistry::test_empty();
+        let chunks = ChunkStore::new(2);
+        let cases = [
+            (
+                ServerParticleKind::EntityEffect,
+                super::ServerParticleOptions::EntityEffect { color: 0xffff_ffff },
+                false,
+            ),
+            (
+                ServerParticleKind::Effect,
+                super::ServerParticleOptions::Spell {
+                    color: 0x00ff_ffff,
+                    power: 1.0,
+                },
+                false,
+            ),
+            (
+                ServerParticleKind::InstantEffect,
+                super::ServerParticleOptions::Spell {
+                    color: 0x00ff_ffff,
+                    power: 1.0,
+                },
+                true,
+            ),
+            (
+                ServerParticleKind::Witch,
+                super::ServerParticleOptions::Simple,
+                true,
+            ),
+            (
+                ServerParticleKind::RaidOmen,
+                super::ServerParticleOptions::Simple,
+                false,
+            ),
+            (
+                ServerParticleKind::TrialOmen,
+                super::ServerParticleOptions::Simple,
+                false,
+            ),
+        ];
+        for (kind, options, spell) in cases {
+            store.clear();
+            store.add_particles_from_packet(
+                kind,
+                options,
+                true,
+                false,
+                dvec3(0.0, 0.0, 0.0),
+                dvec3(0.0, 0.0, 0.0),
+                0.0,
+                0,
+                dvec3(0.0, 0.0, 0.0),
+                &registry,
+                &chunks,
+                &Default::default(),
+            );
+            assert_eq!(store.pending.len(), 1, "{kind:?}");
+            if kind == ServerParticleKind::Witch {
+                let color = store.pending[0].color;
+                assert!((0.35..0.85).contains(&color[0]));
+                assert_eq!(color[1], 0.0);
+                assert_eq!(color[0], color[2]);
+            }
+            for _ in 0..3 {
+                store.tick(&chunks);
+            }
+            let quad = store.extract(0.0, dvec3(0.0, 0.0, 0.0));
+            assert_eq!(quad.len(), 1, "{kind:?}");
+            let expected_sprite = match kind {
+                ServerParticleKind::EntityEffect | ServerParticleKind::Effect => {
+                    let frame = super::animated_frame_index(
+                        store.particles[0].age,
+                        store.particles[0].lifetime,
+                        8,
+                    );
+                    store.entity_effect_frames[frame]
+                }
+                ServerParticleKind::InstantEffect | ServerParticleKind::Witch => {
+                    let frame = super::animated_frame_index(
+                        store.particles[0].age,
+                        store.particles[0].lifetime,
+                        8,
+                    );
+                    store.spell_frames[frame]
+                }
+                ServerParticleKind::RaidOmen => store.raid_omen_sprite,
+                ServerParticleKind::TrialOmen => store.trial_omen_sprite,
+                _ => unreachable!(),
+            };
+            assert_eq!(quad[0].u0, expected_sprite.u_min, "{kind:?}");
+            assert_eq!(quad[0].v0, expected_sprite.v_min, "{kind:?}");
+            assert_eq!(quad[0].translucent, true, "{kind:?}");
+            if matches!(
+                kind,
+                ServerParticleKind::RaidOmen | ServerParticleKind::TrialOmen
+            ) {
+                assert_eq!(quad[0].color, 0xffff_ffff, "{kind:?}");
+            }
+            assert_eq!(
+                spell,
+                matches!(
+                    kind,
+                    ServerParticleKind::InstantEffect | ServerParticleKind::Witch
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn packet_effect_power_applies_to_effect_and_instant_effect() {
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut store = super::ParticleStore::new(
+            AtlasUVMap::test_empty(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        let registry = crate::world::block::registry::BlockRegistry::test_empty();
+        let chunks = ChunkStore::new(2);
+        for kind in [
+            ServerParticleKind::Effect,
+            ServerParticleKind::InstantEffect,
+        ] {
+            store.clear();
+            fastrand::seed(17);
+            store.add_particles_from_packet(
+                kind,
+                super::ServerParticleOptions::Spell {
+                    color: -1,
+                    power: 1.0,
+                },
+                true,
+                false,
+                dvec3(0.0, 0.0, 0.0),
+                dvec3(0.0, 0.0, 0.0),
+                0.0,
+                0,
+                dvec3(0.0, 0.0, 0.0),
+                &registry,
+                &chunks,
+                &Default::default(),
+            );
+            let baseline_vel = store.pending[0].vel;
+            for power in [0.0, 0.5] {
+                store.clear();
+                fastrand::seed(17);
+                store.add_particles_from_packet(
+                    kind,
+                    super::ServerParticleOptions::Spell { color: -1, power },
+                    true,
+                    false,
+                    dvec3(0.0, 0.0, 0.0),
+                    dvec3(0.0, 0.0, 0.0),
+                    0.0,
+                    0,
+                    dvec3(0.0, 0.0, 0.0),
+                    &registry,
+                    &chunks,
+                    &Default::default(),
+                );
+                assert_eq!(store.pending.len(), 1);
+                let spawn_pos = store.pending[0].pos;
+                let spawn_vel = store.pending[0].vel;
+                let expected_vel = dvec3(
+                    baseline_vel.x * f64::from(power),
+                    (baseline_vel.y - 0.1) * f64::from(power) + 0.1,
+                    baseline_vel.z * f64::from(power),
+                );
+                assert_eq!(spawn_vel, expected_vel, "{kind:?}, power={power}");
+                store.tick(&chunks);
+                store.tick(&chunks);
+                assert_eq!(store.particles.len(), 1);
+                let expected_delta = dvec3(spawn_vel.x, spawn_vel.y + 0.004, spawn_vel.z);
+                assert!((store.particles[0].pos - spawn_pos - expected_delta).length() < 1e-12);
+                assert_eq!(store.extract(0.0, dvec3(0.0, 0.0, 0.0)).len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn living_omen_effects_reach_the_filter_and_emit_at_most_one_particle() {
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut store = super::ParticleStore::new(
+            AtlasUVMap::test_empty(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        let metadata = [const { ParticleOptions::RaidOmen }; 75];
+        let mut spawned = false;
+        for seed in 0..256 {
+            fastrand::seed(seed);
+            store.add_living_effect_particles(
+                dvec3(0.0, 0.0, 0.0),
+                0.6,
+                1.8,
+                &metadata,
+                true,
+                false,
+                dvec3(0.0, 0.0, 0.0),
+            );
+            assert!(store.pending.len() <= 1);
+            if !store.pending.is_empty() {
+                spawned = true;
+                break;
+            }
+        }
+        assert!(spawned, "omen reaches the living-particle spawn path");
+        assert_eq!(store.pending[0].color, [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn living_witch_uses_red_blue_spell_brightness_and_advances_once_per_tick() {
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut store = super::ParticleStore::new(
+            AtlasUVMap::test_empty(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        let metadata = [ParticleOptions::Witch];
+        let mut chunks = ChunkStore::new(2);
+        chunks.light_data.insert(
+            (0, 0),
+            std::sync::Arc::new(crate::world::chunk::ChunkLightData {
+                sky_sections: Vec::new(),
+                block_sections: Vec::new(),
+                min_y: -64,
+                has_sky: true,
+                sky_top_section: None,
+            }),
+        );
+        let mut spawned_seed = None;
+        for seed in 0..256 {
+            store.clear();
+            fastrand::seed(seed);
+            store.add_living_effect_particles(
+                dvec3(0.0, 0.0, 0.0),
+                0.6,
+                1.8,
+                &metadata,
+                false,
+                false,
+                dvec3(0.0, 0.0, 0.0),
+            );
+            if !store.pending.is_empty() {
+                spawned_seed = Some(seed);
+                break;
+            }
+        }
+        let seed = spawned_seed.expect("Witch living effect spawns within 256 seeds");
+        let initial_pos = store.pending[0].pos;
+        let expected_color = store.pending[0].color;
+        fastrand::seed(seed);
+        let _selected_option = fastrand::usize(..1);
+        assert_eq!(fastrand::u32(..) % 4, 0);
+        let expected_pos = dvec3(
+            (fastrand::f64() - 0.5) * f64::from(0.6f32),
+            fastrand::f64() * f64::from(1.8f32),
+            (fastrand::f64() - 0.5) * f64::from(0.6f32),
+        );
+        assert_eq!(initial_pos, expected_pos);
+        let expected_particle = Particle::entity_effect(
+            expected_pos,
+            glam::DVec3::ONE,
+            0xffff_ffff,
+            &store.entity_effect_frames,
+        );
+        let expected_brightness = super::spell_brightness(fastrand::f32());
+        assert_eq!(store.pending[0].vel, expected_particle.vel);
+        assert_eq!(store.pending[0].lifetime, expected_particle.lifetime);
+        assert_eq!(
+            expected_color,
+            [expected_brightness, 0.0, expected_brightness]
+        );
+        assert_eq!(expected_color[1], 0.0);
+        assert_eq!(expected_color[0], expected_color[2]);
+        assert!((0.35..0.85).contains(&expected_color[0]));
+        assert!(matches!(store.pending[0].kind, super::Kind::SpellEffect));
+        assert!(store.pending.len() <= 1);
+        store.tick(&chunks);
+        assert!(store.pending.is_empty());
+        assert_eq!(store.particles.len(), 1);
+        store.tick(&chunks);
+        assert_ne!(store.particles[0].pos, initial_pos);
+        assert_eq!(store.particles[0].color, expected_color);
+        assert!(store.particles[0].light > 0.0);
+        let quad = store.extract(0.0, dvec3(0.0, 0.0, 0.0));
+        assert_eq!(quad.len(), 1);
+        let red = quad[0].color & 0xff;
+        let green = (quad[0].color >> 8) & 0xff;
+        let blue = (quad[0].color >> 16) & 0xff;
+        assert!(red > 0 && blue > 0);
+        assert_eq!(red, blue);
+        assert_eq!(green, 0);
+        assert!((89..=217).contains(&red));
     }
 
     #[test]
@@ -2567,6 +3363,8 @@ mod tests {
 
     #[test]
     fn campfire_override_tick_uses_native_gravity_without_base_friction() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
         let frame = super::AtlasRegion {
             u_min: 0.0,
             v_min: 0.0,
@@ -3768,7 +4566,12 @@ mod tests {
         use super::ServerParticleKind as Kind;
 
         assert!(matches!(Kind::from_id(27), Some(Kind::EndRod)));
+        assert!(matches!(Kind::from_id(23), Some(Kind::Effect)));
         assert!(matches!(Kind::from_id(28), Some(Kind::EntityEffect)));
+        assert!(matches!(Kind::from_id(53), Some(Kind::InstantEffect)));
+        assert!(matches!(Kind::from_id(78), Some(Kind::Witch)));
+        assert!(matches!(Kind::from_id(120), Some(Kind::RaidOmen)));
+        assert!(matches!(Kind::from_id(121), Some(Kind::TrialOmen)));
         assert!(matches!(Kind::from_id(29), Some(Kind::ExplosionEmitter)));
         assert!(matches!(Kind::from_id(30), Some(Kind::Explosion)));
         assert!(matches!(Kind::from_id(66), Some(Kind::Poof)));
