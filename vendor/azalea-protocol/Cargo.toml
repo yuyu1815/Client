@@ -1,0 +1,61 @@
+[package]
+name = "azalea-protocol"
+description = "Send and receive Minecraft packets."
+version = "0.16.0+mc26.2"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/azalea-rs/azalea"
+
+[dev-dependencies]
+eyre = "0.6.12"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+criterion = "0.8.2"
+chrono = { version = "0.4.44", default-features = false, features = ["now"] }
+minecraft_folder_path = "0.1.2"
+parking_lot = "0.12.5"
+
+[dependencies]
+azalea-auth = { version = "0.16", default-features = false }
+azalea-block = { version = "0.16", default-features = false }
+azalea-brigadier = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32", version = "0.16", default-features = false, features = ["azalea-buf"] }
+azalea-buf = { version = "0.16", default-features = false }
+azalea-chat = { version = "0.16", default-features = false, features = ["numbers", "azalea-buf"] }
+azalea-core = { version = "0.16", default-features = false }
+azalea-crypto = { version = "0.16", default-features = false, features = ["signing"] }
+azalea-entity = { version = "0.16", default-features = false }
+azalea-inventory = { version = "0.16", default-features = false }
+azalea-protocol-macros = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32", version = "0.16", default-features = false }
+azalea-registry = { version = "0.16", default-features = false }
+azalea-world = { version = "0.16", default-features = false, optional = true }
+bevy_ecs = { version = "0.18.1", default-features = false, optional = true, features = ["multi_threaded"] }
+flate2 = { version = "1.1.9", features = ["zlib-rs"] }
+futures = "0.3.32"
+futures-lite = "2.6.1"
+serde = { version = "1.0.228", features = ["serde_derive"] }
+serde_json = "1.0.149"
+simdnbt = "0.10.0"
+socks5-impl = { version = "0.8.2", features = ["client"] }
+thiserror = "2.0.18"
+tokio = { version = "1.52.2", features = ["io-util", "net", "macros"] }
+tokio-util = { version = "0.7.18", features = ["codec"] }
+tracing = "0.1.44"
+hickory-resolver = { version = "0.26.1", features = ["tokio", "system-config"] }
+uuid = "1.23.1"
+indexmap = "2.14.0"
+reqwest = { version = "0.13.3", default-features = false, optional = true, features = ["socks"] }
+
+[features]
+default = ["online-mode", "connecting"]
+connecting = []
+online-mode = ["azalea-auth/online-mode", "dep:reqwest"]
+bevy_ecs = [
+    "dep:bevy_ecs",
+    "dep:azalea-world",
+    "azalea-entity/bevy_ecs",
+    "azalea-core/bevy_ecs",
+]
+
+[[bench]]
+name = "read"
+harness = false

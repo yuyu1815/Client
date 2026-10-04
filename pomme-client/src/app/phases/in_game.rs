@@ -4433,52 +4433,13 @@ pub fn update_game(
     let entity_view_scale =
         crate::renderer::entity_view_scale(effective_rd, core.menu.entity_distance_percent);
 
-    let mut map_quads = Vec::new();
-    for frame in game.entity_store.vehicles.values().filter(|entity| {
-        matches!(
-            entity.kind,
-            Some(azalea_registry::builtin::EntityKind::ItemFrame)
-                | Some(azalea_registry::builtin::EntityKind::GlowItemFrame)
-        )
-    }) {
-        if !crate::renderer::entity_distance_visible(
-            *frame.position,
-            gfx.renderer.camera_render_position(),
-            1024.0,
-            entity_view_scale,
-        ) {
-            continue;
-        }
-        let azalea_inventory::ItemStack::Present(stack) = &frame.item_frame_item else {
-            continue;
-        };
-        let Some(map_id) =
-            crate::player::menu_click::component::<azalea_inventory::components::MapId>(stack)
-        else {
-            continue;
-        };
-        if map_id.id < 0 {
-            continue;
-        }
-        let map_id = map_id.id as u32;
-        let Some(map) = game.maps.0.get(&map_id) else {
-            continue;
-        };
-        let direction = frame
-            .item_frame_direction
-            .unwrap_or(azalea_core::direction::Direction::South);
-        let base_matrix =
-            item_frame_base_matrix(*frame.position, direction, gfx.renderer.camera_anchor());
-        map_quads.push(MapQuadDraw {
-            map_id,
-            map_data: map.clone(),
-            position: base_matrix.w_axis.truncate(),
-            rotation: crate::renderer::pipelines::map_quad::frame_map_rotation(
-                glam::Quat::from_mat4(&base_matrix),
-                frame.item_frame_rotation,
-            ),
-        });
-    }
+    let map_quads = extract_map_frame_quads(
+        &game.entity_store,
+        &game.maps,
+        gfx.renderer.camera_render_position(),
+        entity_view_scale,
+        gfx.renderer.camera_anchor(),
+    );
 
     // Vanilla Hud.extractSleepOverlay sits outside the isHidden gate: above
     // the hotbar/effects/boss bar, below chat and the tab list.
@@ -5635,7 +5596,10 @@ pub fn update_game(
                     is_invisible: e.flags.invisible,
                     is_spectator: e.entity_type == EntityKind::Player
                         && e.player_uuid.is_some_and(|uuid| {
-                            game.tab_list.players.get(&uuid).is_some_and(|player| player.game_mode == 3)
+                            game.tab_list
+                                .players
+                                .get(&uuid)
+                                .is_some_and(|player| player.game_mode == 3)
                         }),
                     skin_parts_mask: match e.entity_type {
                         EntityKind::Player if entity_id == game.player.entity_id => {
@@ -6347,6 +6311,52 @@ pub fn update_game(
                         (game.tick_count.saturating_sub(started) as f32 + partial_tick) / duration;
                     (progress <= 1.0).then_some((progress, positive))
                 });
+                let end_portal = match be.kind {
+                    BlockEntityKind::EndPortal => {
+                        Some(crate::renderer::pipelines::end_portal::EndPortalDraw {
+                            gateway: false,
+                            face_mask: 0x03,
+                            age: None,
+                        })
+                    }
+                    BlockEntityKind::EndGateway => {
+                        let directions = [
+                            (0, -1, 0),
+                            (0, 1, 0),
+                            (0, 0, -1),
+                            (0, 0, 1),
+                            (-1, 0, 0),
+                            (1, 0, 0),
+                        ];
+                        let mut face_mask = 0;
+                        for (face, (dx, dy, dz)) in directions.into_iter().enumerate() {
+                            let neighbor_pos = BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz);
+                            let column = ChunkPos::new(
+                                neighbor_pos.x.div_euclid(16),
+                                neighbor_pos.z.div_euclid(16),
+                            );
+                            let unloaded = game.chunk_store.get_chunk(&column).is_none();
+                            let neighbor = game.chunk_store.get_block_state(
+                                neighbor_pos.x,
+                                neighbor_pos.y,
+                                neighbor_pos.z,
+                            );
+                            let light = crate::world::block::light_props(neighbor);
+                            let occluded = light.can_occlude
+                                && (crate::world::block::is_empty_shape(neighbor)
+                                    || crate::world::block::shape_occludes(state, neighbor, face));
+                            if unloaded || !occluded {
+                                face_mask |= 1 << face;
+                            }
+                        }
+                        Some(crate::renderer::pipelines::end_portal::EndPortalDraw {
+                            gateway: true,
+                            face_mask,
+                            age: be.nbt.int("Age"),
+                        })
+                    }
+                    _ => None,
+                };
                 Some(crate::renderer::BlockEntityRenderInfo {
                     pos: *pos,
                     root_matrix: None,
@@ -6356,6 +6366,7 @@ pub fn update_game(
                     decorated_pot_sherds: be.decorated_pot_sherds.clone(),
                     pot_wobble,
                     kind: be.kind,
+                    end_portal,
                     statue_pose: statue.map(|(pose, _)| pose),
                     book: be.book.as_ref().map(|book| book.interpolated(partial_tick)),
                     banner_phase: (pos.x as i64 * 7
@@ -6494,20 +6505,10 @@ pub fn update_game(
         .and_then(|draw| {
             crate::world::block_entity::player_head_profile_source_from_item(draw.stack)
         });
-    let equipped_head_profiles: Vec<_> = entity_renders
-        .iter()
-        .filter_map(|info| {
-            let stack = info
-                .armor_stand_equipment
-                .get(&azalea_inventory::components::EquipmentSlot::Head)?;
-            let azalea_inventory::ItemStack::Present(data) = stack else {
-                return None;
-            };
-            crate::world::block_entity::player_head_profile_source_from_item(
-                &azalea_inventory::ItemStack::Present(data.clone()),
-            )
-        })
-        .collect();
+    let entity_head_profiles =
+        crate::renderer::pipelines::entity_renderer::entity_player_head_profile_sources(
+            &entity_renders,
+        );
     gfx.renderer.update_head_skins(
         block_entity_renders
             .iter()
@@ -6527,7 +6528,7 @@ pub fn update_game(
             .chain(held_item.0.as_ref().and_then(|item| item.3.as_ref()))
             .chain(held_item.1.as_ref().and_then(|item| item.3.as_ref()))
             .chain(activation_profile.as_ref())
-            .chain(equipped_head_profiles.iter()),
+            .chain(entity_head_profiles.iter()),
         &core.tokio_rt,
     );
     game.last_update_phases.cpu_update_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
@@ -6547,6 +6548,7 @@ pub fn update_game(
         game.show_chunk_borders,
         game.dimension.as_str(),
         sky,
+        partial_tick,
         &entity_renders,
         // World text is independent of F1, but suppressed during benchmarks as before.
         (!benchmark_running).then_some(&game.entity_store),
@@ -7032,6 +7034,7 @@ fn minecart_cargo_render_infos(
                     decorated_pot_sherds: crate::world::block_entity::default_pot_sherds(),
                     pot_wobble: None,
                     kind,
+                    end_portal: None,
                     statue_pose: None,
                     banner_phase: 0.0,
                     bell_partial: partial_tick,
@@ -7964,6 +7967,56 @@ fn item_frame_base_rotation(direction: azalea_core::direction::Direction) -> gla
                 * glam::Mat4::from_rotation_y(180_f32.to_radians())
         }
     }
+}
+
+pub(crate) fn extract_map_frame_quads(
+    entities: &crate::entity::EntityStore,
+    maps: &crate::world::maps::MapStore,
+    camera: glam::DVec3,
+    view_scale: f32,
+    anchor: glam::DVec3,
+) -> Vec<MapQuadDraw> {
+    entities
+        .vehicles
+        .values()
+        .filter(|frame| {
+            matches!(
+                frame.kind,
+                Some(azalea_registry::builtin::EntityKind::ItemFrame)
+                    | Some(azalea_registry::builtin::EntityKind::GlowItemFrame)
+            )
+        })
+        .filter_map(|frame| {
+            if !crate::renderer::entity_distance_visible(
+                *frame.position,
+                camera,
+                1024.0,
+                view_scale,
+            ) {
+                return None;
+            }
+            let azalea_inventory::ItemStack::Present(stack) = &frame.item_frame_item else {
+                return None;
+            };
+            let map_id =
+                crate::player::menu_click::component::<azalea_inventory::components::MapId>(stack)?;
+            let map_id = u32::try_from(map_id.id).ok()?;
+            let map = maps.0.get(&map_id)?;
+            let direction = frame
+                .item_frame_direction
+                .unwrap_or(azalea_core::direction::Direction::South);
+            let base_matrix = item_frame_base_matrix(*frame.position, direction, anchor);
+            Some(MapQuadDraw {
+                map_id,
+                map_data: map.clone(),
+                position: base_matrix.w_axis.truncate(),
+                rotation: crate::renderer::pipelines::map_quad::frame_map_rotation(
+                    glam::Quat::from_mat4(&base_matrix),
+                    frame.item_frame_rotation,
+                ),
+            })
+        })
+        .collect()
 }
 
 fn item_frame_base_position(
@@ -9375,8 +9428,8 @@ mod tests {
     fn armor_stand_render_extraction_uses_living_vehicle_phase_for_head_only() {
         use azalea_registry::builtin::EntityKind;
 
-        use crate::entity::components::{LookDirection, Position};
         use crate::entity::EntityStore;
+        use crate::entity::components::{LookDirection, Position};
 
         let mut store = EntityStore::new();
         store.spawn_living(
@@ -9400,12 +9453,18 @@ mod tests {
         assert_eq!(rendered[0].skull_walk_anim_pos, Some(6.5));
 
         store.vehicle_of.remove(&1);
-        assert_eq!(armor_stand_render_infos(&store, 0.25)[0].skull_walk_anim_pos, Some(0.0));
+        assert_eq!(
+            armor_stand_render_infos(&store, 0.25)[0].skull_walk_anim_pos,
+            Some(0.0)
+        );
 
         store.set_vehicle_transform(3, Position::default(), glam::DVec3::ZERO);
         store.set_vehicle_kind(3, EntityKind::AcaciaBoat);
         store.vehicle_of.insert(1, 3);
-        assert_eq!(armor_stand_render_infos(&store, 0.25)[0].skull_walk_anim_pos, Some(0.0));
+        assert_eq!(
+            armor_stand_render_infos(&store, 0.25)[0].skull_walk_anim_pos,
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -9446,7 +9505,11 @@ mod tests {
         assert_eq!(renders[0].body_transform.unwrap().x_axis.x, 0.5);
         store.apply_vehicle_metadata(1, 0, MetaValue::Byte(0x20));
         let invisible = armor_stand_render_infos(&store, 0.5);
-        assert_eq!(invisible.len(), 1, "equipment inputs must survive invisibility");
+        assert_eq!(
+            invisible.len(),
+            1,
+            "equipment inputs must survive invisibility"
+        );
         assert!(invisible[0].is_invisible);
     }
 
@@ -11443,6 +11506,59 @@ mod tests {
             minecart_cargo_state_for(K::ChestMinecart, Some(u32::from(custom)), false).unwrap();
         assert_eq!(override_state, custom);
         assert!(minecart_cargo_state_for(K::ChestMinecart, Some(u32::MAX), false).is_none());
+    }
+
+    #[test]
+    fn frame_map_candidates_require_matching_stack_map_id_and_map_store_entry() {
+        use azalea_inventory::components::MapId;
+        use azalea_registry::builtin::{DataComponentKind, EntityKind, ItemKind};
+
+        let mut entities = crate::entity::EntityStore::new();
+        for id in [1, 2] {
+            entities.set_vehicle_spawn_transform(
+                id,
+                crate::entity::components::Position::default(),
+                glam::DVec3::ZERO,
+                crate::entity::components::LookDirection::default(),
+            );
+            entities.set_vehicle_kind(id, EntityKind::ItemFrame);
+        }
+        let map_stack = |map_id| {
+            let mut stack = azalea_inventory::ItemStackData::new(ItemKind::FilledMap, 1);
+            // SAFETY: MapId is stored under its matching component kind.
+            unsafe {
+                stack.component_patch.unchecked_insert_component(
+                    DataComponentKind::MapId,
+                    Some(MapId { id: map_id }.into()),
+                );
+            }
+            azalea_inventory::ItemStack::Present(stack)
+        };
+        entities.set_item_frame_item(1, map_stack(17));
+        entities.set_item_frame_item(2, map_stack(18));
+        let mut maps = crate::world::maps::MapStore::default();
+        // A non-zero color patch, applied through the production MapStore path.
+        maps.apply(17, 0, false, Some((1, 1, 4, 9, vec![0x2a])), None);
+        let quads = super::extract_map_frame_quads(
+            &entities,
+            &maps,
+            glam::DVec3::ZERO,
+            1.0,
+            glam::DVec3::ZERO,
+        );
+        assert_eq!(quads.len(), 1);
+        assert_eq!(quads[0].map_id, 17);
+        assert_eq!(quads[0].map_data.colors[9 * 128 + 4], 0x2a);
+        assert!(
+            super::extract_map_frame_quads(
+                &entities,
+                &crate::world::maps::MapStore::default(),
+                glam::DVec3::ZERO,
+                1.0,
+                glam::DVec3::ZERO,
+            )
+            .is_empty()
+        );
     }
 
     #[test]

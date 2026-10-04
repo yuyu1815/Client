@@ -645,6 +645,8 @@ pub fn rendered_kind(name: &str) -> Option<BlockEntityKind> {
         "chest" => Some(BlockEntityKind::Chest),
         "trapped_chest" => Some(BlockEntityKind::TrappedChest),
         "ender_chest" => Some(BlockEntityKind::EnderChest),
+        "end_portal" => Some(BlockEntityKind::EndPortal),
+        "end_gateway" => Some(BlockEntityKind::EndGateway),
         // Copper chests share vanilla's `chest` block entity type; the
         // weathering stage only picks the texture.
         s if s.ends_with("copper_chest") => Some(BlockEntityKind::Chest),
@@ -694,6 +696,8 @@ fn is_rendered(kind: BlockEntityKind) -> bool {
         BlockEntityKind::Chest
             | BlockEntityKind::TrappedChest
             | BlockEntityKind::EnderChest
+            | BlockEntityKind::EndPortal
+            | BlockEntityKind::EndGateway
             | BlockEntityKind::ShulkerBox
             | BlockEntityKind::Sign
             | BlockEntityKind::HangingSign

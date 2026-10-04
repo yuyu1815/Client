@@ -26,6 +26,66 @@ pub struct Swapchain {
     pub framebuffers: Vec<vk::Framebuffer>,
     pub framebuffers_scene: Vec<vk::Framebuffer>,
     pub framebuffers_load: Vec<vk::Framebuffer>,
+    pub retired: bool,
+}
+
+struct SwapchainBuild<'a> {
+    ctx: &'a VulkanContext,
+    handle: vk::SwapchainKHR,
+    image_views: Vec<vk::ImageView>,
+    depth_image: vk::Image,
+    depth_view: vk::ImageView,
+    depth_allocation: Option<Allocation>,
+    render_passes: Vec<vk::RenderPass>,
+    framebuffers: Vec<vk::Framebuffer>,
+    armed: bool,
+}
+
+impl<'a> SwapchainBuild<'a> {
+    fn new(ctx: &'a VulkanContext, handle: vk::SwapchainKHR) -> Self {
+        Self {
+            ctx,
+            handle,
+            image_views: Vec::new(),
+            depth_image: vk::Image::null(),
+            depth_view: vk::ImageView::null(),
+            depth_allocation: None,
+            render_passes: Vec::new(),
+            framebuffers: Vec::new(),
+            armed: true,
+        }
+    }
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SwapchainBuild<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let d = &self.ctx.device;
+        for &fb in &self.framebuffers {
+            d.destroy_framebuffer(fb, None);
+        }
+        for &rp in &self.render_passes {
+            d.destroy_render_pass(rp, None);
+        }
+        if self.depth_view != vk::ImageView::null() {
+            d.destroy_image_view(self.depth_view, None);
+        }
+        if self.depth_image != vk::Image::null() {
+            d.destroy_image(self.depth_image, None);
+        }
+        if let Some(a) = self.depth_allocation.take() {
+            self.ctx.allocator.lock().unwrap().free(a).ok();
+        }
+        for &view in &self.image_views {
+            d.destroy_image_view(view, None);
+        }
+        d.destroy_swapchain(self.handle, None);
+    }
 }
 
 impl Swapchain {
@@ -34,7 +94,7 @@ impl Swapchain {
         width: u32,
         height: u32,
         vsync: bool,
-        old_swapchain: vk::SwapchainKHR,
+        mut old_swapchain: Option<&mut Swapchain>,
     ) -> Result<Self, ContextError> {
         let caps = ctx.physical_device.get_surface_capabilities(ctx.surface)?;
         let formats = ctx.physical_device.get_surface_formats(ctx.surface)?;
@@ -101,6 +161,13 @@ impl Swapchain {
                 (vk::SharingMode::Exclusive, vec![])
             };
 
+        // All fallible surface queries and create-info construction happen before
+        // retirement. Vulkan retires oldSwapchain as soon as native creation is
+        // reached, even when vkCreateSwapchainKHR itself fails.
+        let old_handle = old_swapchain
+            .as_deref()
+            .filter(|old| !old.retired)
+            .map_or(vk::SwapchainKHR::null(), |old| old.handle);
         let swapchain_info = vk::SwapchainCreateInfoKHR {
             surface: ctx.surface,
             min_image_count: image_count,
@@ -116,59 +183,78 @@ impl Swapchain {
             composite_alpha: vk::CompositeAlphaFlagsKHR::Opaque,
             present_mode,
             clipped: vk::TRUE,
-            old_swapchain,
+            old_swapchain: old_handle,
             ..Default::default()
         };
 
-        let swapchain = ctx.device.create_swapchain(&swapchain_info, None)?;
-        let images = ctx.device.get_swapchain_images(swapchain)?;
+        if let Some(old) = old_swapchain.as_deref_mut() {
+            if old_handle != vk::SwapchainKHR::null() {
+                old.retired = true;
+            }
+        }
+        let handle = ctx.device.create_swapchain(&swapchain_info, None)?;
+        let mut build = SwapchainBuild::new(ctx, handle);
+        let images = ctx.device.get_swapchain_images(handle)?;
 
-        let image_views = images
-            .iter()
-            .map(|&img| {
-                let view_info = vk::ImageViewCreateInfo {
-                    image: img,
-                    view_type: vk::ImageViewType::Type2D,
-                    format: format.format,
-                    subresource_range: util::COLOR_SUBRESOURCE_RANGE,
-                    ..Default::default()
-                };
-                ctx.device.create_image_view(&view_info, None)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        for &img in &images {
+            let view_info = vk::ImageViewCreateInfo {
+                image: img,
+                view_type: vk::ImageViewType::Type2D,
+                format: format.format,
+                subresource_range: util::COLOR_SUBRESOURCE_RANGE,
+                ..Default::default()
+            };
+            build
+                .image_views
+                .push(ctx.device.create_image_view(&view_info, None)?);
+        }
 
         let (depth_image, depth_view, depth_allocation) =
             create_depth_resources(&ctx.device, extent, &ctx.allocator)?;
+        build.depth_image = depth_image;
+        build.depth_view = depth_view;
+        build.depth_allocation = Some(depth_allocation);
 
         let render_pass = create_render_pass(&ctx.device, format.format)?;
+        build.render_passes.push(render_pass);
         let render_pass_scene = create_render_pass_scene(&ctx.device, format.format)?;
+        build.render_passes.push(render_pass_scene);
         let render_pass_load = create_render_pass_load(&ctx.device, format.format)?;
+        build.render_passes.push(render_pass_load);
 
-        let make_fbs = |rp: vk::RenderPass| -> Result<Vec<vk::Framebuffer>, vk::Error> {
-            image_views
-                .iter()
-                .map(|&view| {
-                    let attachments = [view, depth_view];
-                    let fb_info = vk::FramebufferCreateInfo {
-                        render_pass: rp,
-                        attachment_count: attachments.len() as u32,
-                        attachments: attachments.as_ptr(),
-                        width: extent.width,
-                        height: extent.height,
-                        layers: 1,
-                        ..Default::default()
-                    };
-                    ctx.device.create_framebuffer(&fb_info, None)
-                })
-                .collect()
+        let mut make_fbs = |rp: vk::RenderPass| -> Result<Vec<vk::Framebuffer>, vk::Error> {
+            let mut fbs = Vec::with_capacity(build.image_views.len());
+            for &view in &build.image_views {
+                let attachments = [view, build.depth_view];
+                let fb_info = vk::FramebufferCreateInfo {
+                    render_pass: rp,
+                    attachment_count: attachments.len() as u32,
+                    attachments: attachments.as_ptr(),
+                    width: extent.width,
+                    height: extent.height,
+                    layers: 1,
+                    ..Default::default()
+                };
+                let fb = ctx.device.create_framebuffer(&fb_info, None)?;
+                build.framebuffers.push(fb);
+                fbs.push(fb);
+            }
+            Ok(fbs)
         };
 
         let framebuffers = make_fbs(render_pass)?;
         let framebuffers_scene = make_fbs(render_pass_scene)?;
         let framebuffers_load = make_fbs(render_pass_load)?;
 
+        let image_views = std::mem::take(&mut build.image_views);
+        build.depth_image = vk::Image::null();
+        build.depth_view = vk::ImageView::null();
+        let depth_allocation = build.depth_allocation.take().unwrap();
+        build.render_passes.clear();
+        build.framebuffers.clear();
+        build.disarm();
         Ok(Self {
-            handle: swapchain,
+            handle,
             images,
             image_views,
             format,
@@ -182,6 +268,7 @@ impl Swapchain {
             framebuffers,
             framebuffers_scene,
             framebuffers_load,
+            retired: false,
         })
     }
 
@@ -208,10 +295,10 @@ impl Swapchain {
         }
 
         device.destroy_image_view(self.depth_view, None);
+        device.destroy_image(self.depth_image, None);
         if let Some(alloc) = self.depth_allocation.take() {
             allocator.lock().unwrap().free(alloc).ok();
         }
-        device.destroy_image(self.depth_image, None);
 
         for &view in &self.image_views {
             device.destroy_image_view(view, None);
@@ -252,15 +339,27 @@ fn create_depth_resources(
     let image = device.create_image(&image_info, None)?;
     let mem_reqs = device.get_image_memory_requirements(image);
 
-    let allocation = allocator.lock().unwrap().allocate(&AllocationCreateDesc {
+    let allocation = match allocator.lock().unwrap().allocate(&AllocationCreateDesc {
         name: "depth_image",
         requirements: mem_reqs,
         location: MemoryLocation::GpuOnly,
         linear: false,
         allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-    })?;
+    }) {
+        Ok(allocation) => allocation,
+        Err(error) => {
+            device.destroy_image(image, None);
+            return Err(error.into());
+        }
+    };
 
-    unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset())? };
+    if let Err(error) =
+        unsafe { device.bind_image_memory(image, allocation.memory(), allocation.offset()) }
+    {
+        device.destroy_image(image, None);
+        allocator.lock().unwrap().free(allocation).ok();
+        return Err(error.into());
+    }
 
     let view_info = vk::ImageViewCreateInfo {
         image,
@@ -269,7 +368,14 @@ fn create_depth_resources(
         subresource_range: util::DEPTH_SUBRESOURCE_RANGE,
         ..Default::default()
     };
-    let view = device.create_image_view(&view_info, None)?;
+    let view = match device.create_image_view(&view_info, None) {
+        Ok(view) => view,
+        Err(error) => {
+            device.destroy_image(image, None);
+            allocator.lock().unwrap().free(allocation).ok();
+            return Err(error.into());
+        }
+    };
 
     Ok((image, view, allocation))
 }

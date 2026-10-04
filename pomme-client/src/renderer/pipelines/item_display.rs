@@ -30,6 +30,13 @@ impl DisplayTransform {
         let s = Mat4::from_scale(self.scale);
         t * r * s
     }
+
+    pub fn to_left_hand_matrix(mut self) -> Mat4 {
+        self.translation.x = -self.translation.x;
+        self.rotation.y = -self.rotation.y;
+        self.rotation.z = -self.rotation.z;
+        self.to_matrix()
+    }
 }
 
 /// Per-item cache of one `display.<key>` transform, resolved from the item's
@@ -109,6 +116,38 @@ impl DisplayResolver {
                 &self.asset_index,
                 &self.pack_dirs,
                 self.key,
+            )
+        })
+        .unwrap_or(default);
+        self.cache
+            .borrow_mut()
+            .insert(item_name.to_string(), resolved);
+        resolved
+    }
+
+    pub fn resolve_left_hand(
+        &self,
+        item_name: &str,
+        right_hand: &DisplayResolver,
+        default: DisplayTransform,
+    ) -> DisplayTransform {
+        if let Some(t) = self.cache.borrow().get(item_name) {
+            return *t;
+        }
+        let resolved = resolve_item_model_path(
+            item_name,
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &self.pack_dirs,
+        )
+        .and_then(|path| {
+            resolve_left_display_optional(
+                &path,
+                &self.jar_assets_dir,
+                &self.asset_index,
+                &self.pack_dirs,
+                self.key,
+                right_hand.key,
             )
         })
         .unwrap_or(default);
@@ -198,6 +237,40 @@ fn resolve_display(
     None
 }
 
+fn resolve_left_display_optional(
+    start_path: &str,
+    jar: &Path,
+    index: &Option<crate::assets::AssetIndex>,
+    packs: &[PathBuf],
+    left_key: &str,
+    right_key: &str,
+) -> Option<DisplayTransform> {
+    let mut current = Some(start_path.to_string());
+    for _ in 0..MODEL_PARENT_LIMIT {
+        let path = current.take()?;
+        let asset_key = crate::assets::AssetId::parse(&path).asset_key("models", ".json");
+        let file = crate::assets::resolve_asset_path_with_pack_dirs(jar, index, &asset_key, packs);
+        let json = read_json(&file)?;
+        let display = json.get("display");
+        if let Some(transform) = display
+            .and_then(|display| display.get(left_key))
+            .and_then(parse_display_transform)
+            .or_else(|| {
+                display
+                    .and_then(|display| display.get(right_key))
+                    .and_then(parse_display_transform)
+            })
+        {
+            return Some(transform);
+        }
+        current = json
+            .get("parent")
+            .and_then(|parent| parent.as_str())
+            .map(|parent| strip_mc_prefix(parent).to_string());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +290,98 @@ mod tests {
             .resolve("totem_of_undying", DisplayTransform::IDENTITY)
             .scale
             .x
+    }
+
+    #[test]
+    fn third_person_left_display_falls_back_then_mirrors_official_axes() {
+        let root = std::env::temp_dir().join(format!("held-display-{}", uuid::Uuid::new_v4()));
+        write(
+            &root,
+            "minecraft/items/stick.json",
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/stick"}}"#,
+        );
+        model(
+            &root,
+            "stick",
+            r#"{"display":{"thirdperson_righthand":{"rotation":[10,20,30],"translation":[4,5,6],"scale":[2,2,2]}}}"#,
+        );
+        let right = DisplayResolver::new(&root.join("assets"), "thirdperson_righthand");
+        let left = DisplayResolver::new(&root.join("assets"), "thirdperson_lefthand");
+        let fallback = left.resolve_left_hand("stick", &right, DisplayTransform::IDENTITY);
+        assert_eq!(fallback.translation, Vec3::new(4.0, 5.0, 6.0) / 16.0);
+        let matrix = fallback.to_left_hand_matrix();
+        let expected = Mat4::from_translation(Vec3::new(-4.0, 5.0, 6.0) / 16.0)
+            * Mat4::from_rotation_x(10.0_f32.to_radians())
+            * Mat4::from_rotation_y(-20.0_f32.to_radians())
+            * Mat4::from_rotation_z(-30.0_f32.to_radians())
+            * Mat4::from_scale(Vec3::splat(2.0));
+        assert!(matrix.abs_diff_eq(expected, 1.0e-6));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn left_hand_fallback_uses_each_models_right_before_parent_left() {
+        let root = std::env::temp_dir().join(format!("held-left-parent-{}", uuid::Uuid::new_v4()));
+        write(
+            &root,
+            "minecraft/items/stick.json",
+            r#"{"model":"minecraft:item/child"}"#,
+        );
+        model(
+            &root,
+            "child",
+            r#"{"parent":"minecraft:item/parent","display":{"thirdperson_righthand":{"translation":[1,2,3]}}}"#,
+        );
+        model(
+            &root,
+            "parent",
+            r#"{"display":{"thirdperson_lefthand":{"translation":[9,8,7]}}}"#,
+        );
+        let right = DisplayResolver::new(&root.join("assets"), "thirdperson_righthand");
+        let left = DisplayResolver::new(&root.join("assets"), "thirdperson_lefthand");
+        let resolved = left.resolve_left_hand("stick", &right, DisplayTransform::IDENTITY);
+        assert_eq!(resolved.translation, Vec3::new(1.0, 2.0, 3.0) / 16.0);
+        assert_eq!(
+            resolved.to_left_hand_matrix().w_axis.truncate(),
+            Vec3::new(-1.0, 2.0, 3.0) / 16.0
+        );
+
+        model(
+            &root,
+            "child",
+            r#"{"parent":"minecraft:item/parent","display":{"thirdperson_lefthand":{"translation":[4,5,6]},"thirdperson_righthand":{"translation":[1,2,3]}}}"#,
+        );
+        left.clear_cache();
+        assert_eq!(
+            left.resolve_left_hand("stick", &right, DisplayTransform::IDENTITY)
+                .translation,
+            Vec3::new(4.0, 5.0, 6.0) / 16.0,
+            "explicit local left wins"
+        );
+
+        model(&root, "child", r#"{"parent":"minecraft:item/parent"}"#);
+        left.clear_cache();
+        assert_eq!(
+            left.resolve_left_hand("stick", &right, DisplayTransform::IDENTITY)
+                .translation,
+            Vec3::new(9.0, 8.0, 7.0) / 16.0,
+            "parent transform is used only after local left and right are absent"
+        );
+
+        write(
+            &root,
+            "minecraft/items/stick.json",
+            r#"{"model":"minecraft:item/identity"}"#,
+        );
+        model(&root, "identity", "{}");
+        left.clear_cache();
+        assert_eq!(
+            left.resolve_left_hand("stick", &right, DisplayTransform::IDENTITY)
+                .to_matrix(),
+            Mat4::IDENTITY,
+            "resolved model without either hand transform is identity"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

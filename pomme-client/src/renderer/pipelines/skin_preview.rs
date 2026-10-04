@@ -21,6 +21,15 @@ pub(crate) struct Uniform {
     mvp: [[f32; 4]; 4],
 }
 
+pub(crate) struct PreparedSkinPreview {
+    body_buffer: vk::Buffer,
+    body_allocation: Allocation,
+    body_count: u32,
+    arm_buffer: vk::Buffer,
+    arm_allocation: Allocation,
+    arm_count: u32,
+}
+
 pub struct SkinPreviewPipeline {
     pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
@@ -461,6 +470,101 @@ impl SkinPreviewPipeline {
         );
         cmd.bind_vertex_buffers(0, &[self.arm_buffer], &[0]);
         cmd.draw(self.arm_count, 1, 0, 0);
+    }
+
+    pub(crate) fn prepare_skin(
+        &self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        slim: bool,
+    ) -> Result<PreparedSkinPreview, String> {
+        let body = build_body_mesh(slim);
+        let (body_buffer, body_allocation) = util::try_create_mapped_buffer(
+            device,
+            allocator,
+            bytemuck::cast_slice(&body),
+            vk::BufferUsageFlags::VertexBuffer,
+            "skin_preview_body",
+        )?;
+        let arm = build_right_arm_mesh(slim);
+        let (arm_buffer, arm_allocation) = match util::try_create_mapped_buffer(
+            device,
+            allocator,
+            bytemuck::cast_slice(&arm),
+            vk::BufferUsageFlags::VertexBuffer,
+            "skin_preview_arm",
+        ) {
+            Ok(resources) => resources,
+            Err(error) => {
+                device.destroy_buffer(body_buffer, None);
+                let _ = util::lock_allocator(allocator).free(body_allocation);
+                return Err(error);
+            }
+        };
+        Ok(PreparedSkinPreview {
+            body_buffer,
+            body_allocation,
+            body_count: body.len() as u32,
+            arm_buffer,
+            arm_allocation,
+            arm_count: arm.len() as u32,
+        })
+    }
+
+    pub(crate) fn discard_prepared_skin(
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        prepared: PreparedSkinPreview,
+    ) {
+        device.destroy_buffer(prepared.body_buffer, None);
+        device.destroy_buffer(prepared.arm_buffer, None);
+        let mut alloc = util::lock_allocator(allocator);
+        let _ = alloc.free(prepared.body_allocation);
+        let _ = alloc.free(prepared.arm_allocation);
+    }
+
+    pub(crate) fn commit_skin(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        view: vk::ImageView,
+        sampler: vk::Sampler,
+        prepared: PreparedSkinPreview,
+    ) {
+        device.destroy_buffer(self.body_buffer, None);
+        device.destroy_buffer(self.arm_buffer, None);
+        let mut alloc = util::lock_allocator(allocator);
+        let _ = alloc.free(std::mem::replace(
+            &mut self.body_allocation,
+            prepared.body_allocation,
+        ));
+        let _ = alloc.free(std::mem::replace(
+            &mut self.arm_allocation,
+            prepared.arm_allocation,
+        ));
+        self.body_buffer = prepared.body_buffer;
+        self.body_count = prepared.body_count;
+        self.arm_buffer = prepared.arm_buffer;
+        self.arm_count = prepared.arm_count;
+        drop(alloc);
+        self.update_skin_view(device, view, sampler);
+    }
+
+    fn update_skin_view(&self, device: &vk::Device, view: vk::ImageView, sampler: vk::Sampler) {
+        let image_info = vk::DescriptorImageInfo {
+            sampler,
+            image_view: view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        let write = vk::WriteDescriptorSet {
+            dst_set: self.tex_set,
+            dst_binding: 0,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            descriptor_count: 1,
+            image_info: &image_info,
+            ..Default::default()
+        };
+        device.update_descriptor_sets(&[write], &[]);
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {

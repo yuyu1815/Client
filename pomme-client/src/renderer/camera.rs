@@ -563,6 +563,22 @@ impl CameraUniform {
         [self.camera_pos[0], self.camera_pos[1], self.camera_pos[2]]
     }
 
+    /// Matches the two fog bands consumed by the End Portal fragment shader.
+    pub fn end_portal_fog_factor(&self, spherical: f32, cylindrical: f32) -> f32 {
+        let band = |distance: f32, start: f32, end: f32| {
+            if distance <= start {
+                0.0
+            } else if distance >= end {
+                1.0
+            } else {
+                (distance - start) / (end - start)
+            }
+        };
+        band(spherical, self.fog_env[0], self.fog_env[1])
+            .max(band(cylindrical, self.camera_pos[3], self.fog_color[3]))
+            .clamp(0.0, 1.0)
+    }
+
     pub fn new(
         camera: &Camera,
         sky_color: [f32; 3],
@@ -635,6 +651,20 @@ impl CameraUniform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portal_fog_uses_generated_render_and_environment_bands() {
+        let mut camera = Camera::new(1.0);
+        camera.set_render_distance(16);
+        let uniform = CameraUniform::new(&camera, [0.2, 0.3, 0.4], 16, false);
+        assert_eq!(uniform.camera_pos[3], 230.4);
+        assert_eq!(uniform.fog_color[3], 256.0);
+        assert_eq!(uniform.fog_env[..2], [0.0, 1024.0]);
+        assert_eq!(uniform.end_portal_fog_factor(0.0, 0.0), 0.0);
+        assert_eq!(uniform.end_portal_fog_factor(128.0, 128.0), 0.125);
+        assert_eq!(uniform.end_portal_fog_factor(256.0, 256.0), 1.0);
+        assert_eq!(uniform.end_portal_fog_factor(1024.0, 1024.0), 1.0);
+    }
 
     #[test]
     fn invert_mouse_changes_mouse_pitch_only() {

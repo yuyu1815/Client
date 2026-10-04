@@ -47,22 +47,23 @@ tracing-subscriber = "0.3"
 [patch.crates-io]
 azalea-buf = { path = "vendor/azalea-buf" }
 azalea-buf-macros = { path = "vendor/azalea-buf/azalea-buf-macros" }
-azalea-protocol = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
-azalea-crypto = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
-azalea-auth = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
+azalea-protocol = { path = "vendor/azalea-protocol" }
+azalea-crypto = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
+azalea-auth = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
 azalea-entity = { path = "vendor/azalea-entity" }
-azalea-world = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
+azalea-world = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
 azalea-block = { path = "pomme-block" }
-azalea-chat = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
-azalea-core = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
-azalea-registry = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
-azalea-inventory = { git = "https://github.com/azalea-rs/azalea", branch = "26.2" }
+azalea-chat = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
+azalea-core = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
+azalea-registry = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
+azalea-inventory = { git = "https://github.com/azalea-rs/azalea", rev = "ffedf17c9b6ff9fbafbf7e0d14c8d2366b2d0a32" }
 
 [patch."https://github.com/azalea-rs/azalea"]
 azalea-block = { path = "pomme-block" }
 azalea-buf = { path = "vendor/azalea-buf" }
 azalea-buf-macros = { path = "vendor/azalea-buf/azalea-buf-macros" }
 azalea-entity = { path = "vendor/azalea-entity" }
+azalea-protocol = { path = "vendor/azalea-protocol" }
 
 [profile.dev]
 opt-level = 1

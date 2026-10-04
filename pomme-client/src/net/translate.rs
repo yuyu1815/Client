@@ -275,8 +275,8 @@
 //!   (`FriendlyByteBuf.writeComponent`); `component_pass` transcodes every
 //!   consumed component field via `json_to_nbt` (mixed arrays normalize to
 //!   compound lists) and the entity-data component serializers (5/6) transcode
-//!   in the metadata walk — `server_data` and `map_item_data` drop instead
-//!   (pomme never reads them)
+//!   in the metadata walk; `server_data` still drops while `map_item_data` is
+//!   decoded for protocols 763–765
 //! - `set_score` carries a method byte (its REMOVE arm becomes the
 //!   `reset_score` packet 1.20.3 added) and no display/numberFormat;
 //!   `set_objective` ends at the render type
@@ -623,9 +623,8 @@ struct Ids764 {
     set_score_id: u32,
     reset_score_id: u32,
     resource_pack_push_id: u32,
-    /// Dropped quietly: component-bearing packets pomme never consumes
-    /// (`server_data`, `map_item_data`).
-    drops: [u32; 2],
+    /// Dropped quietly: `server_data` is not consumed.
+    drops: [u32; 1],
     /// Serverbound: native + wire ids for the resource_pack reply rewrite.
     resource_pack_response_id: u32,
     resource_pack_response_old_id: u32,
@@ -1130,6 +1129,18 @@ impl Translation {
         if v765.is_some_and(|v| id == v.update_advancements_id) {
             tracing::debug!("Dropping update_advancements with old-form icons");
             return None;
+        }
+        if self.protocol <= 765
+            && id
+                == required_id(
+                    PacketTable::native(),
+                    Phase::Game,
+                    Direction::Clientbound,
+                    "map_item_data",
+                )
+        {
+            return translate_map_item_data_legacy(self.protocol, id, &raw[id_end..])
+                .map(Vec::into_boxed_slice);
         }
         let v764 = self.game_ids.as_ref().and_then(|g| g.v764.as_ref());
         if v764.is_some_and(|v| v.drops.contains(&id)) {
@@ -1769,10 +1780,7 @@ impl GameIds {
                 set_score_id: id(Clientbound, "set_score"),
                 reset_score_id: id(Clientbound, "reset_score"),
                 resource_pack_push_id: id(Clientbound, "resource_pack_push"),
-                drops: [
-                    id(Clientbound, "server_data"),
-                    id(Clientbound, "map_item_data"),
-                ],
+                drops: [id(Clientbound, "server_data")],
                 resource_pack_response_id: id(Serverbound, "resource_pack"),
                 resource_pack_response_old_id: required_id(
                     table,
@@ -3304,6 +3312,147 @@ fn transcode_component(cur: &mut Cursor<&[u8]>, out: &mut Vec<u8>) -> Option<()>
     let json = std::str::from_utf8(&cur.get_ref()[at..at + len]).ok()?;
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
     json_to_nbt(&value).azalea_write(out).ok()
+}
+
+/// Converts the verified 1.20–1.20.4 map packet into the native 26.2
+/// codec. These packet ids are dispatched through PacketTable; never infer
+/// an old id from a numeric constant.
+fn translate_map_item_data_legacy(protocol: i32, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    use azalea_buf::AzBuf;
+
+    if !matches!(protocol, 763..=765)
+        || payload.len() > azalea_protocol::read::MAXIMUM_UNCOMPRESSED_LENGTH as usize
+    {
+        return None;
+    }
+    let mut cur = Cursor::new(payload);
+    let mut out = Vec::with_capacity(payload.len().saturating_add(8));
+    wire::write_varint(&mut out, id);
+    copy_varint(&mut cur, &mut out)?; // signed map id's VarInt bit pattern
+    copy_bytes(&mut cur, &mut out, 2)?; // scale, locked
+    let locked_at = out.len() - 1;
+    if out[locked_at] > 1 {
+        return None;
+    }
+
+    let has_decorations = read_u8(&mut cur)?;
+    if has_decorations > 1 {
+        return None;
+    }
+    out.push(has_decorations);
+    if has_decorations != 0 {
+        let count = u32::azalea_read_var(&mut cur).ok()? as usize;
+        // Every source entry needs at least type + x/z/rotation + name flag.
+        if count > (payload.len() - cur.position() as usize) / 5 {
+            return None;
+        }
+        let count_at = out.len();
+        wire::write_varint(&mut out, 0); // replaced after unknown ids are skipped
+        let mut written = 0u32;
+        for _ in 0..count {
+            let kind = u32::azalea_read_var(&mut cur).ok()?;
+            let coords = [read_u8(&mut cur)?, read_u8(&mut cur)?, read_u8(&mut cur)?];
+            let has_name = read_u8(&mut cur)?;
+            if has_name > 1 {
+                return None;
+            }
+            // Source evidence: 763 defines map icon ids 0–26; 764/765 define
+            // 0–33. The native codec represents known ids 0–34; still omit
+            // values outside each legacy source's range rather than aliasing.
+            const NATIVE_DECORATION_MAX: u32 = 34;
+            const LEGACY_763_MAX: u32 = 26;
+            const LEGACY_764_765_MAX: u32 = 33;
+            let source_max = if protocol == 763 {
+                LEGACY_763_MAX
+            } else {
+                LEGACY_764_765_MAX
+            };
+            let native_kind = (kind <= source_max && kind <= NATIVE_DECORATION_MAX)
+                .then_some(kind);
+            let name = if has_name == 0 {
+                None
+            } else if protocol <= 764 {
+                let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+                if len > payload.len().saturating_sub(cur.position() as usize) {
+                    return None;
+                }
+                let start = cur.position() as usize;
+                advance(&mut cur, len)?;
+                let json: serde_json::Value =
+                    serde_json::from_slice(&payload[start..start + len]).ok()?;
+                if !json_nbt_strings_fit(&json) {
+                    return None;
+                }
+                let mut nbt = Vec::new();
+                json_to_nbt(&json).azalea_write(&mut nbt).ok()?;
+                Some(nbt)
+            } else {
+                let start = cur.position() as usize;
+                skip_nbt(&mut cur)?;
+                Some(payload[start..cur.position() as usize].to_vec())
+            };
+            if let Some(native_kind) = native_kind {
+                wire::write_varint(&mut out, native_kind); // native direct registry id
+                out.extend_from_slice(&coords);
+                if let Some(name) = name {
+                    out.push(1);
+                    out.extend_from_slice(&name);
+                } else {
+                    out.push(0);
+                }
+                written += 1;
+            }
+        }
+        let mut count_bytes = Vec::new();
+        wire::write_varint(&mut count_bytes, written);
+        out.splice(count_at..count_at + 1, count_bytes);
+    }
+
+    let width = read_u8(&mut cur)?;
+    if width == 0 {
+        out.push(0); // native MapPatch width=0 sentinel
+    } else {
+        let height = read_u8(&mut cur)?;
+        let x = read_u8(&mut cur)?;
+        let y = read_u8(&mut cur)?;
+        let len = u32::azalea_read_var(&mut cur).ok()? as usize;
+        if len > payload.len().saturating_sub(cur.position() as usize) {
+            return None;
+        }
+        out.extend_from_slice(&[width, height, x, y]);
+        wire::write_varint(&mut out, len as u32);
+        copy_bytes(&mut cur, &mut out, len)?;
+    }
+    (cur.position() as usize == payload.len()).then_some(out)
+}
+
+/// Checks all JSON strings and object keys against NBT's modified UTF-8 u16
+/// byte length before simdnbt's writer can truncate it.
+fn json_nbt_strings_fit(value: &serde_json::Value) -> bool {
+    fn fits(s: &str) -> bool {
+        s.chars()
+            .try_fold(0usize, |len, c| {
+                let bytes = match c {
+                    '\0' => 2,
+                    '\u{0001}'..='\u{007f}' => 1,
+                    '\u{0080}'..='\u{07ff}' => 2,
+                    '\u{0800}'..='\u{ffff}' => 3,
+                    _ => 6,
+                };
+                let len = len.checked_add(bytes)?;
+                (len <= u16::MAX as usize).then_some(len)
+            })
+            .is_some()
+    }
+
+    match value {
+        serde_json::Value::String(s) => fits(s),
+        serde_json::Value::Array(items) => items.iter().all(json_nbt_strings_fit),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .all(|(key, value)| fits(key) && json_nbt_strings_fit(value)),
+        _ => true,
+    }
 }
 
 /// A JSON chat-component value as an owned NBT tag: the codec shape is
@@ -5659,9 +5808,17 @@ fn skip_nbt_payload(cur: &mut Cursor<&[u8]>, tag: u8, depth: u32) -> Option<()> 
         }
         9 => {
             let elem = read_u8(cur)?;
-            let n = read_i32(cur)?;
-            for _ in 0..n.max(0) {
+            let n = usize::try_from(read_i32(cur)?).ok()?;
+            let remaining = cur.get_ref().len().checked_sub(cur.position() as usize)?;
+            if elem > 12 || (elem == 0 && n != 0) || n > remaining {
+                return None;
+            }
+            for _ in 0..n {
+                let before = cur.position();
                 skip_nbt_payload(cur, elem, depth + 1)?;
+                if cur.position() <= before {
+                    return None;
+                }
             }
             Some(())
         }
@@ -6462,5 +6619,44 @@ mod tests {
             &[0x00, 0x09, 0x00, 0x0A],
         ];
         assert_eq!(out, expected.concat());
+    }
+
+    #[test]
+    fn nbt_lists_reject_unbounded_or_malformed_counts_and_preserve_valid_lists() {
+        let skip = |payload: &[u8]| skip_nbt_payload(&mut Cursor::new(payload), 9, 0);
+        // NBT List End type is legal only for an empty list. The malicious
+        // 0x7fffffff count fails before entering the element loop.
+        assert!(skip(&[0, 0, 0, 0, 0]).is_some());
+        assert!(skip(&[0, 0x7f, 0xff, 0xff, 0xff]).is_none());
+        assert!(skip(&[1, 0xff, 0xff, 0xff, 0xff]).is_none()); // negative
+        assert!(skip(&[13, 0, 0, 0, 0]).is_none()); // invalid element type
+        assert!(skip(&[1, 0, 0, 0, 2, 7]).is_none()); // truncated list
+
+        let byte_list = [1, 0, 0, 0, 2, 7, 8];
+        let mut cursor = Cursor::new(&byte_list[..]);
+        skip_nbt_payload(&mut cursor, 9, 0).unwrap();
+        assert_eq!(cursor.position(), byte_list.len() as u64);
+        let compound_list = [10, 0, 0, 0, 1, 0]; // one empty compound
+        let mut cursor = Cursor::new(&compound_list[..]);
+        skip_nbt_payload(&mut cursor, 9, 0).unwrap();
+        assert_eq!(cursor.position(), compound_list.len() as u64);
+        assert!(skip_nbt_payload(&mut Cursor::new(&[7][..]), 1, 512).is_some());
+        assert!(skip_nbt_payload(&mut Cursor::new(&[7][..]), 1, 513).is_none());
+    }
+
+    #[test]
+    fn json_to_nbt_string_validation_counts_modified_utf8_for_nested_values_and_keys() {
+        let fits = |value: serde_json::Value| json_nbt_strings_fit(&value);
+        assert!(fits(serde_json::json!({"text": "a".repeat(65_535)})));
+        assert!(!fits(serde_json::json!({"text": "a".repeat(65_536)})));
+        assert!(fits(serde_json::json!({"nul": "\0".repeat(32_767)})));
+        assert!(!fits(serde_json::json!({"nul": "\0".repeat(32_768)})));
+        assert!(fits(serde_json::json!({"nested": {"é": "é".repeat(32_767)}})));
+        assert!(!fits(serde_json::json!({"nested": {"é": "é".repeat(32_768)}})));
+        assert!(fits(serde_json::json!({"nested": {"語": "語".repeat(21_845)}})));
+        assert!(!fits(serde_json::json!({"nested": {"語": "語".repeat(21_846)}})));
+        assert!(fits(serde_json::json!({"nested": {"𝄞": "𝄞".repeat(10_922)}})));
+        assert!(!fits(serde_json::json!({"nested": {"𝄞": "𝄞".repeat(10_923)}})));
+        assert!(!fits(serde_json::json!({"outer": {("k".repeat(65_536)): "ok"}})));
     }
 }

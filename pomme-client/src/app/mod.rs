@@ -386,7 +386,9 @@ impl ApplicationHandler for App {
                 }
 
                 if let Some(uuid) = pending_skin_uuid.take() {
-                    renderer.load_player_skin(&uuid, &self.core.tokio_rt);
+                    if let Err(error) = renderer.load_player_skin(&uuid, &self.core.tokio_rt) {
+                        tracing::warn!("Local player skin load failed: {error:?}");
+                    }
                 }
 
                 self.core.apply_cursor_grab(&window, None);

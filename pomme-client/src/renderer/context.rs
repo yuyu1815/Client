@@ -83,12 +83,36 @@ pub struct VulkanContext {
     pub image_available_semaphores: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT],
     pub in_flight_fences: [vk::Fence; MAX_FRAMES_IN_FLIGHT],
     pub frame_index: usize,
+    pub(crate) pending_portal_uploads:
+        Arc<Mutex<Vec<super::pipelines::end_portal::PendingPortalUpload>>>,
 
     #[cfg(debug_assertions)]
     debug_messenger: vk::DebugUtilsMessengerEXT,
 
     pub gpu_name: String,
     pub vulkan_version: String,
+    teardown_wait: Option<TeardownWait>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TeardownWait {
+    Idle,
+    DeviceLost,
+}
+
+fn wait_idle_for_teardown(mut wait: impl FnMut() -> Result<(), vk::Error>) -> TeardownWait {
+    loop {
+        match wait() {
+            Ok(()) => return TeardownWait::Idle,
+            Err(vk::Error::DeviceLost) => return TeardownWait::DeviceLost,
+            Err(error) => {
+                tracing::error!(
+                    "GPU teardown wait failed; retrying before freeing resources: {error}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
 }
 
 impl VulkanContext {
@@ -293,23 +317,43 @@ impl VulkanContext {
             image_available_semaphores,
             in_flight_fences,
             frame_index: 0,
+            pending_portal_uploads: Arc::new(Mutex::new(Vec::new())),
             #[cfg(debug_assertions)]
             debug_messenger,
             gpu_name,
             vulkan_version,
+            teardown_wait: None,
         })
     }
 
     pub fn advance_frame(&mut self) {
         self.frame_index = (self.frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
     }
+
+    pub fn prepare_teardown(&mut self) -> TeardownWait {
+        if let Some(outcome) = self.teardown_wait {
+            return outcome;
+        }
+        let outcome = wait_idle_for_teardown(|| self.device.wait_idle());
+        self.teardown_wait = Some(outcome);
+        outcome
+    }
 }
 
 impl Drop for VulkanContext {
     fn drop(&mut self) {
+        let outcome = self.prepare_teardown();
+        super::pipelines::end_portal::reclaim_pending_uploads(
+            &self.device,
+            self.command_pool,
+            &self.allocator,
+            &mut self
+                .pending_portal_uploads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            outcome,
+        );
         unsafe {
-            let _ = self.device.wait_idle();
-
             for &fence in &self.in_flight_fences {
                 self.device.destroy_fence(fence, None);
             }
@@ -332,6 +376,26 @@ impl Drop for VulkanContext {
             self.instance.destroy_surface(self.surface, None);
             self.instance.destroy(None);
         }
+    }
+}
+
+#[cfg(test)]
+mod teardown_tests {
+    use super::*;
+
+    #[test]
+    fn teardown_wait_retries_non_lost_and_preserves_device_lost_outcome() {
+        let mut waits = [Err(vk::Error::Unknown), Ok(())].into_iter();
+        let mut calls = 0;
+        let outcome = wait_idle_for_teardown(|| {
+            calls += 1;
+            waits.next().unwrap()
+        });
+        assert_eq!(outcome, TeardownWait::Idle);
+        assert_eq!(calls, 2);
+
+        let outcome = wait_idle_for_teardown(|| Err(vk::Error::DeviceLost));
+        assert_eq!(outcome, TeardownWait::DeviceLost);
     }
 }
 

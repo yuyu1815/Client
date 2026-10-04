@@ -34,6 +34,26 @@ struct HandUniform {
     mvp: [[f32; 4]; 4],
 }
 
+pub(crate) struct LocalPendingUpload {
+    pub(crate) command: vk::CommandBuffer,
+    pub(crate) staging: vk::Buffer,
+    pub(crate) staging_allocation: Allocation,
+    pub(crate) image: vk::Image,
+    pub(crate) view: vk::ImageView,
+    pub(crate) allocation: Allocation,
+}
+
+pub(crate) struct PreparedSkin {
+    pub(crate) image: vk::Image,
+    pub(crate) view: vk::ImageView,
+    allocation: Allocation,
+    vertex_buffer: vk::Buffer,
+    vertex_allocation: Allocation,
+    left_vertex_buffer: vk::Buffer,
+    left_vertex_allocation: Allocation,
+    vertex_count: u32,
+}
+
 pub struct HandPipeline {
     pipeline: vk::Pipeline,
     pipeline_layout: vk::PipelineLayout,
@@ -255,15 +275,14 @@ impl HandPipeline {
         self.skin_sampler
     }
 
-    pub fn reload_skin(
-        &mut self,
+    pub(crate) fn prepare_skin(
         device: &vk::Device,
         queue: vk::Queue,
         command_pool: vk::CommandPool,
         allocator: &Arc<Mutex<Allocator>>,
         skin: &SkinData,
-    ) {
-        let (image, view, allocation) = upload_skin_to_gpu(
+    ) -> Result<PreparedSkin, (String, Option<LocalPendingUpload>)> {
+        let (image, view, allocation) = try_upload_skin_to_gpu(
             device,
             queue,
             command_pool,
@@ -271,56 +290,99 @@ impl HandPipeline {
             &skin.pixels,
             skin.width,
             skin.height,
-        );
-
-        device.destroy_image_view(self.skin_view, None);
-        device.destroy_image(self.skin_image, None);
-        allocator
-            .lock()
-            .unwrap()
-            .free(std::mem::replace(&mut self.skin_allocation, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
-
-        self.skin_image = image;
-        self.skin_view = view;
-        self.skin_allocation = allocation;
-        update_skin_descriptor(device, self.skin_set, self.skin_view, self.skin_sampler);
-
-        device.destroy_buffer(self.vertex_buffer, None);
-        allocator
-            .lock()
-            .unwrap()
-            .free(std::mem::replace(&mut self.vertex_allocation, unsafe {
-                std::mem::zeroed()
-            }))
-            .ok();
-        device.destroy_buffer(self.left_vertex_buffer, None);
-        allocator
-            .lock()
-            .unwrap()
-            .free(std::mem::replace(
-                &mut self.left_vertex_allocation,
-                unsafe { std::mem::zeroed() },
-            ))
-            .ok();
-        let (vertex_buffer, vertex_allocation, vertex_count) =
-            create_arm_vertex_buffer(device, allocator, skin.width, skin.height, skin.slim, false);
-        let (left_vertex_buffer, left_vertex_allocation, _) =
-            create_arm_vertex_buffer(device, allocator, skin.width, skin.height, skin.slim, true);
-        self.vertex_buffer = vertex_buffer;
-        self.vertex_allocation = vertex_allocation;
-        self.left_vertex_buffer = left_vertex_buffer;
-        self.left_vertex_allocation = left_vertex_allocation;
-        self.vertex_count = vertex_count;
-
-        tracing::info!(
-            "Skin reloaded: {}x{} (slim: {})",
+        )?;
+        let vertices = try_create_arm_vertex_buffer(
+            device,
+            allocator,
             skin.width,
             skin.height,
-            skin.slim
+            skin.slim,
+            false,
         );
+        let (vertex_buffer, vertex_allocation, vertex_count) = match vertices {
+            Ok(value) => value,
+            Err(error) => {
+                device.destroy_image_view(view, None);
+                device.destroy_image(image, None);
+                let _ = util::lock_allocator(allocator).free(allocation);
+                return Err((error, None));
+            }
+        };
+        let left = try_create_arm_vertex_buffer(
+            device,
+            allocator,
+            skin.width,
+            skin.height,
+            skin.slim,
+            true,
+        );
+        let (left_vertex_buffer, left_vertex_allocation, _) = match left {
+            Ok(value) => value,
+            Err(error) => {
+                device.destroy_buffer(vertex_buffer, None);
+                let _ = util::lock_allocator(allocator).free(vertex_allocation);
+                device.destroy_image_view(view, None);
+                device.destroy_image(image, None);
+                let _ = util::lock_allocator(allocator).free(allocation);
+                return Err((error, None));
+            }
+        };
+        Ok(PreparedSkin {
+            image,
+            view,
+            allocation,
+            vertex_buffer,
+            vertex_allocation,
+            left_vertex_buffer,
+            left_vertex_allocation,
+            vertex_count,
+        })
+    }
+
+    pub(crate) fn commit_skin(
+        &mut self,
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        prepared: PreparedSkin,
+    ) {
+        device.destroy_image_view(self.skin_view, None);
+        device.destroy_image(self.skin_image, None);
+        let mut alloc = util::lock_allocator(allocator);
+        let _ = alloc.free(std::mem::replace(
+            &mut self.skin_allocation,
+            prepared.allocation,
+        ));
+        device.destroy_buffer(self.vertex_buffer, None);
+        let _ = alloc.free(std::mem::replace(
+            &mut self.vertex_allocation,
+            prepared.vertex_allocation,
+        ));
+        device.destroy_buffer(self.left_vertex_buffer, None);
+        let _ = alloc.free(std::mem::replace(
+            &mut self.left_vertex_allocation,
+            prepared.left_vertex_allocation,
+        ));
+        self.skin_image = prepared.image;
+        self.skin_view = prepared.view;
+        self.vertex_buffer = prepared.vertex_buffer;
+        self.left_vertex_buffer = prepared.left_vertex_buffer;
+        self.vertex_count = prepared.vertex_count;
+        update_skin_descriptor(device, self.skin_set, self.skin_view, self.skin_sampler);
+    }
+
+    pub(crate) fn discard_prepared_skin(
+        device: &vk::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        prepared: PreparedSkin,
+    ) {
+        device.destroy_image_view(prepared.view, None);
+        device.destroy_image(prepared.image, None);
+        device.destroy_buffer(prepared.vertex_buffer, None);
+        device.destroy_buffer(prepared.left_vertex_buffer, None);
+        let mut alloc = util::lock_allocator(allocator);
+        let _ = alloc.free(prepared.allocation);
+        let _ = alloc.free(prepared.vertex_allocation);
+        let _ = alloc.free(prepared.left_vertex_allocation);
     }
 
     pub fn recreate_pipeline(&mut self, device: &vk::Device, render_pass: vk::RenderPass) {
@@ -377,6 +439,25 @@ pub(super) fn projection(aspect: f32, hud_fov: f32) -> Mat4 {
     let mut proj = proj::directx::perspective(hud_fov, aspect, NEAR, FAR);
     proj.y_axis.y *= -1.0;
     proj
+}
+
+fn try_create_arm_vertex_buffer(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    skin_w: u32,
+    skin_h: u32,
+    slim: bool,
+    left: bool,
+) -> Result<(vk::Buffer, Allocation, u32), String> {
+    let vertices = build_arm_vertices(skin_w, skin_h, slim, left);
+    let (buffer, allocation) = util::try_create_mapped_buffer(
+        device,
+        allocator,
+        bytemuck::cast_slice::<HandVertex, u8>(&vertices),
+        vk::BufferUsageFlags::VertexBuffer,
+        "hand_vertices",
+    )?;
+    Ok((buffer, allocation, vertices.len() as u32))
 }
 
 fn create_arm_vertex_buffer(
@@ -501,6 +582,78 @@ fn load_skin_texture(
         height,
     );
     (image, view, allocation, width, height)
+}
+
+fn try_upload_skin_to_gpu(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(vk::Image, vk::ImageView, Allocation), (String, Option<LocalPendingUpload>)> {
+    let (image, view, allocation) = util::try_create_gpu_image_2d(
+        device,
+        allocator,
+        width,
+        height,
+        vk::Format::R8G8B8A8Srgb,
+        "skin",
+    )
+    .map_err(|e| (e, None))?;
+    let (staging_buf, staging_alloc) = match util::try_create_mapped_buffer(
+        device,
+        allocator,
+        pixels,
+        vk::BufferUsageFlags::TransferSrc,
+        "skin_staging",
+    ) {
+        Ok(staging) => staging,
+        Err(error) => {
+            device.destroy_image_view(view, None);
+            device.destroy_image(image, None);
+            let _ = util::lock_allocator(allocator).free(allocation);
+            return Err((error, None));
+        }
+    };
+    match util::try_upload_image(
+        device,
+        queue,
+        command_pool,
+        staging_buf,
+        image,
+        width,
+        height,
+    ) {
+        Ok(()) => {
+            device.destroy_buffer(staging_buf, None);
+            let _ = util::lock_allocator(allocator).free(staging_alloc);
+            Ok((image, view, allocation))
+        }
+        Err(error) => {
+            if let Some(command) = error.submitted_command_buffer {
+                Err((
+                    error.message,
+                    Some(LocalPendingUpload {
+                        command,
+                        staging: staging_buf,
+                        staging_allocation: staging_alloc,
+                        image,
+                        view,
+                        allocation,
+                    }),
+                ))
+            } else {
+                device.destroy_buffer(staging_buf, None);
+                let _ = util::lock_allocator(allocator).free(staging_alloc);
+                device.destroy_image_view(view, None);
+                device.destroy_image(image, None);
+                let _ = util::lock_allocator(allocator).free(allocation);
+                Err((error.message, None))
+            }
+        }
+    }
 }
 
 fn upload_skin_to_gpu(

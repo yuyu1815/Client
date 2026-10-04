@@ -97,6 +97,9 @@ pub enum RendererError {
 
     #[error("failed to load placed-head slim Steve fallback: {0}")]
     HeadSkin(String),
+
+    #[error("failed to initialize End Portal rendering: {0}")]
+    EndPortal(String),
 }
 
 #[derive(Clone, Copy)]
@@ -178,6 +181,7 @@ enum RenderMode<'a> {
         show_chunk_borders: bool,
         dimension: &'a str,
         sky: SkyState,
+        partial_tick: f32,
         fog_color: [f32; 3],
         entities: &'a [EntityRenderInfo],
         text_display_source: Option<&'a EntityStore>,
@@ -259,10 +263,39 @@ pub struct BlockEntityModelDrawCounts {
     pub chest_capacity_rejected: u32,
 }
 
+struct HeldItemModelNames {
+    display_name: String,
+    mesh_name: String,
+}
+
+fn held_item_model_names(
+    display_name: &str,
+    mesh_name: impl FnOnce(&str) -> String,
+) -> HeldItemModelNames {
+    HeldItemModelNames {
+        display_name: display_name.to_owned(),
+        mesh_name: mesh_name(display_name),
+    }
+}
+
+fn held_item_model_matrix(
+    attachment: glam::Mat4,
+    display: pipelines::item_display::DisplayTransform,
+    left_hand: bool,
+) -> glam::Mat4 {
+    attachment
+        * if left_hand {
+            display.to_left_hand_matrix()
+        } else {
+            display.to_matrix()
+        }
+}
+
 pub struct Renderer {
     pub world_light_environment: Option<crate::net::environment::SkyLightEvaluation>,
     ctx: VulkanContext,
     swapchain: Swapchain,
+    pending_swapchain: Option<(Swapchain, u32, u32, bool)>,
     camera: Camera,
 
     registry: BlockRegistry,
@@ -302,6 +335,7 @@ pub struct Renderer {
     atlas: TextureAtlas,
     entity_renderer: EntityRenderer,
     block_entity_pipeline: BlockEntityPipeline,
+    end_portal_pipeline: pipelines::end_portal::EndPortalPipeline,
     /// Frozen alongside the BE chest textures for this renderer session.
     christmas_chests: bool,
     placed_head_skins: placed_head_skin::PlacedHeadSkinCache,
@@ -362,13 +396,8 @@ impl Renderer {
         let ctx = VulkanContext::new(&window)?;
         crate::app::startup_mark("renderer_vulkan_ready");
 
-        let swapchain_state = Swapchain::new(
-            &ctx,
-            size.width.max(1),
-            size.height.max(1),
-            vsync,
-            vk::SwapchainKHR::null(),
-        )?;
+        let swapchain_state =
+            Swapchain::new(&ctx, size.width.max(1), size.height.max(1), vsync, None)?;
         // The swapchain may pick the surface's `current_extent` rather than the
         // requested size; track that actual extent so layout matches rendering.
         let swapchain_extent = swapchain_state.extent;
@@ -603,6 +632,24 @@ impl Renderer {
             &activation_pack_dirs,
         );
 
+        let end_portal_pipeline = pipelines::end_portal::EndPortalPipeline::new(
+            &ctx.device,
+            ctx.graphics_queue,
+            ctx.command_pool,
+            swapchain_state.render_pass,
+            &ctx.allocator,
+            jar_assets_dir,
+            asset_index,
+            &activation_pack_dirs,
+            pipelines::end_portal::AssetLoadMode::Startup,
+            &mut ctx
+                .pending_portal_uploads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            None,
+        )
+        .map_err(RendererError::EndPortal)?;
+
         let chunk_border_pipeline = pipelines::chunk_borders::ChunkBorderPipeline::new(
             &ctx.device,
             swapchain_state.render_pass,
@@ -706,6 +753,7 @@ impl Renderer {
             world_light_environment: None,
             ctx,
             swapchain: swapchain_state,
+            pending_swapchain: None,
             camera,
             registry,
             jar_assets_dir: jar_assets_dir.to_path_buf(),
@@ -724,6 +772,7 @@ impl Renderer {
             book_preview,
             entity_renderer,
             block_entity_pipeline,
+            end_portal_pipeline,
             christmas_chests,
             placed_head_skins,
             chunk_border_pipeline,
@@ -978,7 +1027,33 @@ impl Renderer {
     }
 
     fn recreate_swapchain(&mut self) -> Result<(), RendererError> {
-        let _ = self.ctx.device.wait_idle();
+        self.ctx.device.wait_idle()?;
+
+        let requested = (self.width, self.height, self.vsync);
+        if self
+            .pending_swapchain
+            .as_ref()
+            .is_some_and(|(_, w, h, v)| (*w, *h, *v) != requested)
+        {
+            if let Some((mut pending, _, _, _)) = self.pending_swapchain.take() {
+                pending.destroy(&self.ctx.device, &self.ctx.allocator);
+            }
+        }
+        if self.pending_swapchain.is_none() {
+            let old = (!self.swapchain.retired).then_some(&mut self.swapchain);
+            let candidate = Swapchain::new(&self.ctx, self.width, self.height, self.vsync, old)?;
+            self.pending_swapchain = Some((candidate, requested.0, requested.1, requested.2));
+        }
+        let portal_rp = self.pending_swapchain.as_ref().unwrap().0.render_pass;
+        if let Err(error) = self
+            .end_portal_pipeline
+            .recreate_pipeline(&self.ctx.device, portal_rp)
+        {
+            return Err(RendererError::EndPortal(error));
+        }
+        let (candidate, _, _, _) = self.pending_swapchain.take().unwrap();
+        let mut old = std::mem::replace(&mut self.swapchain, candidate);
+        old.destroy(&self.ctx.device, &self.ctx.allocator);
 
         if let Some(mut pipeline) = self.activation_pipeline.take() {
             pipeline.destroy(&self.ctx.device, &self.ctx.allocator);
@@ -993,16 +1068,6 @@ impl Renderer {
 
         self.chunk_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
-
-        let mut old_swapchain = Swapchain::new(
-            &self.ctx,
-            self.width,
-            self.height,
-            self.vsync,
-            self.swapchain.handle,
-        )?;
-        std::mem::swap(&mut self.swapchain, &mut old_swapchain);
-        old_swapchain.destroy(&self.ctx.device, &self.ctx.allocator);
 
         self.activation_targets =
             match pipelines::item_activation::ActivationTargets::new(&self.ctx, &self.swapchain) {
@@ -1733,6 +1798,7 @@ impl Renderer {
         show_chunk_borders: bool,
         dimension: &str,
         sky: SkyState,
+        partial_tick: f32,
         entities: &[EntityRenderInfo],
         text_display_source: Option<&EntityStore>,
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
@@ -1945,10 +2011,8 @@ impl Renderer {
         // Vanilla CustomHeadLayer renders skulls and non-armor HEAD items
         // independently from HumanoidArmorLayer. Reuse item meshes and profile
         // skin resolution instead of treating every head stack as armor.
-        let mut head_display = pipelines::item_display::DisplayResolver::new(
-            &self.jar_assets_dir,
-            "head",
-        );
+        let mut head_display =
+            pipelines::item_display::DisplayResolver::new(&self.jar_assets_dir, "head");
         head_display.update_resources(
             &self.jar_assets_dir,
             &self.asset_index,
@@ -1976,9 +2040,9 @@ impl Renderer {
             // Skull identity comes from the actual item, never an ItemModel override.
             let skull_type = worn_skull_type(&item_resource_name);
             if skull_type.is_none()
-                && crate::player::menu_click::component::<
-                    azalea_inventory::components::Equippable,
-                >(stack_data)
+                && crate::player::menu_click::component::<azalea_inventory::components::Equippable>(
+                    stack_data,
+                )
                 .is_some_and(|equippable| {
                     equippable.slot == azalea_inventory::components::EquipmentSlot::Head
                         && equippable.asset_id.is_some()
@@ -1987,7 +2051,8 @@ impl Renderer {
                 continue;
             }
             let Some(attachment) = (if skull_type.is_some() {
-                self.entity_renderer.custom_head_skull_attachment(info, anchor)
+                self.entity_renderer
+                    .custom_head_skull_attachment(info, anchor)
             } else {
                 self.entity_renderer.custom_head_attachment(info, anchor)
             }) else {
@@ -1995,7 +2060,9 @@ impl Renderer {
             };
             if skull_type.is_some() {
                 let player_profile = (skull_type == Some("player"))
-                    .then(|| crate::world::block_entity::player_head_profile_source_from_item(&stack))
+                    .then(|| {
+                        crate::world::block_entity::player_head_profile_source_from_item(&stack)
+                    })
                     .flatten();
                 let block_pos = azalea_core::position::BlockPos::new(
                     info.position.x.floor() as i32,
@@ -2042,6 +2109,98 @@ impl Renderer {
                 stack_count: 1,
             });
         }
+        let mut right_hand_display = pipelines::item_display::DisplayResolver::new(
+            &self.jar_assets_dir,
+            "thirdperson_righthand",
+        );
+        right_hand_display.update_resources(
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &self.activation_pack_dirs,
+        );
+        let mut left_hand_display = pipelines::item_display::DisplayResolver::new(
+            &self.jar_assets_dir,
+            "thirdperson_lefthand",
+        );
+        left_hand_display.update_resources(
+            &self.jar_assets_dir,
+            &self.asset_index,
+            &self.activation_pack_dirs,
+        );
+        for info in &frame_entities {
+            for (slot, left_arm) in pipelines::entity_renderer::held_item_slots(info) {
+                let Some(azalea_inventory::ItemStack::Present(stack_data)) =
+                    info.armor_stand_equipment.get(&slot)
+                else {
+                    continue;
+                };
+                let stack = azalea_inventory::ItemStack::Present(stack_data.clone());
+                let resource_name = crate::player::inventory::item_resource_name(stack_data.kind);
+                let item_name =
+                    BlockRegistry::item_model_name(&stack).unwrap_or_else(|| resource_name.clone());
+                let raw_dye_rgb = crate::player::menu_click::component::<
+                    azalea_inventory::components::DyedColor,
+                >(stack_data)
+                .map(|color| {
+                    [
+                        (color.rgb >> 16) as u8,
+                        (color.rgb >> 8) as u8,
+                        color.rgb as u8,
+                    ]
+                });
+                let names = held_item_model_names(&item_name, |name| {
+                    self.resolve_dye_variant_key(name, raw_dye_rgb)
+                });
+                let item_name = names.mesh_name;
+                let Some(attachment) = self
+                    .entity_renderer
+                    .held_item_attachment(info, anchor, left_arm)
+                else {
+                    continue;
+                };
+                self.ensure_item_mesh(&item_name);
+                let display = if left_arm {
+                    left_hand_display.resolve_left_hand(
+                        &names.display_name,
+                        &right_hand_display,
+                        pipelines::item_display::DisplayTransform::IDENTITY,
+                    )
+                } else {
+                    right_hand_display.resolve(
+                        &names.display_name,
+                        pipelines::item_display::DisplayTransform::IDENTITY,
+                    )
+                };
+                let model_matrix = held_item_model_matrix(attachment, display, left_arm);
+                let profile = (worn_skull_type(&resource_name) == Some("player"))
+                    .then(|| {
+                        crate::world::block_entity::player_head_profile_source_from_item(&stack)
+                    })
+                    .flatten();
+                item_entities.push(pipelines::item_entity::ItemRenderInfo {
+                    item_name,
+                    raw_dye_rgb,
+                    player_head_profile_source: profile,
+                    model_matrix,
+                    light: 1.0,
+                    white_overlay: 0.0,
+                    nether_lighting: dimension == "minecraft:the_nether",
+                    entity_uuid: None,
+                    invisible: info.is_invisible,
+                    actual_age: None,
+                    actual_render_age: 0.0,
+                    age_f: 0.0,
+                    actual_spin: 0.0,
+                    spin: 0.0,
+                    bob_offset: 0.0,
+                    actual_bob_offset: 0.0,
+                    controlled_phase: false,
+                    bob_controlled: false,
+                    position: [info.position.x, info.position.y, info.position.z],
+                    stack_count: 1,
+                });
+            }
+        }
         if let Some(start) = prepare_start {
             self.last_timings.render_prepare_ms = start.elapsed().as_secs_f32() * 1000.0;
         }
@@ -2060,6 +2219,7 @@ impl Renderer {
                 show_chunk_borders,
                 dimension,
                 sky,
+                partial_tick,
                 fog_color: clear_col,
                 entities: &frame_entities,
                 text_display_source,
@@ -2117,10 +2277,49 @@ impl Renderer {
         game_dir: &Path,
         packs: &crate::resource_pack::ResourcePackManager,
     ) {
-        self.ctx.device.wait_idle().unwrap();
+        crate::logging::diagnostic_stage("renderer_reload.begin");
+        if let Err(error) = self.ctx.device.wait_idle() {
+            tracing::warn!(
+                "Keeping renderer resources after GPU idle failed during asset reload: {error}"
+            );
+            return;
+        }
+        crate::logging::diagnostic_stage("renderer_reload.idle_complete");
+        let new_pack_dirs: Vec<_> = packs.active_pack_dirs().map(Path::to_path_buf).collect();
+        let portal_result = pipelines::end_portal::portal_transaction(
+            || {
+                pipelines::end_portal::EndPortalPipeline::new(
+                    &self.ctx.device,
+                    self.ctx.graphics_queue,
+                    self.ctx.command_pool,
+                    self.swapchain.render_pass,
+                    &self.ctx.allocator,
+                    &self.jar_assets_dir,
+                    &self.asset_index,
+                    &new_pack_dirs,
+                    pipelines::end_portal::AssetLoadMode::Reload,
+                    &mut self
+                        .ctx
+                        .pending_portal_uploads
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    Some(context::TeardownWait::Idle),
+                )
+            },
+            |replacement| {
+                self.end_portal_pipeline
+                    .destroy(&self.ctx.device, &self.ctx.allocator);
+                self.end_portal_pipeline = replacement;
+            },
+        );
+        if let Err(error) = portal_result {
+            tracing::warn!("Keeping previous End Portal pipeline after reload failure: {error}");
+            return;
+        }
+        crate::logging::diagnostic_stage("renderer_reload.portal_prepared");
+        self.activation_pack_dirs = new_pack_dirs;
         self.entity_renderer
             .clear_equipment_textures(&self.ctx.device, &self.ctx.allocator);
-        self.activation_pack_dirs = packs.active_pack_dirs().map(Path::to_path_buf).collect();
         self.entity_renderer.reload_entity_textures(
             &self.ctx.device,
             self.ctx.graphics_queue,
@@ -2224,7 +2423,9 @@ impl Renderer {
             Some(packs),
         )
         .expect("failed to rebuild atlas");
+        crate::logging::diagnostic_stage("renderer_reload.registry_atlas_complete");
 
+        crate::logging::diagnostic_stage("renderer_reload.panorama.begin");
         let panorama_faces = pipelines::panorama::resolve_panorama_faces(
             &self.panorama_dir,
             &self.jar_assets_dir,
@@ -2238,6 +2439,7 @@ impl Renderer {
             &self.ctx.allocator,
             panorama_faces,
         );
+        crate::logging::diagnostic_stage("renderer_reload.panorama.complete");
 
         self.chunk_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
@@ -2252,6 +2454,8 @@ impl Renderer {
         }
         self.particle_pipeline
             .rebind_atlas(&self.ctx.device, &self.atlas);
+        crate::logging::diagnostic_stage("renderer_reload.atlas_rebind_complete");
+        crate::logging::diagnostic_stage("renderer_reload.font_reload.begin");
         if let Err(error) = self.menu_pipeline.reload_minecraft_fonts(
             &self.ctx.device,
             self.ctx.graphics_queue,
@@ -2265,7 +2469,9 @@ impl Renderer {
         ) {
             tracing::warn!("Keeping previous Minecraft fonts after reload failure: {error}");
         }
+        crate::logging::diagnostic_stage("renderer_reload.font_reload.complete");
 
+        crate::logging::diagnostic_stage("renderer_reload.item_warmup.begin");
         warm_item_meshes(
             &self.ctx.device,
             &self.ctx.allocator,
@@ -2273,12 +2479,14 @@ impl Renderer {
             &self.atlas.uv_map,
             &self.registry,
         );
+        crate::logging::diagnostic_stage("renderer_reload.item_warmup.complete");
 
         // GUI item slots cache fully rendered pixels. Releasing their keys is
         // enough: reused slots are marked stale and cleared before rebaking.
         self.gui_item_atlas.invalidate_all();
 
         tracing::info!("Assets reloaded");
+        crate::logging::diagnostic_stage("renderer_reload.complete");
     }
 
     pub fn reload_panorama(&mut self, panorama_dir: &Path) {
@@ -2302,42 +2510,104 @@ impl Renderer {
         self.skin_preview.trigger_swing();
     }
 
-    pub fn load_player_skin(&mut self, uuid: &uuid::Uuid, rt: &tokio::runtime::Runtime) {
+    pub fn load_player_skin(
+        &mut self,
+        uuid: &uuid::Uuid,
+        rt: &tokio::runtime::Runtime,
+    ) -> Result<(), PlayerSkinUploadError> {
         let uuid_str = uuid.to_string().replace('-', "");
         let skin = rt.block_on(async { fetch_skin_texture(&uuid_str).await });
         match skin {
             Ok(skin) => self.update_local_player_skin(uuid, &skin),
-            Err(e) => tracing::warn!("Failed to load player skin: {e}"),
+            Err(e) => {
+                tracing::warn!("Failed to load player skin: {e}");
+                Err(PlayerSkinUploadError::UploadFailed)
+            }
         }
     }
 
-    pub(crate) fn update_local_player_skin(&mut self, uuid: &uuid::Uuid, skin: &SkinData) {
-        // In-flight frames can still reference the old hand/preview sheet.
+    pub(crate) fn update_local_player_skin(
+        &mut self,
+        uuid: &uuid::Uuid,
+        skin: &SkinData,
+    ) -> Result<(), PlayerSkinUploadError> {
         self.ctx
             .device
             .wait_idle()
-            .expect("wait before replacing local skin");
-        self.hand_pipeline.reload_skin(
+            .map_err(|_| PlayerSkinUploadError::UploadFailed)?;
+        self.entity_renderer.reclaim_pending_player_skin_uploads(
+            &self.ctx.device,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+        );
+        let prepared = match pipelines::hand::HandPipeline::prepare_skin(
             &self.ctx.device,
             self.ctx.graphics_queue,
             self.ctx.command_pool,
             &self.ctx.allocator,
             skin,
-        );
-        self.skin_preview
-            .destroy(&self.ctx.device, &self.ctx.allocator);
-        self.skin_preview = SkinPreviewPipeline::new(
+        ) {
+            Ok(prepared) => prepared,
+            Err((error, pending)) => {
+                if let Some(pending) = pending {
+                    self.entity_renderer.retain_local_skin_upload(pending);
+                }
+                tracing::warn!("Local player skin hand prepare failed: {error}");
+                return Err(PlayerSkinUploadError::UploadFailed);
+            }
+        };
+        let preview =
+            match self
+                .skin_preview
+                .prepare_skin(&self.ctx.device, &self.ctx.allocator, skin.slim)
+            {
+                Ok(preview) => preview,
+                Err(error) => {
+                    pipelines::hand::HandPipeline::discard_prepared_skin(
+                        &self.ctx.device,
+                        &self.ctx.allocator,
+                        prepared,
+                    );
+                    tracing::warn!("Local player skin preview prepare failed: {error}");
+                    return Err(PlayerSkinUploadError::UploadFailed);
+                }
+            };
+        if let Err(error) = self.update_player_entity_skin(uuid, skin) {
+            pipelines::hand::HandPipeline::discard_prepared_skin(
+                &self.ctx.device,
+                &self.ctx.allocator,
+                prepared,
+            );
+            pipelines::skin_preview::SkinPreviewPipeline::discard_prepared_skin(
+                &self.ctx.device,
+                &self.ctx.allocator,
+                preview,
+            );
+            return Err(error);
+        }
+        // Entity upload's successful queue wait confirms all old frame references are
+        // complete.
+        self.skin_preview.commit_skin(
             &self.ctx.device,
-            self.swapchain.render_pass,
             &self.ctx.allocator,
-            self.hand_pipeline.skin_view(),
+            prepared.view,
             self.hand_pipeline.skin_sampler(),
-            skin.slim,
+            preview,
         );
-        self.update_player_entity_skin(uuid, skin);
+        self.hand_pipeline
+            .commit_skin(&self.ctx.device, &self.ctx.allocator, prepared);
+        Ok(())
     }
 
-    pub fn update_player_entity_skin(&mut self, uuid: &uuid::Uuid, skin: &SkinData) {
+    pub fn can_accept_player_entity_skin(&self, uuid: &uuid::Uuid) -> bool {
+        self.entity_renderer.can_accept_player_skin(uuid)
+    }
+
+    pub fn update_player_entity_skin(
+        &mut self,
+        uuid: &uuid::Uuid,
+        skin: &SkinData,
+    ) -> Result<(), PlayerSkinUploadError> {
         self.entity_renderer.update_player_skin(
             &self.ctx.device,
             self.ctx.graphics_queue,
@@ -2345,7 +2615,7 @@ impl Renderer {
             &self.ctx.allocator,
             uuid,
             skin,
-        );
+        )
     }
 
     pub fn remove_player_entity_skin(&mut self, uuid: &uuid::Uuid) {
@@ -2573,6 +2843,7 @@ impl Renderer {
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
             self.block_entity_pipeline.update_camera(frame, &uniform);
+            self.end_portal_pipeline.update_camera(frame, &uniform);
             self.chunk_border_pipeline.update_camera(frame, &uniform);
             self.world_border_pipeline.update_camera(frame, &uniform);
             self.item_entity_pipeline.update_camera(frame, &uniform);
@@ -2829,6 +3100,7 @@ impl Renderer {
                 show_chunk_borders,
                 dimension,
                 sky,
+                partial_tick,
                 fog_color: _,
                 entities,
                 text_display_source,
@@ -2972,6 +3244,20 @@ impl Renderer {
                     self.last_timings.be_model_draws_by_kind = draws_by_kind;
                     self.last_timings.be_sign_vertices = sign_vertices;
                 }
+                let portal_draws: Vec<_> = block_entities
+                    .iter()
+                    .filter_map(|info| info.end_portal.map(|draw| (info.pos, draw)))
+                    .collect();
+                let game_time = (sky.game_time.rem_euclid(24000) as f32 + partial_tick) / 24000.0;
+                self.end_portal_pipeline.draw(
+                    &self.ctx.device,
+                    &self.ctx.allocator,
+                    cmd,
+                    frame,
+                    anchor,
+                    &portal_draws,
+                    game_time,
+                );
 
                 let pass_start = benchmark_timing.then(std::time::Instant::now);
                 self.item_entity_pipeline.draw(cmd, frame, item_entities);
@@ -3582,6 +3868,13 @@ fn warm_item_meshes(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayerSkinUploadError {
+    CapacityFull { current: usize, limit: usize },
+    UploadFailed,
+    DescriptorAllocationFailed,
+}
+
 /// Decoded skin ready for upload: always a 64x64 RGBA sheet (legacy 64x32
 /// skins are converted), plus the profile's arm model.
 pub(crate) struct SkinData {
@@ -3956,7 +4249,14 @@ fn strip_alpha_if_opaque(img: &mut [u8], x0: u32, y0: u32, x1: u32, y1: u32) {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        let _ = self.ctx.device.wait_idle();
+        // Non-lost errors are retried by the shared context teardown contract;
+        // VK_ERROR_DEVICE_LOST is a distinct safe-to-destroy outcome per Vulkan.
+        self.ctx.prepare_teardown();
+        self.entity_renderer.reclaim_pending_player_skin_uploads(
+            &self.ctx.device,
+            self.ctx.command_pool,
+            &self.ctx.allocator,
+        );
 
         if let Some(mut pipeline) = self.activation_pipeline.take() {
             pipeline.destroy(&self.ctx.device, &self.ctx.allocator);
@@ -3991,6 +4291,8 @@ impl Drop for Renderer {
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.block_entity_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
+        self.end_portal_pipeline
+            .destroy(&self.ctx.device, &self.ctx.allocator);
         self.chunk_border_pipeline
             .destroy(&self.ctx.device, &self.ctx.allocator);
         self.world_border_pipeline
@@ -4019,6 +4321,9 @@ impl Drop for Renderer {
             self.ctx.device.destroy_semaphore(sem, None);
         }
 
+        if let Some((mut pending, _, _, _)) = self.pending_swapchain.take() {
+            pending.destroy(&self.ctx.device, &self.ctx.allocator);
+        }
         self.swapchain
             .destroy(&self.ctx.device, &self.ctx.allocator);
     }
@@ -4027,6 +4332,46 @@ impl Drop for Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dyed_held_mesh_keeps_original_model_for_display_resolution() {
+        use glam::Vec3;
+        let root = std::env::temp_dir().join(format!("held-dye-display-{}", uuid::Uuid::new_v4()));
+        let item = root.join("assets/minecraft/items/bundle.json");
+        std::fs::create_dir_all(item.parent().unwrap()).unwrap();
+        std::fs::write(
+            &item,
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/bundle"}}"#,
+        )
+        .unwrap();
+        let model = root.join("assets/minecraft/models/item/bundle.json");
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(
+            model,
+            r#"{"display":{"thirdperson_righthand":{"rotation":[17,23,31],"translation":[4,5,6]}}}"#,
+        )
+        .unwrap();
+        let right = pipelines::item_display::DisplayResolver::new(
+            &root.join("assets"),
+            "thirdperson_righthand",
+        );
+        let dyed =
+            held_item_model_names("bundle", |_| "__pomme_dye_variant__:bundle:#a06540".into());
+        assert_eq!(dyed.mesh_name, "__pomme_dye_variant__:bundle:#a06540");
+        let transform = right.resolve(
+            &dyed.display_name,
+            pipelines::item_display::DisplayTransform::IDENTITY,
+        );
+        assert_eq!(transform.rotation, Vec3::new(17.0, 23.0, 31.0));
+        assert_eq!(transform.translation, Vec3::new(4.0, 5.0, 6.0) / 16.0);
+
+        let plain = held_item_model_names("bundle", str::to_owned);
+        assert_eq!(
+            plain.mesh_name, plain.display_name,
+            "non-dyed mesh key is unchanged"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn worn_skull_classification_is_exact_and_type_specific() {

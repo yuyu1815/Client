@@ -63,8 +63,7 @@ pub fn resolve_happy_ghast_layer_inputs(
         .filter_map(|layer| {
             let color = match &layer.dyeable {
                 Some(dyeable) => {
-                    let Some(color) = dyed_rgb.or(dyeable.color_when_undyed)
-                    else {
+                    let Some(color) = dyed_rgb.or(dyeable.color_when_undyed) else {
                         return None;
                     };
                     (color as u32) | 0xff00_0000

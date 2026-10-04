@@ -138,6 +138,7 @@ struct PlayerSkinRequest {
     profile_uuid: Option<uuid::Uuid>,
     source: PlayerSkinSource,
     generation: u64,
+    deferred_capacity: bool,
 }
 
 impl PlayerSkinRequest {
@@ -145,6 +146,135 @@ impl PlayerSkinRequest {
         self.profile_uuid == result.profile_uuid
             && self.source == result.source
             && self.generation == result.generation
+    }
+
+    fn same_source(&self, profile_uuid: Option<uuid::Uuid>, source: &PlayerSkinSource) -> bool {
+        self.profile_uuid == profile_uuid && self.source == *source
+    }
+}
+
+fn begin_player_skin_request(
+    requests: &mut HashMap<uuid::Uuid, PlayerSkinRequest>,
+    uuid: uuid::Uuid,
+    profile_uuid: Option<uuid::Uuid>,
+    source: PlayerSkinSource,
+    generation: u64,
+    can_accept: bool,
+) -> bool {
+    if let Some(existing) = requests.get(&uuid) {
+        if existing.same_source(profile_uuid, &source)
+            && (!existing.deferred_capacity || !can_accept)
+        {
+            return false;
+        }
+    }
+    let is_v3_no_fetch = matches!(source, PlayerSkinSource::Uuid)
+        && profile_uuid.is_some_and(|id| id.get_version_num() == 3);
+    requests.insert(
+        uuid,
+        PlayerSkinRequest {
+            profile_uuid,
+            source,
+            generation,
+            deferred_capacity: !can_accept && !is_v3_no_fetch,
+        },
+    );
+    can_accept && !is_v3_no_fetch
+}
+
+fn queue_player_skin_request(
+    requests: &mut HashMap<uuid::Uuid, PlayerSkinRequest>,
+    uuid: uuid::Uuid,
+    profile_uuid: Option<uuid::Uuid>,
+    source: PlayerSkinSource,
+    generation: u64,
+    can_accept: bool,
+    dispatch: impl FnOnce(PlayerSkinSource, Option<uuid::Uuid>, u64),
+) -> bool {
+    if !begin_player_skin_request(
+        requests,
+        uuid,
+        profile_uuid,
+        source.clone(),
+        generation,
+        can_accept,
+    ) {
+        return false;
+    }
+    dispatch(source, profile_uuid, generation);
+    true
+}
+
+enum PlayerSkinApply {
+    Stale,
+    FetchFailed,
+    Uploaded,
+    UploadFailed(crate::renderer::PlayerSkinUploadError),
+}
+
+fn apply_player_skin_result(
+    requests: &mut HashMap<uuid::Uuid, PlayerSkinRequest>,
+    skin: PlayerSkinResult,
+    upload: impl FnOnce(
+        &crate::renderer::SkinData,
+    ) -> Result<(), crate::renderer::PlayerSkinUploadError>,
+    commit: impl FnOnce(&crate::renderer::SkinData),
+) -> PlayerSkinApply {
+    if !requests
+        .get(&skin.uuid)
+        .is_some_and(|request| request.accepts(&skin))
+    {
+        return PlayerSkinApply::Stale;
+    }
+    let PlayerSkinResult {
+        uuid,
+        profile_uuid,
+        source,
+        generation,
+        result,
+    } = skin;
+    let data = match result {
+        Ok(data) => data,
+        Err(_) => {
+            remove_matching_player_skin_request(requests, uuid, profile_uuid, &source, generation);
+            return PlayerSkinApply::FetchFailed;
+        }
+    };
+    match upload(&data) {
+        Ok(()) => {
+            commit(&data);
+            PlayerSkinApply::Uploaded
+        }
+        Err(error) => {
+            remove_matching_player_skin_request(requests, uuid, profile_uuid, &source, generation);
+            PlayerSkinApply::UploadFailed(error)
+        }
+    }
+}
+
+fn remove_player_skin_request(
+    requests: &mut HashMap<uuid::Uuid, PlayerSkinRequest>,
+    uuid: &uuid::Uuid,
+) -> bool {
+    requests.remove(uuid).is_some()
+}
+
+fn remove_matching_player_skin_request(
+    requests: &mut HashMap<uuid::Uuid, PlayerSkinRequest>,
+    uuid: uuid::Uuid,
+    profile_uuid: Option<uuid::Uuid>,
+    source: &PlayerSkinSource,
+    generation: u64,
+) -> bool {
+    if requests.get(&uuid).is_some_and(|request| {
+        request.profile_uuid == profile_uuid
+            && request.source == *source
+            && request.generation == generation
+    }) {
+        requests.remove(&uuid);
+        true
+    } else {
+        false
     }
 }
 
@@ -162,6 +292,358 @@ mod player_skin_request_tests {
         }
     }
 
+    fn success(source: PlayerSkinSource, generation: u64) -> PlayerSkinResult {
+        PlayerSkinResult {
+            uuid: uuid::Uuid::nil(),
+            profile_uuid: None,
+            source,
+            generation,
+            result: Ok(crate::renderer::SkinData {
+                pixels: Vec::new(),
+                width: 64,
+                height: 64,
+                slim: false,
+                cape: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn failed_generation_is_removed_without_touching_newer_same_source_request() {
+        let uuid = uuid::Uuid::from_u128(9);
+        let source = PlayerSkinSource::Textures("secret-token".into());
+        let mut requests = HashMap::from([(
+            uuid,
+            PlayerSkinRequest {
+                profile_uuid: None,
+                source: source.clone(),
+                generation: 2,
+                deferred_capacity: false,
+            },
+        )]);
+        assert!(!remove_matching_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            &source,
+            1
+        ));
+        assert!(requests.contains_key(&uuid));
+        assert!(remove_matching_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            &source,
+            2
+        ));
+        assert!(!requests.contains_key(&uuid));
+        let retry = PlayerSkinRequest {
+            profile_uuid: None,
+            source: source.clone(),
+            generation: 3,
+            deferred_capacity: false,
+        };
+        assert!(retry.same_source(None, &source));
+        assert!(!retry.accepts(&result(source.clone(), 2)));
+    }
+
+    #[test]
+    fn production_queue_preflight_defers_full_entity_and_local_requests_until_notice() {
+        for local in [false, true] {
+            let uuid = uuid::Uuid::from_u128(if local { 100 } else { 101 });
+            let source = PlayerSkinSource::Textures("opaque".into());
+            let mut requests = HashMap::new();
+            let mut fetches = 0;
+            assert!(!queue_player_skin_request(
+                &mut requests,
+                uuid,
+                None,
+                source.clone(),
+                1,
+                false,
+                |_, _, _| fetches += 1,
+            ));
+            assert_eq!(fetches, 0, "local={local}");
+            assert!(requests[&uuid].deferred_capacity);
+            assert!(queue_player_skin_request(
+                &mut requests,
+                uuid,
+                None,
+                source.clone(),
+                2,
+                true,
+                |_, _, _| fetches += 1,
+            ));
+            assert_eq!(fetches, 1, "local={local}");
+        }
+    }
+
+    #[test]
+    fn source_b_capacity_deferral_invalidates_late_source_a_and_retries_on_notice() {
+        let uuid = uuid::Uuid::from_u128(102);
+        let a = PlayerSkinSource::Textures("A".into());
+        let b = PlayerSkinSource::Textures("B".into());
+        let mut requests = HashMap::new();
+        assert!(begin_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            a.clone(),
+            1,
+            true
+        ));
+        assert!(!begin_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            b.clone(),
+            2,
+            false
+        ));
+        assert!(!requests[&uuid].accepts(&result(a, 1)));
+        assert!(begin_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            b,
+            3,
+            true
+        ));
+        assert_eq!(requests[&uuid].generation, 3);
+    }
+
+    #[test]
+    fn same_source_failure_retries_new_generation_and_success_deduplicates() {
+        let uuid = uuid::Uuid::from_u128(103);
+        let source = PlayerSkinSource::Textures("same".into());
+        let mut requests = HashMap::new();
+        assert!(begin_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            source.clone(),
+            1,
+            true
+        ));
+        // Production drain removes only the matching failed generation.
+        assert!(remove_matching_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            &source,
+            1
+        ));
+        assert!(begin_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            source.clone(),
+            2,
+            true
+        ));
+        assert!(!begin_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            source,
+            3,
+            true
+        ));
+        assert_eq!(requests[&uuid].generation, 2);
+    }
+
+    #[test]
+    fn v3_uuid_is_remembered_without_fetch_and_remove_allows_same_uuid_again() {
+        let uuid = uuid::Uuid::from_u128(104);
+        let v3 = uuid::Uuid::from_u128(0x123e4567e89b3000a456426614174000);
+        let mut requests = HashMap::new();
+        let mut fetches = 0;
+        assert!(!queue_player_skin_request(
+            &mut requests,
+            uuid,
+            Some(v3),
+            PlayerSkinSource::Uuid,
+            1,
+            true,
+            |_, _, _| fetches += 1,
+        ));
+        assert_eq!(fetches, 0);
+        assert_eq!(requests[&uuid].generation, 1);
+        assert!(remove_player_skin_request(&mut requests, &uuid));
+        assert!(begin_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            PlayerSkinSource::Textures("again".into()),
+            2,
+            true,
+        ));
+    }
+
+    #[test]
+    fn upload_capacity_race_failure_clears_generation_and_allows_retry_after_space() {
+        let uuid = uuid::Uuid::from_u128(105);
+        let source = PlayerSkinSource::Textures("race".into());
+        let mut requests = HashMap::new();
+        assert!(begin_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            source.clone(),
+            1,
+            true
+        ));
+        // The queue preflight passed, but renderer upload reports a race-time full
+        // cache; drain uses the same production matching removal as
+        // fetch/upload failures.
+        assert!(remove_matching_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            &source,
+            1
+        ));
+        assert!(begin_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            source,
+            2,
+            true
+        ));
+        assert_eq!(requests[&uuid].generation, 2);
+    }
+
+    #[test]
+    fn production_result_boundary_rejects_stale_and_commits_only_successful_uploads() {
+        let uuid = uuid::Uuid::from_u128(106);
+        let a = PlayerSkinSource::Textures("A".into());
+        let b = PlayerSkinSource::Textures("B".into());
+        let mut requests = HashMap::new();
+        assert!(begin_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            a.clone(),
+            1,
+            true
+        ));
+        assert!(!begin_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            b.clone(),
+            2,
+            false
+        ));
+        let mut uploads = 0;
+        let mut commits = 0;
+        let stale = PlayerSkinResult {
+            uuid,
+            profile_uuid: None,
+            source: a,
+            generation: 1,
+            result: Ok(crate::renderer::SkinData {
+                pixels: Vec::new(),
+                width: 64,
+                height: 64,
+                slim: false,
+                cape: None,
+            }),
+        };
+        assert!(matches!(
+            apply_player_skin_result(
+                &mut requests,
+                stale,
+                |_| {
+                    uploads += 1;
+                    Ok(())
+                },
+                |_| commits += 1,
+            ),
+            PlayerSkinApply::Stale
+        ));
+        assert_eq!((uploads, commits), (0, 0));
+
+        assert!(queue_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            b.clone(),
+            3,
+            true,
+            |_, _, _| uploads += 1,
+        ));
+        assert_eq!(uploads, 1);
+        let failed_upload = PlayerSkinResult {
+            uuid,
+            profile_uuid: None,
+            source: b.clone(),
+            generation: 3,
+            result: Ok(crate::renderer::SkinData {
+                pixels: Vec::new(),
+                width: 64,
+                height: 64,
+                slim: false,
+                cape: None,
+            }),
+        };
+        assert!(matches!(
+            apply_player_skin_result(
+                &mut requests,
+                failed_upload,
+                |_| Err(crate::renderer::PlayerSkinUploadError::CapacityFull {
+                    current: 128,
+                    limit: 128
+                }),
+                |_| commits += 1,
+            ),
+            PlayerSkinApply::UploadFailed(
+                crate::renderer::PlayerSkinUploadError::CapacityFull { .. }
+            )
+        ));
+        assert_eq!(commits, 0);
+        let mut retry_dispatches = 0;
+        assert!(queue_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            b.clone(),
+            4,
+            true,
+            |_, _, _| retry_dispatches += 1,
+        ));
+        assert_eq!(retry_dispatches, 1);
+        let uploaded = PlayerSkinResult {
+            uuid,
+            profile_uuid: None,
+            source: b.clone(),
+            generation: 4,
+            result: Ok(crate::renderer::SkinData {
+                pixels: Vec::new(),
+                width: 64,
+                height: 64,
+                slim: false,
+                cape: None,
+            }),
+        };
+        assert!(matches!(
+            apply_player_skin_result(&mut requests, uploaded, |_| Ok(()), |_| commits += 1,),
+            PlayerSkinApply::Uploaded
+        ));
+        assert_eq!(commits, 1);
+        assert!(!queue_player_skin_request(
+            &mut requests,
+            uuid,
+            None,
+            b,
+            5,
+            true,
+            |_, _, _| retry_dispatches += 1,
+        ));
+        assert_eq!(retry_dispatches, 1);
+    }
+
     #[test]
     fn changed_request_and_removed_request_reject_old_callbacks() {
         let textures = PlayerSkinSource::Textures("old".into());
@@ -170,18 +652,23 @@ mod player_skin_request_tests {
             profile_uuid: None,
             source: PlayerSkinSource::Textures("new".into()),
             generation: 2,
+            deferred_capacity: false,
         };
         assert!(!updated.accepts(&old));
         let same_source_new_generation = PlayerSkinRequest {
             profile_uuid: None,
             source: textures,
             generation: 3,
+            deferred_capacity: false,
         };
         assert!(!same_source_new_generation.accepts(&old));
+        let stale_success = success(PlayerSkinSource::Textures("old".into()), 1);
+        assert!(!same_source_new_generation.accepts(&stale_success));
         let changed_profile = PlayerSkinRequest {
             profile_uuid: Some(uuid::Uuid::from_u128(1)),
             source: PlayerSkinSource::Textures("old".into()),
             generation: 1,
+            deferred_capacity: false,
         };
         assert!(!changed_profile.accepts(&old));
         // Removal/world reset deletes the request; `Option::is_some_and` in
@@ -1100,6 +1587,93 @@ fn register_nonliving_spawn(
     store.set_vehicle_kind(id, kind);
 }
 
+pub(crate) fn register_nonliving_spawn_event(
+    store: &mut crate::entity::EntityStore,
+    id: i32,
+    position: Position,
+    velocity: glam::DVec3,
+    y_rot: f32,
+    x_rot: f32,
+    kind: azalea_registry::builtin::EntityKind,
+    spawn_data: i32,
+    item_frame_direction: Option<azalea_core::direction::Direction>,
+) {
+    register_nonliving_spawn(store, id, position, velocity, y_rot, x_rot, kind);
+    store.set_vehicle_spawn_data(id, spawn_data);
+    if let Some(direction) = item_frame_direction {
+        store.set_item_frame_direction(id, direction);
+    }
+}
+
+pub(crate) fn apply_item_frame_metadata(
+    entities: &mut crate::entity::EntityStore,
+    id: i32,
+    metadata: &crate::net::NetworkEvent,
+) -> Option<String> {
+    let is_frame = entities.vehicles.get(&id).is_some_and(|vehicle| {
+        matches!(
+            vehicle.kind,
+            Some(
+                azalea_registry::builtin::EntityKind::ItemFrame
+                    | azalea_registry::builtin::EntityKind::GlowItemFrame
+            )
+        )
+    });
+    match metadata {
+        crate::net::NetworkEvent::ItemFrameDirection { direction, .. } if is_frame => {
+            entities.set_item_frame_direction(id, *direction);
+            Some(String::new())
+        }
+        crate::net::NetworkEvent::ItemFrameItem { item, .. } if is_frame => {
+            entities.set_item_frame_item(id, item.clone());
+            let azalea_inventory::ItemStack::Present(data) = item else {
+                return Some(String::new());
+            };
+            if data.is_empty() {
+                return Some(String::new());
+            }
+            Some(
+                crate::world::block::registry::BlockRegistry::item_model_name(item)
+                    .unwrap_or_else(|| crate::player::inventory::item_resource_name(data.kind)),
+            )
+        }
+        crate::net::NetworkEvent::ItemFrameRotation { rotation, .. } if is_frame => {
+            entities.set_item_frame_rotation(id, *rotation);
+            Some(String::new())
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn apply_entity_item_data(
+    entities: &crate::entity::EntityStore,
+    items: &mut crate::entity::ItemEntityStore,
+    id: i32,
+    item_name: String,
+    item_id: u32,
+    damage: i32,
+    count: i32,
+    stack: Option<azalea_inventory::ItemStackData>,
+) -> Option<String> {
+    if !entities
+        .vehicles
+        .get(&id)
+        .is_some_and(|vehicle| vehicle.kind == Some(azalea_registry::builtin::EntityKind::Item))
+    {
+        return None;
+    }
+    let item_name = stack
+        .as_ref()
+        .and_then(|stack| {
+            crate::world::block::registry::BlockRegistry::item_model_name(
+                &azalea_inventory::ItemStack::Present(stack.clone()),
+            )
+        })
+        .unwrap_or(item_name);
+    items.set_item_data(id, item_name.clone(), item_id, damage, count, stack);
+    Some(item_name)
+}
+
 fn arrow_pickup_position(store: &crate::entity::EntityStore, id: i32) -> Option<Position> {
     use azalea_registry::builtin::EntityKind;
     let vehicle = store.vehicles.get(&id)?;
@@ -1641,12 +2215,18 @@ impl AppCore {
 
     /// Queues a tab-list player's entity skin: the textures the server sent,
     /// else a session-server lookup by id.
-    fn queue_player_skin(&mut self, uuid: uuid::Uuid, textures: Option<String>) {
-        self.queue_player_skin_for(uuid, Some(uuid), textures);
+    fn queue_player_skin(
+        &mut self,
+        renderer: &Renderer,
+        uuid: uuid::Uuid,
+        textures: Option<String>,
+    ) {
+        self.queue_player_skin_for(renderer, uuid, Some(uuid), textures);
     }
 
     fn queue_player_skin_for(
         &mut self,
+        renderer: &Renderer,
         cache_uuid: uuid::Uuid,
         profile_uuid: Option<uuid::Uuid>,
         textures: Option<String>,
@@ -1657,56 +2237,49 @@ impl AppCore {
         let source = textures
             .map(PlayerSkinSource::Textures)
             .unwrap_or(PlayerSkinSource::Uuid);
-        if self
-            .requested_player_skins
-            .get(&cache_uuid)
-            .is_some_and(|request| request.source == source && request.profile_uuid == profile_uuid)
-        {
-            return;
-        }
+        let can_accept = renderer.can_accept_player_entity_skin(&cache_uuid);
         self.next_player_skin_generation = self.next_player_skin_generation.wrapping_add(1);
         let generation = self.next_player_skin_generation;
-        self.requested_player_skins.insert(
+        let tx = self.player_skin_tx.clone();
+        let tokio_rt = self.tokio_rt.clone();
+        queue_player_skin_request(
+            &mut self.requested_player_skins,
             cache_uuid,
-            PlayerSkinRequest {
-                profile_uuid,
-                source: source.clone(),
-                generation,
+            profile_uuid,
+            source,
+            generation,
+            can_accept,
+            move |source, profile_uuid, generation| {
+                tokio_rt.spawn(async move {
+                    let result = fetch_skin(&source, profile_uuid).await;
+                    let _ = tx.send(PlayerSkinResult {
+                        uuid: cache_uuid,
+                        profile_uuid,
+                        source,
+                        generation,
+                        result,
+                    });
+                });
             },
         );
-
-        // Name-derived (v3) UUIDs from offline-mode servers have no Mojang
-        // profile to fetch; keep the default skin.
-        if matches!(source, PlayerSkinSource::Uuid)
-            && profile_uuid.is_some_and(|uuid| uuid.get_version_num() == 3)
-        {
-            return;
-        }
-
-        let tx = self.player_skin_tx.clone();
-        self.tokio_rt.spawn(async move {
-            let result = fetch_skin(&source, profile_uuid).await;
-            let _ = tx.send(PlayerSkinResult {
-                uuid: cache_uuid,
-                profile_uuid,
-                source,
-                generation,
-                result,
-            });
-        });
     }
 
     fn drain_player_skin_results(&mut self, renderer: &mut Renderer) {
         while let Ok(skin) = self.player_skin_rx.try_recv() {
-            if !self
-                .requested_player_skins
-                .get(&skin.uuid)
-                .is_some_and(|request| request.accepts(&skin))
-            {
-                continue;
-            }
-            match skin.result {
-                Ok(data) => {
+            let uuid = skin.uuid;
+            let generation = skin.generation;
+            let is_local = uuid == self.user.uuid;
+            let result = apply_player_skin_result(
+                &mut self.requested_player_skins,
+                skin,
+                |data| {
+                    if is_local {
+                        renderer.update_local_player_skin(&uuid, data)
+                    } else {
+                        renderer.update_player_entity_skin(&uuid, data)
+                    }
+                },
+                |data| {
                     let base = crate::renderer::pipelines::menu_overlay::extract_face_8x8_with_hat(
                         &data.pixels,
                         data.width,
@@ -1720,18 +2293,33 @@ impl AppCore {
                         true,
                     );
                     if let (Some(base), Some(hat)) = (base, hat) {
-                        self.player_faces.insert(skin.uuid, (base, hat));
+                        self.player_faces.insert(uuid, (base, hat));
                         self.player_faces_dirty = true;
                     }
-                    if skin.uuid == self.user.uuid {
-                        renderer.update_local_player_skin(&skin.uuid, &data);
-                    } else {
-                        renderer.update_player_entity_skin(&skin.uuid, &data);
+                },
+            );
+            match result {
+                PlayerSkinApply::Stale => continue,
+                PlayerSkinApply::FetchFailed => {
+                    tracing::warn!("Player skin fetch failed (generation={generation})");
+                    continue;
+                }
+                PlayerSkinApply::Uploaded => continue,
+                PlayerSkinApply::UploadFailed(error) => match error {
+                    crate::renderer::PlayerSkinUploadError::CapacityFull { current, limit } => {
+                        tracing::warn!(
+                            "Player skin registration capacity full (generation={generation}, current={current}, limit={limit})"
+                        );
                     }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load entity player skin for {}: {e}", skin.uuid)
-                }
+                    crate::renderer::PlayerSkinUploadError::UploadFailed => {
+                        tracing::warn!("Player skin GPU upload failed (generation={generation})")
+                    }
+                    crate::renderer::PlayerSkinUploadError::DescriptorAllocationFailed => {
+                        tracing::warn!(
+                            "Player skin descriptor allocation failed (generation={generation})"
+                        )
+                    }
+                },
             }
         }
     }
@@ -2009,7 +2597,7 @@ impl AppCore {
     }
 
     fn remove_player_skin(&mut self, renderer: &mut Renderer, uuid: &uuid::Uuid) {
-        self.requested_player_skins.remove(uuid);
+        remove_player_skin_request(&mut self.requested_player_skins, uuid);
         let removed = self.player_faces.remove(uuid).is_some();
         if removed {
             self.player_faces_dirty = true;
@@ -2018,6 +2606,7 @@ impl AppCore {
     }
 
     fn reload_live_resource_assets(&mut self, game: &mut GameState, renderer: &mut Renderer) {
+        crate::logging::diagnostic_stage("resource_reload.begin");
         // The shared atlas bakes UVs into chunk vertices, so a live pack swap
         // must retire chunk geometry before repacking the atlas. Recreate the
         // CPU mesher and particle atlas state from the same freshly-reloaded
@@ -2047,6 +2636,7 @@ impl AppCore {
         game.vis_task = None;
         game.vis_valid = false;
         game.pending_load_rescan = true;
+        crate::logging::diagnostic_stage("resource_reload.end");
     }
 
     fn clear_server_ui(&mut self, game: &mut GameState, renderer: &mut Renderer) {
@@ -2081,6 +2671,7 @@ impl AppCore {
     /// `menu.reload_assets` is safe here because the pending local-pack toggle
     /// it stands for is covered by the reload we just did.
     fn reload_pack_assets(&mut self, renderer: &mut Renderer) {
+        crate::logging::diagnostic_stage("pack_assets.begin");
         self.menu.active_packs = self.resource_packs.active_pack_info();
         renderer.reload_assets(&self.data_dirs.game_dir, &self.resource_packs);
         self.audio.reload_assets(&self.resource_packs);
@@ -2089,6 +2680,7 @@ impl AppCore {
             .retain(|_, entry| matches!(entry.content, InlineObjectContent::Head { .. }));
         self.game_dynamic_atlas_keys.clear();
         self.menu.reload_assets = false;
+        crate::logging::diagnostic_stage("pack_assets.end");
     }
 
     /// Apply the resource-pack screen's deferred actions in every app phase.
@@ -2507,7 +3099,7 @@ impl AppCore {
                         .and_then(|vehicle| vehicle.uuid);
                     if let Some(cache_uuid) = cache_uuid {
                         if profile_id.is_some() || textures.is_some() {
-                            self.queue_player_skin_for(cache_uuid, profile_id, textures);
+                            self.queue_player_skin_for(renderer, cache_uuid, profile_id, textures);
                         } else {
                             self.remove_player_skin(renderer, &cache_uuid);
                         }
@@ -3652,11 +4244,11 @@ impl AppCore {
                                 .players
                                 .get(&uuid)
                                 .and_then(|p| p.textures.clone());
-                            self.queue_player_skin(uuid, textures);
+                            self.queue_player_skin(renderer, uuid, textures);
                         }
                     }
                     if !crate::entity::is_living_mob(&entity_type) {
-                        register_nonliving_spawn(
+                        register_nonliving_spawn_event(
                             &mut game.entity_store,
                             id,
                             position,
@@ -3664,12 +4256,10 @@ impl AppCore {
                             y_rot_deg,
                             x_rot_deg,
                             entity_type,
+                            spawn_data,
+                            item_frame_direction,
                         );
                         game.entity_store.set_vehicle_uuid(id, uuid);
-                        game.entity_store.set_vehicle_spawn_data(id, spawn_data);
-                        if let Some(direction) = item_frame_direction {
-                            game.entity_store.set_item_frame_direction(id, direction);
-                        }
                     }
                     if entity_type == azalea_registry::builtin::EntityKind::Item {
                         game.item_entity_store
@@ -4064,48 +4654,37 @@ impl AppCore {
                     count,
                     stack,
                 } => {
-                    let item_name = stack
-                        .as_ref()
-                        .and_then(|stack| {
-                            crate::world::block::registry::BlockRegistry::item_model_name(
-                                &azalea_inventory::ItemStack::Present(stack.clone()),
-                            )
-                        })
-                        .unwrap_or(item_name);
-                    renderer.ensure_item_mesh(&item_name);
-                    game.item_entity_store
-                        .set_item_data(id, item_name, item_id, damage, count, stack);
+                    if let Some(item_name) = apply_entity_item_data(
+                        &game.entity_store,
+                        &mut game.item_entity_store,
+                        id,
+                        item_name,
+                        item_id,
+                        damage,
+                        count,
+                        stack,
+                    ) {
+                        renderer.ensure_item_mesh(&item_name);
+                    }
                 }
-                NetworkEvent::ItemFrameDirection { id, direction } => {
-                    game.entity_store.set_item_frame_direction(id, direction);
-                    if let Some(frame) = game.entity_store.vehicles.get(&id)
-                        && matches!(
-                            frame.kind,
-                            Some(
-                                azalea_registry::builtin::EntityKind::ItemFrame
-                                    | azalea_registry::builtin::EntityKind::GlowItemFrame
-                            )
-                        )
+                event @ NetworkEvent::ItemFrameDirection { id, .. } => {
+                    if apply_item_frame_metadata(&mut game.entity_store, id, &event).is_some()
+                        && let Some(frame) = game.entity_store.vehicles.get(&id)
                     {
                         game.entity_positions.insert(id, frame.position);
                         self.audio.update_entity_sound_position(id, frame.position);
                     }
                 }
-                NetworkEvent::ItemFrameItem { id, item } => {
-                    if let azalea_inventory::ItemStack::Present(data) = &item
-                        && !data.is_empty()
+                event @ NetworkEvent::ItemFrameItem { id, .. } => {
+                    if let Some(mesh_name) =
+                        apply_item_frame_metadata(&mut game.entity_store, id, &event)
+                        && !mesh_name.is_empty()
                     {
-                        let name =
-                            crate::world::block::registry::BlockRegistry::item_model_name(&item)
-                                .unwrap_or_else(|| {
-                                    crate::player::inventory::item_resource_name(data.kind)
-                                });
-                        renderer.ensure_item_mesh(&name);
+                        renderer.ensure_item_mesh(&mesh_name);
                     }
-                    game.entity_store.set_item_frame_item(id, item);
                 }
-                NetworkEvent::ItemFrameRotation { id, rotation } => {
-                    game.entity_store.set_item_frame_rotation(id, rotation);
+                event @ NetworkEvent::ItemFrameRotation { id, .. } => {
+                    apply_item_frame_metadata(&mut game.entity_store, id, &event);
                 }
                 NetworkEvent::TextDisplayText { id, text } => {
                     game.entity_store.set_text_display_text(id, text);
@@ -4530,11 +5109,11 @@ impl AppCore {
                 NetworkEvent::PlayerInfoUpdate { actions, entries } => {
                     if actions.add_player {
                         for entry in &entries {
-                            self.queue_player_skin(entry.uuid, entry.textures.clone());
+                            self.queue_player_skin(renderer, entry.uuid, entry.textures.clone());
                         }
                     } else {
                         for entry in entries.iter().filter(|e| e.textures.is_some()) {
-                            self.queue_player_skin(entry.uuid, entry.textures.clone());
+                            self.queue_player_skin(renderer, entry.uuid, entry.textures.clone());
                         }
                     }
                     game.tab_list.apply_update(&actions, &entries);
@@ -4589,7 +5168,9 @@ impl AppCore {
                     }
                 }
                 Ok(Ok(path)) => {
+                    crate::logging::diagnostic_stage("server_pack.apply.begin");
                     self.resource_packs.apply_server_pack(id, &hash, path);
+                    crate::logging::diagnostic_stage("server_pack.apply.complete");
                     // Vanilla acknowledges SuccessfullyLoaded only after the
                     // resources have been applied. Rebuild the live renderer
                     // (including shared-atlas chunk geometry) before replying.
@@ -5465,8 +6046,9 @@ mod tests {
 
     use super::{
         CursorOp, DeathRoute, DynamicAtlasSyncStats, HeadProfile, PendingPackDownload, Velocity,
-        accepted_player_chat_tag, add_explosion_knockback, apply_passengers,
-        apply_vehicle_teleport, chest_open_event, cursor_step, death_route, entity_look_direction,
+        accepted_player_chat_tag, add_explosion_knockback, apply_entity_item_data,
+        apply_item_frame_metadata, apply_passengers, apply_vehicle_teleport, chest_open_event,
+        clear_world_entities, cursor_step, death_route, entity_look_direction,
         explosion_sound_pitch, load_network_chunk, local_player_motion, pack_download_action,
         player_command_packet, player_input_state, player_ride_state, player_rotation_packet,
         post_teleport_echo, register_nonliving_spawn, reply_to_play_ping, resolve_entity_teleport,
@@ -5481,6 +6063,274 @@ mod tests {
     use crate::player::valid_player_name;
     use crate::resource_pack::ResourcePackManager;
     use crate::ui::chat::ChatMessageTag;
+
+    #[test]
+    fn frame_metadata_and_old_index_eight_item_event_are_kind_guarded() {
+        use azalea_core::direction::Direction;
+        use azalea_entity::EntityDataValue as V;
+        use azalea_inventory::{ItemStack, ItemStackData};
+        use azalea_registry::Registry;
+        use azalea_registry::builtin::{EntityKind, ItemKind};
+        use glam::DVec3;
+
+        use crate::entity::components::Position;
+        use crate::net::NetworkEvent as E;
+
+        let protocol = 770;
+        let stack = ItemStack::Present(ItemStackData::new(ItemKind::Stone, 1));
+        let mut entities = crate::entity::EntityStore::new();
+        let mut items = crate::entity::ItemEntityStore::new();
+        for (id, kind) in [
+            (1, EntityKind::ItemFrame),
+            (2, EntityKind::GlowItemFrame),
+            (3, EntityKind::Item),
+        ] {
+            register_nonliving_spawn(
+                &mut entities,
+                id,
+                Position::default(),
+                DVec3::ZERO,
+                0.0,
+                0.0,
+                kind,
+            );
+            items.spawn_item(id, uuid::Uuid::nil(), Position::default(), DVec3::ZERO);
+        }
+        let events = crate::net::handler::entity_item_metadata_events(
+            protocol,
+            1,
+            8,
+            &V::ItemStack(stack.clone()),
+        );
+        assert_eq!(
+            events.len(),
+            2,
+            "legacy index eight classifies the same stack twice"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, E::ItemFrameItem { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, E::EntityItemData { .. }))
+        );
+
+        let apply = |entities: &mut crate::entity::EntityStore,
+                     items: &mut crate::entity::ItemEntityStore,
+                     events: &[E]| {
+            for event in events {
+                match event {
+                    E::ItemFrameItem { id, .. }
+                    | E::ItemFrameDirection { id, .. }
+                    | E::ItemFrameRotation { id, .. } => {
+                        let _ = apply_item_frame_metadata(entities, *id, event);
+                    }
+                    E::EntityItemData {
+                        id,
+                        item_name,
+                        item_id,
+                        damage,
+                        count,
+                        stack,
+                    } => {
+                        let _ = apply_entity_item_data(
+                            entities,
+                            items,
+                            *id,
+                            item_name.clone(),
+                            *item_id,
+                            *damage,
+                            *count,
+                            stack.clone(),
+                        );
+                    }
+                    _ => panic!("unexpected classifier event"),
+                }
+            }
+        };
+        for id in [1, 2, 3] {
+            let events = crate::net::handler::entity_item_metadata_events(
+                protocol,
+                id,
+                8,
+                &V::ItemStack(stack.clone()),
+            );
+            apply(&mut entities, &mut items, &events);
+            let is_frame = id != 3;
+            assert_eq!(entities.vehicles[&id].item_frame_item == stack, is_frame);
+            assert!(items.position(id).is_some());
+            let visible = items.visible_items(DVec3::ZERO, 1.0);
+            assert_eq!(
+                visible
+                    .iter()
+                    .filter(|item| item.item_id == ItemKind::Stone.to_u32())
+                    .count(),
+                usize::from(!is_frame)
+            );
+        }
+
+        let direction = E::ItemFrameDirection {
+            id: 2,
+            direction: Direction::North,
+        };
+        assert!(apply_item_frame_metadata(&mut entities, 2, &direction).is_some());
+        assert_eq!(
+            entities.vehicles[&2].item_frame_direction,
+            Some(Direction::North)
+        );
+        let rotation = E::ItemFrameRotation { id: 2, rotation: 3 };
+        assert!(apply_item_frame_metadata(&mut entities, 2, &rotation).is_some());
+        assert_eq!(entities.vehicles[&2].item_frame_rotation, 3);
+        assert!(apply_item_frame_metadata(&mut entities, 99, &direction).is_none());
+        assert!(
+            apply_entity_item_data(&entities, &mut items, 99, "stone".into(), 1, 0, 1, None)
+                .is_none()
+        );
+
+        // Real remove lifecycle: remove from both stores, then reuse the id as an Item.
+        entities.remove_entity(1);
+        items.remove(&[1]);
+        assert!(
+            apply_item_frame_metadata(
+                &mut entities,
+                1,
+                &E::ItemFrameItem {
+                    id: 1,
+                    item: stack.clone()
+                }
+            )
+            .is_none()
+        );
+        register_nonliving_spawn(
+            &mut entities,
+            1,
+            Position::default(),
+            DVec3::ZERO,
+            0.0,
+            0.0,
+            EntityKind::Item,
+        );
+        items.spawn_item(1, uuid::Uuid::nil(), Position::default(), DVec3::ZERO);
+        apply(
+            &mut entities,
+            &mut items,
+            &crate::net::handler::entity_item_metadata_events(
+                protocol,
+                1,
+                8,
+                &V::ItemStack(stack.clone()),
+            ),
+        );
+        assert!(entities.vehicles[&1].item_frame_item == ItemStack::Empty);
+        assert!(items.position(1).is_some());
+        assert_eq!(
+            items
+                .visible_items(DVec3::ZERO, 1.0)
+                .iter()
+                .filter(|item| item.item_id == ItemKind::Stone.to_u32())
+                .count(),
+            2
+        );
+
+        // Same world-reset helper used by production reinitializes both stores.
+        let mut positions = std::collections::HashMap::from([(1, Position::default())]);
+        let mut silent = std::collections::HashSet::from([1]);
+        clear_world_entities(&mut entities, &mut items, &mut positions, &mut silent);
+        assert!(entities.vehicles.is_empty());
+        assert!(items.visible_items(DVec3::ZERO, 1.0).is_empty());
+        assert!(positions.is_empty() && silent.is_empty());
+        let reset_frame = E::ItemFrameItem {
+            id: 1,
+            item: stack.clone(),
+        };
+        let reset_item = E::EntityItemData {
+            id: 1,
+            item_name: "minecraft:stone".into(),
+            item_id: ItemKind::Stone.to_u32(),
+            damage: 0,
+            count: 1,
+            stack: Some(ItemStackData::new(ItemKind::Stone, 1)),
+        };
+        assert!(apply_item_frame_metadata(&mut entities, 1, &reset_frame).is_none());
+        assert!(
+            apply_entity_item_data(&entities, &mut items, 1, "stone".into(), 1, 0, 1, None)
+                .is_none()
+        );
+        assert!(apply_item_frame_metadata(&mut entities, 4, &reset_item).is_none());
+        assert!(
+            apply_entity_item_data(&entities, &mut items, 4, "stone".into(), 1, 0, 1, None)
+                .is_none()
+        );
+        assert!(items.visible_items(DVec3::ZERO, 1.0).is_empty());
+    }
+
+    #[test]
+    fn entity_item_metadata_only_updates_real_item_entities() {
+        use azalea_registry::builtin::EntityKind;
+        use glam::DVec3;
+
+        use crate::entity::components::Position;
+
+        let mut entities = crate::entity::EntityStore::new();
+        register_nonliving_spawn(
+            &mut entities,
+            1,
+            Position::default(),
+            DVec3::ZERO,
+            0.0,
+            0.0,
+            EntityKind::ItemFrame,
+        );
+        register_nonliving_spawn(
+            &mut entities,
+            2,
+            Position::default(),
+            DVec3::ZERO,
+            0.0,
+            0.0,
+            EntityKind::Item,
+        );
+        let mut items = crate::entity::ItemEntityStore::new();
+        items.spawn_item(2, uuid::Uuid::nil(), Position::default(), DVec3::ZERO);
+
+        assert!(
+            apply_entity_item_data(
+                &entities,
+                &mut items,
+                1,
+                "minecraft:map".into(),
+                17,
+                0,
+                1,
+                None,
+            )
+            .is_none()
+        );
+        assert!(items.visible_items(DVec3::ZERO, 1.0).is_empty());
+
+        assert_eq!(
+            apply_entity_item_data(
+                &entities,
+                &mut items,
+                2,
+                "minecraft:stone".into(),
+                1,
+                0,
+                1,
+                None,
+            )
+            .as_deref(),
+            Some("minecraft:stone")
+        );
+        assert_eq!(items.visible_items(DVec3::ZERO, 1.0)[0].item_id, 1);
+        assert_eq!(
+            items.visible_items(DVec3::ZERO, 1.0)[0].item_name,
+            "minecraft:stone"
+        );
+    }
 
     #[test]
     fn play_ping_reply_preserves_protocol_id_bits() {

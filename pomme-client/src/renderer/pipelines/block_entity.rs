@@ -46,6 +46,7 @@ pub struct BlockEntityRenderInfo {
     /// (progress in [0,1], positive hit) from vanilla pot block event 1.
     pub pot_wobble: Option<(f32, bool)>,
     pub kind: BlockEntityKind,
+    pub end_portal: Option<super::end_portal::EndPortalDraw>,
     /// Copper golem statue body-layer index (standing, running, sitting, star).
     pub statue_pose: Option<u8>,
     /// Vanilla BannerFlagModel phase in ticks, modulo 100.
@@ -670,6 +671,7 @@ pub(crate) fn worn_skull_render_info(
         decorated_pot_sherds: crate::world::block_entity::default_pot_sherds(),
         pot_wobble: None,
         kind: BlockEntityKind::Skull,
+        end_portal: None,
         statue_pose: None,
         banner_phase: 0.0,
         bell_partial: 0.0,
@@ -770,8 +772,8 @@ fn skull_wall_model_matrix(block_center: glam::Vec3, yaw: f32) -> glam::Mat4 {
     // SkullBlockRenderer.createWallTransformation: block offset, opposite-facing
     // yaw, then the raw skull model's vanilla mirror.
     let facing = glam::Mat4::from_rotation_y((180.0 - yaw).to_radians());
-    let offset = glam::Vec3::new(0.0, 0.25, 0.0)
-        + facing.transform_vector3(glam::Vec3::new(0.0, 0.0, 0.25));
+    let offset =
+        glam::Vec3::new(0.0, 0.25, 0.0) + facing.transform_vector3(glam::Vec3::new(0.0, 0.0, 0.25));
     glam::Mat4::from_translation(block_center + offset)
         * facing
         * glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0))
@@ -1613,9 +1615,7 @@ impl BlockEntityPipeline {
                             * glam::Mat4::from_rotation_y((180.0f32 - info.yaw).to_radians())
                             * glam::Mat4::from_scale(glam::Vec3::new(1.0, -1.0, -1.0))
                     }
-                    ModelConvention::BlockYUp
-                        if info.kind == BlockEntityKind::EnchantingTable =>
-                    {
+                    ModelConvention::BlockYUp if info.kind == BlockEntityKind::EnchantingTable => {
                         let (_, _, time, rotation) = info.book.unwrap_or((0.0, 0.0, 0.0, 0.0));
                         glam::Mat4::from_translation(
                             block_center
@@ -2469,6 +2469,7 @@ mod sign_text_tests {
             decorated_pot_sherds: crate::world::block_entity::default_pot_sherds(),
             pot_wobble: None,
             kind: BlockEntityKind::Chest,
+            end_portal: None,
             statue_pose: None,
             banner_phase: 0.0,
             bell_partial: 0.0,
@@ -3028,13 +3029,41 @@ mod sign_text_tests {
     fn worn_skulls_use_dedicated_models_textures_profiles_and_animation() {
         let _protocol = crate::world::block::test_protocol_guard();
         let cases = [
-            ("skeleton_skull", 0, "minecraft/textures/entity/skeleton/skeleton.png"),
-            ("wither_skeleton_skull", 2, "minecraft/textures/entity/skeleton/wither_skeleton.png"),
-            ("zombie_head", 4, "minecraft/textures/entity/zombie/zombie.png"),
-            ("creeper_head", 6, "minecraft/textures/entity/creeper/creeper.png"),
-            ("player_head", 8, "minecraft/textures/entity/player/slim/steve.png"),
-            ("dragon_head", 10, "minecraft/textures/entity/enderdragon/dragon.png"),
-            ("piglin_head", 12, "minecraft/textures/entity/piglin/piglin.png"),
+            (
+                "skeleton_skull",
+                0,
+                "minecraft/textures/entity/skeleton/skeleton.png",
+            ),
+            (
+                "wither_skeleton_skull",
+                2,
+                "minecraft/textures/entity/skeleton/wither_skeleton.png",
+            ),
+            (
+                "zombie_head",
+                4,
+                "minecraft/textures/entity/zombie/zombie.png",
+            ),
+            (
+                "creeper_head",
+                6,
+                "minecraft/textures/entity/creeper/creeper.png",
+            ),
+            (
+                "player_head",
+                8,
+                "minecraft/textures/entity/player/slim/steve.png",
+            ),
+            (
+                "dragon_head",
+                10,
+                "minecraft/textures/entity/enderdragon/dragon.png",
+            ),
+            (
+                "piglin_head",
+                12,
+                "minecraft/textures/entity/piglin/piglin.png",
+            ),
         ];
         let matrix = glam::Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0))
             * glam::Mat4::from_rotation_x(0.37)
@@ -3044,18 +3073,26 @@ mod sign_text_tests {
         let zombie_inner = &models[2].vertices[..36];
         let zombie_hat = &models[2].vertices[36..];
         let bounds = |vertices: &[crate::renderer::chunk::mesher::ChunkVertex]| {
-            vertices.iter().fold([f32::INFINITY, f32::NEG_INFINITY], |mut b, v| {
-                b[0] = b[0].min(v.position[0]);
-                b[1] = b[1].max(v.position[0]);
-                b
-            })
+            vertices
+                .iter()
+                .fold([f32::INFINITY, f32::NEG_INFINITY], |mut b, v| {
+                    b[0] = b[0].min(v.position[0]);
+                    b[1] = b[1].max(v.position[0]);
+                    b
+                })
         };
         assert_eq!(bounds(zombie_inner), [-0.25, 0.25]);
         assert_eq!(bounds(zombie_hat), [-0.265625, 0.265625]);
-        assert!(zombie_hat.iter().any(|v| v.tex_coords != zombie_inner[0].tex_coords));
+        assert!(
+            zombie_hat
+                .iter()
+                .any(|v| v.tex_coords != zombie_inner[0].tex_coords)
+        );
         for (name, variant, texture) in cases {
             let profile = (name == "player_head").then_some(PlayerHeadProfileSource::Default);
-            let info = worn_skull_render_info(name, matrix, 2.5, profile.clone(), BlockPos::new(0, 0, 0)).unwrap();
+            let info =
+                worn_skull_render_info(name, matrix, 2.5, profile.clone(), BlockPos::new(0, 0, 0))
+                    .unwrap();
             assert_eq!(info.kind, BlockEntityKind::Skull);
             assert_eq!(info.variant, variant);
             assert_eq!(info.root_matrix, Some(matrix));
@@ -3070,16 +3107,24 @@ mod sign_text_tests {
             let vertex = glam::Vec3::from_array(model.vertices[0].position);
             let actual_final_vertex = (draw_root * part).transform_point3(vertex);
             let expected_final_vertex = matrix.transform_point3(part.transform_point3(vertex));
-            assert!(actual_final_vertex.abs_diff_eq(expected_final_vertex, 1e-6), "{name}");
+            assert!(
+                actual_final_vertex.abs_diff_eq(expected_final_vertex, 1e-6),
+                "{name}"
+            );
         }
-        assert!(worn_skull_render_info("stone", matrix, 0.0, None, BlockPos::new(0, 0, 0)).is_none());
+        assert!(
+            worn_skull_render_info("stone", matrix, 0.0, None, BlockPos::new(0, 0, 0)).is_none()
+        );
 
         // Execute the actual attachment × part transform × baked-vertex path.
         let raw_head = &models[0];
         assert_eq!(raw_head.convention, super::ModelConvention::SkullRaw);
         assert_eq!(raw_head.parts[0].offset, glam::Vec3::ZERO);
         let raw_bounds = raw_head.vertices.iter().fold(
-            [glam::Vec3::splat(f32::INFINITY), glam::Vec3::splat(f32::NEG_INFINITY)],
+            [
+                glam::Vec3::splat(f32::INFINITY),
+                glam::Vec3::splat(f32::NEG_INFINITY),
+            ],
             |[min, max], vertex| {
                 let p = glam::Vec3::from_array(vertex.position);
                 [min.min(p), max.max(p)]
@@ -3097,7 +3142,8 @@ mod sign_text_tests {
         let origin = (root * part).transform_point3(glam::Vec3::ZERO);
         for axis in [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z] {
             let actual_basis = (root * part).transform_point3(axis) - origin;
-            let expected_basis = root.transform_point3(axis) - root.transform_point3(glam::Vec3::ZERO);
+            let expected_basis =
+                root.transform_point3(axis) - root.transform_point3(glam::Vec3::ZERO);
             assert!(actual_basis.abs_diff_eq(expected_basis, 1e-6));
         }
         assert_eq!(part, glam::Mat4::IDENTITY);
@@ -3113,20 +3159,33 @@ mod sign_text_tests {
         let dragon_part = dragon.compute_part_transforms(&PartAnim::default())[0];
         let dragon_expected = glam::Mat4::from_translation(dragon.parts[0].offset / 16.0)
             * glam::Mat4::from_scale(glam::Vec3::splat(0.75));
-        assert!((root * dragon_part).transform_point3(dragon_vertex)
-            .abs_diff_eq((root * dragon_expected).transform_point3(dragon_vertex), 1e-6));
+        assert!(
+            (root * dragon_part)
+                .transform_point3(dragon_vertex)
+                .abs_diff_eq(
+                    (root * dragon_expected).transform_point3(dragon_vertex),
+                    1e-6
+                )
+        );
         let piglin = &models[6];
         let piglin_vertex = glam::Vec3::from_array(piglin.vertices[0].position);
         assert_eq!(piglin.convention, super::ModelConvention::SkullRaw);
         assert!(piglin_vertex.y < 0.0);
         let piglin_part = piglin.compute_part_transforms(&PartAnim::default())[0];
-        assert!((root * piglin_part).transform_point3(piglin_vertex)
-            .abs_diff_eq(root.transform_point3(piglin_vertex), 1e-6));
+        assert!(
+            (root * piglin_part)
+                .transform_point3(piglin_vertex)
+                .abs_diff_eq(root.transform_point3(piglin_vertex), 1e-6)
+        );
 
         let phase = 2.5;
         let dragon = skull_part_animation(&models[5], phase);
         assert_eq!(dragon.rotation[0].0, 1); // jaw
-        assert!((dragon.rotation[0].1.x - ((phase * std::f32::consts::PI * 0.2).sin() + 1.0) * 0.2).abs() < 1e-6);
+        assert!(
+            (dragon.rotation[0].1.x - ((phase * std::f32::consts::PI * 0.2).sin() + 1.0) * 0.2)
+                .abs()
+                < 1e-6
+        );
         let piglin = skull_part_animation(&models[6], phase);
         assert_eq!(piglin.rotation.len(), 2);
         assert_eq!(models[6].parts[piglin.rotation[0].0].name, "left_ear");
@@ -3245,10 +3304,34 @@ mod sign_text_tests {
         // Independent SkullBlockRenderer.createWallTransformation oracles:
         // translation=(.5-stepX*.25,.25,.5-stepZ*.25), yaw=-opposite.yRot.
         for (yaw, origin, x, y, z) in [
-            (0.0, Vec3::new(0.0, 0.25, -0.25), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 0.0, -1.0)), // south
-            (90.0, Vec3::new(0.25, 0.25, 0.0), Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, -1.0, 0.0), Vec3::new(1.0, 0.0, 0.0)), // west
-            (180.0, Vec3::new(0.0, 0.25, 0.25), Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)), // north
-            (270.0, Vec3::new(-0.25, 0.25, 0.0), Vec3::new(0.0, 0.0, -1.0), Vec3::new(0.0, -1.0, 0.0), Vec3::new(-1.0, 0.0, 0.0)), // east
+            (
+                0.0,
+                Vec3::new(0.0, 0.25, -0.25),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(0.0, 0.0, -1.0),
+            ), // south
+            (
+                90.0,
+                Vec3::new(0.25, 0.25, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+            ), // west
+            (
+                180.0,
+                Vec3::new(0.0, 0.25, 0.25),
+                Vec3::new(-1.0, 0.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+            ), // north
+            (
+                270.0,
+                Vec3::new(-0.25, 0.25, 0.0),
+                Vec3::new(0.0, 0.0, -1.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(-1.0, 0.0, 0.0),
+            ), // east
         ] {
             let mut info = chest(0, 0);
             info.kind = BlockEntityKind::Skull;

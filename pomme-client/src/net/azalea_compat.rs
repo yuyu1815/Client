@@ -550,6 +550,614 @@ fn translate_decode_and_remap(protocol: i32, old: Vec<u8>) -> ClientboundGamePac
     packet
 }
 
+#[test]
+fn legacy_map_item_data_763_765_translates_through_native_decode_and_map_store() {
+    use crate::world::maps::{MapDecorationAsset, MapStore};
+
+    let fixture = |protocol: i32, body: &[u8]| {
+        let mut frame = Vec::new();
+        wire::write_varint(
+            &mut frame,
+            old_id(protocol, Direction::Clientbound, "map_item_data"),
+        );
+        frame.extend_from_slice(body);
+        frame
+    };
+    let decode = |protocol, body: &[u8]| translate_and_decode(protocol, fixture(protocol, body));
+
+    // Named JSON component, map id 17, and known type 1 (frame).
+    let ClientboundGamePacket::MapItemData(p) = decode(
+        763,
+        &[
+            0x11, 0, 0, 1, 1, 1, 16, 32, 3, 1, 12, b'{', b'"', b't', b'e', b'x', b't', b'"', b':',
+            b'"', b'A', b'"', b'}', 0,
+        ],
+    ) else {
+        panic!("expected legacy MapItemData");
+    };
+    assert_eq!((p.map_id, p.scale, p.locked), (17, 0, false));
+    let decorations = p.decorations.as_ref().expect("Some decorations");
+    assert_eq!(decorations.len(), 1);
+    assert_eq!(decorations[0].decoration_type as u32, 1);
+    assert_eq!(
+        (decorations[0].x, decorations[0].y, decorations[0].rot),
+        (16, 32, 3)
+    );
+    assert!(decorations[0].name.is_some());
+    assert!(p.color_patch.0.is_none());
+
+    // 764 preserves Some(empty) and the no-patch sentinel independently.
+    let ClientboundGamePacket::MapItemData(p) = decode(764, &[0x11, 2, 1, 1, 0, 0]) else {
+        panic!("expected 764 map data");
+    };
+    assert_eq!((p.map_id, p.scale, p.locked), (17, 2, true));
+    assert_eq!(p.decorations.as_ref().unwrap().len(), 0);
+    assert!(p.color_patch.0.is_none());
+    assert!(matches!(
+        crate::net::handler::map_item_data_event(&ClientboundGamePacket::MapItemData(p)),
+        Some(crate::net::NetworkEvent::MapItemData { decorations: Some(items), patch: None, .. }) if items.is_empty()
+    ));
+    let ClientboundGamePacket::MapItemData(p) = decode(763, &[0x11, 0, 0, 0, 0]) else {
+        panic!("expected map data with decorations absent");
+    };
+    assert!(p.decorations.is_none());
+    let ClientboundGamePacket::MapItemData(p) =
+        decode(763, &[0x11, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0])
+    else {
+        panic!("expected unnamed decoration");
+    };
+    assert!(p.decorations.as_ref().unwrap()[0].name.is_none());
+    let mut signed_id = Vec::new();
+    wire::write_varint(&mut signed_id, u32::MAX);
+    signed_id.extend_from_slice(&[0, 0, 0, 0]);
+    let ClientboundGamePacket::MapItemData(p) = decode(763, &signed_id) else {
+        panic!("expected signed map id fixture");
+    };
+    assert_eq!(p.map_id, u32::MAX);
+
+    // 765 anonymous NBT name and 2x2 patch, then exercise actual MapStore
+    // bounds/application.
+    let mut body = vec![0x11, 4, 0, 1, 1, 1, 0, 0, 2, 1];
+    let mut name = Vec::new();
+    simdnbt::owned::NbtTag::Compound({
+        let mut compound = simdnbt::owned::NbtCompound::new();
+        compound.insert("text", simdnbt::owned::NbtTag::String("NBT".into()));
+        compound
+    })
+    .azalea_write(&mut name)
+    .unwrap();
+    body.extend(name);
+    body.extend_from_slice(&[2, 2, 0, 0, 4, 1, 2, 3, 4]);
+    let ClientboundGamePacket::MapItemData(p) = decode(765, &body) else {
+        panic!("expected 765 map data");
+    };
+    assert_eq!((p.map_id, p.scale, p.locked), (17, 4, false));
+    assert!(p.decorations.as_ref().unwrap()[0].name.is_some());
+    let patch = p.color_patch.0.as_ref().unwrap();
+    assert_eq!(
+        (patch.width, patch.height, patch.start_x, patch.start_y),
+        (2, 2, 0, 0)
+    );
+    assert_eq!(patch.map_colors, [1, 2, 3, 4]);
+
+    let event = crate::net::handler::map_item_data_event(&ClientboundGamePacket::MapItemData(p))
+        .expect("map event conversion");
+    let crate::net::NetworkEvent::MapItemData {
+        map_id,
+        scale,
+        locked,
+        patch,
+        decorations,
+    } = event
+    else {
+        panic!("wrong map event");
+    };
+    assert_eq!(
+        decorations.as_ref().unwrap()[0].asset,
+        MapDecorationAsset::Frame
+    );
+    let mut maps = MapStore::default();
+    maps.apply(map_id, scale, locked, patch, decorations);
+    assert_eq!(&maps.0[&17].colors[..2], &[1, 2]);
+    assert_eq!(&maps.0[&17].colors[128..130], &[3, 4]);
+
+    // Unknown icon ids are consumed/omitted without aliasing; the valid patch
+    // survives.
+    let unknown = [0x11, 0, 0, 1, 1, 99, 0, 0, 0, 0, 1, 1, 0, 0, 1, 7];
+    let ClientboundGamePacket::MapItemData(p) = decode(763, &unknown) else {
+        panic!("expected unknown-icon map data");
+    };
+    assert!(p.decorations.as_ref().unwrap().is_empty());
+    assert_eq!(p.color_patch.0.as_ref().unwrap().map_colors, [7]);
+    for (protocol, body) in [
+        (763, &[0x11, 0, 0, 1, 0xff, 0xff, 0xff, 0xff, 0x0f, 0][..]), // negative list count
+        (763, &[0x11, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, b'x', 0][..]),    // invalid JSON
+        (763, &[0x11, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0x7f][..]),          // invalid JSON length
+        (764, &[0x11, 0, 0, 0, 1, 1, 0, 0, 0, 0x7f][..]),             // invalid patch length
+    ] {
+        assert!(
+            translation_for(protocol)
+                .translate_game_frame(fixture(protocol, body).into_boxed_slice())
+                .is_none()
+        );
+    }
+    for protocol in [763, 764, 765] {
+        let frame = fixture(protocol, &[0x11, 0, 0, 0, 0]);
+        for end in 0..frame.len() {
+            assert!(
+                translation_for(protocol)
+                    .translate_game_frame(frame[..end].to_vec().into_boxed_slice())
+                    .is_none(),
+                "accepted truncation at {end} for {protocol}"
+            );
+        }
+    }
+
+    // 766+ stays out of the old decoder and native 776 bytes remain identical.
+    let mut native = Vec::new();
+    wire::write_varint(
+        &mut native,
+        table_id(Phase::Game, Direction::Clientbound, "map_item_data"),
+    );
+    native.extend_from_slice(&[0x11, 0, 0, 0, 0]);
+    assert!(crate::net::translate::Translation::for_protocol(776).is_none());
+    assert!(matches!(
+        azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut std::io::Cursor::new(&native)
+        ),
+        Ok(ClientboundGamePacket::MapItemData(_))
+    ));
+
+    for protocol in [763, 764] {
+        let mut other = Vec::new();
+        wire::write_varint(
+            &mut other,
+            old_id(protocol, Direction::Clientbound, "server_data"),
+        );
+        assert!(
+            translation_for(protocol)
+                .translate_game_frame(other.into_boxed_slice())
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn legacy_map_item_data_763_765_bounds_nbt_lists_and_json_modified_utf8_names() {
+    let fixture = |protocol: i32, body: &[u8]| {
+        let mut frame = Vec::new();
+        wire::write_varint(
+            &mut frame,
+            old_id(protocol, Direction::Clientbound, "map_item_data"),
+        );
+        frame.extend_from_slice(body);
+        frame
+    };
+    let json_body = |text: String| {
+        let mut body = vec![17, 0, 0, 1, 1, 1, 1, 2, 3, 1];
+        let json = serde_json::to_vec(&serde_json::json!({"text": text})).unwrap();
+        wire::write_varint(&mut body, json.len() as u32);
+        body.extend(json);
+        body.push(0); // no patch
+        body
+    };
+
+    // Unknown decorations still need their optional name fully skipped. This
+    // End-element list with a huge positive count must reject in bounded time.
+    let mut malicious = vec![17, 0, 0, 1, 1, 99, 0, 0, 0, 1];
+    malicious.extend_from_slice(&[10, 0, 0, 9, 0, 1, b'l', 0]);
+    malicious.extend_from_slice(&i32::MAX.to_be_bytes());
+    assert!(translation_for(765)
+        .translate_game_frame(fixture(765, &malicious).into_boxed_slice())
+        .is_none());
+    for (elem, count, trailing) in [
+        (0u8, -1i32, &[][..]), // negative
+        (13, 0, &[][..]), // invalid element tag
+        (1, 2, &[7][..]), // count exceeds remaining data
+    ] {
+        let mut nbt = vec![10, 9, 0, 1, b'l', elem];
+        nbt.extend_from_slice(&count.to_be_bytes());
+        nbt.extend_from_slice(trailing);
+        let mut body = vec![17, 0, 0, 1, 1, 99, 0, 0, 0, 1];
+        body.extend(nbt);
+        body.push(0); // no patch
+        assert!(translation_for(765)
+            .translate_game_frame(fixture(765, &body).into_boxed_slice())
+            .is_none());
+    }
+
+    // The exact u16 modified-UTF-8 boundary survives a full translation and
+    // Azalea decode; one byte over is rejected before simdnbt can truncate.
+    for (len, accepted) in [(65_535, true), (65_536, false)] {
+        let frame = fixture(763, &json_body("a".repeat(len)));
+        let translated = translation_for(763).translate_game_frame(frame.into_boxed_slice());
+        assert_eq!(translated.is_some(), accepted, "ASCII length {len}");
+        if let Some(translated) = translated {
+            let mut cursor = std::io::Cursor::new(&translated[..]);
+            let ClientboundGamePacket::MapItemData(packet) =
+                azalea_protocol::read::deserialize_packet(&mut cursor).unwrap()
+            else {
+                panic!("expected map data");
+            };
+            assert_eq!(cursor.position() as usize, translated.len());
+            let decorations = packet.decorations.unwrap();
+            let name = decorations[0].name.as_ref().unwrap();
+            assert!(name.to_string().contains(&"a".repeat(len)));
+        }
+    }
+
+    // Verify source-known domains and native semantic IDs through the actual
+    // event asset mapping. 763 knows 0..=26; 764/765 know 0..=33.
+    for (protocol, source_max) in [(763, 26), (764, 33), (765, 33)] {
+        let mut body = vec![17, 0, 0, 1];
+        wire::write_varint(&mut body, source_max + 1);
+        for source_id in 0..=source_max {
+            wire::write_varint(&mut body, source_id);
+            body.extend_from_slice(&[0, 0, 0, 0]); // coords and no name
+        }
+        body.push(0); // no patch
+        let translated = translation_for(protocol)
+            .translate_game_frame(fixture(protocol, &body).into_boxed_slice())
+            .expect("well-formed source icons");
+        let mut cursor = std::io::Cursor::new(&translated[..]);
+        let packet: ClientboundGamePacket =
+            azalea_protocol::read::deserialize_packet(&mut cursor).unwrap();
+        assert_eq!(cursor.position() as usize, translated.len());
+        let Some(crate::net::NetworkEvent::MapItemData {
+            decorations: Some(event_decorations),
+            ..
+        }) = crate::net::handler::map_item_data_event(&packet)
+        else {
+            panic!("map event decorations");
+        };
+        assert_eq!(event_decorations.len(), source_max as usize + 1, "protocol {protocol}");
+        for (id, decoration) in event_decorations.iter().enumerate() {
+            assert_eq!(
+                decoration.asset,
+                crate::world::maps::MapDecorationAsset::from_registry_id(id as u32),
+                "event asset for protocol {protocol}, source id {id}"
+            );
+        }
+        let ClientboundGamePacket::MapItemData(packet) = packet else {
+            panic!("map item data");
+        };
+        let decorations = packet.decorations.unwrap();
+        assert_eq!(decorations.len(), source_max as usize + 1, "protocol {protocol}");
+        for (id, decoration) in decorations.iter().enumerate() {
+            assert_eq!(decoration.decoration_type as u32, id as u32);
+            assert_eq!(
+                crate::world::maps::MapDecorationAsset::from_registry_id(
+                    decoration.decoration_type as u32
+                ),
+                crate::world::maps::MapDecorationAsset::from_registry_id(id as u32),
+                "protocol {protocol}, source id {id}"
+            );
+        }
+
+        // IDs beyond each protocol's documented domain never alias to native
+        // icon IDs; dropping those records must leave the map patch intact.
+        let mut unknown_body = vec![17, 0, 0, 1];
+        wire::write_varint(&mut unknown_body, 2);
+        for source_id in [source_max + 1, 99] {
+            wire::write_varint(&mut unknown_body, source_id);
+            unknown_body.extend_from_slice(&[0, 0, 0, 0]);
+        }
+        unknown_body.extend_from_slice(&[1, 1, 0, 0, 1, 7]);
+        let translated = translation_for(protocol)
+            .translate_game_frame(fixture(protocol, &unknown_body).into_boxed_slice())
+            .expect("unknown icon records can be skipped safely");
+        let mut cursor = std::io::Cursor::new(&translated[..]);
+        let ClientboundGamePacket::MapItemData(packet) =
+            azalea_protocol::read::deserialize_packet(&mut cursor).unwrap()
+        else {
+            panic!("map item data");
+        };
+        assert_eq!(cursor.position() as usize, translated.len());
+        assert!(packet.decorations.unwrap().is_empty(), "protocol {protocol}");
+        assert_eq!(packet.color_patch.0.unwrap().map_colors, [7]);
+    }
+}
+
+#[test]
+fn legacy_map_item_data_763_764_modified_utf8_boundaries_reach_store() {
+    use crate::world::maps::{MapDecorationAsset, MapStore};
+
+    let fixture = |protocol: i32, name: serde_json::Value| {
+        let mut frame = Vec::new();
+        wire::write_varint(
+            &mut frame,
+            old_id(protocol, Direction::Clientbound, "map_item_data"),
+        );
+        let mut body = vec![17, 0, 0, 1, 1, 1, 16, 32, 3, 1];
+        let json = serde_json::to_vec(&name).unwrap();
+        wire::write_varint(&mut body, json.len() as u32);
+        body.extend(json);
+        body.extend_from_slice(&[2, 2, 4, 5, 4, 9, 8, 7, 6]);
+        frame.extend(body);
+        frame
+    };
+
+    for protocol in [763, 764] {
+        let text = "nul\0𝄞";
+        let frame = fixture(protocol, serde_json::json!({"text": text}));
+        let translated = translation_for(protocol)
+            .translate_game_frame(frame.into_boxed_slice())
+            .expect("NUL and supplementary characters fit modified UTF-8");
+        let packet = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut std::io::Cursor::new(&translated),
+        )
+        .unwrap();
+        let crate::net::NetworkEvent::MapItemData {
+            map_id, scale, locked, patch, decorations,
+        } = crate::net::handler::map_item_data_event(&packet).unwrap() else {
+            unreachable!();
+        };
+        let decoration = &decorations.as_ref().unwrap()[0];
+        assert_eq!(decoration.asset, MapDecorationAsset::Frame);
+        assert_eq!(decoration.name.as_deref(), Some(text));
+        let mut maps = MapStore::default();
+        maps.apply(map_id, scale, locked, patch, decorations);
+        assert_eq!(maps.0[&17].decorations[0].name.as_deref(), Some(text));
+        assert_eq!(&maps.0[&17].colors[5 * 128 + 4..5 * 128 + 6], &[9, 8]);
+        assert_eq!(&maps.0[&17].colors[6 * 128 + 4..6 * 128 + 6], &[7, 6]);
+
+        for (value, should_fit) in [
+            ("\0".repeat(32_767), true),
+            ("\0".repeat(32_768), false),
+            ("𝄞".repeat(10_922), true),
+            ("𝄞".repeat(10_923), false),
+        ] {
+            let frame = fixture(protocol, serde_json::json!({"text": value}));
+            assert_eq!(
+                translation_for(protocol)
+                    .translate_game_frame(frame.into_boxed_slice())
+                    .is_some(),
+                should_fit,
+                "protocol {protocol}, value length {}",
+                value.chars().count()
+            );
+        }
+        for (key_len, should_fit) in [(32_767, true), (32_768, false)] {
+            let key = "\0".repeat(key_len);
+            let mut nested = serde_json::Map::new();
+            nested.insert(key, serde_json::json!("value"));
+            let mut value = serde_json::Map::new();
+            value.insert("text".into(), serde_json::json!("ok"));
+            value.insert("nested".into(), serde_json::Value::Object(nested));
+            let frame = fixture(protocol, serde_json::Value::Object(value));
+            assert_eq!(
+                translation_for(protocol)
+                    .translate_game_frame(frame.into_boxed_slice())
+                    .is_some(),
+                should_fit,
+                "protocol {protocol}, nested key MUTF-8 length {}",
+                key_len * 2
+            );
+        }
+    }
+}
+
+#[test]
+fn legacy_map_item_data_765_anonymous_nbt_lists_reject_malformed_and_keep_valid_empty_lists() {
+    use crate::world::maps::{MapDecorationAsset, MapStore};
+
+    let fixture = |body: &[u8]| {
+        let mut frame = Vec::new();
+        wire::write_varint(
+            &mut frame,
+            old_id(765, Direction::Clientbound, "map_item_data"),
+        );
+        frame.extend_from_slice(body);
+        frame
+    };
+    let body_with_nbt = |nbt: &[u8], patch: &[u8]| {
+        let mut body = vec![17, 0, 0, 1, 1, 99, 0, 0, 0, 1];
+        body.extend_from_slice(nbt);
+        body.extend_from_slice(patch);
+        body
+    };
+
+    for (element, count, values) in [
+        (0u8, i32::MAX, &[][..]), // nonempty End list
+        (1, -1, &[][..]),         // negative count
+        (13, 0, &[][..]),         // invalid element type
+        (1, 2, &[7][..]),         // count exceeds remaining list bytes
+    ] {
+        let mut nbt = vec![10, 9, 0, 5, b'e', b'x', b't', b'r', b'a', element];
+        nbt.extend_from_slice(&count.to_be_bytes());
+        nbt.extend_from_slice(values);
+        if count != 2 {
+            nbt.push(0); // compound end
+        }
+        let frame = fixture(&body_with_nbt(&nbt, &[0]));
+        assert!(translation_for(765)
+            .translate_game_frame(frame.into_boxed_slice())
+            .is_none(), "accepted malformed list type {element}, count {count}");
+    }
+
+    // A legal End-element empty list inside an anonymous root compound is
+    // accepted and carried through the native decoder, event conversion, and
+    // MapStore along with the component text and a nonzero 2x2 color patch.
+    let nbt = [
+        10, // anonymous root compound (no root-name bytes)
+        8, 0, 4, b't', b'e', b'x', b't', 0, 2, b'o', b'k',
+        9, 0, 5, b'e', b'x', b't', b'r', b'a', 0, 0, 0, 0, 0,
+        0, // root compound end
+    ];
+    let mut body = vec![17, 0, 0, 1, 1, 1, 16, 32, 3, 1];
+    body.extend_from_slice(&nbt);
+    body.extend_from_slice(&[2, 2, 4, 5, 4, 9, 8, 7, 6]);
+    let translated = translation_for(765)
+        .translate_game_frame(fixture(&body).into_boxed_slice())
+        .expect("valid anonymous compound with empty list");
+    let packet = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+        &mut std::io::Cursor::new(&translated),
+    )
+    .unwrap();
+    let crate::net::NetworkEvent::MapItemData {
+        map_id, scale, locked, patch, decorations,
+    } = crate::net::handler::map_item_data_event(&packet).unwrap() else {
+        unreachable!();
+    };
+    assert_eq!(decorations.as_ref().unwrap()[0].asset, MapDecorationAsset::Frame);
+    assert_eq!(decorations.as_ref().unwrap()[0].name.as_deref(), Some("ok"));
+    let mut maps = MapStore::default();
+    maps.apply(map_id, scale, locked, patch, decorations);
+    assert_eq!(maps.0[&17].decorations[0].asset, MapDecorationAsset::Frame);
+    assert_eq!(maps.0[&17].decorations[0].name.as_deref(), Some("ok"));
+    assert_eq!(&maps.0[&17].colors[5 * 128 + 4..5 * 128 + 6], &[9, 8]);
+    assert_eq!(&maps.0[&17].colors[6 * 128 + 4..6 * 128 + 6], &[7, 6]);
+}
+
+#[test]
+fn map_item_data_native_ids_0_through_34_decode_to_assets_and_store() {
+    use crate::world::maps::{MapDecorationAsset, MapStore};
+    use azalea_protocol::packets::game::c_map_item_data::DecorationType;
+
+    for id in 0..=34u32 {
+        let bytes = [id as u8]; // all known ids are one-byte VarInts
+        let typed = DecorationType::azalea_read(&mut std::io::Cursor::new(bytes.as_slice()))
+            .unwrap();
+        assert_eq!(typed as u32, id, "typed enum id {id}");
+        let mut encoded = Vec::new();
+        typed.azalea_write(&mut encoded).unwrap();
+        assert_eq!(encoded, bytes, "enum roundtrip id {id}");
+    }
+
+    let native_map_id = table_id(Phase::Game, Direction::Clientbound, "map_item_data");
+    let mut maps = MapStore::default();
+
+    let packet_bytes = |map_id: u32, icon: u32, named_patch: bool| {
+        let mut body = Vec::new();
+        wire::write_varint(&mut body, map_id);
+        body.extend_from_slice(&[2, 1, 1]);
+        wire::write_varint(&mut body, 1);
+        wire::write_varint(&mut body, icon);
+        body.extend_from_slice(&[16, 32, 3]);
+        if named_patch {
+            body.push(1);
+            let mut name = Vec::new();
+            simdnbt::owned::NbtTag::Compound({
+                let mut compound = simdnbt::owned::NbtCompound::new();
+                compound.insert("text", simdnbt::owned::NbtTag::String("trial-chambers".into()));
+                compound
+            })
+            .azalea_write(&mut name)
+            .unwrap();
+            body.extend(name);
+            body.extend_from_slice(&[2, 2, 4, 5, 4, 9, 8, 7, 6]);
+        } else {
+            body.extend_from_slice(&[0, 0]);
+        }
+        let mut packet = Vec::new();
+        wire::write_varint(&mut packet, native_map_id);
+        packet.extend(body);
+        packet
+    };
+
+    for id in 0..=34u32 {
+        let bytes = packet_bytes(100 + id, id, false);
+        let packet = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut std::io::Cursor::new(&bytes),
+        )
+        .unwrap();
+        let ClientboundGamePacket::MapItemData(map) = &packet else {
+            panic!("expected map item data for icon {id}");
+        };
+        assert_eq!(map.decorations.as_ref().unwrap()[0].decoration_type as u32, id);
+        let crate::net::NetworkEvent::MapItemData {
+            map_id, scale, locked, patch, decorations,
+        } = crate::net::handler::map_item_data_event(&packet).unwrap() else {
+            unreachable!();
+        };
+        maps.apply(map_id, scale, locked, patch, decorations);
+        assert_eq!(
+            maps.0[&(100 + id)].decorations[0].asset,
+            MapDecorationAsset::from_registry_id(id),
+            "stored icon asset for id {id}"
+        );
+    }
+
+    for protocol in 766..=775 {
+        for id in [0, 27, 28, 29, 30, 31, 32, 33, 34] {
+            let mut source = Vec::new();
+            wire::write_varint(
+                &mut source,
+                old_id(protocol, Direction::Clientbound, "map_item_data"),
+            );
+            source.extend_from_slice(&packet_bytes(200 + id, id, false)[native_map_id_size()..]);
+            let translated = translation_for(protocol)
+                .translate_game_frame(source.into_boxed_slice())
+                .unwrap();
+            let packet = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+                &mut std::io::Cursor::new(&translated),
+            )
+            .unwrap();
+            let crate::net::NetworkEvent::MapItemData {
+                map_id, scale, locked, patch, decorations,
+            } = crate::net::handler::map_item_data_event(&packet).unwrap() else {
+                unreachable!();
+            };
+            assert!(decorations.as_ref().is_some_and(|items| items.iter().any(|item|
+                item.asset == MapDecorationAsset::from_registry_id(id))),
+                "event decoration asset for protocol {protocol}, id {id}");
+            let mut maps = MapStore::default();
+            maps.apply(map_id, scale, locked, patch, decorations);
+            assert_eq!(maps.0[&(200 + id)].decorations[0].asset,
+                MapDecorationAsset::from_registry_id(id), "protocol {protocol}, id {id}");
+        }
+    }
+    assert!(crate::net::translate::Translation::for_protocol(776).is_none());
+    for id in [0, 27, 28, 29, 30, 31, 32, 33, 34] {
+        let bytes = packet_bytes(300 + id, id, false);
+        let packet = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+            &mut std::io::Cursor::new(&bytes),
+        )
+        .unwrap();
+        let crate::net::NetworkEvent::MapItemData {
+            map_id, scale, locked, patch, decorations,
+        } = crate::net::handler::map_item_data_event(&packet).unwrap() else {
+            unreachable!();
+        };
+        maps.apply(map_id, scale, locked, patch, decorations);
+        assert_eq!(maps.0[&(300 + id)].decorations[0].asset,
+            MapDecorationAsset::from_registry_id(id));
+    }
+
+    let bytes = packet_bytes(34, 34, true);
+    let packet = azalea_protocol::read::deserialize_packet::<ClientboundGamePacket>(
+        &mut std::io::Cursor::new(&bytes),
+    )
+    .unwrap();
+    let ClientboundGamePacket::MapItemData(map) = &packet else { unreachable!() };
+    let typed = &map.decorations.as_ref().unwrap()[0];
+    assert_eq!((typed.x, typed.y, typed.rot), (16, 32, 3));
+    assert!(typed.name.as_ref().unwrap().to_string().contains("trial-chambers"));
+    let crate::net::NetworkEvent::MapItemData {
+        map_id, scale, locked, patch, decorations,
+    } = crate::net::handler::map_item_data_event(&packet).unwrap() else {
+        unreachable!();
+    };
+    let event_decoration = &decorations.as_ref().unwrap()[0];
+    assert_eq!(event_decoration.asset, MapDecorationAsset::TrialChambers);
+    assert_eq!((event_decoration.x, event_decoration.y, event_decoration.rotation), (16, 32, 3));
+    assert!(event_decoration.name.as_ref().unwrap().contains("trial-chambers"));
+    let mut store = MapStore::default();
+    store.apply(map_id, scale, locked, patch, decorations);
+    assert_eq!(store.0[&34].decorations[0].asset, MapDecorationAsset::TrialChambers);
+    assert_eq!(store.0[&34].decorations[0].name.as_deref(), Some("trial-chambers"));
+    assert_eq!((store.0[&34].decorations[0].x, store.0[&34].decorations[0].y,
+        store.0[&34].decorations[0].rotation), (16, 32, 3));
+    assert_eq!(&store.0[&34].colors[5 * 128 + 4..5 * 128 + 6], &[9, 8]);
+    assert_eq!(&store.0[&34].colors[6 * 128 + 4..6 * 128 + 6], &[7, 6]);
+}
+
+fn native_map_id_size() -> usize {
+    let mut bytes = Vec::new();
+    wire::write_varint(&mut bytes, table_id(Phase::Game, Direction::Clientbound, "map_item_data"));
+    bytes.len()
+}
+
 #[cfg(test)]
 pub(crate) fn test_translate_decode_and_remap(
     protocol: i32,
@@ -725,6 +1333,197 @@ fn protocol_775_particle_registry_remaps_old_21_to_native_28() {
     ));
 }
 
+#[test]
+fn legacy_filled_map_frame_metadata_runs_translation_decode_remap_event_and_store() {
+    use azalea_core::direction::Direction as FrameDirection;
+    use azalea_entity::{EntityDataItem, EntityDataValue as V, EntityMetadataItems};
+    use azalea_inventory::components::MapId;
+    use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
+    use azalea_protocol::packets::game::c_add_entity::ClientboundAddEntity;
+    use azalea_protocol::packets::game::c_set_entity_data::ClientboundSetEntityData;
+    use azalea_registry::builtin::{DataComponentKind, EntityKind, ItemKind};
+    use glam::DVec3;
+    use crate::net::NetworkEvent;
+
+    let encode = |packet: &ClientboundGamePacket| azalea_protocol::write::serialize_packet(packet).unwrap();
+    for protocol in [770, 771, 776] {
+        let translation = crate::net::translate::Translation::for_protocol(protocol);
+        if protocol == 776 {
+            assert!(translation.is_none(), "native 776 must bypass translation");
+        } else {
+            assert!(translation.is_some());
+        }
+        let table = RegistryTable::for_protocol(protocol).unwrap();
+        let native = protocol == 776;
+
+        let spawn_frame = if native {
+            let packet = ClientboundGamePacket::AddEntity(ClientboundAddEntity {
+                id: MinecraftEntityId(17),
+                uuid: uuid::Uuid::nil(),
+                entity_type: EntityKind::ItemFrame,
+                position: azalea_core::position::Vec3::default(),
+                movement: Default::default(),
+                x_rot: 0,
+                y_rot: 0,
+                y_head_rot: 0,
+                data: 4,
+            });
+            encode(&packet)
+        } else {
+            let mut old = Vec::new();
+            wire::write_varint(&mut old, old_id(protocol, Direction::Clientbound, "add_entity"));
+            wire::write_varint(&mut old, 17);
+            old.extend_from_slice(&[0; 16]);
+            wire::write_varint(&mut old, registry_id(table, ClientRegistry::EntityType, "item_frame"));
+            for c in [4.0f64, 5.0, 6.0] { old.extend_from_slice(&c.to_be_bytes()); }
+            old.extend_from_slice(&[0, 0, 0]);
+            wire::write_varint(&mut old, 4);
+            old.extend_from_slice(&[0; 6]);
+            translation.as_ref().unwrap().translate_game_frame(old.into_boxed_slice()).unwrap()
+        };
+        let mut spawn_packet: ClientboundGamePacket = azalea_protocol::read::deserialize_packet(
+            &mut std::io::Cursor::new(&spawn_frame),
+        ).unwrap();
+        if let Some(translation) = &translation {
+            assert!(translation.remap_inbound(&mut spawn_packet));
+        }
+        let ClientboundGamePacket::AddEntity(spawn_packet) = spawn_packet else { panic!("add entity") };
+        assert_eq!(spawn_packet.entity_type, EntityKind::ItemFrame);
+        let spawn_event = crate::net::handler::entity_spawn_event(&spawn_packet);
+        let NetworkEvent::EntitySpawned {
+            id, entity_type, position, velocity, y_rot_deg, x_rot_deg,
+            item_frame_direction: Some(spawn_direction), spawn_data, ..
+        } = spawn_event else { panic!("spawn event") };
+        assert_eq!(spawn_direction, FrameDirection::West, "protocol {protocol}");
+        assert_eq!(spawn_data, 4);
+        let mut entities = crate::entity::EntityStore::new();
+        crate::app::core::register_nonliving_spawn_event(
+            &mut entities, id, position, velocity, y_rot_deg, x_rot_deg,
+            entity_type, spawn_data, Some(spawn_direction),
+        );
+        assert_eq!(entities.vehicles[&17].kind, Some(EntityKind::ItemFrame));
+        assert_eq!(entities.vehicles[&17].spawn_data, Some(4));
+        assert_eq!(entities.vehicles[&17].item_frame_direction, Some(FrameDirection::West));
+        let spawn_position = if native {
+            crate::entity::components::Position::new(0.96875, 0.5, 0.5)
+        } else {
+            crate::entity::components::Position::new(4.96875, 5.5, 6.5)
+        };
+        assert_eq!(entities.vehicles[&17].position, spawn_position);
+
+        let metadata_frame = if native {
+            let mut patch = DataComponentPatch::default();
+            // SAFETY: MapId is inserted under its matching component kind.
+            unsafe { patch.unchecked_insert_component(DataComponentKind::MapId, Some(MapId { id: 17 }.into())); }
+            let mut stack = ItemStackData::new(ItemKind::FilledMap, 1);
+            stack.component_patch = patch;
+            encode(&ClientboundGamePacket::SetEntityData(ClientboundSetEntityData {
+                id: MinecraftEntityId(17),
+                packed_items: EntityMetadataItems(vec![
+                    EntityDataItem { index: 8, value: V::Direction(FrameDirection::North) },
+                    EntityDataItem { index: 9, value: V::ItemStack(ItemStack::Present(stack)) },
+                    EntityDataItem { index: 10, value: V::Int(3) },
+                ]),
+            }))
+        } else {
+            let translation = translation.as_ref().unwrap();
+            let map_item = registry_id(table, ClientRegistry::Item, "filled_map");
+            let map_component = registry_id(table, ClientRegistry::DataComponentType, "map_id");
+            let item_index = if protocol == 770 { 8 } else { 9 };
+            let rotation_index = if protocol == 770 { 9 } else { 10 };
+            let mut old = Vec::new();
+            wire::write_varint(&mut old, old_id(protocol, Direction::Clientbound, "set_entity_data"));
+            wire::write_varint(&mut old, 17);
+            if protocol == 771 {
+                // 1.21.6 EntityDataSerializers: direction=12; North is enum VarInt 2.
+                old.extend_from_slice(&[8, 12, 2]);
+            }
+            // 1.21.5/1.21.6 schemas: item_stack=7, int=1.
+            old.extend_from_slice(&[item_index, 7]);
+            wire::write_varint(&mut old, 1);
+            wire::write_varint(&mut old, map_item);
+            wire::write_varint(&mut old, 1);
+            wire::write_varint(&mut old, 0);
+            wire::write_varint(&mut old, map_component);
+            wire::write_varint(&mut old, 17);
+            old.extend_from_slice(&[rotation_index, 1]);
+            wire::write_varint(&mut old, 3);
+            old.push(0xff);
+            translation.translate_game_frame(old.into_boxed_slice()).unwrap()
+        };
+        let mut metadata: ClientboundGamePacket = azalea_protocol::read::deserialize_packet(
+            &mut std::io::Cursor::new(&metadata_frame),
+        ).unwrap();
+        if let Some(translation) = &translation {
+            assert!(translation.remap_inbound(&mut metadata));
+        }
+        let ClientboundGamePacket::SetEntityData(metadata) = metadata else { panic!("typed metadata") };
+        let item_offset = if native || protocol == 771 { 1 } else { 0 };
+        let V::ItemStack(ItemStack::Present(stack)) = &metadata.packed_items.0[item_offset].value else {
+            panic!("filled map stack")
+        };
+        assert_eq!(stack.kind, ItemKind::FilledMap);
+        assert_eq!(stack.component_patch.get::<MapId>(), Some(&MapId { id: 17 }));
+        let rotation_entry = metadata.packed_items.0.last().unwrap();
+        assert_eq!(rotation_entry.value, V::Int(3), "protocol {protocol}");
+        assert_eq!(rotation_entry.index, if native || protocol == 771 { 10 } else { 9 });
+
+        let events: Vec<_> = metadata.packed_items.iter().flat_map(|item| {
+            crate::net::handler::entity_item_metadata_events(protocol, metadata.id.0, item.index, &item.value)
+        }).collect();
+        assert_eq!(events.len(), 3, "protocol {protocol}");
+        let mut item_entities = crate::entity::ItemEntityStore::new();
+        for event in &events {
+            match event {
+                NetworkEvent::ItemFrameItem { id, .. }
+                | NetworkEvent::ItemFrameRotation { id, .. }
+                | NetworkEvent::ItemFrameDirection { id, .. } => {
+                    assert!(crate::app::core::apply_item_frame_metadata(&mut entities, *id, event).is_some());
+                }
+                NetworkEvent::EntityItemData { id, item_name, item_id, damage, count, stack } => {
+                    let _ = crate::app::core::apply_entity_item_data(
+                        &entities, &mut item_entities, *id, item_name.clone(), *item_id,
+                        *damage, *count, stack.clone(),
+                    );
+                }
+                _ => panic!("unexpected metadata event"),
+            }
+        }
+        assert!(item_entities.visible_items(DVec3::ZERO, 1.0).is_empty());
+        let frame = &entities.vehicles[&17];
+        assert_eq!(frame.item_frame_item, ItemStack::Present(stack.clone()));
+        assert_eq!(frame.item_frame_rotation, 3);
+        assert_eq!(frame.item_frame_direction, Some(if protocol == 770 { FrameDirection::West } else { FrameDirection::North }));
+        let expected_quad_center = if native { DVec3::new(0.5, 0.5, 0.5) } else { DVec3::new(4.5, 5.5, 6.5) };
+        let mut maps = crate::world::maps::MapStore::default();
+        maps.apply(17, 0, false, Some((1, 1, 2, 3, vec![0x31])), None);
+        let quads = crate::app::phases::in_game::extract_map_frame_quads(
+            &entities, &maps, DVec3::ZERO, 1.0, DVec3::ZERO,
+        );
+        assert_eq!(quads.len(), 1, "protocol {protocol}");
+        assert_eq!(quads[0].map_id, 17);
+        assert_eq!(quads[0].position, expected_quad_center.as_vec3());
+        let expected_normal = if protocol == 770 { glam::Vec3::X } else { glam::Vec3::Z };
+        assert!(
+            (quads[0].rotation * glam::Vec3::Z).abs_diff_eq(expected_normal, 1e-6),
+            "quad normal/facing protocol {protocol}"
+        );
+        if protocol != 770 {
+            assert!(
+                (quads[0].rotation * glam::Vec3::X).abs_diff_eq(glam::Vec3::Y, 1e-6),
+                "map quad X axis for protocol {protocol}"
+            );
+            assert!(
+                (quads[0].rotation * glam::Vec3::Y).abs_diff_eq(glam::Vec3::NEG_X, 1e-6),
+                "map quad Y axis for protocol {protocol}"
+            );
+        }
+        assert_eq!(quads[0].map_data.colors[3 * 128 + 2], 0x31);
+        assert!(crate::app::phases::in_game::extract_map_frame_quads(
+            &entities, &crate::world::maps::MapStore::default(), DVec3::ZERO, 1.0, DVec3::ZERO,
+        ).is_empty());
+    }
+}
 #[test]
 fn protocol_773_item_damage_particle_and_boolean_decode_at_packet_entry() {
     use azalea_entity::EntityDataValue;
@@ -1646,7 +2445,9 @@ fn translate_entity_data_compound_tag_old_versions() {
         );
         wire::write_varint(&mut old, 9); // entity id
         old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
-        old.extend_from_slice(&[19, 16, 0x0A, 0x00]); // shoulder parrot compound
+        // Anonymous compound with a legal empty End-element list, skipped
+        // from this removed `compound_tag` serializer before the live Boolean.
+        old.extend_from_slice(&[19, 16, 0x0A, 9, 0, 5, b'e', b'm', b'p', b't', b'y', 0, 0, 0, 0, 0, 0]);
         old.extend_from_slice(&[8, 8, 1]); // index 8, boolean, true
         old.push(0xFF);
 

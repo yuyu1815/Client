@@ -145,6 +145,10 @@ fn bake_crystal_beam_model() -> BakedEntityModel {
 const MAX_INSTANCES: usize = 16384;
 const MAX_PLAYER_SKINS: usize = 128;
 
+fn player_skin_cache_allows(existing: bool, current: usize, limit: usize) -> bool {
+    existing || current < limit
+}
+
 const DEFAULT_PLAYER_SKINS: [(&[&[&str]], bool); 18] = [
     (&[&["minecraft/textures/entity/player/slim/alex.png"]], true),
     (&[&["minecraft/textures/entity/player/slim/ari.png"]], true),
@@ -716,6 +720,25 @@ struct PlayerCapeTexture {
     allocation: Allocation,
 }
 
+struct PendingPlayerSkinUpload {
+    command: vk::CommandBuffer,
+    staging: vk::Buffer,
+    staging_allocation: Allocation,
+    texture: PlayerCapeTexture,
+}
+
+fn retain_pending_upload<T>(pending: &mut Vec<T>, upload: T) {
+    pending.push(upload);
+}
+
+fn release_pending_after_idle<T>(pending: &mut Vec<T>, idle: bool, mut release: impl FnMut(T)) {
+    if idle {
+        for item in pending.drain(..) {
+            release(item);
+        }
+    }
+}
+
 impl MobEntry {
     fn base_variant(&self, is_baby: bool, variant_index: u32) -> &MobVariant {
         let pool = if is_baby {
@@ -896,6 +919,7 @@ pub struct EntityRenderer {
     mobs: HashMap<EntityKind, MobEntry>,
     entity_pack_dirs: Vec<std::path::PathBuf>,
     player_skins: HashMap<uuid::Uuid, PlayerSkinTexture>,
+    pending_skin_uploads: Vec<PendingPlayerSkinUpload>,
     equipment_textures: HashMap<String, EquipmentTexture>,
     equipment_pack_dirs: Vec<std::path::PathBuf>,
     happy_ghast_harness: [HarnessMesh; 2],
@@ -3150,6 +3174,7 @@ impl EntityRenderer {
             mobs,
             entity_pack_dirs: pack_dirs.to_vec(),
             player_skins: HashMap::new(),
+            pending_skin_uploads: Vec::new(),
             equipment_textures: HashMap::new(),
             equipment_pack_dirs: Vec::new(),
             happy_ghast_harness,
@@ -3166,6 +3191,14 @@ impl EntityRenderer {
             .copy_from_slice(bytes);
     }
 
+    pub fn can_accept_player_skin(&self, uuid: &uuid::Uuid) -> bool {
+        player_skin_cache_allows(
+            self.player_skins.contains_key(uuid),
+            self.player_skins.len(),
+            MAX_PLAYER_SKINS,
+        )
+    }
+
     pub fn update_player_skin(
         &mut self,
         device: &vk::Device,
@@ -3174,122 +3207,182 @@ impl EntityRenderer {
         allocator: &Arc<Mutex<Allocator>>,
         uuid: &uuid::Uuid,
         skin: &crate::renderer::SkinData,
-    ) {
-        if !self.player_skins.contains_key(uuid) && self.player_skins.len() >= MAX_PLAYER_SKINS {
-            tracing::warn!("Player skin cache full; keeping fallback texture for {uuid}");
-            return;
+    ) -> Result<(), crate::renderer::PlayerSkinUploadError> {
+        use crate::renderer::PlayerSkinUploadError as Error;
+        let old = self.player_skins.get(uuid);
+        if !player_skin_cache_allows(old.is_some(), self.player_skins.len(), MAX_PLAYER_SKINS) {
+            return Err(Error::CapacityFull {
+                current: self.player_skins.len(),
+                limit: MAX_PLAYER_SKINS,
+            });
         }
-
-        let (image, view, allocation) = upload_texture_pixels(
+        // Skin descriptors can be used by already-submitted draw frames. Do not mutate
+        // or retire an existing registration unless the whole device is known idle.
+        device.wait_idle().map_err(|_| Error::UploadFailed)?;
+        reclaim_pending_skin_uploads(
+            device,
+            command_pool,
+            allocator,
+            &mut self.pending_skin_uploads,
+        );
+        let new_skin = try_upload_player_texture(
             device,
             queue,
             command_pool,
             allocator,
+            &mut self.pending_skin_uploads,
             &skin.pixels,
             skin.width,
             skin.height,
-        );
-        let set = if let Some(old) = self.player_skins.get(uuid) {
-            old.set
-        } else {
-            let tex_alloc_info = vk::DescriptorSetAllocateInfo {
-                descriptor_pool: self.descriptor_pool,
-                descriptor_set_count: 1,
-                set_layouts: &self.texture_layout,
-                ..Default::default()
-            };
-            let mut texture_set = vk::DescriptorSet::null();
-            device
-                .allocate_descriptor_sets(&tex_alloc_info, slice::from_mut(&mut texture_set))
-                .expect("failed to allocate player skin texture descriptor set");
-            texture_set
-        };
-
-        let image_info = vk::DescriptorImageInfo {
-            sampler: self.texture_sampler,
-            image_view: view,
-            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-        };
-        let tex_write = vk::WriteDescriptorSet {
-            dst_set: set,
-            dst_binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            image_info: &image_info,
-            ..Default::default()
-        };
-        device.update_descriptor_sets(&[tex_write], &[]);
-
-        let old = self.player_skins.remove(uuid);
-        let mut cape_set = old.as_ref().and_then(|old| old.cape_set);
-        let cape = skin.cape.as_ref().map(|cape| {
-            let (image, view, allocation) = upload_texture_pixels(
+        )?;
+        let new_cape = if let Some(cape) = &skin.cape {
+            match try_upload_player_texture(
                 device,
                 queue,
                 command_pool,
                 allocator,
+                &mut self.pending_skin_uploads,
                 &cape.pixels,
                 cape.width,
                 cape.height,
-            );
-            let descriptor = *cape_set.get_or_insert_with(|| {
-                let alloc_info = vk::DescriptorSetAllocateInfo {
-                    descriptor_pool: self.descriptor_pool,
-                    descriptor_set_count: 1,
-                    set_layouts: &self.texture_layout,
-                    ..Default::default()
-                };
-                let mut descriptor = vk::DescriptorSet::null();
-                device
-                    .allocate_descriptor_sets(&alloc_info, slice::from_mut(&mut descriptor))
-                    .expect("failed to allocate player cape texture descriptor set");
-                descriptor
-            });
-            let image_info = vk::DescriptorImageInfo {
-                sampler: self.texture_sampler,
-                image_view: view,
-                image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
-            };
-            let write = vk::WriteDescriptorSet {
-                dst_set: descriptor,
+            ) {
+                Ok(texture) => Some(texture),
+                Err(error) => {
+                    free_player_cape_texture(device, allocator, new_skin);
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+
+        let old = self.player_skins.get(uuid);
+        let set = old.map_or_else(
+            || allocate_player_descriptor(device, self.descriptor_pool, self.texture_layout),
+            |old| Ok(old.set),
+        );
+        let set = match set {
+            Ok(set) => set,
+            Err(()) => {
+                free_player_cape_texture(device, allocator, new_skin);
+                if let Some(cape) = new_cape {
+                    free_player_cape_texture(device, allocator, cape);
+                }
+                return Err(Error::DescriptorAllocationFailed);
+            }
+        };
+        let cape_set = if new_cape.is_some() {
+            match old.and_then(|old| old.cape_set).map_or_else(
+                || allocate_player_descriptor(device, self.descriptor_pool, self.texture_layout),
+                Ok,
+            ) {
+                Ok(set) => Some(set),
+                Err(()) => {
+                    if old.is_none() {
+                        device
+                            .free_descriptor_sets(self.descriptor_pool, &[set])
+                            .ok();
+                    }
+                    free_player_cape_texture(device, allocator, new_skin);
+                    if let Some(cape) = new_cape {
+                        free_player_cape_texture(device, allocator, cape);
+                    }
+                    return Err(Error::DescriptorAllocationFailed);
+                }
+            }
+        } else {
+            None
+        };
+
+        let skin_info = vk::DescriptorImageInfo {
+            sampler: self.texture_sampler,
+            image_view: new_skin.view,
+            image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+        };
+        device.update_descriptor_sets(
+            &[vk::WriteDescriptorSet {
+                dst_set: set,
                 dst_binding: 0,
                 descriptor_type: vk::DescriptorType::CombinedImageSampler,
                 descriptor_count: 1,
-                image_info: &image_info,
+                image_info: &skin_info,
                 ..Default::default()
+            }],
+            &[],
+        );
+        if let (Some(cape), Some(cape_set)) = (new_cape.as_ref(), cape_set) {
+            let info = vk::DescriptorImageInfo {
+                sampler: self.texture_sampler,
+                image_view: cape.view,
+                image_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
             };
-            device.update_descriptor_sets(&[write], &[]);
-            PlayerCapeTexture {
-                image,
-                view,
-                allocation,
-            }
-        });
-        if let Some(old) = old {
+            device.update_descriptor_sets(
+                &[vk::WriteDescriptorSet {
+                    dst_set: cape_set,
+                    dst_binding: 0,
+                    descriptor_type: vk::DescriptorType::CombinedImageSampler,
+                    descriptor_count: 1,
+                    image_info: &info,
+                    ..Default::default()
+                }],
+                &[],
+            );
+        }
+        let replacement = PlayerSkinTexture {
+            image: new_skin.image,
+            view: new_skin.view,
+            allocation: new_skin.allocation,
+            set,
+            cape: new_cape,
+            cape_set,
+            slim: skin.slim,
+        };
+        if let Some(old) = self.player_skins.insert(uuid.to_owned(), replacement) {
             if let Some(cape) = old.cape {
                 free_player_cape_texture(device, allocator, cape);
             }
             device.destroy_image_view(old.view, None);
             device.destroy_image(old.image, None);
             allocator.lock().unwrap().free(old.allocation).ok();
+            if let Some(old_cape_set) = old.cape_set.filter(|set| Some(*set) != cape_set) {
+                device
+                    .free_descriptor_sets(self.descriptor_pool, &[old_cape_set])
+                    .ok();
+            }
         }
-        self.player_skins.insert(
-            uuid.to_owned(),
-            PlayerSkinTexture {
-                image,
-                view,
-                allocation,
-                set,
-                cape,
-                cape_set,
-                slim: skin.slim,
+        Ok(())
+    }
+
+    pub(crate) fn retain_local_skin_upload(
+        &mut self,
+        pending: crate::renderer::pipelines::hand::LocalPendingUpload,
+    ) {
+        retain_pending_upload(
+            &mut self.pending_skin_uploads,
+            PendingPlayerSkinUpload {
+                command: pending.command,
+                staging: pending.staging,
+                staging_allocation: pending.staging_allocation,
+                texture: PlayerCapeTexture {
+                    image: pending.image,
+                    view: pending.view,
+                    allocation: pending.allocation,
+                },
             },
         );
+    }
 
-        tracing::debug!(
-            "Player skin loaded for {uuid}: {}x{}",
-            skin.width,
-            skin.height
+    pub fn reclaim_pending_player_skin_uploads(
+        &mut self,
+        device: &vk::Device,
+        command_pool: vk::CommandPool,
+        allocator: &Arc<Mutex<Allocator>>,
+    ) {
+        reclaim_pending_skin_uploads(
+            device,
+            command_pool,
+            allocator,
+            &mut self.pending_skin_uploads,
         );
     }
 
@@ -3863,11 +3956,24 @@ impl EntityRenderer {
         }
     }
 
-    /// The translation is anchor-relative, subtracted in f64 (see
-    /// `Camera::anchor`).
-    /// Transform for vanilla's CustomHeadLayer attachment point. Item rendering
-    /// remains in ItemEntityPipeline so blocks, generated items and skull skins
-    /// share the normal item mesh/texture path.
+    /// World transform for an ArmorStand's humanoid arm attachment. The entity
+    /// root (yaw and small scale) and computed arm pose are applied exactly
+    /// once.
+    pub(crate) fn held_item_attachment(
+        &self,
+        info: &EntityRenderInfo,
+        anchor: glam::DVec3,
+        left_arm: bool,
+    ) -> Option<glam::Mat4> {
+        if info.entity_kind != EntityKind::ArmorStand {
+            return None;
+        }
+        let entry = self.mobs.get(&info.entity_kind)?;
+        let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
+        let anim = self.compute_anim(entry.anim, &variant.model, info);
+        held_item_attachment_from_parts(info, anchor, &variant.model, &anim, left_arm)
+    }
+
     pub(crate) fn custom_head_attachment(
         &self,
         info: &EntityRenderInfo,
@@ -3897,7 +4003,11 @@ impl EntityRenderer {
         let variant = entry.base_variant(info.is_baby, self.effective_variant_index(info));
         let anim = self.compute_anim(entry.anim, &variant.model, info);
         let transforms = variant.model.compute_part_transforms(&anim);
-        let head = variant.model.parts.iter().position(|part| part.name == "head")?;
+        let head = variant
+            .model
+            .parts
+            .iter()
+            .position(|part| part.name == "head")?;
         let entity = Self::entity_matrix(info, anchor);
         Some(if skull {
             custom_head_skull_matrix(info.entity_kind, entity, transforms[head])
@@ -4651,34 +4761,169 @@ fn equipment_visible(info: &EntityRenderInfo) -> bool {
     !info.is_spectator
 }
 
+pub(crate) fn held_item_slots(
+    info: &EntityRenderInfo,
+) -> Vec<(azalea_inventory::components::EquipmentSlot, bool)> {
+    use azalea_inventory::components::EquipmentSlot as Slot;
+    if info.entity_kind != EntityKind::ArmorStand || !equipment_visible(info) {
+        return Vec::new();
+    }
+    [(Slot::Mainhand, false), (Slot::Offhand, true)]
+        .into_iter()
+        .filter(|(slot, _)| {
+            matches!(
+                info.armor_stand_equipment.get(slot),
+                Some(azalea_inventory::ItemStack::Present(_))
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn held_player_head_profile_sources(
+    entities: &[EntityRenderInfo],
+) -> Vec<crate::world::block_entity::PlayerHeadProfileSource> {
+    entities
+        .iter()
+        .flat_map(|info| {
+            held_item_slots(info)
+                .into_iter()
+                .filter_map(move |(slot, _)| {
+                    let azalea_inventory::ItemStack::Present(data) =
+                        info.armor_stand_equipment.get(&slot)?
+                    else {
+                        return None;
+                    };
+                    (crate::player::inventory::item_resource_name(data.kind) == "player_head")
+                        .then(|| {
+                            crate::world::block_entity::player_head_profile_source_from_item(
+                                &azalea_inventory::ItemStack::Present(data.clone()),
+                            )
+                        })
+                        .flatten()
+                })
+        })
+        .collect()
+}
+
+pub(crate) fn entity_player_head_profile_sources(
+    entities: &[EntityRenderInfo],
+) -> Vec<crate::world::block_entity::PlayerHeadProfileSource> {
+    use azalea_inventory::components::EquipmentSlot::Head;
+
+    entities
+        .iter()
+        .filter_map(|info| {
+            let azalea_inventory::ItemStack::Present(data) =
+                info.armor_stand_equipment.get(&Head)?
+            else {
+                return None;
+            };
+            crate::world::block_entity::player_head_profile_source_from_item(
+                &azalea_inventory::ItemStack::Present(data.clone()),
+            )
+        })
+        .chain(held_player_head_profile_sources(entities))
+        .collect()
+}
+
 fn model_layer_visible(info: &EntityRenderInfo, kind: OverlayKind) -> bool {
     base_model_visible(info) || kind == OverlayKind::EyesTranslucent
 }
 
 fn custom_head_supported(kind: EntityKind) -> bool {
-    matches!(kind,
-        EntityKind::Player | EntityKind::Mannequin | EntityKind::ArmorStand
-            | EntityKind::Zombie | EntityKind::Husk | EntityKind::Drowned
-            | EntityKind::ZombieVillager | EntityKind::Skeleton | EntityKind::Stray
-            | EntityKind::Bogged | EntityKind::Parched | EntityKind::WitherSkeleton
-            | EntityKind::Piglin | EntityKind::PiglinBrute | EntityKind::ZombifiedPiglin
-            | EntityKind::Villager | EntityKind::WanderingTrader
-            | EntityKind::Pillager | EntityKind::Vindicator | EntityKind::Evoker
-            | EntityKind::Illusioner | EntityKind::CopperGolem
+    matches!(
+        kind,
+        EntityKind::Player
+            | EntityKind::Mannequin
+            | EntityKind::ArmorStand
+            | EntityKind::Zombie
+            | EntityKind::Husk
+            | EntityKind::Drowned
+            | EntityKind::ZombieVillager
+            | EntityKind::Skeleton
+            | EntityKind::Stray
+            | EntityKind::Bogged
+            | EntityKind::Parched
+            | EntityKind::WitherSkeleton
+            | EntityKind::Piglin
+            | EntityKind::PiglinBrute
+            | EntityKind::ZombifiedPiglin
+            | EntityKind::Villager
+            | EntityKind::WanderingTrader
+            | EntityKind::Pillager
+            | EntityKind::Vindicator
+            | EntityKind::Evoker
+            | EntityKind::Illusioner
+            | EntityKind::CopperGolem
     )
 }
 
+fn held_item_attachment_from_parts(
+    info: &EntityRenderInfo,
+    anchor: glam::DVec3,
+    model: &BakedEntityModel,
+    anim: &entity_model::PartAnim,
+    left_arm: bool,
+) -> Option<glam::Mat4> {
+    let arm_name = if left_arm { "left_arm" } else { "right_arm" };
+    let arm = model.parts.iter().position(|part| part.name == arm_name)?;
+    let transforms = model.compute_part_transforms(anim);
+    Some(held_item_attachment_matrix(
+        EntityRenderer::entity_matrix(info, anchor),
+        transforms[arm],
+        left_arm,
+        info.is_baby,
+    ))
+}
+
+fn held_item_attachment_matrix(
+    entity: glam::Mat4,
+    arm: glam::Mat4,
+    left_arm: bool,
+    baby: bool,
+) -> glam::Mat4 {
+    let x = if baby {
+        0.0
+    } else if left_arm {
+        -1.0
+    } else {
+        1.0
+    };
+    let (y, z) = if baby { (1.0, -4.5) } else { (2.0, -10.0) };
+    let hand = glam::Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+        * glam::Mat4::from_rotation_y(std::f32::consts::PI)
+        * glam::Mat4::from_translation(glam::Vec3::new(x, y, z) / 16.0);
+    entity * arm * glam::Mat4::from_scale(glam::Vec3::new(1.0, -1.0, 1.0)) * hand
+}
+
 fn custom_head_y_offset(kind: EntityKind) -> f32 {
-    if kind == EntityKind::Villager { -0.1171875 } else { 0.0 }
+    if kind == EntityKind::Villager {
+        -0.1171875
+    } else {
+        0.0
+    }
 }
 
 fn custom_head_skull_matrix(kind: EntityKind, entity: glam::Mat4, head: glam::Mat4) -> glam::Mat4 {
-    let piglin_scale = if matches!(kind, EntityKind::Piglin | EntityKind::PiglinBrute | EntityKind::ZombifiedPiglin) { 1.0019531 } else { 1.0 };
+    let piglin_scale = if matches!(
+        kind,
+        EntityKind::Piglin | EntityKind::PiglinBrute | EntityKind::ZombifiedPiglin
+    ) {
+        1.0019531
+    } else {
+        1.0
+    };
     let copper = if kind == EntityKind::CopperGolem {
         glam::Mat4::from_translation(glam::Vec3::Y * 0.125)
             * glam::Mat4::from_scale(glam::Vec3::splat(1.0625))
-    } else { glam::Mat4::IDENTITY };
-    let skull_offset = if kind == EntityKind::Villager { -0.07421875 } else { 0.0 };
+    } else {
+        glam::Mat4::IDENTITY
+    };
+    let skull_offset = if kind == EntityKind::Villager {
+        -0.07421875
+    } else {
+        0.0
+    };
     entity
         * glam::Mat4::from_scale(glam::Vec3::new(piglin_scale, 1.0, piglin_scale))
         * head
@@ -4688,18 +4933,35 @@ fn custom_head_skull_matrix(kind: EntityKind, entity: glam::Mat4, head: glam::Ma
         * glam::Mat4::from_scale(glam::Vec3::splat(1.1875))
 }
 
-fn custom_head_attachment_matrix(kind: EntityKind, entity: glam::Mat4, head: glam::Mat4) -> glam::Mat4 {
-    let piglin_scale = if matches!(kind, EntityKind::Piglin | EntityKind::PiglinBrute | EntityKind::ZombifiedPiglin) { 1.0019531 } else { 1.0 };
+fn custom_head_attachment_matrix(
+    kind: EntityKind,
+    entity: glam::Mat4,
+    head: glam::Mat4,
+) -> glam::Mat4 {
+    let piglin_scale = if matches!(
+        kind,
+        EntityKind::Piglin | EntityKind::PiglinBrute | EntityKind::ZombifiedPiglin
+    ) {
+        1.0019531
+    } else {
+        1.0
+    };
     let copper = if kind == EntityKind::CopperGolem {
         glam::Mat4::from_translation(glam::Vec3::Y * 0.125)
             * glam::Mat4::from_scale(glam::Vec3::splat(1.0625))
-    } else { glam::Mat4::IDENTITY };
+    } else {
+        glam::Mat4::IDENTITY
+    };
     entity
         * glam::Mat4::from_scale(glam::Vec3::new(piglin_scale, 1.0, piglin_scale))
         * head
         * glam::Mat4::from_scale(glam::Vec3::new(1.0, -1.0, 1.0))
         * copper
-        * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.25 + custom_head_y_offset(kind), 0.0))
+        * glam::Mat4::from_translation(glam::Vec3::new(
+            0.0,
+            -0.25 + custom_head_y_offset(kind),
+            0.0,
+        ))
         * glam::Mat4::from_rotation_y(std::f32::consts::PI)
         * glam::Mat4::from_scale(glam::Vec3::new(0.625, -0.625, -0.625))
 }
@@ -5395,6 +5657,99 @@ fn load_entity_texture(
     (image, view, allocation)
 }
 
+fn allocate_player_descriptor(
+    device: &vk::Device,
+    pool: vk::DescriptorPool,
+    layout: vk::DescriptorSetLayout,
+) -> Result<vk::DescriptorSet, ()> {
+    let info = vk::DescriptorSetAllocateInfo {
+        descriptor_pool: pool,
+        descriptor_set_count: 1,
+        set_layouts: &layout,
+        ..Default::default()
+    };
+    let mut set = vk::DescriptorSet::null();
+    device
+        .allocate_descriptor_sets(&info, slice::from_mut(&mut set))
+        .map(|()| set)
+        .map_err(|_| ())
+}
+
+fn try_upload_player_texture(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
+    pending: &mut Vec<PendingPlayerSkinUpload>,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<PlayerCapeTexture, crate::renderer::PlayerSkinUploadError> {
+    use crate::renderer::PlayerSkinUploadError::UploadFailed;
+    let (image, view, allocation) = util::try_create_gpu_image_2d(
+        device,
+        allocator,
+        width,
+        height,
+        vk::Format::R8G8B8A8Srgb,
+        "player_skin_texture",
+    )
+    .map_err(|_| UploadFailed)?;
+    let (staging, staging_alloc) = match util::try_create_mapped_buffer(
+        device,
+        allocator,
+        pixels,
+        vk::BufferUsageFlags::TransferSrc,
+        "player_skin_texture_staging",
+    ) {
+        Ok(resources) => resources,
+        Err(_) => {
+            device.destroy_image_view(view, None);
+            device.destroy_image(image, None);
+            allocator.lock().unwrap().free(allocation).ok();
+            return Err(UploadFailed);
+        }
+    };
+    match util::try_upload_image(device, queue, command_pool, staging, image, width, height) {
+        Ok(()) => {
+            // Successful queue idle proves every older skin upload on this queue complete.
+            reclaim_pending_skin_uploads(device, command_pool, allocator, pending);
+            device.destroy_buffer(staging, None);
+            allocator.lock().unwrap().free(staging_alloc).ok();
+        }
+        Err(error) => {
+            let command = error.submitted_command_buffer;
+            if let Some(command) = command {
+                retain_pending_upload(
+                    pending,
+                    PendingPlayerSkinUpload {
+                        command,
+                        staging,
+                        staging_allocation: staging_alloc,
+                        texture: PlayerCapeTexture {
+                            image,
+                            view,
+                            allocation,
+                        },
+                    },
+                );
+            } else {
+                device.destroy_buffer(staging, None);
+                allocator.lock().unwrap().free(staging_alloc).ok();
+                device.destroy_image_view(view, None);
+                device.destroy_image(image, None);
+                allocator.lock().unwrap().free(allocation).ok();
+            }
+            return Err(UploadFailed);
+        }
+    }
+    Ok(PlayerCapeTexture {
+        image,
+        view,
+        allocation,
+    })
+}
+
 fn upload_texture_pixels(
     device: &vk::Device,
     queue: vk::Queue,
@@ -5420,6 +5775,24 @@ fn upload_texture_pixels(
     device.destroy_buffer(staging_buf, None);
     allocator.lock().unwrap().free(staging_alloc).ok();
     (image, view, allocation)
+}
+
+fn reclaim_pending_skin_uploads(
+    device: &vk::Device,
+    command_pool: vk::CommandPool,
+    allocator: &Arc<Mutex<Allocator>>,
+    pending: &mut Vec<PendingPlayerSkinUpload>,
+) {
+    // All callers have observed idle, or are disposing children after device loss.
+    release_pending_after_idle(pending, true, |upload| {
+        device.free_command_buffers(command_pool, &[upload.command.handle()]);
+        device.destroy_buffer(upload.staging, None);
+        device.destroy_image_view(upload.texture.view, None);
+        device.destroy_image(upload.texture.image, None);
+        let mut alloc = allocator.lock().unwrap();
+        alloc.free(upload.staging_allocation).ok();
+        alloc.free(upload.texture.allocation).ok();
+    });
 }
 
 fn player_skin_retirement_safe(has_skins: bool, wait_succeeded: bool) -> bool {
@@ -5789,14 +6162,283 @@ pub(super) fn create_pipeline(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn player_skin_capacity_allows_replacement_but_not_new_skin_when_full() {
+        use super::player_skin_cache_allows;
+        assert!(player_skin_cache_allows(false, 127, 128));
+        assert!(!player_skin_cache_allows(false, 128, 128));
+        assert!(player_skin_cache_allows(true, 128, 128));
+    }
+
+    #[test]
+    fn held_item_hand_offset_and_slot_candidates_follow_armor_stand_items() {
+        use azalea_inventory::components::EquipmentSlot as Slot;
+        use azalea_inventory::{ItemStack, ItemStackData};
+        use azalea_registry::builtin::{EntityKind, ItemKind};
+        use glam::{Mat4, Vec3};
+
+        for (left, expected) in [
+            (false, Vec3::new(-1.0, -10.0, -2.0) / 16.0),
+            (true, Vec3::new(1.0, -10.0, -2.0) / 16.0),
+        ] {
+            let matrix =
+                super::held_item_attachment_matrix(Mat4::IDENTITY, Mat4::IDENTITY, left, false);
+            assert!(
+                matrix
+                    .transform_point3(Vec3::ZERO)
+                    .abs_diff_eq(expected, 1.0e-6)
+            );
+        }
+        let baby = super::held_item_attachment_matrix(Mat4::IDENTITY, Mat4::IDENTITY, false, true);
+        assert!(
+            baby.transform_point3(Vec3::ZERO)
+                .abs_diff_eq(Vec3::new(0.0, -4.5, -1.0) / 16.0, 1.0e-6)
+        );
+
+        let mut info = super::EntityRenderInfo {
+            entity_kind: EntityKind::ArmorStand,
+            armor_stand_flags: 0, // ShowArms=false must not suppress attached items.
+            is_invisible: true,
+            ..Default::default()
+        };
+        info.armor_stand_equipment.insert(
+            Slot::Mainhand,
+            ItemStack::Present(ItemStackData::new(ItemKind::Stick, 1)),
+        );
+        info.armor_stand_equipment.insert(
+            Slot::Offhand,
+            ItemStack::Present(ItemStackData::new(ItemKind::Shield, 1)),
+        );
+        assert_eq!(
+            super::held_item_slots(&info),
+            [(Slot::Mainhand, false), (Slot::Offhand, true)]
+        );
+        info.armor_stand_equipment
+            .insert(Slot::Mainhand, ItemStack::Empty);
+        assert_eq!(super::held_item_slots(&info), [(Slot::Offhand, true)]);
+        info.is_spectator = true;
+        assert!(super::held_item_slots(&info).is_empty());
+    }
+
+    #[test]
+    fn entity_head_profile_collection_keeps_equipped_heads_and_adds_profiled_hands() {
+        use azalea_inventory::components::{
+            EquipmentSlot as Slot, PartialOrFullProfile, PartialProfile, Profile,
+        };
+        use azalea_inventory::{ItemStack, ItemStackData};
+        use azalea_registry::builtin::{DataComponentKind, EntityKind, ItemKind};
+
+        let profiled_head = |name: &str| {
+            let mut stack = ItemStackData::new(ItemKind::PlayerHead, 1);
+            let profile = Profile {
+                unpack: Box::new(PartialOrFullProfile::Partial(PartialProfile {
+                    name: Some(name.into()),
+                    id: None,
+                    properties: Default::default(),
+                })),
+                skin_patch: Box::default(),
+            };
+            // SAFETY: Profile is inserted under its matching component kind.
+            unsafe {
+                stack
+                    .component_patch
+                    .unchecked_insert_component(DataComponentKind::Profile, Some(profile.into()));
+            }
+            ItemStack::Present(stack)
+        };
+        let source_names = |entities: &[super::EntityRenderInfo]| {
+            super::entity_player_head_profile_sources(entities)
+                .into_iter()
+                .filter_map(|source| match source {
+                    crate::world::block_entity::PlayerHeadProfileSource::DynamicName {
+                        name,
+                        ..
+                    } => Some(name),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut head_only = super::EntityRenderInfo::default();
+        head_only
+            .armor_stand_equipment
+            .insert(Slot::Head, profiled_head("HeadOnly"));
+        assert_eq!(source_names(&[head_only.clone()]), ["HeadOnly"]);
+
+        let mut held_only = super::EntityRenderInfo {
+            entity_kind: EntityKind::ArmorStand,
+            ..Default::default()
+        };
+        held_only
+            .armor_stand_equipment
+            .insert(Slot::Mainhand, profiled_head("HeldOnly"));
+        assert_eq!(source_names(&[held_only]), ["HeldOnly"]);
+
+        let mut both = super::EntityRenderInfo {
+            entity_kind: EntityKind::ArmorStand,
+            ..Default::default()
+        };
+        both.armor_stand_equipment
+            .insert(Slot::Head, profiled_head("Head"));
+        both.armor_stand_equipment
+            .insert(Slot::Mainhand, profiled_head("Main"));
+        both.armor_stand_equipment
+            .insert(Slot::Offhand, profiled_head("Off"));
+        assert_eq!(source_names(&[both.clone()]), ["Head", "Main", "Off"]);
+
+        both.armor_stand_equipment
+            .insert(Slot::Mainhand, ItemStack::Empty);
+        both.armor_stand_equipment
+            .insert(Slot::Offhand, ItemStack::Empty);
+        assert_eq!(source_names(&[both.clone()]), ["Head"]);
+        both.armor_stand_equipment.insert(
+            Slot::Offhand,
+            ItemStack::Present(ItemStackData::new(ItemKind::PlayerHead, 1)),
+        );
+        assert_eq!(source_names(&[both.clone()]), ["Head"]);
+
+        let mut spectator = super::EntityRenderInfo {
+            entity_kind: EntityKind::ArmorStand,
+            is_spectator: true,
+            ..Default::default()
+        };
+        spectator
+            .armor_stand_equipment
+            .insert(Slot::Head, profiled_head("SpectatorHead"));
+        spectator
+            .armor_stand_equipment
+            .insert(Slot::Mainhand, profiled_head("SpectatorMain"));
+        spectator
+            .armor_stand_equipment
+            .insert(Slot::Offhand, profiled_head("SpectatorOff"));
+        assert_eq!(
+            source_names(&[spectator]),
+            ["SpectatorHead"],
+            "spectator collection must retain only the head profile"
+        );
+    }
+
+    #[test]
+    fn held_attachment_matches_independent_vanilla_arm_and_item_transforms() {
+        use glam::{EulerRot, Mat4, Vec3};
+        let model = super::entity_models::nonliving_special::bake_armor_stand_model();
+        let anchor = glam::DVec3::new(1.0, 2.0, 3.0);
+        let mut info = super::EntityRenderInfo {
+            entity_kind: azalea_registry::builtin::EntityKind::ArmorStand,
+            position: crate::entity::components::Position::new(5.0, 7.0, -2.0),
+            body_y_rot_deg: 47.0,
+            head_x_rot_deg: 13.0,
+            body_transform: Some(Mat4::from_scale(Vec3::splat(0.5))),
+            armor_stand_pose: [[0.0; 3]; 6],
+            ..Default::default()
+        };
+        info.armor_stand_pose[2] = [-22.0, 31.0, 17.0]; // vanilla leftArmPose
+        info.armor_stand_pose[3] = [35.0, 20.0, -15.0]; // vanilla rightArmPose
+        let anim = super::armor_stand_pose(&info);
+        let root = Mat4::from_translation((*info.position - anchor).as_vec3())
+            * Mat4::from_rotation_y((180.0 - 47.0_f32).to_radians())
+            * Mat4::from_scale(Vec3::splat(0.5));
+        // ArmorStandModel.createBodyLayer supplies arm pivots (-5,2,0)/(5,2,0).
+        // ModelPart.translateAndRotate is pivot/16 * rotationZYX; this renderer's
+        // y-down bake converts vanilla's frame with X reflection and y=24.016-y
+        // (including its existing 0.001-block ground-contact lift).
+        let display = crate::renderer::pipelines::item_display::DisplayTransform {
+            rotation: Vec3::new(17.0, 23.0, 31.0),
+            translation: Vec3::new(4.0, -5.0, 6.0) / 16.0,
+            scale: Vec3::new(0.8, 0.65, 1.1),
+        };
+        let points = [
+            Vec3::ZERO,
+            Vec3::new(0.2, 0.3, -0.4),
+            Vec3::new(-0.5, 0.1, 0.25),
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+        ];
+
+        for (left, pose_index, pivot_x) in [(false, 3, -5.0), (true, 2, 5.0)] {
+            let [x, y, z] = info.armor_stand_pose[pose_index].map(f32::to_radians);
+            let arm = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0))
+                * Mat4::from_translation(Vec3::new(pivot_x, 24.016 - 2.0, 0.0) / 16.0)
+                * Mat4::from_euler(EulerRot::ZYX, -z, y, -x);
+            let hand = Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+                * Mat4::from_rotation_y(std::f32::consts::PI)
+                * Mat4::from_translation(
+                    Vec3::new(if left { -1.0 } else { 1.0 }, 2.0, -10.0) / 16.0,
+                );
+            let vanilla_arm_item = root * arm * Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)) * hand;
+            // Independent vanilla display transform: T * Rx * Ry * Rz * S.
+            // Left hand negates translation X and rotation Y/Z (not scale).
+            let expected_display = Mat4::from_translation(Vec3::new(
+                if left {
+                    -display.translation.x
+                } else {
+                    display.translation.x
+                },
+                display.translation.y,
+                display.translation.z,
+            )) * Mat4::from_rotation_x(display.rotation.x.to_radians())
+                * Mat4::from_rotation_y(
+                    (if left {
+                        -display.rotation.y
+                    } else {
+                        display.rotation.y
+                    })
+                    .to_radians(),
+                )
+                * Mat4::from_rotation_z(
+                    (if left {
+                        -display.rotation.z
+                    } else {
+                        display.rotation.z
+                    })
+                    .to_radians(),
+                )
+                * Mat4::from_scale(display.scale);
+            let expected_item = vanilla_arm_item * expected_display;
+            let attachment =
+                super::held_item_attachment_from_parts(&info, anchor, &model, &anim, left)
+                    .expect("ArmorStand arm exists");
+            let actual_item = crate::renderer::held_item_model_matrix(attachment, display, left);
+            for point in points {
+                assert!(
+                    actual_item
+                        .transform_point3(point)
+                        .abs_diff_eq(expected_item.transform_point3(point), 1e-5),
+                    "left={left}, item vertex {point:?}: actual {:?}, expected {:?}",
+                    actual_item.transform_point3(point),
+                    expected_item.transform_point3(point)
+                );
+            }
+            for basis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                assert!(
+                    actual_item
+                        .transform_vector3(basis)
+                        .abs_diff_eq(expected_item.transform_vector3(basis), 1e-5),
+                    "left={left}, item basis {basis:?}: actual {:?}, expected {:?}",
+                    actual_item.transform_vector3(basis),
+                    expected_item.transform_vector3(basis)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn worn_skull_phase_uses_store_vehicle_type_and_preserves_body_phase() {
         let mut store = crate::entity::EntityStore::new();
         let passenger_phase = 12.5;
-        assert_eq!(super::skull_phase_from_store(&store, 4, None, passenger_phase, 0.5), passenger_phase);
+        assert_eq!(
+            super::skull_phase_from_store(&store, 4, None, passenger_phase, 0.5),
+            passenger_phase
+        );
         store.vehicle_of.insert(4, 9); // nonliving vehicle: in vehicle map, absent from living map
-        assert_eq!(super::skull_phase_from_store(&store, 4, Some(9), passenger_phase, 0.5), 0.0);
+        assert_eq!(
+            super::skull_phase_from_store(&store, 4, Some(9), passenger_phase, 0.5),
+            0.0
+        );
         assert_eq!(passenger_phase, 12.5); // body walk phase remains passenger-owned
-        assert_eq!(super::skull_phase_from_store(&store, 4, Some(8), passenger_phase, 0.5), 0.0);
+        assert_eq!(
+            super::skull_phase_from_store(&store, 4, Some(8), passenger_phase, 0.5),
+            0.0
+        );
     }
 
     #[test]
@@ -5986,9 +6628,7 @@ mod tests {
         let renderer = include_str!("../mod.rs");
         let reload = renderer.find("pub fn reload_assets(").unwrap();
         let after_reload = &renderer[reload..];
-        let idle = after_reload
-            .find("self.ctx.device.wait_idle().unwrap()")
-            .unwrap();
+        let idle = after_reload.find("self.ctx.device.wait_idle()").unwrap();
         let clear = after_reload.find("clear_equipment_textures").unwrap();
         let reload_entities = after_reload.find("reload_entity_textures").unwrap();
         assert!(idle < clear && clear < reload_entities);
@@ -6000,6 +6640,57 @@ mod tests {
         assert!(entity_reload_body.contains("device.update_descriptor_sets"));
         assert!(source.contains("equipment_textures: HashMap<String, EquipmentTexture>"));
         assert!(source.contains("for (_, texture) in self.equipment_textures.drain()"));
+    }
+
+    #[test]
+    fn skin_upload_pending_collection_owns_submitted_resources_until_idle() {
+        use super::{release_pending_after_idle, retain_pending_upload};
+        #[derive(Debug, PartialEq, Eq)]
+        struct OwnedUpload {
+            command: u8,
+            staging: u8,
+            image: u8,
+        }
+
+        let mut pending = Vec::new();
+        // Pre-submit failure never enters the production pending collection.
+        let pre_submit_destroyed = OwnedUpload {
+            command: 0,
+            staging: 10,
+            image: 20,
+        };
+        drop(pre_submit_destroyed);
+        assert!(pending.is_empty());
+
+        // This is the same push and drain used by production pending uploads.
+        let submitted = OwnedUpload {
+            command: 1,
+            staging: 11,
+            image: 21,
+        };
+        retain_pending_upload(&mut pending, submitted);
+        assert_eq!(
+            pending,
+            [OwnedUpload {
+                command: 1,
+                staging: 11,
+                image: 21
+            }]
+        );
+        let mut released = Vec::new();
+        release_pending_after_idle(&mut pending, false, |upload| released.push(upload));
+        assert_eq!(pending.len(), 1);
+        assert!(released.is_empty());
+        release_pending_after_idle(&mut pending, true, |upload| released.push(upload));
+        assert!(pending.is_empty());
+        assert_eq!(
+            released,
+            [OwnedUpload {
+                command: 1,
+                staging: 11,
+                image: 21
+            }]
+        );
     }
 
     #[test]
@@ -6901,37 +7592,80 @@ mod tests {
         assert!((origin.y - 0.25).abs() < 1.0e-6);
         let up = translated.transform_vector3(glam::Vec3::Y);
         assert!((up.y - 0.625).abs() < 1.0e-6);
-        assert_eq!(super::custom_head_y_offset(EntityKind::Villager), -0.1171875);
-        assert_eq!(super::custom_head_y_offset(EntityKind::WanderingTrader), 0.0);
+        assert_eq!(
+            super::custom_head_y_offset(EntityKind::Villager),
+            -0.1171875
+        );
+        assert_eq!(
+            super::custom_head_y_offset(EntityKind::WanderingTrader),
+            0.0
+        );
         assert!(super::custom_head_supported(EntityKind::Parched));
         assert!(super::custom_head_supported(EntityKind::CopperGolem));
         assert!(super::custom_head_supported(EntityKind::Parched));
         assert!(super::custom_head_supported(EntityKind::ArmorStand));
-        let copper = super::custom_head_attachment_matrix(EntityKind::CopperGolem, glam::Mat4::IDENTITY, glam::Mat4::IDENTITY);
+        let copper = super::custom_head_attachment_matrix(
+            EntityKind::CopperGolem,
+            glam::Mat4::IDENTITY,
+            glam::Mat4::IDENTITY,
+        );
         let copper_origin = copper.transform_point3(glam::Vec3::ZERO);
         assert!((copper_origin.y - 0.140625).abs() < 1e-6);
         let copper_x = copper.transform_vector3(glam::Vec3::X).length();
         assert!((copper_x - 0.625 * 1.0625).abs() < 1e-6);
-        let piglin = super::custom_head_attachment_matrix(EntityKind::Piglin, glam::Mat4::IDENTITY, glam::Mat4::IDENTITY);
-        assert!((piglin.transform_vector3(glam::Vec3::X).length() - 0.625 * 1.0019531).abs() < 1e-6);
+        let piglin = super::custom_head_attachment_matrix(
+            EntityKind::Piglin,
+            glam::Mat4::IDENTITY,
+            glam::Mat4::IDENTITY,
+        );
+        assert!(
+            (piglin.transform_vector3(glam::Vec3::X).length() - 0.625 * 1.0019531).abs() < 1e-6
+        );
         let skull = super::custom_head_skull_matrix(
             EntityKind::Player,
             glam::Mat4::IDENTITY,
             glam::Mat4::IDENTITY,
         );
         assert_eq!(skull.transform_point3(glam::Vec3::ZERO), glam::Vec3::ZERO);
-        assert_eq!(skull.transform_vector3(glam::Vec3::X), glam::Vec3::X * 1.1875);
-        assert_eq!(skull.transform_vector3(glam::Vec3::Y), glam::Vec3::Y * -1.1875);
-        assert_eq!(skull.transform_vector3(glam::Vec3::Z), glam::Vec3::Z * 1.1875);
-        let no_yaw = super::custom_head_attachment_matrix(EntityKind::Villager, glam::Mat4::IDENTITY, glam::Mat4::IDENTITY);
-        let trader = super::custom_head_attachment_matrix(EntityKind::WanderingTrader, glam::Mat4::IDENTITY, glam::Mat4::IDENTITY);
+        assert_eq!(
+            skull.transform_vector3(glam::Vec3::X),
+            glam::Vec3::X * 1.1875
+        );
+        assert_eq!(
+            skull.transform_vector3(glam::Vec3::Y),
+            glam::Vec3::Y * -1.1875
+        );
+        assert_eq!(
+            skull.transform_vector3(glam::Vec3::Z),
+            glam::Vec3::Z * 1.1875
+        );
+        let no_yaw = super::custom_head_attachment_matrix(
+            EntityKind::Villager,
+            glam::Mat4::IDENTITY,
+            glam::Mat4::IDENTITY,
+        );
+        let trader = super::custom_head_attachment_matrix(
+            EntityKind::WanderingTrader,
+            glam::Mat4::IDENTITY,
+            glam::Mat4::IDENTITY,
+        );
         assert!((no_yaw.w_axis.y - trader.w_axis.y - 0.1171875).abs() < 1e-6);
         for (pitch, roll) in [(0.0, 0.0), (0.4, 0.0), (0.0, -0.3)] {
             let head = glam::Mat4::from_rotation_x(pitch) * glam::Mat4::from_rotation_z(roll);
-            assert!(super::custom_head_attachment_matrix(EntityKind::Villager, glam::Mat4::IDENTITY, head).is_finite());
+            assert!(
+                super::custom_head_attachment_matrix(
+                    EntityKind::Villager,
+                    glam::Mat4::IDENTITY,
+                    head
+                )
+                .is_finite()
+            );
         }
         assert!(super::equipment_visible(&super::EntityRenderInfo::default()));
-        assert!(!super::equipment_visible(&super::EntityRenderInfo { is_spectator: true, ..Default::default() }));
+        assert!(!super::equipment_visible(&super::EntityRenderInfo {
+            is_spectator: true,
+            ..Default::default()
+        }));
         for kind in [EntityKind::Giant, EntityKind::Spider, EntityKind::Witch] {
             assert!(!super::custom_head_supported(kind), "{kind:?}");
         }
@@ -6946,9 +7680,18 @@ mod tests {
         };
         assert!(super::base_model_visible(&visible));
         assert!(!super::base_model_visible(&invisible));
-        assert!(invisible.is_invisible, "equipment visibility is independent");
-        assert!(super::model_layer_visible(&invisible, super::OverlayKind::EyesTranslucent));
-        assert!(!super::model_layer_visible(&invisible, super::OverlayKind::Opaque));
+        assert!(
+            invisible.is_invisible,
+            "equipment visibility is independent"
+        );
+        assert!(super::model_layer_visible(
+            &invisible,
+            super::OverlayKind::EyesTranslucent
+        ));
+        assert!(!super::model_layer_visible(
+            &invisible,
+            super::OverlayKind::Opaque
+        ));
     }
 
     #[test]

@@ -89,6 +89,8 @@ fn main() {
         ("entity_glint.vert", shaderc::ShaderKind::Vertex),
         ("entity_glint.frag", shaderc::ShaderKind::Fragment),
         ("block_entity.vert", shaderc::ShaderKind::Vertex),
+        ("end_portal.vert", shaderc::ShaderKind::Vertex),
+        ("end_portal.frag", shaderc::ShaderKind::Fragment),
         ("sign_text.vert", shaderc::ShaderKind::Vertex),
         ("sign_text.frag", shaderc::ShaderKind::Fragment),
         ("text_display.frag", shaderc::ShaderKind::Fragment),

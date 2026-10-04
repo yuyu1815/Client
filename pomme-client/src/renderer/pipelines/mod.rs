@@ -5,6 +5,7 @@ pub mod book_preview;
 pub mod chunk;
 pub mod chunk_borders;
 pub mod clouds;
+pub mod end_portal;
 pub mod entity_renderer;
 pub mod equipment;
 pub mod gui_item;

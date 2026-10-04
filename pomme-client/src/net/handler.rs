@@ -25,6 +25,161 @@ use crate::ui::server_dialog::DialogReference;
 use crate::ui::text::format_text_spans;
 use crate::world::block::model::CardinalLightType;
 
+pub(crate) fn entity_spawn_event(
+    p: &azalea_protocol::packets::game::c_add_entity::ClientboundAddEntity,
+) -> NetworkEvent {
+    let y_rot_deg = (p.y_rot as f32) * 360.0 / 256.0;
+    let x_rot_deg = (p.x_rot as f32) * 360.0 / 256.0;
+    let head_y_rot_deg = (p.y_head_rot as f32) * 360.0 / 256.0;
+    let item_frame_direction = matches!(
+        p.entity_type,
+        EntityKind::ItemFrame | EntityKind::GlowItemFrame
+    )
+    .then(|| {
+        use azalea_core::direction::Direction as D;
+        match p.data {
+            0 => D::Down,
+            1 => D::Up,
+            2 => D::North,
+            3 => D::South,
+            4 => D::West,
+            5 => D::East,
+            _ => D::South,
+        }
+    });
+    let mut position: Position = p.position.into();
+    if let Some(direction) = item_frame_direction {
+        // ItemFrame AddEntity sends the attachment BlockPos, not its center.
+        position += glam::DVec3::splat(0.5)
+            - glam::DVec3::from(Position::from(direction.normal_vec3())) * 0.46875;
+    }
+    NetworkEvent::EntitySpawned {
+        id: p.id.0,
+        uuid: p.uuid,
+        entity_type: p.entity_type,
+        position,
+        spawn_data: p.data,
+        item_frame_direction,
+        velocity: lp_to_dvec3(&p.movement),
+        y_rot_deg,
+        x_rot_deg,
+        head_y_rot_deg,
+    }
+}
+
+pub(crate) fn entity_item_metadata_events(
+    protocol: i32,
+    id: i32,
+    index: u8,
+    value: &azalea_entity::EntityDataValue,
+) -> Vec<NetworkEvent> {
+    let mut events = item_frame_metadata_event(protocol, id, index, value).into_iter().collect::<Vec<_>>();
+    if index == 8
+        && let azalea_entity::EntityDataValue::ItemStack(stack) = value
+    {
+        let data = match stack {
+            azalea_inventory::ItemStack::Present(data) => Some(data),
+            azalea_inventory::ItemStack::Empty => None,
+        };
+        let name = data.map_or_else(String::new, |data| {
+            crate::player::inventory::item_resource_name(data.kind)
+        });
+        let item_id = data.map_or(0, |data| data.kind.to_u32());
+        let damage = data
+            .and_then(|data| crate::player::menu_click::component::<azalea_inventory::components::Damage>(data))
+            .map_or(0, |component| component.amount);
+        let count = data.map_or(0, |data| data.count);
+        events.push(NetworkEvent::EntityItemData {
+            id,
+            item_name: name,
+            item_id,
+            damage,
+            count,
+            stack: data.cloned(),
+        });
+    }
+    events
+}
+
+pub(crate) fn item_frame_metadata_event(
+    protocol: i32,
+    id: i32,
+    index: u8,
+    value: &azalea_entity::EntityDataValue,
+) -> Option<NetworkEvent> {
+    let (direction_idx, item_idx, rotation_idx) = if protocol <= 770 {
+        (None, 8, 9)
+    } else {
+        (Some(8), 9, 10)
+    };
+    if Some(index) == direction_idx
+        && let azalea_entity::EntityDataValue::Direction(direction) = value
+    {
+        Some(NetworkEvent::ItemFrameDirection {
+            id,
+            direction: *direction,
+        })
+    } else if index == item_idx
+        && let azalea_entity::EntityDataValue::ItemStack(item) = value
+    {
+        Some(NetworkEvent::ItemFrameItem {
+            id,
+            item: item.clone(),
+        })
+    } else if index == rotation_idx
+        && let azalea_entity::EntityDataValue::Int(rotation) = value
+    {
+        Some(NetworkEvent::ItemFrameRotation {
+            id,
+            rotation: *rotation,
+        })
+    } else {
+        None
+    }
+}
+
+pub(crate) fn map_item_data_event(packet: &ClientboundGamePacket) -> Option<NetworkEvent> {
+    let ClientboundGamePacket::MapItemData(p) = packet else {
+        return None;
+    };
+    let decorations = p.decorations.as_ref().map(|items| {
+        items
+            .iter()
+            .map(|d| {
+                let asset = crate::world::maps::MapDecorationAsset::from_registry_id(
+                    d.decoration_type as u32,
+                );
+                crate::world::maps::MapDecoration {
+                    asset,
+                    x: d.x,
+                    y: d.y,
+                    rotation: d.rot,
+                    name: d.name.as_ref().map(ToString::to_string),
+                    show_on_item_frame: asset.show_on_item_frame(),
+                }
+            })
+            .collect()
+    });
+    let patch = p.color_patch.0.as_ref().and_then(|patch| {
+        (patch.width != 0).then(|| {
+            (
+                patch.width,
+                patch.height,
+                patch.start_x,
+                patch.start_y,
+                patch.map_colors.clone(),
+            )
+        })
+    });
+    Some(NetworkEvent::MapItemData {
+        map_id: p.map_id,
+        scale: p.scale,
+        locked: p.locked,
+        patch,
+        decorations,
+    })
+}
+
 pub(crate) fn attribute_event(
     entity_id: i32,
     snapshot: azalea_protocol::packets::game::c_update_attributes::AttributeSnapshot,
@@ -717,47 +872,8 @@ pub(super) async fn handle_game_packet_with_display_text(
             )
             .await?;
         }
-        ClientboundGamePacket::MapItemData(p) => {
-            let decorations = p.decorations.as_ref().map(|items| {
-                items
-                    .iter()
-                    .map(|d| {
-                        let asset = crate::world::maps::MapDecorationAsset::from_registry_id(
-                            d.decoration_type as u32,
-                        );
-                        crate::world::maps::MapDecoration {
-                            asset,
-                            x: d.x,
-                            y: d.y,
-                            rotation: d.rot,
-                            name: d.name.as_ref().map(ToString::to_string),
-                            show_on_item_frame: asset.show_on_item_frame(),
-                        }
-                    })
-                    .collect()
-            });
-            let patch = p.color_patch.0.as_ref().and_then(|patch| {
-                (patch.width != 0).then(|| {
-                    (
-                        patch.width,
-                        patch.height,
-                        patch.start_x,
-                        patch.start_y,
-                        patch.map_colors.clone(),
-                    )
-                })
-            });
-            send_event(
-                event_tx,
-                NetworkEvent::MapItemData {
-                    map_id: p.map_id,
-                    scale: p.scale,
-                    locked: p.locked,
-                    patch,
-                    decorations,
-                },
-            )
-            .await?;
+        ClientboundGamePacket::MapItemData(_) => {
+            send_event(event_tx, map_item_data_event(packet).unwrap()).await?;
         }
         ClientboundGamePacket::UpdateAttributes(p) => {
             for snapshot in &p.values {
@@ -1212,49 +1328,7 @@ pub(super) async fn handle_game_packet_with_display_text(
             .await?;
         }
         ClientboundGamePacket::AddEntity(p) => {
-            let y_rot_deg = (p.y_rot as f32) * 360.0 / 256.0;
-            let x_rot_deg = (p.x_rot as f32) * 360.0 / 256.0;
-            let head_y_rot_deg = (p.y_head_rot as f32) * 360.0 / 256.0;
-            let item_frame_direction = matches!(
-                p.entity_type,
-                EntityKind::ItemFrame | EntityKind::GlowItemFrame
-            )
-            .then(|| {
-                use azalea_core::direction::Direction as D;
-                match p.data {
-                    0 => D::Down,
-                    1 => D::Up,
-                    2 => D::North,
-                    3 => D::South,
-                    4 => D::West,
-                    5 => D::East,
-                    _ => D::South,
-                }
-            });
-            let mut position: Position = p.position.into();
-            if let Some(direction) = item_frame_direction {
-                // ItemFrame AddEntity sends the attachment BlockPos, not its center.
-                position += glam::DVec3::splat(0.5)
-                    - glam::DVec3::from(Position::from(direction.normal_vec3())) * 0.46875;
-            }
-            // Keep the center and facing in one event, including when metadata
-            // omits the default South direction.
-            send_event(
-                event_tx,
-                NetworkEvent::EntitySpawned {
-                    id: p.id.0,
-                    uuid: p.uuid,
-                    entity_type: p.entity_type,
-                    position,
-                    spawn_data: p.data,
-                    item_frame_direction,
-                    velocity: lp_to_dvec3(&p.movement),
-                    y_rot_deg,
-                    x_rot_deg,
-                    head_y_rot_deg,
-                },
-            )
-            .await?;
+            send_event(event_tx, entity_spawn_event(p),).await?;
         }
         ClientboundGamePacket::DamageEvent(p) => {
             send_event(event_tx, NetworkEvent::EntityDamaged { id: p.entity_id.0 }).await?;
@@ -1412,83 +1486,13 @@ pub(super) async fn handle_game_packet_with_display_text(
             // Avatar's absorption/score sit at 17/18 since 1.21.9 (773);
             // 15/16 on older wire versions (main hand moved to 15, pushing
             // them up).
-            let (absorption_idx, score_idx) = if crate::version::session_protocol() <= 772 {
-                (15, 16)
-            } else {
-                (17, 18)
-            };
+            let protocol = crate::version::session_protocol();
+            let (absorption_idx, score_idx) = if protocol <= 772 { (15, 16) } else { (17, 18) };
             for item in p.packed_items.iter() {
-                // ItemFrame metadata index 8 is ItemFrameDirection in 26.2.
-                if item.index == 8
-                    && let azalea_entity::EntityDataValue::Direction(direction) = &item.value
-                {
-                    send_event(
-                        event_tx,
-                        NetworkEvent::ItemFrameDirection {
-                            id: p.id.0,
-                            direction: *direction,
-                        },
-                    )
-                    .await?;
-                }
-                // Pinned azalea 26.2 metadata: ItemFrame index 9 is an
-                // ItemStack and index 10 is an Int rotation.
-                if item.index == 9
-                    && let azalea_entity::EntityDataValue::ItemStack(stack) = &item.value
-                {
-                    send_event(
-                        event_tx,
-                        NetworkEvent::ItemFrameItem {
-                            id: p.id.0,
-                            item: stack.clone(),
-                        },
-                    )
-                    .await?;
-                }
-                if item.index == 10
-                    && let azalea_entity::EntityDataValue::Int(rotation) = &item.value
-                {
-                    send_event(
-                        event_tx,
-                        NetworkEvent::ItemFrameRotation {
-                            id: p.id.0,
-                            rotation: *rotation,
-                        },
-                    )
-                    .await?;
-                }
-                // index 8 = item stack data for item entities
-                if item.index == 8
-                    && let azalea_entity::EntityDataValue::ItemStack(stack) = &item.value
-                {
-                    let data = match stack {
-                        azalea_inventory::ItemStack::Present(data) => Some(data),
-                        azalea_inventory::ItemStack::Empty => None,
-                    };
-                    let name = data.map_or_else(String::new, |data| {
-                        crate::player::inventory::item_resource_name(data.kind)
-                    });
-                    let item_id = data.map_or(0, |data| data.kind.to_u32());
-                    let damage = data
-                        .and_then(|data| {
-                            crate::player::menu_click::component::<
-                                azalea_inventory::components::Damage,
-                            >(data)
-                        })
-                        .map_or(0, |component| component.amount);
-                    let count = data.map_or(0, |data| data.count);
-                    send_event(
-                        event_tx,
-                        NetworkEvent::EntityItemData {
-                            id: p.id.0,
-                            item_name: name,
-                            item_id,
-                            damage,
-                            count,
-                            stack: data.cloned(),
-                        },
-                    )
-                    .await?;
+                // The classifier takes the protocol explicitly so fixture tests
+                // don't mutate shared session state or race parallel tests.
+                for event in entity_item_metadata_events(protocol, p.id.0, item.index, &item.value) {
+                    send_event(event_tx, event).await?;
                 }
                 // Mannequin DATA_PROFILE follows Avatar's main-arm and
                 // customization metadata (indices 15 and 16).
@@ -2416,6 +2420,14 @@ pub async fn handle_raw_game_packet(
     raw: &[u8],
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<bool, SendError<NetworkEvent>> {
+    handle_raw_game_packet_with_translation(raw, event_tx, super::translate::active()).await
+}
+
+async fn handle_raw_game_packet_with_translation(
+    raw: &[u8],
+    event_tx: &Sender<NetworkEvent>,
+    translation: Option<&super::translate::Translation>,
+) -> Result<bool, SendError<NetworkEvent>> {
     let mut cur = std::io::Cursor::new(raw);
     let Ok(packet_id) = u32::azalea_read_var(&mut cur) else {
         return Ok(false);
@@ -2463,7 +2475,8 @@ pub async fn handle_raw_game_packet(
             }
             parse_legacy_team(&mut cur).map(Some)
         }
-        Some("level_particles") => parse_level_particles(&mut cur).map_err(|e| e.to_string()),
+        Some("level_particles") => parse_level_particles_with_translation(&mut cur, translation)
+            .map_err(|e| e.to_string()),
         Some("sound" | "sound_entity" | "stop_sound") => {
             let result = match name {
                 Some("sound") => handle_raw_ui_sound(&mut cur),
@@ -2616,12 +2629,27 @@ fn sound_packet_ids() -> SoundPacketIds {
 fn parse_level_particles(
     cur: &mut std::io::Cursor<&[u8]>,
 ) -> Result<Option<NetworkEvent>, azalea_buf::BufReadError> {
-    parse_level_particles_for_protocol(cur, super::translate::active().map(|t| t.protocol()))
+    parse_level_particles_impl(cur, None, None)
 }
 
 fn parse_level_particles_for_protocol(
     cur: &mut std::io::Cursor<&[u8]>,
     protocol: Option<i32>,
+) -> Result<Option<NetworkEvent>, azalea_buf::BufReadError> {
+    parse_level_particles_impl(cur, protocol, None)
+}
+
+fn parse_level_particles_with_translation(
+    cur: &mut std::io::Cursor<&[u8]>,
+    translation: Option<&super::translate::Translation>,
+) -> Result<Option<NetworkEvent>, azalea_buf::BufReadError> {
+    parse_level_particles_impl(cur, translation.map(|t| t.protocol()), translation)
+}
+
+fn parse_level_particles_impl(
+    cur: &mut std::io::Cursor<&[u8]>,
+    protocol: Option<i32>,
+    translation: Option<&super::translate::Translation>,
 ) -> Result<Option<NetworkEvent>, azalea_buf::BufReadError> {
     let override_limiter = bool::azalea_read(cur)?;
     let always_show = bool::azalea_read(cur)?;
@@ -2639,7 +2667,7 @@ fn parse_level_particles_for_protocol(
     let type_id = u32::azalea_read_var(cur)?;
     // Particle ids shift between versions; translate into the native id
     // space (`ServerParticleKind`'s) when speaking an older protocol.
-    let type_id = match super::translate::active() {
+    let type_id = match translation {
         Some(t) => match t.remap_particle(type_id) {
             Some(id) => id,
             None => return Ok(None),
@@ -2667,9 +2695,28 @@ fn parse_level_particles_for_protocol(
             };
             crate::particle::ServerParticleOptions::Spell { color, power }
         }
-        crate::particle::ServerParticleKind::Dust => crate::particle::ServerParticleOptions::Dust {
-            packed_color: i32::azalea_read(cur)?,
-            scale: f32::azalea_read(cur)?,
+        crate::particle::ServerParticleKind::Dust => {
+            if protocol.is_some_and(|p| p < 768) {
+                // Protocols 763–767 encode Dust as RGB floats; match ARGB.colorFromFloat
+                // in the official 26.2 decompile (ARGB.java): floor(channel * 255.0f).
+                let channel = |value: f32| (value * 255.0f32).floor() as i32 & 0xff;
+                let red = f32::azalea_read(cur)?;
+                let green = f32::azalea_read(cur)?;
+                let blue = f32::azalea_read(cur)?;
+                let scale = f32::azalea_read(cur)?;
+                crate::particle::ServerParticleOptions::Dust {
+                    packed_color: 0xff00_0000u32 as i32
+                        | (channel(red) << 16)
+                        | (channel(green) << 8)
+                        | channel(blue),
+                    scale,
+                }
+            } else {
+                crate::particle::ServerParticleOptions::Dust {
+                    packed_color: i32::azalea_read(cur)?,
+                    scale: f32::azalea_read(cur)?,
+                }
+            }
         },
         crate::particle::ServerParticleKind::Block => {
             let id = u32::azalea_read_var(cur)?;
@@ -2679,7 +2726,7 @@ fn parse_level_particles_for_protocol(
             crate::particle::ServerParticleOptions::Block(state)
         }
         crate::particle::ServerParticleKind::Item => {
-            let (item_id, count) = if super::translate::active().is_some() {
+            let (item_id, count) = if translation.is_some() {
                 // Translated payloads use Azalea ItemStack's count/id ordering.
                 let count = i32::azalea_read_var(cur)?;
                 (u32::azalea_read_var(cur)?, count)
@@ -3040,6 +3087,53 @@ mod tests {
     };
 
     #[test]
+    fn item_frame_metadata_events_follow_protocol_boundary_without_global_shift() {
+        use azalea_entity::EntityDataValue as V;
+        use azalea_inventory::ItemStack;
+
+        assert!(matches!(
+            item_frame_metadata_event(770, 4, 8, &V::ItemStack(ItemStack::Empty)),
+            Some(NetworkEvent::ItemFrameItem {
+                id: 4,
+                item: ItemStack::Empty
+            })
+        ));
+        assert!(matches!(
+            item_frame_metadata_event(770, 4, 9, &V::Int(5)),
+            Some(NetworkEvent::ItemFrameRotation { id: 4, rotation: 5 })
+        ));
+        assert!(
+            item_frame_metadata_event(
+                770,
+                4,
+                8,
+                &V::Direction(azalea_core::direction::Direction::North)
+            )
+            .is_none()
+        );
+        assert!(matches!(
+            item_frame_metadata_event(
+                771,
+                4,
+                8,
+                &V::Direction(azalea_core::direction::Direction::North)
+            ),
+            Some(NetworkEvent::ItemFrameDirection { id: 4, .. })
+        ));
+        for protocol in [771, 776] {
+            assert!(matches!(
+                item_frame_metadata_event(protocol, 4, 9, &V::ItemStack(ItemStack::Empty)),
+                Some(NetworkEvent::ItemFrameItem { id: 4, .. })
+            ));
+            assert!(matches!(
+                item_frame_metadata_event(protocol, 4, 10, &V::Int(7)),
+                Some(NetworkEvent::ItemFrameRotation { id: 4, rotation: 7 })
+            ));
+        }
+        assert!(item_frame_metadata_event(776, 4, 11, &V::Int(7)).is_none());
+    }
+
+    #[test]
     fn level_particles_entity_effect_decodes_full_argb_tint() {
         let mut raw = Vec::new();
         false.azalea_write(&mut raw).unwrap();
@@ -3120,6 +3214,297 @@ mod tests {
             ..
         } if power == 1.0));
         assert_eq!(cur.get_ref()[cur.position() as usize], 0x5a);
+    }
+
+    #[test]
+    fn level_particles_dust_wire_options_follow_protocol_boundary() {
+        let dust_id = (0..2048)
+            .find(|&id| crate::particle::ServerParticleKind::from_id(id)
+                == Some(crate::particle::ServerParticleKind::Dust))
+            .expect("native dust particle id");
+        for (protocol, expected_color, legacy) in [
+            (765, 0xffff_007f, true),
+            (767, 0xffff_007f, true),
+            (768, 0x0012_3456, false),
+            (769, 0x0012_3456, false),
+            (776, 0x0012_3456, false),
+            (777, 0x0012_3456, false),
+        ] {
+            let mut raw = Vec::new();
+            false.azalea_write(&mut raw).unwrap();
+            true.azalea_write(&mut raw).unwrap();
+            for value in [1.0f64, 2.0, 3.0] {
+                value.azalea_write(&mut raw).unwrap();
+            }
+            for value in [0.0f32, 0.0, 0.0, 1.0] {
+                value.azalea_write(&mut raw).unwrap();
+            }
+            1i32.azalea_write(&mut raw).unwrap();
+            dust_id.azalea_write_var(&mut raw).unwrap();
+            let options_start = raw.len();
+            if legacy {
+                for value in [1.0f32, 0.0, 0.5, 1.25] {
+                    value.azalea_write(&mut raw).unwrap();
+                }
+            } else {
+                expected_color.azalea_write(&mut raw).unwrap();
+                1.25f32.azalea_write(&mut raw).unwrap();
+            }
+            raw.push(0x5a);
+
+            let mut cur = std::io::Cursor::new(raw.as_slice());
+            let event = parse_level_particles_for_protocol(&mut cur, Some(protocol))
+                .unwrap()
+                .unwrap();
+            assert!(matches!(event, NetworkEvent::LevelParticles {
+                options: crate::particle::ServerParticleOptions::Dust { packed_color, scale }, ..
+            } if packed_color as u32 == expected_color && scale == 1.25), "protocol {protocol}");
+            assert_eq!(cur.position() as usize, options_start + if legacy { 16 } else { 8 });
+            assert_eq!(cur.get_ref()[cur.position() as usize], 0x5a);
+        }
+    }
+
+    #[test]
+    fn translated_level_particles_reach_raw_handler_and_particle_store() {
+        use crate::particle::{ParticleMode, ParticleStore, ServerParticleKind};
+        use crate::renderer::chunk::atlas::AtlasUVMap;
+        use crate::renderer::chunk::mesher::Colormap;
+        use crate::world::block::registry::BlockRegistry;
+        use crate::world::chunk::ChunkStore;
+        use pomme_protocol::{Direction, PacketTable, Phase};
+
+        let colors = Arc::new(Colormap::test_empty());
+        let mut store = ParticleStore::new(
+            AtlasUVMap::test_empty(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        store.set_mode(ParticleMode::All);
+        let registry = BlockRegistry::test_empty();
+        let mut chunks = ChunkStore::new(2);
+        chunks.light_data.insert(
+            (0, 0),
+            Arc::new(crate::world::chunk::ChunkLightData {
+                sky_sections: Vec::new(),
+                block_sections: Vec::new(),
+                min_y: -64,
+                has_sky: true,
+                sky_top_section: None,
+            }),
+        );
+
+        for (protocol, source_id, legacy) in [
+            (765, 14, true),
+            (767, 13, true),
+            (768, 13, false),
+            (769, 13, false),
+            (776, 21, false),
+        ] {
+            let translation = (protocol != 776)
+                .then(|| super::super::translate::Translation::for_protocol(protocol).unwrap());
+            let table = if protocol == 776 {
+                PacketTable::native()
+            } else {
+                PacketTable::for_protocol(protocol).unwrap()
+            };
+            let mut frame = Vec::new();
+            wire::write_varint(
+                &mut frame,
+                table
+                    .id(Phase::Game, Direction::Clientbound, "level_particles")
+                    .unwrap(),
+            );
+            if protocol == 765 {
+                wire::write_varint(&mut frame, source_id);
+            }
+            frame.push(1); // override limiter
+            if protocol >= 769 {
+                frame.push(u8::from(protocol == 776)); // alwaysShow
+            }
+            for value in [1.0f64, 2.0, 3.0] {
+                frame.extend_from_slice(&value.to_be_bytes());
+            }
+            for value in [0.0f32, 0.0, 0.0, 1.0] {
+                frame.extend_from_slice(&value.to_be_bytes());
+            }
+            frame.extend_from_slice(&0i32.to_be_bytes()); // one directional particle
+            if protocol != 765 {
+                wire::write_varint(&mut frame, source_id);
+            }
+            if legacy {
+                for value in [1.0f32, 0.0, 0.5, 1.25] {
+                    frame.extend_from_slice(&value.to_be_bytes());
+                }
+            } else {
+                frame.extend_from_slice(&0x0012_3456i32.to_be_bytes());
+                frame.extend_from_slice(&1.25f32.to_be_bytes());
+            }
+
+            let native_frame = if let Some(translation) = &translation {
+                translation.translate_game_frame(frame.clone().into_boxed_slice()).unwrap()
+            } else {
+                frame.into_boxed_slice()
+            };
+            let option_len = if legacy { 16 } else { 8 };
+            assert_eq!(
+                native_frame[native_frame.len() - option_len - 1],
+                source_id as u8
+            ); // Translation preserves wire id; raw parser remaps it to native Dust.
+            if protocol == 765 {
+                assert_eq!(native_frame[1], 1); // overrideLimiter
+                assert_eq!(native_frame[2], 0); // synthesized alwaysShow
+                assert_eq!(
+                    &native_frame[native_frame.len() - 16..],
+                    &[
+                        1.0f32.to_be_bytes(),
+                        0.0f32.to_be_bytes(),
+                        0.5f32.to_be_bytes(),
+                        1.25f32.to_be_bytes(),
+                    ]
+                    .concat(),
+                );
+            }
+
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let handled = runtime
+                .block_on(super::handle_raw_game_packet_with_translation(
+                    &native_frame,
+                    &tx,
+                    translation.as_ref(),
+                ))
+                .unwrap();
+            assert!(handled, "protocol {protocol}");
+            let NetworkEvent::LevelParticles {
+                kind: ServerParticleKind::Dust,
+                options: crate::particle::ServerParticleOptions::Dust { packed_color, scale },
+                pos,
+                x_dist,
+                y_dist,
+                z_dist,
+                max_speed,
+                count,
+                override_limiter,
+                always_show,
+            } = rx
+                .try_recv()
+                .expect(&format!("protocol {protocol}: expected translated Dust event"))
+            else {
+                panic!("protocol {protocol}: expected translated Dust event");
+            };
+            let expected = if legacy { 0xffff_007f } else { 0x0012_3456 };
+            assert_eq!(packed_color as u32, expected, "protocol {protocol}");
+            assert_eq!(scale, 1.25, "protocol {protocol}");
+            assert_eq!(override_limiter, true);
+            assert_eq!(always_show, protocol == 776);
+            assert_eq!(pos, glam::dvec3(1.0, 2.0, 3.0));
+            assert_eq!((x_dist, y_dist, z_dist, max_speed, count), (0.0, 0.0, 0.0, 1.0, 0));
+
+            store.clear();
+            store.add_particles_from_packet(
+                ServerParticleKind::Dust,
+                crate::particle::ServerParticleOptions::Dust { packed_color, scale },
+                true,
+                always_show,
+                pos,
+                glam::dvec3(x_dist.into(), y_dist.into(), z_dist.into()),
+                max_speed.into(),
+                count,
+                glam::dvec3(1.0, 2.0, 3.0),
+                &registry,
+                &chunks,
+                &Default::default(),
+            );
+            assert_eq!(store.test_pending().len(), 1, "protocol {protocol}");
+            store.tick(&chunks);
+            store.tick(&chunks);
+            let quads = store.extract(0.0, glam::dvec3(0.0, 0.0, 0.0));
+            assert_eq!(quads.len(), 1, "protocol {protocol}");
+            let quad = &quads[0];
+            assert!(quad.u0 < quad.u1 && quad.v0 < quad.v1);
+            assert!(quad.size > 0.0 && quad.size <= 0.09375);
+            if legacy {
+                assert!(quad.color & 0xff > 0);
+                assert_eq!((quad.color >> 8) & 0xff, 0);
+                assert!(quad.color >> 16 & 0xff > 0);
+            } else {
+                assert!((quad.color & 0xff) > 0);
+                assert!((quad.color >> 8) & 0xff > 0);
+                assert!((quad.color >> 16) & 0xff > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn translated_truncated_dust_frame_is_rejected_by_raw_handler() {
+        use pomme_protocol::{Direction, PacketTable, Phase};
+
+        let translation = super::super::translate::Translation::for_protocol(765).unwrap();
+        let mut frame = Vec::new();
+        wire::write_varint(
+            &mut frame,
+            PacketTable::for_protocol(765)
+                .unwrap()
+                .id(Phase::Game, Direction::Clientbound, "level_particles")
+                .unwrap(),
+        );
+        wire::write_varint(&mut frame, 14);
+        frame.push(0);
+        for value in [0.0f64; 3] {
+            frame.extend_from_slice(&value.to_be_bytes());
+        }
+        for value in [0.0f32; 4] {
+            frame.extend_from_slice(&value.to_be_bytes());
+        }
+        frame.extend_from_slice(&0i32.to_be_bytes());
+        // The leading 765 Dust id is reused after count; only 15 option bytes follow.
+        frame.extend_from_slice(&[0; 15]);
+        let complete = {
+            let mut frame = frame.clone();
+            frame.push(0); // one more byte makes the required 16-byte options
+            translation.translate_game_frame(frame.into_boxed_slice()).unwrap()
+        };
+        let translated = translation.translate_game_frame(frame.into_boxed_slice()).unwrap();
+        assert_eq!(complete.len(), translated.len() + 1);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(super::handle_raw_game_packet_with_translation(
+                &translated,
+                &tx,
+                Some(&translation),
+            ))
+            .unwrap();
+        assert!(result);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn level_particles_truncated_dust_options_are_rejected() {
+        let dust_id = (0..2048)
+            .find(|&id| crate::particle::ServerParticleKind::from_id(id)
+                == Some(crate::particle::ServerParticleKind::Dust))
+            .unwrap();
+        for (protocol, option_len) in [(767, 15), (768, 7)] {
+            let mut raw = Vec::new();
+            false.azalea_write(&mut raw).unwrap();
+            true.azalea_write(&mut raw).unwrap();
+            for value in [1.0f64, 2.0, 3.0] {
+                value.azalea_write(&mut raw).unwrap();
+            }
+            for value in [0.0f32, 0.0, 0.0, 1.0] {
+                value.azalea_write(&mut raw).unwrap();
+            }
+            1i32.azalea_write(&mut raw).unwrap();
+            dust_id.azalea_write_var(&mut raw).unwrap();
+            raw.extend(std::iter::repeat_n(0, option_len));
+            assert!(parse_level_particles_for_protocol(
+                &mut std::io::Cursor::new(raw.as_slice()),
+                Some(protocol),
+            )
+            .is_err());
+        }
     }
 
     fn handle_raw_game_packet(raw: &[u8], tx: &Sender<NetworkEvent>) -> bool {

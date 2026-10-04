@@ -22,6 +22,29 @@ pub fn create_gpu_image(
     )
 }
 
+pub fn try_create_gpu_image_2d(
+    device: &vk::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    width: u32,
+    height: u32,
+    format: vk::Format,
+    name: &str,
+) -> Result<(vk::Image, vk::ImageView, Allocation), String> {
+    try_create_gpu_image(
+        device,
+        allocator,
+        ImageArrayExtent {
+            width,
+            height,
+            layers: 1,
+        },
+        format,
+        1,
+        vk::ImageViewType::Type2D,
+        name,
+    )
+}
+
 pub fn create_gpu_image_with_format(
     device: &vk::Device,
     allocator: &Arc<Mutex<Allocator>>,
@@ -327,6 +350,83 @@ pub fn create_uniform_buffer(
     )
 }
 
+pub struct UploadImageError {
+    pub message: String,
+    /// Present only after successful submission with completion still unknown.
+    pub submitted_command_buffer: Option<vk::CommandBuffer>,
+}
+
+pub fn try_upload_image(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    staging_buffer: vk::Buffer,
+    image: vk::Image,
+    width: u32,
+    height: u32,
+) -> Result<(), UploadImageError> {
+    try_submit_one_time_retained(device, queue, command_pool, |cmd| {
+        let range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::Color,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::TopOfPipe,
+            vk::PipelineStageFlags::Transfer,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[vk::ImageMemoryBarrier {
+                image,
+                old_layout: vk::ImageLayout::Undefined,
+                new_layout: vk::ImageLayout::TransferDstOptimal,
+                src_access_mask: vk::AccessFlags::empty(),
+                dst_access_mask: vk::AccessFlags::TransferWrite,
+                subresource_range: range,
+                ..Default::default()
+            }],
+        );
+        cmd.copy_buffer_to_image(
+            staging_buffer,
+            image,
+            vk::ImageLayout::TransferDstOptimal,
+            &[vk::BufferImageCopy {
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::Color,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_extent: vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                },
+                ..Default::default()
+            }],
+        );
+        cmd.pipeline_barrier(
+            vk::PipelineStageFlags::Transfer,
+            vk::PipelineStageFlags::FragmentShader,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[vk::ImageMemoryBarrier {
+                image,
+                old_layout: vk::ImageLayout::TransferDstOptimal,
+                new_layout: vk::ImageLayout::ShaderReadOnlyOptimal,
+                src_access_mask: vk::AccessFlags::TransferWrite,
+                dst_access_mask: vk::AccessFlags::ShaderRead,
+                subresource_range: range,
+                ..Default::default()
+            }],
+        );
+    })
+}
+
 pub fn upload_image(
     device: &vk::Device,
     queue: vk::Queue,
@@ -507,6 +607,62 @@ pub fn submit_one_time<F: FnOnce(&vk::CommandBuffer)>(
 ) {
     try_submit_one_time(device, queue, command_pool, record)
         .unwrap_or_else(|error| panic!("{error}"));
+}
+
+fn try_submit_one_time_retained<F: FnOnce(&vk::CommandBuffer)>(
+    device: &vk::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    record: F,
+) -> Result<(), UploadImageError> {
+    let alloc_info = vk::CommandBufferAllocateInfo {
+        command_pool,
+        level: vk::CommandBufferLevel::Primary,
+        command_buffer_count: 1,
+        ..Default::default()
+    };
+    let mut cmd = vk::CommandBuffer::null();
+    unsafe { device.allocate_command_buffers(&alloc_info, std::slice::from_mut(&mut cmd)) }
+        .map_err(|error| UploadImageError {
+            message: format!("failed to allocate one-time command buffer: {error}"),
+            submitted_command_buffer: None,
+        })?;
+    let pre_submit = cmd
+        .begin(&vk::CommandBufferBeginInfo {
+            flags: vk::CommandBufferUsageFlags::OneTimeSubmit,
+            ..Default::default()
+        })
+        .map_err(|error| format!("failed to begin one-time command buffer: {error}"))
+        .and_then(|()| {
+            record(&cmd);
+            cmd.end()
+                .map_err(|error| format!("failed to end one-time command buffer: {error}"))
+        })
+        .and_then(|()| {
+            let info = vk::SubmitInfo {
+                command_buffer_count: 1,
+                command_buffers: &cmd.handle(),
+                ..Default::default()
+            };
+            queue
+                .submit(&[info], vk::Fence::null())
+                .map_err(|error| format!("failed to submit one-time command buffer: {error}"))
+        });
+    if let Err(message) = pre_submit {
+        device.free_command_buffers(command_pool, &[cmd.handle()]);
+        return Err(UploadImageError {
+            message,
+            submitted_command_buffer: None,
+        });
+    }
+    if let Err(error) = queue.wait_idle() {
+        return Err(UploadImageError {
+            message: format!("failed to wait for one-time command buffer: {error}"),
+            submitted_command_buffer: Some(cmd),
+        });
+    }
+    device.free_command_buffers(command_pool, &[cmd.handle()]);
+    Ok(())
 }
 
 fn try_submit_one_time<F: FnOnce(&vk::CommandBuffer)>(
