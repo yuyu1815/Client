@@ -66,8 +66,10 @@ mod diagnostic_tests {
                 .as_nanos()
         ));
         write_stage(&path, "test.stage");
+        write_image(&path, "test.image", 3, 4, 2, 1);
         let stage_file = std::fs::read_to_string(&path).unwrap();
         assert!(stage_file.contains("test.stage"));
+        assert!(stage_file.contains("\"width\":3,\"height\":4,\"layers\":2,\"bytes\":24"));
 
         let private_payload = "private-panic-payload";
         let record = panic_record("src/main.rs:7:3", "captured backtrace");
@@ -120,6 +122,46 @@ fn install_panic_diagnostic(log_dir: &Path) {
 pub(crate) fn diagnostic_stage(stage: &'static str) {
     if let Some(path) = DIAGNOSTIC_PATH.get() {
         write_stage(path, stage);
+    }
+}
+
+fn write_image(
+    path: &Path,
+    stage: &'static str,
+    width: u32,
+    height: u32,
+    layers: u32,
+    bytes_per_pixel: u32,
+) {
+    let _guard = DIAGNOSTIC_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let byte_count = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|bytes| bytes.checked_mul(u64::from(layers)))
+        .and_then(|bytes| bytes.checked_mul(u64::from(bytes_per_pixel)))
+        .unwrap_or(u64::MAX);
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let record = format!(
+        "{{\"epoch_seconds\":{},\"epoch_nanos\":{},\"kind\":\"image\",\"stage\":{},\"width\":{},\"height\":{},\"layers\":{},\"bytes\":{}}}\n",
+        epoch.as_secs(), epoch.subsec_nanos(),
+        serde_json::to_string(stage).unwrap_or_else(|_| "\"stage\"".into()),
+        width, height, layers, byte_count
+    );
+    let _ = append_diagnostic(path, &record);
+}
+
+pub(crate) fn diagnostic_image(
+    stage: &'static str,
+    width: u32,
+    height: u32,
+    layers: u32,
+    bytes_per_pixel: u32,
+) {
+    if let Some(path) = DIAGNOSTIC_PATH.get() {
+        write_image(path, stage, width, height, layers, bytes_per_pixel);
     }
 }
 

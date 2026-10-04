@@ -6,6 +6,15 @@ use std::path::Path;
 include!("src/renderer/chunk/packing_consts.rs");
 
 fn main() {
+    // Debug event/state frames measured 936,896 B on this Windows path; reserve
+    // 4 MiB while AppPhase state remains stack-resident (heap-backed state is a
+    // future option). This is mitigation, not a confirmed crash root cause.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!("cargo:rustc-link-arg-bin=pomme-client=/STACK:4194304");
+    }
+
     // Releases bundle the Vulkan loader (libvulkan.1.dylib) next to the binary,
     // since macOS has no system Vulkan; this rpath lets it be found at runtime.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {

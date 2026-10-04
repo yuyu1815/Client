@@ -486,6 +486,7 @@ impl MenuOverlayPipeline {
             font_sources.jar_assets_dir,
             font_sources.asset_index,
             Some(font_sources.packs),
+            false,
         );
 
         let sprite_sampler = unsafe { util::create_nearest_sampler(device) };
@@ -531,6 +532,7 @@ impl MenuOverlayPipeline {
             command_pool,
             allocator,
             glyph_pixels.as_ref(),
+            false,
         )?;
 
         let font_img_info = vk::DescriptorImageInfo {
@@ -593,6 +595,7 @@ impl MenuOverlayPipeline {
                 font_sources.jar_assets_dir,
                 font_sources.asset_index,
                 Some(font_sources.packs),
+                false,
             );
         // Both source textures ship mcmeta `blur: true`.
         let overlay_sampler = unsafe { util::create_linear_sampler(device) };
@@ -607,6 +610,7 @@ impl MenuOverlayPipeline {
             Some(font_sources.packs),
             "minecraft/textures/misc/underwater.png",
             "underwater_overlay",
+            false,
         );
         // Repeat wrapping: the overlay tiles 4x and scrolls with the look direction.
         let underwater_sampler = unsafe { util::create_nearest_repeat_sampler(device) };
@@ -750,6 +754,7 @@ impl MenuOverlayPipeline {
             font_sources.jar_assets_dir,
             font_sources.asset_index,
             Some(font_sources.packs),
+            true,
         );
         let sprite_info = vk::DescriptorImageInfo {
             sampler: self.sprite_sampler,
@@ -783,6 +788,7 @@ impl MenuOverlayPipeline {
         self.sprite_allocation = Some(sprite_allocation);
         self.sprite_staging_buffer = sprite_staging_buffer;
         self.sprite_staging_allocation = sprite_staging_allocation;
+        crate::logging::diagnostic_stage("font_reload.sprite.descriptor_oldretire.complete");
 
         let (overlay_image, overlay_view, overlay_allocation, vignette_uv, pumpkin_uv) =
             build_camera_overlay_texture(
@@ -793,6 +799,7 @@ impl MenuOverlayPipeline {
                 font_sources.jar_assets_dir,
                 font_sources.asset_index,
                 Some(font_sources.packs),
+                true,
             );
         let (underwater_image, underwater_view, underwater_allocation) = load_single_texture(
             device,
@@ -804,6 +811,7 @@ impl MenuOverlayPipeline {
             Some(font_sources.packs),
             "minecraft/textures/misc/underwater.png",
             "underwater_overlay",
+            true,
         );
         let overlay_infos = [
             vk::DescriptorImageInfo {
@@ -850,10 +858,23 @@ impl MenuOverlayPipeline {
         self.underwater_image = underwater_image;
         self.underwater_view = underwater_view;
         self.underwater_allocation = Some(underwater_allocation);
+        crate::logging::diagnostic_stage("font_reload.bindings_6_7_oldretire.complete");
 
-        let (glyph_map, pixels) = GlyphMap::load(font_sources, self.font_layer_limit)?;
+        crate::logging::diagnostic_stage("font_reload.glyph_map.load.begin");
+        let (glyph_map, pixels) = match GlyphMap::load(font_sources, self.font_layer_limit) {
+            Ok(result) => {
+                crate::logging::diagnostic_stage("font_reload.glyph_map.load.complete");
+                result
+            }
+            Err(error) => {
+                crate::logging::diagnostic_stage("font_reload.glyph_map.load.error_return");
+                return Err(error);
+            }
+        };
+        crate::logging::diagnostic_stage("font_reload.gray_color.build.begin");
         let (gray, color) =
-            create_font_textures(device, queue, command_pool, allocator, Some(&pixels))?;
+            create_font_textures(device, queue, command_pool, allocator, Some(&pixels), true)?;
+        crate::logging::diagnostic_stage("font_reload.gray_color.uploads.complete");
         let gray_info = gray.image_info();
         let color_info = color.image_info();
         let writes =
@@ -866,6 +887,7 @@ impl MenuOverlayPipeline {
                 ..Default::default()
             });
         device.update_descriptor_sets(&writes, &[]);
+        crate::logging::diagnostic_stage("font_reload.bindings_3_8.complete");
 
         let mut alloc = util::lock_allocator(allocator);
         destroy_texture_resources(
@@ -879,6 +901,7 @@ impl MenuOverlayPipeline {
             &mut std::mem::replace(&mut self.mc_font_color, color),
         );
         self.mc_glyph_map = Some(glyph_map);
+        crate::logging::diagnostic_stage("font_reload.oldfontretire_mapcommit.complete");
         Ok(())
     }
 
@@ -2956,6 +2979,7 @@ fn build_sprite_atlas(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
+    diagnostic: bool,
 ) -> (
     SpriteAtlas,
     vk::Image,
@@ -2964,6 +2988,7 @@ fn build_sprite_atlas(
     vk::Buffer,
     Option<Allocation>,
 ) {
+    if diagnostic { crate::logging::diagnostic_stage("font_reload.sprite.cpu_build.begin"); }
     let resolve_asset_path = |jar: &Path, index: &Option<AssetIndex>, key: &str| {
         resolve_asset_path_with_packs(jar, index, key, packs)
     };
@@ -4491,6 +4516,10 @@ fn build_sprite_atlas(
     // `upload_image` copies `atlas_size * atlas_size * 4` bytes regardless of
     // the staging buffer's length, so `pixels` has to stay sized off the packed
     // `atlas_size` above; feeding these a size of their own would read past it.
+    if diagnostic {
+        crate::logging::diagnostic_stage("font_reload.sprite.cpu_build.complete");
+        crate::logging::diagnostic_image("font_reload.sprite.gpu_upload.begin", atlas_size, atlas_size, 1, 4);
+    }
     let (image, view, allocation) =
         util::create_gpu_image(device, allocator, atlas_size, atlas_size, "sprite_atlas");
     let (staging_buffer, staging_allocation) =
@@ -4504,6 +4533,7 @@ fn build_sprite_atlas(
         atlas_size,
         atlas_size,
     );
+    if diagnostic { crate::logging::diagnostic_stage("font_reload.sprite.gpu_upload.complete"); }
 
     (
         SpriteAtlas { regions },
@@ -4565,7 +4595,9 @@ fn build_camera_overlay_texture(
     jar_assets_dir: &Path,
     asset_index: &Option<AssetIndex>,
     packs: Option<&crate::resource_pack::ResourcePackManager>,
+    diagnostic: bool,
 ) -> (vk::Image, vk::ImageView, Allocation, [f32; 4], [f32; 4]) {
+    if diagnostic { crate::logging::diagnostic_stage("font_reload.camera_overlay.build.begin"); }
     let (vig, vw, vh) = load_overlay_rgba(
         jar_assets_dir,
         asset_index,
@@ -4587,6 +4619,10 @@ fn build_camera_overlay_texture(
 
     let (image, view, allocation) =
         util::create_gpu_image(device, allocator, w, h, "camera_overlay");
+    if diagnostic {
+        crate::logging::diagnostic_stage("font_reload.camera_overlay.build.complete");
+        crate::logging::diagnostic_image("font_reload.camera_overlay.gpu_upload.begin", w, h, 1, 4);
+    }
     upload_and_free_staging(
         device,
         queue,
@@ -4598,6 +4634,7 @@ fn build_camera_overlay_texture(
         h,
         "camera_overlay_staging",
     );
+    if diagnostic { crate::logging::diagnostic_stage("font_reload.camera_overlay.gpu_upload.complete"); }
 
     let (iw, ih) = (w as f32, h as f32);
     let vignette_uv = [
@@ -4626,9 +4663,15 @@ fn load_single_texture(
     packs: Option<&crate::resource_pack::ResourcePackManager>,
     asset_key: &str,
     name: &str,
+    diagnostic: bool,
 ) -> (vk::Image, vk::ImageView, Allocation) {
+    if diagnostic { crate::logging::diagnostic_stage("font_reload.underwater.build.begin"); }
     let (pixels, w, h) = load_overlay_rgba(jar_assets_dir, asset_index, packs, asset_key);
     let (image, view, allocation) = util::create_gpu_image(device, allocator, w, h, name);
+    if diagnostic {
+        crate::logging::diagnostic_stage("font_reload.underwater.build.complete");
+        crate::logging::diagnostic_image("font_reload.underwater.gpu_upload.begin", w, h, 1, 4);
+    }
     upload_and_free_staging(
         device,
         queue,
@@ -4640,6 +4683,7 @@ fn load_single_texture(
         h,
         name,
     );
+    if diagnostic { crate::logging::diagnostic_stage("font_reload.underwater.gpu_upload.complete"); }
     (image, view, allocation)
 }
 
@@ -4650,6 +4694,7 @@ struct FontTextureUpload<'a> {
     extent: util::ImageArrayExtent,
     format: vk::Format,
     name: &'static str,
+    diagnostic: bool,
 }
 
 /// Uploads the gray (R8) and colored glyph atlases, with 1x1 placeholders when
@@ -4660,6 +4705,7 @@ fn create_font_textures(
     command_pool: vk::CommandPool,
     allocator: &Arc<Mutex<Allocator>>,
     pixels: Option<&GlyphAtlasPixels>,
+    diagnostic: bool,
 ) -> Result<(TextureResources, TextureResources), String> {
     let extent = |layers| util::ImageArrayExtent {
         width: GLYPH_ATLAS_SIZE,
@@ -4690,6 +4736,7 @@ fn create_font_textures(
                 extent,
                 format,
                 name,
+                diagnostic,
             },
         )
     };
@@ -4737,6 +4784,9 @@ fn create_font_texture(
     } else {
         4
     };
+    if upload.diagnostic {
+        crate::logging::diagnostic_image(if upload.format == vk::Format::R8Unorm { "font_reload.gray_texture.upload.begin" } else { "font_reload.color_texture.upload.begin" }, upload.extent.width, upload.extent.height, upload.extent.layers, bytes_per_pixel as u32);
+    }
     let uploaded = util::try_create_mapped_buffer(
         device,
         allocator,
@@ -4761,6 +4811,9 @@ fn create_font_texture(
     if let Err(error) = uploaded {
         destroy_texture_resources(device, &mut util::lock_allocator(allocator), &mut texture);
         return Err(error);
+    }
+    if upload.diagnostic {
+        crate::logging::diagnostic_stage(if upload.format == vk::Format::R8Unorm { "font_reload.gray_texture.upload.complete" } else { "font_reload.color_texture.upload.complete" });
     }
     Ok(texture)
 }
