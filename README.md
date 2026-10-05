@@ -31,6 +31,10 @@ alternative to the official Java client.
 - **Discord presence** for the menu, servers, and worlds
 - **Launcher**: Tauri-based launcher with frosted glass UI, multi-account management, Mojang patch notes, installation manager
 
+## Compatibility
+
+[公式 Java Edition 26.2 との互換性一覧](docs/compatibility/README.md) — 現行Rust実装の静的照合。実装状態・既知の差分・未検証事項・根拠を分けて記載しています。実機での一致確認や全機能の網羅を示すものではありません。
+
 ## Architecture
 
 ```bash
