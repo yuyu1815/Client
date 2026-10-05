@@ -365,7 +365,7 @@ Asset denominator is all active resource-manager particle JSON, not 125 identiti
 
 ## Provider binding crosswalk — static source ownership, not equivalence
 
-Each fixed ID is joined from the official registration identity to its Java provider binding, Rust `from_name` arm, and concrete central/family source owner. `JPF` denotes one of 53 Java source evidence groups, not one identity. `RPF` identifies the actual Rust owner; family grouping never asserts shared parameters or matching behavior. The final column is explicit: no Java/Rust execution comparison was run.
+Each fixed ID is joined from the official registration identity to its Java provider binding, Rust `from_name` arm, and concrete central/family source owner. `JPF` denotes one of 53 Java source evidence groups—not an identity count and not a count of distinct Java classes. A group can cover several IDs or provider subclasses. `RPF` identifies the actual Rust owner; family grouping never asserts shared parameters or matching behavior. The final column is explicit: no Java/Rust execution comparison was run.
 
 | ID | Java identity / option | Java provider binding (`ParticleResources.registerProviders`) | Rust identity route (`ServerParticleKind::from_name`) | Rust typed option match | Rust concrete owner (RPF) | Status |
 |---|---|---|---|---|---|---|
@@ -509,7 +509,7 @@ Each crosswalk row's `RPF` column links stable ID -> Rust `from_name` variant ->
 | RPF-T | `pomme-client/src/particle.rs:3518-3528` -> `pomme-client/src/particle/terrain_extra.rs:26-50` support/option validation; `:51-302` constructor/block filter; `:303-357` tick; `:358-382` appearance. Marker/falling dust/pillar/crumble/item each have distinct initialization and update. |
 | RPF-E | `pomme-client/src/particle.rs:3530-3554` -> `pomme-client/src/particle/emitters.rs:42-103` support/model request; `:104-160` constructor; `:161-387` tick/children/animation; `:388-410` appearance; `geyser_child` `:287-386`. Geyser/gas/gust schedules and Elder Guardian special model are distinct; not generic quad fallback. |
 
-The JPF link and stable ID on each row join Java provider registration/source to Rust concrete owner mechanically. Coverage: Java IDs 125; JPF evidence groups 53 (not identities); Rust names 125; concrete owner paths 125/125; unknown route 0; source execution comparison 0/125. Source mapping completion is not behavior equivalence.
+The JPF link and stable ID on each row join Java provider registration/source to Rust concrete owner mechanically. Coverage: Java IDs 125; JPF evidence groups 53 (not identity count or distinct-class count); Rust names 125; concrete owner paths 125/125; unknown route 0; source execution comparison 0/125. Source mapping completion is not behavior equivalence.
 
 ### Shared official Java base/provider evidence
 
