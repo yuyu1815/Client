@@ -96,7 +96,7 @@ Pommeにはmeshがない場合のflat texture fallback (`Client/pomme-client/src
 
 ## 依存・未確認事項
 
-**依存:** resources-and-launch（26.2 assets/registry hash・priority/reload generation・texture lifetime契約）、inventory（stack/component snapshot）、interaction/server-gameplay（use/cooldown/authority遷移）、living-entities（player pose/appearance/visibility/masks・humanoid armor/wings/cape target）、nonliving-entities（animal/vehicle equipment consumer/model contract）、world/map owner（map/decorations state）、connection-and-protocol（profile/appearance retrieval boundary）。隣接planの範囲を書き換えず、各ownerとsnapshot/error contractを合意する。protocolはtransport、resourcesはload、各rendererはsemantic consumerを担う。
+**依存:** [resources](resources.md)（26.2 assets/registry hash・priority/reload generation・texture lifetime契約）、[launcher](launcher.md)（取得済みartifact/version整合と起動引渡し）、[inventory](inventory.md)（stack/component snapshot）、[interaction](interaction.md) / [server-gameplay](server-gameplay.md)（use/cooldown/authority遷移）、[living-entities](living-entities.md)（player pose/appearance/visibility/masks・humanoid armor/wings/cape target）、[nonliving-entities](nonliving-entities.md)（animal/vehicle equipment consumer/model contract）、[server-world](server-world.md) / [connection-and-protocol](connection-and-protocol.md)（map/decorations stateとtransport境界）、[connection-and-protocol](connection-and-protocol.md)（profile/appearance retrieval boundary）。隣接planの範囲を書き換えず、各ownerとsnapshot/error contractを合意する。protocolはtransport、resourcesはload、各rendererはsemantic consumerを担う。
 
 **調査済み:** 公式上記有限宣言全件、公式held/map/player armor/cape/wingsの主要入口、Pomme dynamic definition→mesh bake、held/GUI/drop/map/equipment/skin/cape/activationの主要静的経路、flat mesh fallbackの性質。調査済みはsource pathの読解であり実挙動ではない。
 
