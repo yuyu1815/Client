@@ -13,7 +13,7 @@ use crate::app::core::{AppCore, PlayerInputState};
 use crate::app::level_load::LevelLoadTracker;
 use crate::app::phases::Gfx;
 use crate::app::{TICK_RATE, input};
-use crate::audio::{CATEGORY_AMBIENT, CATEGORY_PLAYERS, SoundRef};
+use crate::audio::{CATEGORY_AMBIENT, CATEGORY_BLOCKS, CATEGORY_PLAYERS, SoundRef};
 use crate::benchmark::{
     Benchmark, BenchmarkResult, ChunkLoadBench, ChunkLoadResult, ChunkLoadStep, UploadHandle,
     UploadStatus, upload_result,
@@ -317,6 +317,9 @@ pub struct GameState {
     /// Bubble index the pop sound last played for, so each pop fires once.
     pub last_bubble_pop_sound_played: i32,
     pub biome_climate: Arc<HashMap<u32, BiomeClimate>>,
+    pub ambient_particles:
+        Arc<HashMap<u32, Vec<crate::world::environment_particles::AmbientParticle>>>,
+    pub dimension_ambient_particles: Vec<crate::world::environment_particles::AmbientParticle>,
     pub player_walk_pos: f32,
     pub player_walk_speed: f32,
     pub player_prev_walk_speed: f32,
@@ -396,6 +399,10 @@ pub struct GameState {
     pub scoreboard: crate::ui::hud::Scoreboard,
     pub local_scoreboard_name: Option<String>,
     pub boss_bars: crate::ui::boss_bar::BossBarState,
+    lightmap_boss_darkening: [f32; 2],
+    lightmap_darkness_blend: [f32; 2],
+    lightmap_block_flicker: f32,
+    pub(crate) lightning_flash_ticks: u8,
     pub toasts: crate::ui::toast::ToastState,
     pub recipe_book: crate::ui::recipe_book::RecipeBookState,
     pub subtitles: crate::ui::subtitles::SubtitleOverlayState,
@@ -421,6 +428,9 @@ pub struct GameState {
     pub interaction: InteractionState,
     pub sky_state: crate::renderer::SkyState,
     pub dimension_environment: crate::net::environment::DimensionEnvironment,
+    pub water_evaporates_biomes: HashMap<u32, crate::net::environment::BoolAttributeLayer>,
+    pub dripstone_particle_biomes:
+        HashMap<u32, crate::world::environment_particles::AmbientParticle>,
     pub sky_light_evaluation: Option<crate::net::environment::SkyLightEvaluation>,
     pub(crate) sky_light_unavailable_reason: Option<String>,
     pub pending_dimension_environment: Option<crate::net::environment::DimensionEnvironmentInput>,
@@ -687,6 +697,57 @@ impl GameState {
         Ok(sample.timeline_ticks(period))
     }
 
+    pub(crate) fn timeline_clock_render_sample(
+        &self,
+        timeline: &crate::net::environment::LightmapTimeline,
+        render_partial_tick: f32,
+    ) -> Result<f64, String> {
+        let id = self.world_clock_ids.get(&timeline.clock).ok_or_else(|| {
+            format!(
+                "timeline {} references unknown world clock {}",
+                timeline.id, timeline.clock
+            )
+        })?;
+        let sample = self.world_clocks.get(id).ok_or_else(|| {
+            format!(
+                "timeline {} world clock {} (id {id}) has no sample",
+                timeline.id, timeline.clock
+            )
+        })?;
+        let ticks = match timeline.period_ticks {
+            Some(period) => {
+                if period <= 0 {
+                    return Err(format!(
+                        "timeline {} has invalid period {period}",
+                        timeline.id
+                    ));
+                }
+                (sample.total_ticks.rem_euclid(i64::from(period)) as f64
+                    + f64::from(sample.partial_tick)
+                    + f64::from(render_partial_tick) * f64::from(sample.rate))
+                .rem_euclid(f64::from(period))
+            }
+            None => sample.renderer_tick(render_partial_tick),
+        };
+        Ok(ticks)
+    }
+
+    pub(crate) fn ambient_timeline_clock_ticks(
+        &self,
+        timeline_id: &str,
+        clock_name: &str,
+    ) -> Result<i64, String> {
+        let id = self.world_clock_ids.get(clock_name).ok_or_else(|| {
+            format!("timeline {timeline_id} references unknown world clock {clock_name}")
+        })?;
+        self.world_clocks
+            .get(id)
+            .map(|sample| sample.total_ticks)
+            .ok_or_else(|| {
+                format!("timeline {timeline_id} world clock {clock_name} (id {id}) has no sample")
+            })
+    }
+
     /// Resolve a spawned entity's attachment from the dimensions available to
     /// existing raycast/player state. Pose/attribute-scale mutations beyond
     /// these sources are not represented by the current shared entity state.
@@ -814,6 +875,8 @@ impl GameState {
             world_border: crate::world::border::WorldBorder::default(),
             last_bubble_pop_sound_played: 0,
             biome_climate: Arc::new(HashMap::new()),
+            ambient_particles: Arc::new(HashMap::new()),
+            dimension_ambient_particles: Vec::new(),
             player_walk_pos: 0.0,
             player_walk_speed: 0.0,
             player_prev_walk_speed: 0.0,
@@ -873,6 +936,10 @@ impl GameState {
             scoreboard: crate::ui::hud::Scoreboard::default(),
             local_scoreboard_name: None,
             boss_bars: crate::ui::boss_bar::BossBarState::default(),
+            lightmap_boss_darkening: [0.0; 2],
+            lightmap_darkness_blend: [0.0; 2],
+            lightmap_block_flicker: 0.0,
+            lightning_flash_ticks: 0,
             toasts: crate::ui::toast::ToastState::default(),
             recipe_book: crate::ui::recipe_book::RecipeBookState::default(),
             subtitles: crate::ui::subtitles::SubtitleOverlayState::default(),
@@ -887,6 +954,8 @@ impl GameState {
             interaction: InteractionState::new(),
             sky_state: SkyState::default_day(),
             dimension_environment: Default::default(),
+            water_evaporates_biomes: HashMap::new(),
+            dripstone_particle_biomes: HashMap::new(),
             sky_light_evaluation: None,
             sky_light_unavailable_reason: None,
             pending_dimension_environment: None,
@@ -3383,8 +3452,135 @@ fn refresh_sky_light_evaluation(game: &mut GameState) {
     };
 }
 
-/// Approximate vanilla Lightmap.getBrightness; inherited entity/scalar tint
-/// remains approximate.
+/// Build the frame-global Java lightmap inputs. Vanilla has no biome override
+/// for the attributes consumed here; particle-specific block/sky coordinates
+/// are supplied separately in each particle vertex.
+fn particle_lightmap_settings(
+    game: &GameState,
+    partial_tick: f32,
+) -> crate::renderer::lightmap::Settings {
+    let mut settings = crate::renderer::lightmap::Settings::default();
+    settings.block_factor += game.lightmap_block_flicker;
+    let end_clock_time = game
+        .sky_state
+        .clock_id
+        .and_then(|id| game.world_clocks.get(&id))
+        .map(|clock| clock.renderer_tick(partial_tick))
+        .unwrap_or_else(|| {
+            game.sky_state.day_time as f64
+                + f64::from(game.sky_state.clock_partial_tick)
+                + f64::from(partial_tick) * f64::from(game.sky_state.clock_rate)
+        });
+    let end_flash = if game.dimension_environment.has_end_flashes {
+        crate::net::environment::end_flash_intensity(end_clock_time)
+    } else {
+        0.0
+    };
+    let explicit = game.dimension_environment.lightmap_attributes;
+    apply_lightmap_frame_attributes(
+        &mut settings,
+        crate::net::environment::LightmapFrameAttributes {
+            sky_light_factor: explicit
+                .sky_light_factor
+                .filter(|value| value.is_finite())
+                .map(|value| value.clamp(0.0, 1.0))
+                .unwrap_or(1.0),
+            block_light_tint: explicit.block_light_tint.unwrap_or(-10_100),
+            sky_light_color: explicit.sky_light_color.unwrap_or(-1),
+            ambient_light_color: explicit.ambient_light_color.unwrap_or(-16_777_216),
+            night_vision_color: explicit.night_vision_color.unwrap_or(-6_710_887),
+        },
+    );
+    let evaluated = crate::net::environment::evaluate_lightmap_attributes(
+        &game.dimension_environment,
+        game.sky_state.rain(),
+        game.sky_state.thunder(),
+        game.lightning_flash_ticks > 0,
+        end_flash,
+        game.boss_bars.should_create_world_fog(),
+        |timeline| game.timeline_clock_render_sample(timeline, partial_tick),
+    );
+    if let Ok(attributes) = evaluated {
+        apply_lightmap_frame_attributes(&mut settings, attributes);
+    }
+
+    // Pomme currently has no persisted gamma/darkness-pulse options; these
+    // use the actual Java option defaults rather than a fabricated setting.
+    // Java GameRenderer extracts LightmapRenderState with partialTicks=1.0.
+    let darkness = game.lightmap_darkness_blend[1];
+    let brightness = 0.5_f32;
+    let darkness_option = 1.0_f32;
+    let dark_modifier = darkness * darkness_option;
+    settings.brightness = (brightness - dark_modifier).max(0.0);
+    settings.darkness_scale = (((game.tick_count as f32 - 1.0) * std::f32::consts::PI * 0.025)
+        .cos()
+        * 0.45
+        * dark_modifier)
+        .max(0.0);
+    settings.boss_overlay_world_darkening = game.lightmap_boss_darkening[1];
+
+    if let Some(effect) = game.player.effects.get(15) {
+        let duration = effect.duration as f32;
+        settings.night_vision_factor = if effect.duration > 200 {
+            1.0
+        } else {
+            0.7 + ((duration - 1.0) * std::f32::consts::PI * 0.2).sin() * 0.3
+        };
+    } else if game.player.water_vision() > 0.0 && game.player.effects.get(28).is_some() {
+        settings.night_vision_factor = game.player.water_vision();
+    }
+    settings
+}
+
+fn apply_lightmap_frame_attributes(
+    settings: &mut crate::renderer::lightmap::Settings,
+    attributes: crate::net::environment::LightmapFrameAttributes,
+) {
+    let rgb = |value: i32| {
+        let value = value as u32;
+        [
+            ((value >> 16) & 255) as f32 / 255.0,
+            ((value >> 8) & 255) as f32 / 255.0,
+            (value & 255) as f32 / 255.0,
+        ]
+    };
+    settings.sky_factor = attributes.sky_light_factor;
+    settings.block_light_tint = rgb(attributes.block_light_tint);
+    settings.sky_light_color = rgb(attributes.sky_light_color);
+    settings.ambient_color = rgb(attributes.ambient_light_color);
+    settings.night_vision_color = rgb(attributes.night_vision_color);
+}
+
+#[cfg(test)]
+mod particle_lightmap_frame_tests {
+    use super::*;
+
+    #[test]
+    fn evaluated_camera_attributes_are_applied_before_cpu_lut_generation() {
+        let attributes = crate::net::environment::LightmapFrameAttributes {
+            sky_light_factor: 0.24,
+            block_light_tint: -10_100,
+            sky_light_color: 0x007a_7aff,
+            ambient_light_color: -16_119_286,
+            night_vision_color: -6_710_887,
+        };
+        let mut settings = crate::renderer::lightmap::Settings::default();
+        apply_lightmap_frame_attributes(&mut settings, attributes);
+        assert_eq!(settings.sky_factor, 0.24);
+        assert_eq!(
+            settings.sky_light_color,
+            [122.0 / 255.0, 122.0 / 255.0, 1.0]
+        );
+        assert_eq!(settings.ambient_color, [10.0 / 255.0; 3]);
+        let lut = crate::renderer::lightmap::generate(settings);
+        assert_ne!(
+            lut[15 * 16],
+            crate::renderer::lightmap::generate(crate::renderer::lightmap::Settings::default())
+                [15 * 16],
+        );
+    }
+}
+
 fn lightmap_brightness(
     chunks: &ChunkStore,
     dimension: &str,
@@ -3530,7 +3726,7 @@ pub fn update_game(
     core.audio.set_subtitles_enabled(core.menu.show_subtitles);
 
     gfx.renderer.set_vsync(core.menu.vsync);
-    core.apply_pending_pack_changes(&mut gfx.renderer);
+    core.apply_pending_pack_changes(&mut gfx.renderer, game);
     game.chat.set_options(core.menu.chat_options);
 
     // Vanilla pauseIfInactive: losing OS focus for more than half a second
@@ -3591,6 +3787,9 @@ pub fn update_game(
         &mut game.world_clocks,
     );
     game.item_entity_store.advance_age(level_ticks);
+    game.lightning_flash_ticks = game
+        .lightning_flash_ticks
+        .saturating_sub(level_ticks.min(u32::from(u8::MAX)) as u8);
 
     if game.input_live() && game.chunk_load_bench.is_none() {
         gfx.renderer.update_camera(
@@ -3612,10 +3811,36 @@ pub fn update_game(
     // below continues to use the clamped `dt`.
     let fixed_tick_budget = take_fixed_tick_budget(&mut core.tick_accumulator, raw_dt);
     let fixed_tick_start = game.benchmark.is_some().then(std::time::Instant::now);
+    let spectator_uuids: std::collections::HashSet<_> = game
+        .tab_list
+        .players
+        .values()
+        .filter(|player| player.game_mode == 3)
+        .map(|player| player.uuid)
+        .collect();
     let mut fixed_tick_count = 0;
+    let mut local_tick_particle_requests = Vec::new();
     for _ in 0..fixed_tick_budget {
         fixed_tick_count += 1;
         game.tick_count = game.tick_count.wrapping_add(1);
+        game.lightmap_block_flicker +=
+            (fastrand::f32() - fastrand::f32()) * fastrand::f32() * fastrand::f32() * 0.1;
+        game.lightmap_block_flicker *= 0.9;
+        game.lightmap_boss_darkening[0] = game.lightmap_boss_darkening[1];
+        game.lightmap_boss_darkening[1] = if game.boss_bars.should_darken_screen() {
+            (game.lightmap_boss_darkening[1] + 0.05).min(1.0)
+        } else {
+            (game.lightmap_boss_darkening[1] - 0.0125).max(0.0)
+        };
+        game.lightmap_darkness_blend[0] = game.lightmap_darkness_blend[1];
+        let darkness_active = game
+            .player
+            .effects
+            .get(32)
+            .is_some_and(|effect| effect.duration > 22);
+        let target = if darkness_active { 1.0 } else { 0.0 };
+        game.lightmap_darkness_blend[1] +=
+            (target - game.lightmap_darkness_blend[1]).clamp(-1.0 / 22.0, 1.0 / 22.0);
         connection
             .packet_tx
             .recorder
@@ -3653,6 +3878,23 @@ pub fn update_game(
         }
         let local_player_was_removed = game.dead && game.player.death_animation_finished();
         core.tick_physics(&mut gfx.renderer, connection, &gfx.window, game);
+        if game.client_loaded && !local_player_was_removed {
+            let position = glam::DVec3::from(game.player.position);
+            let mut rng = fastrand::Rng::with_seed(game.tick_count);
+            local_tick_particle_requests.extend(
+                crate::entity::local_block_effect_particle_requests(
+                    &game.chunk_store,
+                    position,
+                    glam::DVec3::from(game.player.prev_position),
+                    game.player.bounding_box(),
+                    game.player.game_mode != 3,
+                    game.player.on_ground,
+                    game.player.pose == crate::entity::EntityPose::Crouching,
+                    game.tick_count,
+                    &mut rng,
+                ),
+            );
+        }
         // Cloak motion is a level tick (20 Hz), not physics/interpolation cadence.
         tick_cloaks(&mut game.player, &mut game.entity_store);
         // `LocalPlayer.tick` returns before `super.tick()` until the client has
@@ -3665,8 +3907,20 @@ pub fn update_game(
             game.player.tick_sleep();
         }
         game.item_entity_store.tick(&game.chunk_store);
+        local_tick_particle_requests.extend(
+            game.item_entity_store
+                .block_contact_particle_requests(&game.chunk_store, game.tick_count),
+        );
         game.entity_store
             .tick_projectile_displays(&game.chunk_store);
+        if game.client_loaded {
+            local_tick_particle_requests.extend(crate::entity::powder_snow_nonliving_requests(
+                &mut game.entity_store,
+                &game.item_entity_store,
+                &game.chunk_store,
+                game.tick_count,
+            ));
+        }
         let book_players: Vec<_> = std::iter::once(*game.player.position)
             .chain(
                 game.entity_store
@@ -3749,8 +4003,230 @@ pub fn update_game(
                 game.particle_store.add_campfire_smoke(spawn, signal);
             }
         }
+        // ClientLevel.animateTick and tickWeatherEffects produce local-only
+        // requests from loaded world state; server LevelParticles remain packet-owned.
+        let world_particle_camera = gfx.renderer.camera_render_position();
+        let ambient_timeline_override = crate::net::environment::evaluate_ambient_particles(
+            &game.dimension_environment,
+            |timeline_id, clock_name, _period_ticks| {
+                game.ambient_timeline_clock_ticks(timeline_id, clock_name)
+            },
+        )
+        .unwrap_or_else(|error| {
+            tracing::debug!(%error, "Ambient-particle timeline unavailable");
+            None
+        });
+        let mut animate_probes = Vec::new();
+        crate::world::particle_tick::sample_animate_positions(
+            world_particle_camera,
+            |x, z| {
+                game.chunk_store
+                    .get_chunk(&azalea_core::position::ChunkPos::new(x, z))
+                    .is_some()
+            },
+            |pos, _| animate_probes.push(pos),
+            game.tick_count,
+        );
+        let ambient_spawns = crate::world::environment_particles::sample_loaded_positions(
+            &game.chunk_store,
+            &game.ambient_particles,
+            &game.dimension_ambient_particles,
+            ambient_timeline_override.as_deref(),
+            animate_probes.iter().copied(),
+            game.tick_count,
+            core.menu.particle_status(),
+        );
+        for spawn in ambient_spawns {
+            game.particle_store.add_particle_spawn_request(
+                spawn,
+                world_particle_camera,
+                gfx.renderer.registry(),
+                &game.chunk_store,
+                &game.biome_climate,
+            );
+        }
+        let marker_target = game
+            .player
+            .inventory
+            .held_stack(core.input.selected_slot())
+            .map(|held| crate::player::inventory::item_resource_name(held.kind));
+        let marker_target = crate::world::particle_tick::marker_particle_target(
+            game.player.game_mode,
+            marker_target.as_deref(),
+        );
+        let mut world_particle_requests = std::mem::take(&mut local_tick_particle_requests);
+        world_particle_requests.extend(
+            crate::world::particle_tick::sample_animate_tick_particles_at_positions(
+                &game.chunk_store,
+                animate_probes.iter().copied(),
+                game.tick_count,
+                marker_target,
+            ),
+        );
+        for position in game.entity_store.take_firework_launch_sounds() {
+            core.audio.play_world_sound(
+                &SoundRef::event("entity.firework_rocket.launch"),
+                CATEGORY_AMBIENT,
+                position,
+                3.0,
+                1.0,
+                fastrand::u64(..),
+            );
+        }
+        game.entity_store
+            .set_client_particle_game_time(game.sky_state.game_time);
+        let holds_item = |kind| {
+            game.player
+                .inventory
+                .held_stack(core.input.selected_slot())
+                .is_some_and(|stack| stack.kind == kind)
+                || game
+                    .player
+                    .inventory
+                    .offhand()
+                    .as_present()
+                    .is_some_and(|stack| stack.kind == kind)
+        };
+        world_particle_requests.extend(game.entity_store.client_particle_requests(
+            &game.chunk_store,
+            &spectator_uuids,
+            Some(crate::entity::LocalPlayerProjectileView {
+                entity_id: game.player.entity_id,
+                position: game.player.position.into(),
+                bbox_height: f64::from(game.player.height()),
+                bounds: game.player.bounding_box(),
+                is_spectator: game.player.game_mode == 3,
+                is_alive: game.player.health > 0.0,
+                holds_carrot_on_a_stick: holds_item(
+                    azalea_registry::builtin::ItemKind::CarrotOnAStick,
+                ),
+                holds_warped_fungus_on_a_stick: holds_item(
+                    azalea_registry::builtin::ItemKind::WarpedFungusOnAStick,
+                ),
+            }),
+        ));
+        let (_, foliage_colormap, _) = game.mesh_dispatcher.colormaps();
+        world_particle_requests.extend(
+            crate::world::particle_tick::sample_block_particles_at_positions(
+                &game.chunk_store,
+                &game.biome_climate,
+                &foliage_colormap,
+                animate_probes.iter().copied(),
+                game.tick_count,
+                game.sky_state.rain() > 0.0,
+                game.sky_state.thunder() > 0.0,
+                game.sky_state.game_time,
+                game.sky_light_evaluation
+                    .map_or(0, |evaluation| evaluation.sky_darken),
+                |pos| {
+                    let resolved = crate::net::environment::dripstone_attributes_at(
+                        &game.chunk_store,
+                        pos,
+                        &game.dimension_environment,
+                        &game.water_evaporates_biomes,
+                        &game.dripstone_particle_biomes,
+                        |timeline_id, clock_name, period| {
+                            game.ambient_timeline_clock_ticks(timeline_id, clock_name)
+                                .map(|ticks| {
+                                    period.map_or(ticks, |p| ticks.rem_euclid(i64::from(p)))
+                                })
+                        },
+                    );
+                    match resolved {
+                        Ok((water, particle)) => (particle.kind, particle.options, water),
+                        Err(error) => {
+                            tracing::debug!(%error, "Dripstone environment attributes unavailable");
+                            (
+                                crate::particle::ServerParticleKind::DrippingDripstoneWater,
+                                crate::particle::ServerParticleOptions::Simple,
+                                game.dimension_environment.water_evaporates,
+                            )
+                        }
+                    }
+                },
+            ),
+        );
+        let block_entity_particle_players = game
+            .entity_store
+            .living
+            .values()
+            .filter(|entity| {
+                entity.entity_type == azalea_registry::builtin::EntityKind::Player
+                    && entity.health > 0.0
+            })
+            .filter_map(|entity| {
+                let uuid = entity.player_uuid?;
+                if uuid == core.user.uuid {
+                    return None;
+                }
+                let position = DVec3::from(*entity.position);
+                let base = azalea_entity::dimensions::EntityDimensions::from(entity.entity_type);
+                let dimensions = crate::entity::EntityStore::dimensions_for_pose(
+                    crate::entity::EntityDimensions {
+                        width: f64::from(base.width),
+                        height: f64::from(base.height),
+                    },
+                    entity.pose,
+                );
+                Some(crate::world::block_entity_particle::ClientPlayerVisual {
+                    uuid,
+                    position,
+                    block_pos: azalea_core::position::BlockPos::new(
+                        position.x.floor() as i32,
+                        position.y.floor() as i32,
+                        position.z.floor() as i32,
+                    ),
+                    height: dimensions.height,
+                    spectator: game
+                        .tab_list
+                        .players
+                        .get(&uuid)
+                        .is_some_and(|player| player.game_mode == 3),
+                })
+            })
+            .chain((!game.dead).then(|| {
+                let position = DVec3::from(*game.player.position);
+                crate::world::block_entity_particle::ClientPlayerVisual {
+                    uuid: core.user.uuid,
+                    position,
+                    block_pos: azalea_core::position::BlockPos::new(
+                        position.x.floor() as i32,
+                        position.y.floor() as i32,
+                        position.z.floor() as i32,
+                    ),
+                    height: game.player.height(),
+                    spectator: crate::player::is_spectator(game.player.game_mode),
+                }
+            }))
+            .collect::<Vec<_>>();
+        world_particle_requests.extend(
+            crate::world::block_entity_particle::tick_block_entity_particles(
+                &mut game.chunk_store,
+                &block_entity_particle_players,
+                &game.entity_store,
+                game.sky_state.game_time,
+            ),
+        );
+        world_particle_requests.extend(crate::world::particle_tick::sample_weather(
+            &game.chunk_store,
+            &game.biome_climate,
+            world_particle_camera,
+            game.sky_state.rain(),
+            crate::renderer::pipelines::weather::WEATHER_RADIUS,
+            core.menu.particle_status(),
+            game.sky_state.game_time,
+        ));
+        for request in world_particle_requests {
+            game.particle_store.add_particle_spawn_request(
+                request,
+                world_particle_camera,
+                gfx.renderer.registry(),
+                &game.chunk_store,
+                &game.biome_climate,
+            );
+        }
         let local_height = game.player.height();
-        let local_effect_particles = if game.dead {
+        let local_effect_particles = if game.dead || game.player.effect_particle_options.is_some() {
             &[][..]
         } else {
             game.player.effect_particles.as_slice()
@@ -3778,7 +4254,11 @@ pub fn update_game(
                 DVec3::from(*entity.position),
                 dimensions.width as f32,
                 dimensions.height as f32,
-                entity.effect_particles.as_slice(),
+                if entity.effect_particle_options.is_some() {
+                    &[][..]
+                } else {
+                    entity.effect_particles.as_slice()
+                },
                 entity.effect_particles_ambient,
                 entity.flags.invisible,
             ))
@@ -3796,13 +4276,95 @@ pub fn update_game(
                 particle_camera,
             );
         }
+        if !(game.singleplayer && game.paused) {
+            if !game.dead
+                && let Some(particles) = &game.player.effect_particle_options
+            {
+                game.particle_store.add_living_effect_server_particles(
+                    DVec3::from(*game.player.position),
+                    (crate::player::PLAYER_HALF_WIDTH * 2.0) as f32,
+                    local_height as f32,
+                    particles,
+                    game.player.effect_particles_ambient,
+                    game.player.invisible,
+                    particle_camera,
+                    gfx.renderer.registry(),
+                    &game.chunk_store,
+                    &game.biome_climate,
+                );
+            }
+            for (&id, entity) in &game.entity_store.living {
+                if id != game.player.entity_id
+                    && let Some(particles) = &entity.effect_particle_options
+                {
+                    let base =
+                        azalea_entity::dimensions::EntityDimensions::from(entity.entity_type);
+                    let dimensions = EntityStore::dimensions_for_pose(
+                        crate::entity::EntityDimensions {
+                            width: f64::from(base.width),
+                            height: f64::from(base.height),
+                        },
+                        entity.pose,
+                    );
+                    let baby_scale = if entity.is_baby { 0.5 } else { 1.0 };
+                    game.particle_store.add_living_effect_server_particles(
+                        DVec3::from(*entity.position),
+                        (dimensions.width * baby_scale) as f32,
+                        (dimensions.height * baby_scale) as f32,
+                        particles,
+                        entity.effect_particles_ambient,
+                        entity.flags.invisible,
+                        particle_camera,
+                        gfx.renderer.registry(),
+                        &game.chunk_store,
+                        &game.biome_climate,
+                    );
+                }
+            }
+        }
         let chunks = &game.chunk_store;
+        game.particle_store.spawn_tracked_explosion_particles(
+            particle_camera,
+            gfx.renderer.registry(),
+            chunks,
+            &game.biome_climate,
+        );
         let player = &game.player;
         let entities = &game.entity_store;
         let items = &game.item_entity_store;
         game.particle_store.tick_with_entity_lookup(chunks, |id| {
             GameState::tracking_attachment_for(player, entities, items, id)
         });
+        let mut attraction_players = Vec::new();
+        if game.player.game_mode != 3 {
+            attraction_players.push((
+                DVec3::from(game.player.position),
+                DVec3::from(game.player.velocity),
+            ));
+        }
+        attraction_players.extend(game.entity_store.living.values().filter_map(|entity| {
+            (entity.entity_type == EntityKind::Player
+                && entity
+                    .player_uuid
+                    .is_some_and(|uuid| !spectator_uuids.contains(&uuid)))
+            .then_some((DVec3::from(entity.position), entity.velocity))
+        }));
+        game.particle_store
+            .apply_player_attraction(&attraction_players);
+        for sound in game.particle_store.drain_sound_requests() {
+            core.audio.play_world_sound(
+                &SoundRef::event(sound.event),
+                if sound.event.starts_with("entity.firework_rocket.") {
+                    CATEGORY_AMBIENT
+                } else {
+                    CATEGORY_BLOCKS
+                },
+                Position::new(sound.pos.x, sound.pos.y, sound.pos.z),
+                sound.volume,
+                sound.pitch,
+                sound.seed,
+            );
+        }
         game.block_entity_anim.tick();
         game.title.tick();
         tick_tool_highlight(core, game);
@@ -5825,6 +6387,18 @@ pub fn update_game(
     }
 
     if !benchmark_running {
+        let pickup_snapshots = game.item_entity_store.active_pickups(
+            partial_tick,
+            &game.entity_store,
+            game.player.entity_id,
+            game.player.position.into(),
+            game.player.eye_height,
+        );
+        entity_renders.extend(pickup_entity_render_infos(
+            &pickup_snapshots,
+            &game.dimension,
+            gfx.renderer.camera_effective_look_deg(),
+        ));
         entity_renders.extend(arrow_render_infos(&game.entity_store, partial_tick));
         let camera_look = gfx.renderer.camera_look_dir();
         entity_renders.extend(projectile_render_infos(
@@ -5890,6 +6464,9 @@ pub fn update_game(
             &game.entity_store,
             &game.chunk_store,
             &gfx.renderer,
+            game.player.entity_id,
+            *game.player.position,
+            game.player.eye_height,
             game.cardinal_light,
             gfx.renderer.camera_render_position(),
             gfx.renderer.camera_anchor(),
@@ -6422,8 +6999,16 @@ pub fn update_game(
     let particle_quads = if benchmark_running {
         Vec::new()
     } else {
-        game.particle_store
-            .extract(partial_tick, gfx.renderer.camera_anchor())
+        game.particle_store.extract(
+            partial_tick,
+            gfx.renderer.camera_anchor(),
+            &game.chunk_store,
+        )
+    };
+    let elder_guardian_particle_requests = if benchmark_running {
+        Vec::new()
+    } else {
+        game.particle_store.model_render_requests(partial_tick)
     };
 
     let held_item = if benchmark_running {
@@ -6534,6 +7119,8 @@ pub fn update_game(
     game.last_update_phases.cpu_update_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
     gfx.renderer
         .set_world_light_environment(game.sky_light_evaluation);
+    gfx.renderer
+        .set_particle_lightmap(particle_lightmap_settings(game, partial_tick));
     let render_start = std::time::Instant::now();
     if let Err(e) = gfx.renderer.render_world(
         &gfx.window,
@@ -6555,6 +7142,7 @@ pub fn update_game(
         &item_renders,
         &block_entity_renders,
         &particle_quads,
+        &elder_guardian_particle_requests,
         &weather_columns,
         if benchmark_running {
             crate::renderer::CloudMode::Off
@@ -7380,6 +7968,74 @@ fn experience_orb_render_infos(
                 overlay_tints,
                 age_in_ticks: age,
                 ..Default::default()
+            })
+        })
+        .collect()
+}
+
+fn pickup_entity_render_infos(
+    pickups: &[crate::entity::PickupRenderInfo],
+    dimension: &str,
+    camera_look: (f32, f32),
+) -> Vec<EntityRenderInfo> {
+    pickups
+        .iter()
+        .filter_map(|pickup| {
+            let view = pickup.entity_view.as_ref()?;
+            let position = pickup.position;
+            Some(match view {
+                crate::entity::PickupEntityView::ExperienceOrb {
+                    value,
+                    age,
+                    block_light,
+                    sky_light,
+                } => {
+                    let age = *age as f32 + 1.0;
+                    let light = experience_orb_light(*block_light, *sky_light, dimension);
+                    let mut overlay_tints = [None; MAX_OVERLAYS];
+                    overlay_tints[0] = Some(experience_orb_color(age, light));
+                    EntityRenderInfo {
+                        position,
+                        simulation_position: position,
+                        entity_kind: EntityKind::ExperienceOrb,
+                        body_y_rot_deg: camera_look.0,
+                        head_x_rot_deg: camera_look.1,
+                        variant_index: experience_orb_icon(*value),
+                        overlay_tints,
+                        age_in_ticks: age,
+                        ..Default::default()
+                    }
+                }
+                crate::entity::PickupEntityView::Arrow {
+                    variant_index,
+                    body_y_rot_deg,
+                    head_x_rot_deg,
+                    base_tint,
+                } => EntityRenderInfo {
+                    position,
+                    simulation_position: position,
+                    entity_kind: EntityKind::Arrow,
+                    variant_index: *variant_index,
+                    body_y_rot_deg: *body_y_rot_deg,
+                    head_x_rot_deg: *head_x_rot_deg,
+                    base_tint: *base_tint,
+                    ..Default::default()
+                },
+                crate::entity::PickupEntityView::Trident {
+                    body_y_rot_deg,
+                    head_x_rot_deg,
+                    projectile_foil,
+                    age,
+                } => EntityRenderInfo {
+                    position,
+                    simulation_position: position,
+                    entity_kind: EntityKind::Trident,
+                    body_y_rot_deg: *body_y_rot_deg,
+                    head_x_rot_deg: *head_x_rot_deg,
+                    projectile_foil: *projectile_foil,
+                    age_in_ticks: *age as f32,
+                    ..Default::default()
+                },
             })
         })
         .collect()
@@ -8231,6 +8887,9 @@ fn build_item_render_infos(
     entities: &crate::entity::EntityStore,
     chunk_store: &ChunkStore,
     renderer: &Renderer,
+    local_player_id: i32,
+    local_player_pos: glam::DVec3,
+    local_player_eye_height: f32,
     cardinal_light: CardinalLightType,
     camera_pos: glam::DVec3,
     anchor: glam::DVec3,
@@ -8336,9 +8995,24 @@ fn build_item_render_infos(
 
     // Pickup fly-animation: the cluster at the lerped position, age frozen at
     // pickup.
-    for pickup in entity_store.active_pickups(partial_tick) {
-        let age_f = pickup.age as f32 + partial_tick;
-        let light = get_entity_light(chunk_store, pickup.position);
+    for pickup in entity_store.active_pickups(
+        partial_tick,
+        entities,
+        local_player_id,
+        crate::entity::components::Position::new(
+            local_player_pos.x,
+            local_player_pos.y,
+            local_player_pos.z,
+        ),
+        local_player_eye_height,
+    ) {
+        if pickup.entity_view.is_some() {
+            continue;
+        }
+        // ItemPickupParticle retains the one EntityRenderState extracted at
+        // partial tick 1.0; do not advance the item's age while it flies.
+        let age_f = pickup.age as f32 + 1.0;
+        let light = get_entity_light(chunk_store, pickup.light_position);
         let item_name = pickup
             .stack
             .as_ref()
@@ -9422,6 +10096,71 @@ mod tests {
             (experience_orb_light(0, 0, "minecraft:the_nether") - (0.1 + 0.9 * (7.0 / 39.0))).abs()
                 < 1e-6
         );
+    }
+
+    #[test]
+    fn pickup_entity_snapshots_use_native_orb_arrow_and_trident_renderers() {
+        use azalea_registry::builtin::EntityKind;
+
+        use crate::entity::components::Position;
+        use crate::entity::{EntityStore, ItemEntityStore, PickupEntityView};
+
+        let mut store = ItemEntityStore::new();
+        let start = Position::new(1.0, 64.0, 2.0);
+        let target = Position::new(0.0, 65.0, 0.0);
+        store.pickup_entity(
+            start,
+            9,
+            target,
+            PickupEntityView::ExperienceOrb {
+                value: 149,
+                age: 5,
+                block_light: 15,
+                sky_light: 0,
+            },
+        );
+        store.pickup_entity(
+            start,
+            9,
+            target,
+            PickupEntityView::Arrow {
+                variant_index: 1,
+                body_y_rot_deg: 35.0,
+                head_x_rot_deg: -12.0,
+                base_tint: [1.0; 4],
+            },
+        );
+        store.pickup_entity(
+            start,
+            9,
+            target,
+            PickupEntityView::Trident {
+                body_y_rot_deg: 45.0,
+                head_x_rot_deg: 10.0,
+                projectile_foil: true,
+                age: 12,
+            },
+        );
+        let snapshots = store.active_pickups(1.0, &EntityStore::new(), 9, target, 1.62);
+        let rendered =
+            super::pickup_entity_render_infos(&snapshots, "minecraft:overworld", (0.0, 0.0));
+        assert_eq!(
+            rendered
+                .iter()
+                .map(|info| info.entity_kind)
+                .collect::<Vec<_>>(),
+            [
+                EntityKind::ExperienceOrb,
+                EntityKind::Arrow,
+                EntityKind::Trident
+            ]
+        );
+        assert_eq!(rendered[0].variant_index, experience_orb_icon(149));
+        assert_eq!(
+            (rendered[1].variant_index, rendered[1].body_y_rot_deg),
+            (1, 35.0)
+        );
+        assert!(rendered[2].projectile_foil);
     }
 
     #[test]

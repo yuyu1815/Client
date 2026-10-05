@@ -67,6 +67,14 @@ pub struct BossBarState {
 }
 
 impl BossBarState {
+    pub fn should_darken_screen(&self) -> bool {
+        self.bars.iter().any(|(_, bar)| bar.darken_screen)
+    }
+
+    pub fn should_create_world_fog(&self) -> bool {
+        self.bars.iter().any(|(_, bar)| bar.create_world_fog)
+    }
+
     /// Update ops for unknown ids are dropped (vanilla would NPE).
     pub fn apply(&mut self, id: uuid::Uuid, op: BossBarOp) {
         match op {

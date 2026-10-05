@@ -6,6 +6,7 @@ pub mod entity_model;
 #[cfg(test)]
 #[path = "entity_model_cape_tests.rs"]
 mod entity_model_cape_tests;
+pub(crate) mod lightmap;
 pub(crate) mod entity_models {
     pub mod aquatic;
     pub mod armor;
@@ -188,6 +189,7 @@ enum RenderMode<'a> {
         item_entities: &'a [pipelines::item_entity::ItemRenderInfo],
         block_entities: &'a [BlockEntityRenderInfo],
         particles: &'a [ParticleQuad],
+        elder_guardian_particles: &'a [crate::particle::SpecialParticleRenderRequest],
         weather: &'a [WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
@@ -291,8 +293,43 @@ fn held_item_model_matrix(
         }
 }
 
+fn atlas_texture_names<'a>(
+    registry: &'a BlockRegistry,
+    generated_item_textures: &HashSet<&'a str>,
+) -> HashSet<&'a str> {
+    registry
+        .texture_names()
+        .chain(generated_item_textures.iter().copied())
+        .chain(crate::particle::END_ROD_SPRITES)
+        .chain(crate::particle::ENTITY_EFFECT_SPRITES)
+        .chain(crate::particle::SPELL_SPRITES)
+        .chain([
+            crate::particle::RAID_OMEN_SPRITE,
+            crate::particle::TRIAL_OMEN_SPRITE,
+        ])
+        .chain(crate::particle::GENERIC_PARTICLE_SPRITES)
+        .chain(crate::particle::CAMPFIRE_COSY_SMOKE_SPRITES)
+        .chain(crate::particle::CAMPFIRE_SIGNAL_SMOKE_SPRITES)
+        .chain(crate::particle::EXPLOSION_SPRITES)
+        .chain([
+            crate::particle::CRIT_SPRITE,
+            crate::particle::ENCHANTED_HIT_SPRITE,
+            "water_flow",
+            "lava_flow",
+            // Missing/invalid pack PNG resolves to atlas sprite 0.
+            "entity/chest/normal",
+            "entity/chest/normal_left",
+            "entity/chest/normal_right",
+            "entity/chest/christmas",
+            "entity/chest/christmas_left",
+            "entity/chest/christmas_right",
+        ])
+        .collect()
+}
+
 pub struct Renderer {
     pub world_light_environment: Option<crate::net::environment::SkyLightEvaluation>,
+    particle_lightmap: lightmap::Settings,
     ctx: VulkanContext,
     swapchain: Swapchain,
     pending_swapchain: Option<(Swapchain, u32, u32, bool)>,
@@ -357,6 +394,10 @@ impl Renderer {
         environment: Option<crate::net::environment::SkyLightEvaluation>,
     ) {
         self.world_light_environment = environment;
+    }
+
+    pub fn set_particle_lightmap(&mut self, settings: lightmap::Settings) {
+        self.particle_lightmap = settings;
     }
 
     pub fn new(
@@ -441,34 +482,7 @@ impl Renderer {
         crate::app::startup_mark("renderer_atlas_start");
 
         let generated_item_textures: HashSet<&str> = registry.flat_item_textures().collect();
-        let texture_names: HashSet<&str> = registry
-            .texture_names()
-            .chain(generated_item_textures.iter().copied())
-            .chain(crate::particle::END_ROD_SPRITES)
-            .chain(crate::particle::ENTITY_EFFECT_SPRITES)
-            .chain(crate::particle::SPELL_SPRITES)
-            .chain([
-                crate::particle::RAID_OMEN_SPRITE,
-                crate::particle::TRIAL_OMEN_SPRITE,
-            ])
-            .chain(crate::particle::GENERIC_PARTICLE_SPRITES)
-            .chain(crate::particle::CAMPFIRE_COSY_SMOKE_SPRITES)
-            .chain(crate::particle::CAMPFIRE_SIGNAL_SMOKE_SPRITES)
-            .chain(crate::particle::EXPLOSION_SPRITES)
-            .chain([
-                crate::particle::CRIT_SPRITE,
-                crate::particle::ENCHANTED_HIT_SPRITE,
-                "water_flow",
-                "lava_flow",
-                // Missing/invalid pack PNG resolves to atlas sprite 0.
-                "entity/chest/normal",
-                "entity/chest/normal_left",
-                "entity/chest/normal_right",
-                "entity/chest/christmas",
-                "entity/chest/christmas_left",
-                "entity/chest/christmas_right",
-            ])
-            .collect();
+        let texture_names = atlas_texture_names(&registry, &generated_item_textures);
         let atlas = TextureAtlas::build(
             &ctx.device,
             ctx.graphics_queue,
@@ -751,6 +765,7 @@ impl Renderer {
 
         let mut renderer = Self {
             world_light_environment: None,
+            particle_lightmap: lightmap::Settings::default(),
             ctx,
             swapchain: swapchain_state,
             pending_swapchain: None,
@@ -1804,6 +1819,7 @@ impl Renderer {
         item_entities: &[pipelines::item_entity::ItemRenderInfo],
         block_entities: &[BlockEntityRenderInfo],
         particles: &[ParticleQuad],
+        elder_guardian_particles: &[crate::particle::SpecialParticleRenderRequest],
         weather: &[WeatherColumn],
         cloud_mode: CloudMode,
         render_distance: u32,
@@ -2226,6 +2242,7 @@ impl Renderer {
                 item_entities: &item_entities,
                 block_entities: &rendered_block_entities,
                 particles,
+                elder_guardian_particles,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -2383,34 +2400,7 @@ impl Renderer {
         self.atlas.destroy(&self.ctx.device, &self.ctx.allocator);
         let generated_item_textures: std::collections::HashSet<&str> =
             self.registry.flat_item_textures().collect();
-        let texture_names: std::collections::HashSet<&str> = self
-            .registry
-            .texture_names()
-            .chain(generated_item_textures.iter().copied())
-            .chain(crate::particle::END_ROD_SPRITES)
-            .chain(crate::particle::ENTITY_EFFECT_SPRITES)
-            .chain(crate::particle::SPELL_SPRITES)
-            .chain([
-                crate::particle::RAID_OMEN_SPRITE,
-                crate::particle::TRIAL_OMEN_SPRITE,
-            ])
-            .chain(crate::particle::GENERIC_PARTICLE_SPRITES)
-            .chain(crate::particle::CAMPFIRE_COSY_SMOKE_SPRITES)
-            .chain(crate::particle::CAMPFIRE_SIGNAL_SMOKE_SPRITES)
-            .chain(crate::particle::EXPLOSION_SPRITES)
-            .chain([
-                crate::particle::CRIT_SPRITE,
-                crate::particle::ENCHANTED_HIT_SPRITE,
-                "water_flow",
-                "lava_flow",
-                "entity/chest/normal",
-                "entity/chest/normal_left",
-                "entity/chest/normal_right",
-                "entity/chest/christmas",
-                "entity/chest/christmas_left",
-                "entity/chest/christmas_right",
-            ])
-            .collect();
+        let texture_names = atlas_texture_names(&self.registry, &generated_item_textures);
         self.atlas = TextureAtlas::build(
             &self.ctx.device,
             self.ctx.graphics_queue,
@@ -2829,6 +2819,7 @@ impl Renderer {
         let setup_start = benchmark_timing.then(std::time::Instant::now);
         let render_finished = self.render_finished_per_image[image_index as usize];
 
+        let mut camera_position_relative = glam::Vec3::ZERO;
         if let RenderMode::World {
             fog_color,
             render_distance,
@@ -2838,7 +2829,9 @@ impl Renderer {
         {
             let uniform =
                 CameraUniform::new(&self.camera, *fog_color, *render_distance, *eyes_in_water)
-                    .with_terrain_light_environment(self.world_light_environment);
+                    .with_terrain_light_environment(self.world_light_environment)
+                    .with_particle_lightmap(self.particle_lightmap);
+            camera_position_relative = glam::Vec3::from_array(uniform.camera_position());
             self.chunk_pipeline.update_camera(frame, &uniform);
             self.block_overlay_pipeline.update_camera(frame, &uniform);
             self.entity_renderer.update_camera(frame, &uniform);
@@ -3107,6 +3100,7 @@ impl Renderer {
                 item_entities,
                 block_entities,
                 particles,
+                elder_guardian_particles,
                 weather,
                 cloud_mode,
                 render_distance,
@@ -3207,6 +3201,9 @@ impl Renderer {
                     cmd,
                     frame,
                     entities,
+                    elder_guardian_particles,
+                    self.camera.orientation(),
+                    camera_position_relative,
                     &ent_frustum,
                     anchor,
                     eye,

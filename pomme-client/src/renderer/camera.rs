@@ -537,7 +537,12 @@ pub struct CameraUniform {
     fog_env: [f32; 4],
     /// x: sky darken, y: ambient light, z: native lighting enabled.
     terrain_light_environment: [f32; 4],
+    /// Java 26.2 block-x / sky-y RGBA8 lightmap, std140 vec4[256].
+    particle_lightmap: crate::renderer::lightmap::Lut,
 }
+
+// Vulkan guarantees maxUniformBufferRange >= 16 KiB; this layout is 4,240 B.
+const _: () = assert!(std::mem::size_of::<CameraUniform>() <= 16 * 1024);
 
 // Vanilla FogType.WATER defaults (EnvironmentAttributes): color 0xFF050533,
 // start -8, end 96. Vanilla scales end by getWaterVision() (min 0.25); we use
@@ -621,7 +626,15 @@ impl CameraUniform {
             camera_block: anchor.as_ivec3().extend(0).to_array(),
             fog_env: [env_start, env_end, 0.0, 0.0],
             terrain_light_environment: [0.0; 4],
+            particle_lightmap: crate::renderer::lightmap::generate(
+                crate::renderer::lightmap::Settings::default(),
+            ),
         }
+    }
+
+    pub fn with_particle_lightmap(mut self, settings: crate::renderer::lightmap::Settings) -> Self {
+        self.particle_lightmap = crate::renderer::lightmap::generate(settings);
+        self
     }
 
     pub fn with_terrain_light_environment(
@@ -644,6 +657,9 @@ impl CameraUniform {
             camera_block: [0; 4],
             fog_env: [f32::MAX, f32::MAX, 0.0, 0.0],
             terrain_light_environment: [0.0; 4],
+            particle_lightmap: crate::renderer::lightmap::generate(
+                crate::renderer::lightmap::Settings::default(),
+            ),
         }
     }
 }
@@ -781,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn camera_ubo_matches_std140_prefix_and_terrain_extension() {
+    fn camera_ubo_matches_std140_prefix_terrain_extension_and_particle_lut() {
         assert_eq!(std::mem::offset_of!(CameraUniform, camera_pos), 64);
         assert_eq!(std::mem::offset_of!(CameraUniform, fog_color), 80);
         assert_eq!(std::mem::offset_of!(CameraUniform, camera_block), 96);
@@ -790,10 +806,12 @@ mod tests {
             std::mem::offset_of!(CameraUniform, terrain_light_environment),
             128
         );
-        assert_eq!(std::mem::size_of::<CameraUniform>(), 144);
+        assert_eq!(std::mem::offset_of!(CameraUniform, particle_lightmap), 144);
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 144 + 256 * 16);
 
         let identity = CameraUniform::with_view_proj(Mat4::IDENTITY);
         assert_eq!(identity.terrain_light_environment, [0.0; 4]);
+        assert_eq!(identity.particle_lightmap.len(), 256);
         let native = identity.with_terrain_light_environment(Some(
             crate::net::environment::SkyLightEvaluation {
                 sky_light_level: 1.0,

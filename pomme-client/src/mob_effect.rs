@@ -136,6 +136,10 @@ impl ActiveMobEffects {
         self.0.is_empty()
     }
 
+    pub fn get(&self, effect_id: u32) -> Option<&MobEffectInstance> {
+        self.0.iter().find(|effect| effect.effect_id == effect_id)
+    }
+
     /// Vanilla `tickClient`: durations floor at 0 and the entry stays until
     /// the server's remove packet.
     pub fn tick(&mut self) {
