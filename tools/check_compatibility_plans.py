@@ -8,7 +8,7 @@ from pathlib import Path
 
 BASE = "a12e38d9ea09d290a0b1736fe48a1cdafe49325f"
 PROTECTED = {
-    "README.md": "74ba0856c8a6e14b193c5071dd6fa3dc2e42a8ee3a04b52e776c7a40f5f3fe21",
+    "Client/README.md": "74ba0856c8a6e14b193c5071dd6fa3dc2e42a8ee3a04b52e776c7a40f5f3fe21",
     "Client/docs/compatibility/README.md": "afa71bfc2228992393a1c6c0466b0edbc4201426ee7c210e83fec285949285cb",
     "Client/docs/compatibility/data.json": "80475006d86c919790edc5e05a2e834b4341d699f49f1b3a7a0c02951da755e5",
 }
