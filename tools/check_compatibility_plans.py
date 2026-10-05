@@ -57,10 +57,11 @@ def check(root, reference):
                 except ValueError:
                     raise AssertionError(f"source citation outside reference root: {name}")
             candidates = [reference / name]
-            if name.startswith("Client/"):
-                candidates.append(reference / name)
-            elif name.startswith("pomme-client/"):
+            if name.startswith("pomme-client/"):
                 candidates.append(reference / "Client" / name)
+            else:
+                candidates.extend((reference / "Client" / name,
+                                   reference / "Client/pomme-client/src" / name))
             source = next((p for p in candidates if p.is_file()), None)
             assert source is not None, f"missing cited source: {match.group(0)}"
             total = len(source.read_text(encoding="utf-8", errors="replace").splitlines())
