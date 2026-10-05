@@ -2988,7 +2988,9 @@ fn build_sprite_atlas(
     vk::Buffer,
     Option<Allocation>,
 ) {
-    if diagnostic { crate::logging::diagnostic_stage("font_reload.sprite.cpu_build.begin"); }
+    if diagnostic {
+        crate::logging::diagnostic_stage("font_reload.sprite.cpu_build.begin");
+    }
     let resolve_asset_path = |jar: &Path, index: &Option<AssetIndex>, key: &str| {
         resolve_asset_path_with_packs(jar, index, key, packs)
     };
@@ -4518,7 +4520,13 @@ fn build_sprite_atlas(
     // `atlas_size` above; feeding these a size of their own would read past it.
     if diagnostic {
         crate::logging::diagnostic_stage("font_reload.sprite.cpu_build.complete");
-        crate::logging::diagnostic_image("font_reload.sprite.gpu_upload.begin", atlas_size, atlas_size, 1, 4);
+        crate::logging::diagnostic_image(
+            "font_reload.sprite.gpu_upload.begin",
+            atlas_size,
+            atlas_size,
+            1,
+            4,
+        );
     }
     let (image, view, allocation) =
         util::create_gpu_image(device, allocator, atlas_size, atlas_size, "sprite_atlas");
@@ -4533,7 +4541,9 @@ fn build_sprite_atlas(
         atlas_size,
         atlas_size,
     );
-    if diagnostic { crate::logging::diagnostic_stage("font_reload.sprite.gpu_upload.complete"); }
+    if diagnostic {
+        crate::logging::diagnostic_stage("font_reload.sprite.gpu_upload.complete");
+    }
 
     (
         SpriteAtlas { regions },
@@ -4597,7 +4607,9 @@ fn build_camera_overlay_texture(
     packs: Option<&crate::resource_pack::ResourcePackManager>,
     diagnostic: bool,
 ) -> (vk::Image, vk::ImageView, Allocation, [f32; 4], [f32; 4]) {
-    if diagnostic { crate::logging::diagnostic_stage("font_reload.camera_overlay.build.begin"); }
+    if diagnostic {
+        crate::logging::diagnostic_stage("font_reload.camera_overlay.build.begin");
+    }
     let (vig, vw, vh) = load_overlay_rgba(
         jar_assets_dir,
         asset_index,
@@ -4634,7 +4646,9 @@ fn build_camera_overlay_texture(
         h,
         "camera_overlay_staging",
     );
-    if diagnostic { crate::logging::diagnostic_stage("font_reload.camera_overlay.gpu_upload.complete"); }
+    if diagnostic {
+        crate::logging::diagnostic_stage("font_reload.camera_overlay.gpu_upload.complete");
+    }
 
     let (iw, ih) = (w as f32, h as f32);
     let vignette_uv = [
@@ -4665,7 +4679,9 @@ fn load_single_texture(
     name: &str,
     diagnostic: bool,
 ) -> (vk::Image, vk::ImageView, Allocation) {
-    if diagnostic { crate::logging::diagnostic_stage("font_reload.underwater.build.begin"); }
+    if diagnostic {
+        crate::logging::diagnostic_stage("font_reload.underwater.build.begin");
+    }
     let (pixels, w, h) = load_overlay_rgba(jar_assets_dir, asset_index, packs, asset_key);
     let (image, view, allocation) = util::create_gpu_image(device, allocator, w, h, name);
     if diagnostic {
@@ -4683,7 +4699,9 @@ fn load_single_texture(
         h,
         name,
     );
-    if diagnostic { crate::logging::diagnostic_stage("font_reload.underwater.gpu_upload.complete"); }
+    if diagnostic {
+        crate::logging::diagnostic_stage("font_reload.underwater.gpu_upload.complete");
+    }
     (image, view, allocation)
 }
 
@@ -4785,7 +4803,17 @@ fn create_font_texture(
         4
     };
     if upload.diagnostic {
-        crate::logging::diagnostic_image(if upload.format == vk::Format::R8Unorm { "font_reload.gray_texture.upload.begin" } else { "font_reload.color_texture.upload.begin" }, upload.extent.width, upload.extent.height, upload.extent.layers, bytes_per_pixel as u32);
+        crate::logging::diagnostic_image(
+            if upload.format == vk::Format::R8Unorm {
+                "font_reload.gray_texture.upload.begin"
+            } else {
+                "font_reload.color_texture.upload.begin"
+            },
+            upload.extent.width,
+            upload.extent.height,
+            upload.extent.layers,
+            bytes_per_pixel as u32,
+        );
     }
     let uploaded = util::try_create_mapped_buffer(
         device,
@@ -4813,7 +4841,11 @@ fn create_font_texture(
         return Err(error);
     }
     if upload.diagnostic {
-        crate::logging::diagnostic_stage(if upload.format == vk::Format::R8Unorm { "font_reload.gray_texture.upload.complete" } else { "font_reload.color_texture.upload.complete" });
+        crate::logging::diagnostic_stage(if upload.format == vk::Format::R8Unorm {
+            "font_reload.gray_texture.upload.complete"
+        } else {
+            "font_reload.color_texture.upload.complete"
+        });
     }
     Ok(texture)
 }

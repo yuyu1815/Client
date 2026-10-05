@@ -146,9 +146,13 @@ fn write_image(
         .unwrap_or_default();
     let record = format!(
         "{{\"epoch_seconds\":{},\"epoch_nanos\":{},\"kind\":\"image\",\"stage\":{},\"width\":{},\"height\":{},\"layers\":{},\"bytes\":{}}}\n",
-        epoch.as_secs(), epoch.subsec_nanos(),
+        epoch.as_secs(),
+        epoch.subsec_nanos(),
         serde_json::to_string(stage).unwrap_or_else(|_| "\"stage\"".into()),
-        width, height, layers, byte_count
+        width,
+        height,
+        layers,
+        byte_count
     );
     let _ = append_diagnostic(path, &record);
 }
