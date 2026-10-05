@@ -47,6 +47,7 @@ pub struct AtlasRegion {
 #[derive(Clone)]
 pub struct AtlasUVMap {
     regions: HashMap<String, AtlasRegion>,
+    particle_sprites: HashMap<String, Vec<String>>,
     sprite_alpha_masks: HashMap<String, SpriteAlphaMask>,
     /// Level-0 rectangles by sprite index, as `(x, y, width, height)`.
     rects: Vec<[u32; 4]>,
@@ -58,6 +59,7 @@ impl AtlasUVMap {
     pub(crate) fn test_empty() -> Self {
         Self {
             regions: HashMap::new(),
+            particle_sprites: HashMap::new(),
             sprite_alpha_masks: HashMap::new(),
             rects: vec![[0; 4]],
             missing: AtlasRegion {
@@ -79,6 +81,11 @@ impl AtlasUVMap {
         self.regions.insert(name.to_owned(), region);
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_insert_particle_sprites(&mut self, particle: &str, names: Vec<String>) {
+        self.particle_sprites.insert(particle.to_owned(), names);
+    }
+
     pub fn get_region(&self, name: &str) -> AtlasRegion {
         self.regions.get(name).copied().unwrap_or(self.missing)
     }
@@ -89,6 +96,21 @@ impl AtlasUVMap {
 
     pub fn has_region(&self, name: &str) -> bool {
         self.regions.contains_key(name)
+    }
+
+    /// Ordered atlas texture identifiers from
+    /// `assets/<namespace>/particles/<name>.json`. Names are canonical
+    /// resource locations (`particle/foo` for minecraft).
+    pub fn particle_sprite_names(&self, particle: &str) -> Option<&[String]> {
+        self.particle_sprites
+            .get(crate::assets::AssetId::parse(particle).canonical().as_str())
+            .map(Vec::as_slice)
+    }
+
+    /// Ordered atlas regions for a particle's descriptor frames.
+    pub fn particle_sprite_regions(&self, particle: &str) -> Option<Vec<AtlasRegion>> {
+        self.particle_sprite_names(particle)
+            .map(|names| names.iter().map(|name| self.get_region(name)).collect())
     }
 
     pub fn missing_region(&self) -> AtlasRegion {
@@ -186,6 +208,105 @@ struct MipSource {
     animation: AnimationLayout,
     strategy: MipmapStrategy,
     alpha_cutoff_bias: f32,
+}
+
+#[derive(serde::Deserialize)]
+struct ParticleDescription {
+    textures: Option<Vec<String>>,
+}
+
+struct ParticleSpriteResources {
+    by_particle: HashMap<String, Vec<String>>,
+    texture_names: HashSet<String>,
+    described: usize,
+    missing: usize,
+    invalid: usize,
+}
+
+fn load_particle_sprite_resources(
+    jar_assets_dir: &Path,
+    asset_index: &Option<AssetIndex>,
+    pack_dirs: &[PathBuf],
+) -> ParticleSpriteResources {
+    let mut result = ParticleSpriteResources {
+        by_particle: HashMap::new(),
+        texture_names: HashSet::new(),
+        described: 0,
+        missing: 0,
+        invalid: 0,
+    };
+    for particle in
+        pomme_protocol::RegistryTable::native().names(pomme_protocol::ClientRegistry::ParticleType)
+    {
+        let id = AssetId::parse(particle);
+        let descriptor_key = id.asset_key("particles", ".json");
+        let descriptor_path = crate::assets::resolve_asset_path_with_pack_dirs(
+            jar_assets_dir,
+            asset_index,
+            &descriptor_key,
+            &pack_dirs,
+        );
+        let contents = match std::fs::read_to_string(&descriptor_path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                result.missing += 1;
+                result.by_particle.insert(id.canonical(), Vec::new());
+                continue;
+            }
+            Err(error) => {
+                result.invalid += 1;
+                tracing::warn!(particle, path = %descriptor_path.display(), %error, "Failed to read particle description");
+                result.by_particle.insert(id.canonical(), Vec::new());
+                continue;
+            }
+        };
+        let description: ParticleDescription = match serde_json::from_str(&contents) {
+            Ok(description) => description,
+            Err(error) => {
+                result.invalid += 1;
+                tracing::warn!(particle, path = %descriptor_path.display(), %error, "Invalid particle description JSON");
+                result.by_particle.insert(id.canonical(), Vec::new());
+                continue;
+            }
+        };
+        result.described += 1;
+        let mut frames = Vec::new();
+        for texture in description.textures.unwrap_or_default() {
+            let texture_id = AssetId::parse(&texture);
+            let particle_path = if texture_id.path.starts_with("particle/") {
+                texture_id.path.to_owned()
+            } else {
+                format!("particle/{}", texture_id.path)
+            };
+            let canonical = if texture_id.namespace == "minecraft" {
+                particle_path.clone()
+            } else {
+                format!("{}:{particle_path}", texture_id.namespace)
+            };
+            let texture_key = AssetId {
+                namespace: texture_id.namespace,
+                path: &particle_path,
+            }
+            .asset_key("textures", ".png");
+            if !crate::assets::valid_asset_key(&texture_key) {
+                result.invalid += 1;
+                tracing::warn!(particle, texture, "Invalid particle texture identifier");
+                continue;
+            }
+            result.texture_names.insert(canonical.clone());
+            frames.push(canonical);
+        }
+        result.by_particle.insert(id.canonical(), frames);
+    }
+    tracing::info!(
+        types = result.by_particle.len(),
+        descriptions = result.described,
+        missing_descriptions = result.missing,
+        invalid = result.invalid,
+        textures = result.texture_names.len(),
+        "Resolved native particle sprite descriptions"
+    );
+    result
 }
 
 struct AnimatedSprite {
@@ -609,16 +730,26 @@ impl TextureAtlas {
         generated_item_textures: &HashSet<&str>,
         packs: Option<&crate::resource_pack::ResourcePackManager>,
     ) -> Result<Self, vk::Error> {
-        let texture_names: HashSet<&str> =
-            texture_names.iter().copied().chain(FIRE_SPRITES).collect();
+        let pack_dirs: Vec<_> = packs
+            .into_iter()
+            .flat_map(|packs| packs.active_pack_dirs().map(Path::to_path_buf))
+            .collect();
+        let particle_resources =
+            load_particle_sprite_resources(jar_assets_dir, asset_index, &pack_dirs);
+        let texture_names: HashSet<String> = texture_names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .chain(FIRE_SPRITES.into_iter().map(str::to_owned))
+            .chain(particle_resources.texture_names.iter().cloned())
+            .collect();
         let mut sources: Vec<Source> = Vec::with_capacity(texture_names.len());
-        for &name in &texture_names {
+        for name in &texture_names {
             sources.push(load_source(
                 name,
                 jar_assets_dir,
                 asset_index,
                 packs,
-                generated_item_textures.contains(name),
+                generated_item_textures.contains(name.as_str()),
             ));
         }
 
@@ -731,6 +862,7 @@ impl TextureAtlas {
 
         let uv_map = AtlasUVMap {
             regions,
+            particle_sprites: particle_resources.by_particle,
             sprite_alpha_masks,
             rects,
             missing: missing_region,
@@ -1556,6 +1688,73 @@ fn pack(sources: &[Source], atlas_size: u32, mip_align: u32, padding: u32) -> (P
 mod tests {
     use super::*;
     use crate::test_util::test_temp_dir;
+
+    #[test]
+    fn particle_descriptions_resolve_ordered_frames_pack_override_and_invalid_data() {
+        let root = test_temp_dir("particle_sprite_resources");
+        let builtin = root.join("builtin");
+        let low_pack = root.join("pack-low");
+        let high_pack = root.join("pack-high");
+        let write = |root: &Path, key: &str, contents: &str| {
+            let path = root.join("assets").join(key);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        };
+        write(
+            &builtin,
+            "minecraft/particles/crit.json",
+            r#"{"textures":["base"]}"#,
+        );
+        write(
+            &low_pack,
+            "minecraft/particles/crit.json",
+            r#"{"textures":["particle/low"]}"#,
+        );
+        write(
+            &high_pack,
+            "minecraft/particles/crit.json",
+            r#"{"textures":["frame_2","example:frame_1","frame_0"]}"#,
+        );
+        write(
+            &high_pack,
+            "minecraft/particles/elder_guardian.json",
+            "not json",
+        );
+
+        // Startup without active packs and atlas reload with packs use this same
+        // descriptor discovery path; re-running it observes changed overrides.
+        let initial = load_particle_sprite_resources(&builtin.join("assets"), &None, &[]);
+        assert_eq!(initial.by_particle["crit"], ["particle/base"]);
+        let resources =
+            load_particle_sprite_resources(&builtin.join("assets"), &None, &[low_pack, high_pack]);
+        assert_eq!(resources.by_particle.len(), 125);
+        assert_eq!(resources.described, 1);
+        assert_eq!(resources.missing, 123);
+        assert_eq!(resources.invalid, 1);
+        assert_eq!(
+            resources.by_particle["crit"],
+            [
+                "particle/frame_2",
+                "example:particle/frame_1",
+                "particle/frame_0"
+            ]
+        );
+        assert!(resources.by_particle["elder_guardian"].is_empty());
+        assert!(resources.texture_names.contains("example:particle/frame_1"));
+        assert!(!resources.texture_names.contains("particle/low"));
+
+        write(
+            &root.join("pack-high"),
+            "minecraft/particles/crit.json",
+            r#"{"textures":["reloaded"]}"#,
+        );
+        let reloaded = load_particle_sprite_resources(
+            &builtin.join("assets"),
+            &None,
+            &[root.join("pack-low"), root.join("pack-high")],
+        );
+        assert_eq!(reloaded.by_particle["crit"], ["particle/reloaded"]);
+    }
 
     #[test]
     fn entity_effect_sprites_load_alpha_and_receive_distinct_atlas_regions() {

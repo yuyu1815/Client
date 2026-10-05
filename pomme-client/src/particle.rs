@@ -26,6 +26,14 @@ use crate::world::block::registry::{BlockRegistry, Tint};
 use crate::world::block::{block_id, is_air};
 use crate::world::chunk::ChunkStore;
 
+mod atmosphere;
+mod emitters;
+mod magic;
+mod terrain_extra;
+mod water;
+
+pub(crate) use emitters::RenderRequest as SpecialParticleRenderRequest;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ParticleMode {
     #[default]
@@ -75,22 +83,19 @@ fn accept_particle(
     distance_squared: f64,
     rng: &mut impl FnMut() -> u32,
 ) -> bool {
-    if !bypass && distance_squared > 1024.0 {
-        return false;
-    }
-    if bypass {
-        return true;
-    }
+    // Java calculates the effective ParticleStatus before either limiter check,
+    // so these RNG draws also occur for distant and override-limiter particles.
     let mode = if mode == ParticleMode::Minimal && always_visible && rng() % 10 == 0 {
         ParticleMode::Decreased
     } else {
         mode
     };
-    match mode {
-        ParticleMode::All => true,
-        ParticleMode::Decreased => rng() % 3 != 0,
-        ParticleMode::Minimal => false,
-    }
+    let mode = if mode == ParticleMode::Decreased && rng() % 3 == 0 {
+        ParticleMode::Minimal
+    } else {
+        mode
+    };
+    bypass || (distance_squared <= 1024.0 && mode != ParticleMode::Minimal)
 }
 
 #[derive(PartialEq, Eq)]
@@ -98,6 +103,9 @@ enum Kind {
     /// `TerrainParticle` / `BreakingItemParticle`: collision physics,
     /// world-lit, fixed sprite, opaque layer.
     Terrain,
+    /// Breaking-hit terrain after Java `scale(0.6)`, which narrows collision
+    /// bounds without changing the rendered quad size.
+    TerrainScaled,
     /// `BreakingItemParticle`: terrain-like physics with an item-model particle
     /// icon.
     Item,
@@ -124,14 +132,40 @@ enum Kind {
     CampfireSignalSmoke,
     Crit,
     Dust,
+    DustColorTransition,
     Shriek,
     Trail,
     Vibration,
+    Atmosphere(atmosphere::State),
+    Water(water::State),
+    Magic(magic::State),
+    TerrainExtra(terrain_extra::State),
+    Emitters(emitters::State),
 }
 
 impl Kind {
+    /// Java `TrialSpawnerDetectionParticle.getFacingCameraMode`.
+    fn look_at_y(&self) -> bool {
+        matches!(self, Kind::Magic(state) if look_at_y(state.kind))
+    }
+
     /// Vanilla `SingleQuadParticle.getLayer`.
     fn translucent(&self) -> bool {
+        if let Kind::TerrainExtra(state) = self {
+            return terrain_extra::translucent(*state);
+        }
+        if let Kind::Atmosphere(state) = self {
+            return atmosphere::translucent(*state);
+        }
+        if let Kind::Water(state) = self {
+            return water::translucent(*state);
+        }
+        if let Kind::Magic(state) = self {
+            return magic::translucent(state.kind);
+        }
+        if let Kind::Emitters(state) = self {
+            return emitters::translucent(state.kind);
+        }
         matches!(
             self,
             Kind::ItemTranslucent
@@ -146,6 +180,164 @@ impl Kind {
                 | Kind::Vibration
         )
     }
+}
+
+fn look_at_y(kind: ServerParticleKind) -> bool {
+    matches!(
+        kind,
+        ServerParticleKind::TrialSpawnerDetection
+            | ServerParticleKind::TrialSpawnerDetectionOminous
+    )
+}
+
+fn provider_light_uv(
+    kind: ServerParticleKind,
+    sky: u8,
+    block: u8,
+    age: i32,
+    lifetime: i32,
+    partial: f32,
+) -> Option<u32> {
+    let progress = ((age as f32 + partial) / lifetime.max(1) as f32).clamp(0.0, 1.0);
+    let block = block.saturating_mul(16);
+    let sky = sky.saturating_mul(16);
+    let with_block_15 = || Some(240 | (u32::from(sky) << 8));
+    let add_emission = |emission: f32| {
+        Some(
+            u32::from(
+                block
+                    .saturating_add((emission.clamp(0.0, 1.0) * 240.0) as u8)
+                    .min(240),
+            ) | (u32::from(sky) << 8),
+        )
+    };
+    match kind {
+        ServerParticleKind::CopperFireFlame
+        | ServerParticleKind::Flame
+        | ServerParticleKind::SoulFireFlame
+        | ServerParticleKind::SmallFlame => add_emission(progress),
+        ServerParticleKind::Soul
+        | ServerParticleKind::SculkSoul
+        | ServerParticleKind::Lava
+        | ServerParticleKind::DrippingObsidianTear
+        | ServerParticleKind::FallingObsidianTear
+        | ServerParticleKind::LandingObsidianTear
+        | ServerParticleKind::TrialSpawnerDetection
+        | ServerParticleKind::TrialSpawnerDetectionOminous
+        | ServerParticleKind::SculkCharge
+        | ServerParticleKind::SculkChargePop
+        | ServerParticleKind::VaultConnection
+        | ServerParticleKind::OminousSpawning => with_block_15(),
+        ServerParticleKind::Firefly => {
+            let fade = if progress >= 0.9 {
+                (1.0 - progress) / 0.1
+            } else if progress <= 0.3 {
+                progress / 0.3
+            } else {
+                1.0
+            };
+            Some((255.0 * fade) as u32)
+        }
+        ServerParticleKind::Glow
+        | ServerParticleKind::WaxOn
+        | ServerParticleKind::WaxOff
+        | ServerParticleKind::ElectricSpark
+        | ServerParticleKind::Scrape => add_emission(progress),
+        ServerParticleKind::Portal | ServerParticleKind::ReversePortal => add_emission(
+            (age.max(0) as f32 / lifetime.max(1) as f32)
+                .clamp(0.0, 1.0)
+                .powi(8),
+        ),
+        ServerParticleKind::Enchant | ServerParticleKind::Nautilus => {
+            add_emission(progress.powi(8))
+        }
+        _ => None,
+    }
+}
+
+fn particle_light_uv(
+    kind: &Kind,
+    sky: u8,
+    block: u8,
+    age: i32,
+    lifetime: i32,
+    partial: f32,
+) -> u32 {
+    let provider = match kind {
+        Kind::Atmosphere(state) => Some(state.kind),
+        Kind::Water(state) => Some(state.kind),
+        Kind::Magic(state) => Some(state.kind),
+        Kind::TerrainExtra(state) => Some(state.kind),
+        Kind::Emitters(state) => Some(state.kind),
+        _ => None,
+    };
+    let fullbright = matches!(
+        kind,
+        Kind::EndRod
+            | Kind::Totem
+            | Kind::Explosion
+            | Kind::Trail
+            | Kind::Magic(magic::State {
+                kind: ServerParticleKind::Firework
+                    | ServerParticleKind::SonicBoom
+                    | ServerParticleKind::SweepAttack
+                    | ServerParticleKind::Gust
+                    | ServerParticleKind::SmallGust,
+                ..
+            })
+            | Kind::Water(water::State {
+                kind: ServerParticleKind::SquidInk | ServerParticleKind::GlowSquidInk,
+                ..
+            })
+            | Kind::Emitters(emitters::State {
+                kind: ServerParticleKind::ElderGuardian,
+                ..
+            })
+    );
+    if fullbright {
+        return 0xF0F0;
+    }
+    if matches!(kind, Kind::Shriek | Kind::Vibration) {
+        return 240 | (u32::from(sky.saturating_mul(16)) << 8);
+    }
+    provider
+        .and_then(|provider| provider_light_uv(provider, sky, block, age, lifetime, partial))
+        .unwrap_or_else(|| {
+            u32::from(block.saturating_mul(16)) | (u32::from(sky.saturating_mul(16)) << 8)
+        })
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Appearance {
+    pub(super) size: f32,
+    pub(super) color: [f32; 3],
+    pub(super) alpha: f32,
+    pub(super) rotation: Quat,
+    pub(super) second_rotation: Option<Quat>,
+}
+
+pub(crate) struct ParticleSoundRequest {
+    pub(crate) event: &'static str,
+    pub(crate) pos: DVec3,
+    pub(crate) volume: f32,
+    pub(crate) pitch: f32,
+    pub(crate) seed: u64,
+}
+
+/// Typed client-local composite effect from `ClientLevel.createFireworks`.
+#[derive(Clone, Debug)]
+pub(crate) struct FireworkStarterRequest {
+    pub(crate) position: DVec3,
+    pub(crate) velocity: DVec3,
+    pub(crate) far_effect: bool,
+    pub(crate) explosions: Vec<azalea_inventory::components::FireworkExplosion>,
+}
+
+struct FireworkStarter {
+    request: FireworkStarterRequest,
+    life: usize,
+    lifetime: usize,
+    twinkle_delay: bool,
 }
 
 pub struct Particle {
@@ -284,7 +476,7 @@ impl Particle {
     }
 
     /// `POOF` provider: official 26.2 `ExplodeParticle` behavior.
-    fn poof(pos: DVec3, velocity_arg: DVec3, frames: &[AtlasRegion; 8]) -> Self {
+    fn poof(pos: DVec3, velocity_arg: DVec3, frames: &[AtlasRegion]) -> Self {
         let jitter = || ((fastrand::f32() * 2.0 - 1.0) * 0.05) as f64;
         let vel = velocity_arg + dvec3(jitter(), jitter(), jitter());
         let shade = fastrand::f32() * 0.3 + 0.7;
@@ -367,7 +559,7 @@ impl Particle {
 
     /// Standard `SMOKE` block-particle provider based on
     /// `BaseAshSmokeParticle`.
-    fn smoke(pos: DVec3, velocity: DVec3, frames: &[AtlasRegion; 8]) -> Self {
+    fn smoke(pos: DVec3, velocity: DVec3, frames: &[AtlasRegion]) -> Self {
         let jitter = || (fastrand::f32() * 2.0 - 1.0) * 0.4;
         let mut base_velocity = dvec3(
             f64::from(jitter()),
@@ -469,14 +661,32 @@ impl Particle {
         sprite: AtlasRegion,
         rng: &mut fastrand::Rng,
     ) -> Self {
+        Self::dust_with_transition(pos, velocity, color, None, scale, sprite, rng)
+    }
+
+    fn dust_with_transition(
+        pos: DVec3,
+        velocity: DVec3,
+        color: [f32; 3],
+        to_color: Option<[f32; 3]>,
+        scale: f32,
+        sprite: AtlasRegion,
+        rng: &mut fastrand::Rng,
+    ) -> Self {
         let scale = scale.clamp(0.01, 4.0);
         let base_size = 0.1 * (0.75 * scale);
         let base_lifetime = (8.0 / (rng.f64() * 0.8 + 0.2)) as i32;
         let lifetime = ((base_lifetime as f32 * scale).max(1.0)) as i32;
         let base_factor = rng.f32() * 0.4 + 0.6;
         let color = color.map(|channel| (rng.f32() * 0.2 + 0.8) * channel * base_factor);
+        let end_color =
+            to_color.map(|to| to.map(|channel| (rng.f32() * 0.2 + 0.8) * channel * base_factor));
         let mut particle = Self {
-            kind: Kind::Dust,
+            kind: if end_color.is_some() {
+                Kind::DustColorTransition
+            } else {
+                Kind::Dust
+            },
             pos,
             prev_pos: pos,
             vel: velocity * 0.1,
@@ -495,7 +705,7 @@ impl Particle {
             color,
             alpha: 1.0,
             light: 0.0,
-            target: None,
+            target: end_color.map(|c| dvec3(c[0] as f64, c[1] as f64, c[2] as f64)),
             entity_target: None,
             delay: 0,
             rotation: Quat::IDENTITY,
@@ -837,7 +1047,7 @@ impl Particle {
         &mut self,
         chunks: &ChunkStore,
         end_rod_frames: &[AtlasRegion; 8],
-        generic_frames: &[AtlasRegion; 8],
+        generic_frames: &[AtlasRegion],
         explosion_frames: &[AtlasRegion; 16],
     ) -> bool {
         self.tick_with_entity_lookup(
@@ -853,7 +1063,7 @@ impl Particle {
         &mut self,
         chunks: &ChunkStore,
         end_rod_frames: &[AtlasRegion; 8],
-        generic_frames: &[AtlasRegion; 8],
+        generic_frames: &[AtlasRegion],
         explosion_frames: &[AtlasRegion; 16],
         lookup: &mut impl FnMut(i32) -> Option<TrackingAttachment>,
     ) -> bool {
@@ -880,11 +1090,13 @@ impl Particle {
         }
         match self.kind {
             Kind::Terrain
+            | Kind::TerrainScaled
             | Kind::Item
             | Kind::ItemTranslucent
             | Kind::Smoke
             | Kind::Poof
-            | Kind::Dust => self.move_with_collision(chunks),
+            | Kind::Dust
+            | Kind::DustColorTransition => self.move_with_collision(chunks),
             Kind::CampfireCosySmoke | Kind::CampfireSignalSmoke => {
                 self.move_with_collision_width(chunks, 0.125)
             }
@@ -917,6 +1129,11 @@ impl Particle {
                 }
             }
             Kind::Explosion => {}
+            Kind::Atmosphere(_)
+            | Kind::Water(_)
+            | Kind::Magic(_)
+            | Kind::TerrainExtra(_)
+            | Kind::Emitters(_) => {}
         }
         if self.kind == Kind::Smoke && self.pos.y == self.prev_pos.y {
             self.vel.x *= 1.1;
@@ -939,11 +1156,13 @@ impl Particle {
         }
         match self.kind {
             Kind::Terrain
+            | Kind::TerrainScaled
             | Kind::Item
             | Kind::ItemTranslucent
             | Kind::Smoke
             | Kind::Poof
-            | Kind::Dust => {
+            | Kind::Dust
+            | Kind::DustColorTransition => {
                 self.light = world_brightness(
                     chunks,
                     self.pos.x.floor() as i32,
@@ -994,6 +1213,11 @@ impl Particle {
                     self.pos.z.floor() as i32,
                 );
             }
+            Kind::Atmosphere(_)
+            | Kind::Water(_)
+            | Kind::Magic(_)
+            | Kind::TerrainExtra(_)
+            | Kind::Emitters(_) => {}
         }
         if self.kind == Kind::Shriek {
             self.alpha = 1.0 - (self.age as f32 / self.lifetime as f32).clamp(0.0, 1.0);
@@ -1011,7 +1235,7 @@ impl Particle {
 
     /// Vanilla `Particle.move`.
     fn move_with_collision(&mut self, chunks: &ChunkStore) {
-        self.move_with_collision_width(chunks, HALF_WIDTH);
+        self.move_with_collision_width(chunks, collision_half_width(&self.kind));
     }
 
     fn move_with_collision_width(&mut self, chunks: &ChunkStore, half_width: f64) {
@@ -1072,23 +1296,56 @@ pub const EXPLOSION_SPRITES: [&str; 16] = [
     "particle/explosion_15",
 ];
 
-fn supports_explosion_particle(option: &ParticleOptions) -> bool {
-    matches!(
-        option,
-        ParticleOptions::Explosion
-            | ParticleOptions::ExplosionEmitter
-            | ParticleOptions::EndRod
-            | ParticleOptions::Poof
-            | ParticleOptions::Smoke
-    )
-}
-
 fn explosion_frame_index(age: i32, lifetime: i32) -> usize {
     ((age.max(0) as usize * 15) / lifetime.max(1) as usize).min(15)
 }
 
 fn animated_frame_index(age: i32, lifetime: i32, frames: usize) -> usize {
     ((age.max(0) as usize * (frames - 1)) / lifetime.max(1) as usize).min(frames - 1)
+}
+
+fn breaking_effect_position(
+    pos: BlockPos,
+    bounds: LocalBox,
+    face: azalea_core::direction::Direction,
+    random: [f64; 3],
+) -> DVec3 {
+    let sample = |random: f64, min: f64, max: f64| {
+        random * (max - min - f64::from(0.2f32)) + f64::from(0.1f32) + min
+    };
+    let mut p = DVec3::new(
+        pos.x as f64 + sample(random[0], bounds[0], bounds[3]),
+        pos.y as f64 + sample(random[1], bounds[1], bounds[4]),
+        pos.z as f64 + sample(random[2], bounds[2], bounds[5]),
+    );
+    let face_offset = f64::from(0.1f32);
+    match face {
+        azalea_core::direction::Direction::Down => p.y = pos.y as f64 + bounds[1] - face_offset,
+        azalea_core::direction::Direction::Up => p.y = pos.y as f64 + bounds[4] + face_offset,
+        azalea_core::direction::Direction::North => p.z = pos.z as f64 + bounds[2] - face_offset,
+        azalea_core::direction::Direction::South => p.z = pos.z as f64 + bounds[5] + face_offset,
+        azalea_core::direction::Direction::West => p.x = pos.x as f64 + bounds[0] - face_offset,
+        azalea_core::direction::Direction::East => p.x = pos.x as f64 + bounds[3] + face_offset,
+    }
+    p
+}
+
+fn terrain_power(velocity: DVec3, power: f32) -> DVec3 {
+    let power = f64::from(power);
+    let y_offset = f64::from(0.1f32);
+    DVec3::new(
+        velocity.x * power,
+        (velocity.y - y_offset) * power + y_offset,
+        velocity.z * power,
+    )
+}
+
+fn collision_half_width(kind: &Kind) -> f64 {
+    if matches!(kind, Kind::TerrainScaled) {
+        f64::from(0.2f32 * 0.6f32) * 0.5
+    } else {
+        HALF_WIDTH
+    }
 }
 
 fn effect_particle_denominator(ambient: bool, invisible: bool) -> u32 {
@@ -1119,6 +1376,19 @@ fn color_particle_argb(color: &azalea_core::color::RgbColor) -> u32 {
 
 fn dust_quad_size(base_size: f32, age: i32, lifetime: i32, partial_tick: f32) -> f32 {
     base_size * (((age as f32 + partial_tick) / lifetime as f32) * 32.0).clamp(0.0, 1.0)
+}
+
+/// Java `DustColorTransitionParticle.lerpColors` uses `(age + partial) /
+/// (lifetime + 1)`.
+fn dust_transition_color(
+    from: [f32; 3],
+    to: [f32; 3],
+    age: i32,
+    lifetime: i32,
+    partial_tick: f32,
+) -> [f32; 3] {
+    let t = ((age as f32 + partial_tick) / (lifetime as f32 + 1.0)).clamp(0.0, 1.0);
+    std::array::from_fn(|i| from[i] + (to[i] - from[i]) * t)
 }
 
 /// `crit.json` and `enchanted_hit.json` each register one provider-specific
@@ -1213,35 +1483,138 @@ pub const END_ROD_SPRITES: [&str; 8] = [
     "particle/glitter_0",
 ];
 
-/// Server-sent particle types with implemented vanilla-like effects. Payload
-/// codecs are decoded separately; unsupported types are dropped, never treated
-/// as simple options.
+/// Every native Java 26.2 particle identity. ID resolution is delegated to
+/// the native registry so this list never duplicates numeric registry IDs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerParticleKind {
+    AngryVillager,
+    Block,
+    BlockMarker,
+    Bubble,
+    SulfurBubbles,
+    NoxiousGas,
+    NoxiousGasCloud,
+    Geyser,
+    GeyserBase,
+    GeyserPoof,
+    GeyserPlume,
+    Cloud,
+    CopperFireFlame,
+    Crit,
+    DamageIndicator,
+    DragonBreath,
+    DrippingLava,
+    FallingLava,
+    LandingLava,
+    DrippingWater,
+    FallingWater,
+    Dust,
+    DustColorTransition,
+    Effect,
+    ElderGuardian,
+    EnchantedHit,
+    Enchant,
     EndRod,
     EntityEffect,
-    Effect,
-    InstantEffect,
-    Witch,
-    TrialOmen,
-    RaidOmen,
     ExplosionEmitter,
     Explosion,
+    Gust,
+    SmallGust,
+    GustEmitterLarge,
+    GustEmitterSmall,
+    SonicBoom,
+    FallingDust,
+    Firework,
+    Fishing,
+    Flame,
+    Infested,
+    CherryLeaves,
+    PaleOakLeaves,
+    TintedLeaves,
+    SculkSoul,
+    SculkCharge,
+    SculkChargePop,
+    SoulFireFlame,
+    Soul,
+    Flash,
+    HappyVillager,
+    Composter,
+    Heart,
+    InstantEffect,
+    Item,
+    Vibration,
+    Trail,
+    PauseMobGrowth,
+    ResetMobGrowth,
+    ItemSlime,
+    ItemCobweb,
+    ItemSnowball,
+    LargeSmoke,
+    Lava,
+    Mycelium,
+    Note,
     Poof,
+    Portal,
+    Rain,
     Smoke,
+    WhiteSmoke,
+    Sneeze,
+    Spit,
+    SquidInk,
+    SweepAttack,
+    Totem,
+    Underwater,
+    Splash,
+    Witch,
+    BubblePop,
+    CurrentDown,
+    BubbleColumnUp,
+    Nautilus,
+    Dolphin,
     CampfireCosySmoke,
     CampfireSignalSmoke,
-    Totem,
-    Dust,
-    Block,
-    Item,
+    DrippingHoney,
+    FallingHoney,
+    LandingHoney,
+    FallingNectar,
+    FallingSporeBlossom,
+    Ash,
+    CrimsonSpore,
+    WarpedSpore,
+    SporeBlossomAir,
+    DrippingObsidianTear,
+    FallingObsidianTear,
+    LandingObsidianTear,
+    ReversePortal,
+    WhiteAsh,
+    SmallFlame,
+    Snowflake,
+    DrippingDripstoneLava,
+    FallingDripstoneLava,
+    DrippingDripstoneWater,
+    FallingDripstoneWater,
+    GlowSquidInk,
+    Glow,
+    WaxOn,
+    WaxOff,
+    ElectricSpark,
+    Scrape,
     Shriek,
-    Trail,
-    Vibration,
+    EggCrack,
+    DustPlume,
+    TrialSpawnerDetection,
+    TrialSpawnerDetectionOminous,
+    VaultConnection,
+    DustPillar,
+    OminousSpawning,
+    RaidOmen,
+    TrialOmen,
+    BlockCrumble,
+    Firefly,
+    SulfurCubeGoo,
 }
 
-/// Wire options retained with a server particle. Only known exact codecs are
-/// represented; unknown payload layouts are never assumed to be empty.
+/// Exact option payloads supported by the Java 26.2 particle codecs.
 #[derive(Clone, Debug)]
 pub enum ServerParticleOptions {
     Simple,
@@ -1256,11 +1629,33 @@ pub enum ServerParticleOptions {
         packed_color: i32,
         scale: f32,
     },
+    DustColorTransition {
+        from_color: i32,
+        to_color: i32,
+        scale: f32,
+    },
+    Color {
+        color: i32,
+    },
+    Power {
+        power: f32,
+    },
+    SculkCharge {
+        roll: f32,
+    },
+    Geyser {
+        water_blocks: i32,
+    },
+    GeyserBase {
+        water_blocks: i32,
+        burst_impulse_base: f32,
+    },
     Block(BlockState),
     Item {
         item_id: u32,
         count: i32,
         components: azalea_inventory::DataComponentPatch,
+        raw_components: Option<std::sync::Arc<simdnbt::owned::NbtCompound>>,
     },
     Shriek {
         delay: i32,
@@ -1282,45 +1677,179 @@ pub enum ServerParticleOptions {
 }
 
 impl ServerParticleKind {
-    /// Maps a particle registry id (`ParticleTypes` registration order in the
-    /// 26.2 reference; ids shift between versions). Pomme owns this mapping
-    /// because azalea's particle wire enum is out of sync with the registry.
     pub fn from_id(id: u32) -> Option<Self> {
-        match id {
-            23 => Some(Self::Effect),
-            28 => Some(Self::EntityEffect),
-            53 => Some(Self::InstantEffect),
-            78 => Some(Self::Witch),
-            120 => Some(Self::RaidOmen),
-            121 => Some(Self::TrialOmen),
-            27 => Some(Self::EndRod),
-            29 => Some(Self::ExplosionEmitter),
-            30 => Some(Self::Explosion),
-            66 => Some(Self::Poof),
-            69 => Some(Self::Smoke),
-            70 => Some(Self::CampfireCosySmoke),
-            71 => Some(Self::CampfireSignalSmoke),
-            75 => Some(Self::Totem),
-            21 => Some(Self::Dust),
-            1 => Some(Self::Block),
-            54 => Some(Self::Item),
-            55 => Some(Self::Vibration),
-            56 => Some(Self::Trail),
-            112 => Some(Self::Shriek),
-            _ => None,
-        }
+        let name = pomme_protocol::registries::RegistryTable::native()
+            .name_of(pomme_protocol::registries::ClientRegistry::ParticleType, id)?;
+        Self::from_name(name)
+    }
+
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "angry_villager" => Self::AngryVillager,
+            "block" => Self::Block,
+            "block_marker" => Self::BlockMarker,
+            "bubble" => Self::Bubble,
+            "sulfur_bubbles" => Self::SulfurBubbles,
+            "noxious_gas" => Self::NoxiousGas,
+            "noxious_gas_cloud" => Self::NoxiousGasCloud,
+            "geyser" => Self::Geyser,
+            "geyser_base" => Self::GeyserBase,
+            "geyser_poof" => Self::GeyserPoof,
+            "geyser_plume" => Self::GeyserPlume,
+            "cloud" => Self::Cloud,
+            "copper_fire_flame" => Self::CopperFireFlame,
+            "crit" => Self::Crit,
+            "damage_indicator" => Self::DamageIndicator,
+            "dragon_breath" => Self::DragonBreath,
+            "dripping_lava" => Self::DrippingLava,
+            "falling_lava" => Self::FallingLava,
+            "landing_lava" => Self::LandingLava,
+            "dripping_water" => Self::DrippingWater,
+            "falling_water" => Self::FallingWater,
+            "dust" => Self::Dust,
+            "dust_color_transition" => Self::DustColorTransition,
+            "effect" => Self::Effect,
+            "elder_guardian" => Self::ElderGuardian,
+            "enchanted_hit" => Self::EnchantedHit,
+            "enchant" => Self::Enchant,
+            "end_rod" => Self::EndRod,
+            "entity_effect" => Self::EntityEffect,
+            "explosion_emitter" => Self::ExplosionEmitter,
+            "explosion" => Self::Explosion,
+            "gust" => Self::Gust,
+            "small_gust" => Self::SmallGust,
+            "gust_emitter_large" => Self::GustEmitterLarge,
+            "gust_emitter_small" => Self::GustEmitterSmall,
+            "sonic_boom" => Self::SonicBoom,
+            "falling_dust" => Self::FallingDust,
+            "firework" => Self::Firework,
+            "fishing" => Self::Fishing,
+            "flame" => Self::Flame,
+            "infested" => Self::Infested,
+            "cherry_leaves" => Self::CherryLeaves,
+            "pale_oak_leaves" => Self::PaleOakLeaves,
+            "tinted_leaves" => Self::TintedLeaves,
+            "sculk_soul" => Self::SculkSoul,
+            "sculk_charge" => Self::SculkCharge,
+            "sculk_charge_pop" => Self::SculkChargePop,
+            "soul_fire_flame" => Self::SoulFireFlame,
+            "soul" => Self::Soul,
+            "flash" => Self::Flash,
+            "happy_villager" => Self::HappyVillager,
+            "composter" => Self::Composter,
+            "heart" => Self::Heart,
+            "instant_effect" => Self::InstantEffect,
+            "item" => Self::Item,
+            "vibration" => Self::Vibration,
+            "trail" => Self::Trail,
+            "pause_mob_growth" => Self::PauseMobGrowth,
+            "reset_mob_growth" => Self::ResetMobGrowth,
+            "item_slime" => Self::ItemSlime,
+            "item_cobweb" => Self::ItemCobweb,
+            "item_snowball" => Self::ItemSnowball,
+            "large_smoke" => Self::LargeSmoke,
+            "lava" => Self::Lava,
+            "mycelium" => Self::Mycelium,
+            "note" => Self::Note,
+            "poof" => Self::Poof,
+            "portal" => Self::Portal,
+            "rain" => Self::Rain,
+            "smoke" => Self::Smoke,
+            "white_smoke" => Self::WhiteSmoke,
+            "sneeze" => Self::Sneeze,
+            "spit" => Self::Spit,
+            "squid_ink" => Self::SquidInk,
+            "sweep_attack" => Self::SweepAttack,
+            "totem_of_undying" => Self::Totem,
+            "underwater" => Self::Underwater,
+            "splash" => Self::Splash,
+            "witch" => Self::Witch,
+            "bubble_pop" => Self::BubblePop,
+            "current_down" => Self::CurrentDown,
+            "bubble_column_up" => Self::BubbleColumnUp,
+            "nautilus" => Self::Nautilus,
+            "dolphin" => Self::Dolphin,
+            "campfire_cosy_smoke" => Self::CampfireCosySmoke,
+            "campfire_signal_smoke" => Self::CampfireSignalSmoke,
+            "dripping_honey" => Self::DrippingHoney,
+            "falling_honey" => Self::FallingHoney,
+            "landing_honey" => Self::LandingHoney,
+            "falling_nectar" => Self::FallingNectar,
+            "falling_spore_blossom" => Self::FallingSporeBlossom,
+            "ash" => Self::Ash,
+            "crimson_spore" => Self::CrimsonSpore,
+            "warped_spore" => Self::WarpedSpore,
+            "spore_blossom_air" => Self::SporeBlossomAir,
+            "dripping_obsidian_tear" => Self::DrippingObsidianTear,
+            "falling_obsidian_tear" => Self::FallingObsidianTear,
+            "landing_obsidian_tear" => Self::LandingObsidianTear,
+            "reverse_portal" => Self::ReversePortal,
+            "white_ash" => Self::WhiteAsh,
+            "small_flame" => Self::SmallFlame,
+            "snowflake" => Self::Snowflake,
+            "dripping_dripstone_lava" => Self::DrippingDripstoneLava,
+            "falling_dripstone_lava" => Self::FallingDripstoneLava,
+            "dripping_dripstone_water" => Self::DrippingDripstoneWater,
+            "falling_dripstone_water" => Self::FallingDripstoneWater,
+            "glow_squid_ink" => Self::GlowSquidInk,
+            "glow" => Self::Glow,
+            "wax_on" => Self::WaxOn,
+            "wax_off" => Self::WaxOff,
+            "electric_spark" => Self::ElectricSpark,
+            "scrape" => Self::Scrape,
+            "shriek" => Self::Shriek,
+            "egg_crack" => Self::EggCrack,
+            "dust_plume" => Self::DustPlume,
+            "trial_spawner_detection" => Self::TrialSpawnerDetection,
+            "trial_spawner_detection_ominous" => Self::TrialSpawnerDetectionOminous,
+            "vault_connection" => Self::VaultConnection,
+            "dust_pillar" => Self::DustPillar,
+            "ominous_spawning" => Self::OminousSpawning,
+            "raid_omen" => Self::RaidOmen,
+            "trial_omen" => Self::TrialOmen,
+            "block_crumble" => Self::BlockCrumble,
+            "firefly" => Self::Firefly,
+            "sulfur_cube_goo" => Self::SulfurCubeGoo,
+            _ => return None,
+        })
     }
 
     /// Vanilla `ParticleType.getOverrideLimiter`.
     fn override_limiter(self) -> bool {
         matches!(
             self,
-            Self::ExplosionEmitter
+            Self::BlockMarker
+                | Self::Geyser
+                | Self::GeyserBase
+                | Self::GeyserPoof
+                | Self::GeyserPlume
+                | Self::DamageIndicator
+                | Self::ElderGuardian
+                | Self::ExplosionEmitter
                 | Self::Explosion
+                | Self::Gust
+                | Self::GustEmitterLarge
+                | Self::GustEmitterSmall
+                | Self::SonicBoom
+                | Self::SculkCharge
+                | Self::SculkChargePop
                 | Self::Poof
-                | Self::Vibration
+                | Self::Spit
+                | Self::SquidInk
+                | Self::SweepAttack
                 | Self::CampfireCosySmoke
                 | Self::CampfireSignalSmoke
+                | Self::GlowSquidInk
+                | Self::Glow
+                | Self::WaxOn
+                | Self::WaxOff
+                | Self::ElectricSpark
+                | Self::Scrape
+                | Self::TrialSpawnerDetection
+                | Self::TrialSpawnerDetectionOminous
+                | Self::VaultConnection
+                | Self::OminousSpawning
+                | Self::Vibration
         )
     }
 }
@@ -1343,6 +1872,138 @@ struct PlannedExplosionParticle {
 struct ExplosionEmitter {
     pos: DVec3,
     age: u8,
+}
+
+fn firework_explosion_sparks(
+    atlas: &AtlasUVMap,
+    request: &FireworkStarterRequest,
+    explosion: &azalea_inventory::components::FireworkExplosion,
+) -> Vec<Particle> {
+    use azalea_inventory::components::FireworkExplosionShape as Shape;
+    const STAR: &[(f64, f64)] = &[
+        (0.0, 1.0),
+        (0.3455, 0.309),
+        (0.9511, 0.309),
+        (0.3795918367346939, -0.12653061224489795),
+        (0.6122448979591837, -0.8040816326530612),
+        (0.0, -0.35918367346938773),
+    ];
+    const CREEPER: &[(f64, f64)] = &[
+        (0.0, 0.2),
+        (0.2, 0.2),
+        (0.2, 0.6),
+        (0.6, 0.6),
+        (0.6, 0.2),
+        (0.2, 0.2),
+        (0.2, 0.0),
+        (0.4, 0.0),
+        (0.4, -0.6),
+        (0.2, -0.6),
+        (0.2, -0.4),
+        (0.0, -0.4),
+    ];
+    let colors = if explosion.colors.is_empty() {
+        &[0x1e1b1b][..]
+    } else {
+        explosion.colors.as_slice()
+    };
+    let fade = || {
+        (!explosion.fade_colors.is_empty())
+            .then(|| rgb_f32(explosion.fade_colors[fastrand::usize(..explosion.fade_colors.len())]))
+    };
+    let color = || rgb_f32(colors[fastrand::usize(..colors.len())]);
+    let mut result = Vec::new();
+    let mut push = |velocity: DVec3| {
+        if let Some(particle) = magic::firework_spark(
+            atlas,
+            request.position,
+            velocity,
+            color(),
+            fade(),
+            explosion.has_trail,
+            explosion.has_twinkle,
+        ) {
+            result.push(particle);
+        }
+    };
+    match explosion.shape {
+        Shape::SmallBall | Shape::LargeBall => {
+            let steps = if explosion.shape == Shape::SmallBall {
+                2
+            } else {
+                4
+            };
+            let base_speed = if steps == 2 { 0.25 } else { 0.5 };
+            for y in -steps..=steps {
+                for x in -steps..=steps {
+                    let mut z = -steps;
+                    while z <= steps {
+                        let direction = DVec3::new(
+                            f64::from(x) + (fastrand::f64() - fastrand::f64()) * 0.5,
+                            f64::from(y) + (fastrand::f64() - fastrand::f64()) * 0.5,
+                            f64::from(z) + (fastrand::f64() - fastrand::f64()) * 0.5,
+                        );
+                        let speed = direction.length() / base_speed + gaussian_sample() * 0.05;
+                        push(direction / speed);
+                        if y != -steps && y != steps && x != -steps && x != steps {
+                            z += steps * 2 - 1;
+                        }
+                        z += 1;
+                    }
+                }
+            }
+        }
+        Shape::Star | Shape::Creeper => {
+            let coords = if explosion.shape == Shape::Star {
+                STAR
+            } else {
+                CREEPER
+            };
+            let flat = explosion.shape == Shape::Creeper;
+            let (sx, sy) = coords[0];
+            push(dvec3(sx * 0.5, sy * 0.5, 0.0));
+            let base_angle = fastrand::f64() * std::f64::consts::PI;
+            let angle_mod = if flat { 0.034 } else { 0.34 };
+            for angle_step in 0..3 {
+                let angle = base_angle + angle_step as f64 * std::f64::consts::PI * angle_mod;
+                let (mut ox, mut oy) = coords[0];
+                for &(tx, ty) in &coords[1..] {
+                    for step in 1..=4 {
+                        let t = f64::from(step) * 0.25;
+                        let mut vx = (ox + (tx - ox) * t) * 0.5;
+                        let vy = (oy + (ty - oy) * t) * 0.5;
+                        let vz = vx * angle.sin();
+                        vx *= angle.cos();
+                        for flip in [-1.0, 1.0] {
+                            push(dvec3(vx * flip, vy, vz * flip));
+                        }
+                    }
+                    ox = tx;
+                    oy = ty;
+                }
+            }
+        }
+        Shape::Burst => {
+            let off_x = gaussian_sample() * 0.05;
+            let off_z = gaussian_sample() * 0.05;
+            for _ in 0..70 {
+                push(dvec3(
+                    request.velocity.x * 0.5 + gaussian_sample() * 0.15 + off_x,
+                    request.velocity.y * 0.5 + fastrand::f64() * 0.5,
+                    request.velocity.z * 0.5 + gaussian_sample() * 0.15 + off_z,
+                ));
+            }
+        }
+    }
+    result
+}
+
+fn rgb_f32(rgb: i32) -> [f32; 3] {
+    [
+        ((rgb >> 16) & 255) as f32 / 255.0,
+        ((rgb >> 8) & 255) as f32 / 255.0,
+        (rgb & 255) as f32 / 255.0,
+    ]
 }
 
 fn plan_explosion_particles(
@@ -1498,6 +2159,8 @@ pub struct ParticleStore {
     particles: Vec<Particle>,
     emitters: Vec<ExplosionEmitter>,
     pending_emitters: Vec<ExplosionEmitter>,
+    firework_starters: Vec<FireworkStarter>,
+    pending_firework_starters: Vec<FireworkStarter>,
     tracked_explosions: Vec<TrackedExplosion>,
     tracking_emitters: Vec<TrackingEmitter>,
     crit_sprite: AtlasRegion,
@@ -1512,13 +2175,16 @@ pub struct ParticleStore {
     spell_frames: [AtlasRegion; 8],
     raid_omen_sprite: AtlasRegion,
     trial_omen_sprite: AtlasRegion,
-    generic_frames: [AtlasRegion; 8],
+    generic_frames: [AtlasRegion; 12],
     explosion_frames: [AtlasRegion; 16],
     campfire_cosy_frames: [AtlasRegion; 8],
     campfire_signal_frames: [AtlasRegion; 8],
     grass_colormap: Arc<Colormap>,
     foliage_colormap: Arc<Colormap>,
     dry_foliage_colormap: Arc<Colormap>,
+    sound_requests: Vec<ParticleSoundRequest>,
+    item_model_dimension: Option<String>,
+    item_model_registries: Arc<azalea_core::registry_holder::RegistryHolder>,
 }
 
 /// Client `CampfireBlockEntity::particleTick` emits smoke only for lit, dry
@@ -1564,6 +2230,11 @@ impl ParticleStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_pending_positions(&self) -> Vec<DVec3> {
+        self.pending.iter().map(|particle| particle.pos).collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_pending_color_velocity(&self, index: usize) -> ([f32; 3], DVec3) {
         let particle = &self.pending[index];
         (particle.color, particle.vel)
@@ -1571,6 +2242,87 @@ impl ParticleStore {
 
     pub fn set_mode(&mut self, mode: ParticleMode) {
         self.mode = mode;
+    }
+
+    /// The ParticleStore is the common item-particle spawn boundary. The
+    /// GameState world lifecycle updates this snapshot before any packet or
+    /// local request can spawn against a newly joined/switched level.
+    pub(crate) fn set_item_model_world(
+        &mut self,
+        dimension: Option<&str>,
+        registries: Arc<azalea_core::registry_holder::RegistryHolder>,
+    ) {
+        self.item_model_dimension = dimension.filter(|key| !key.is_empty()).map(str::to_owned);
+        self.item_model_registries = registries;
+    }
+
+    pub(crate) fn reload_assets(
+        &mut self,
+        uv_map: AtlasUVMap,
+        grass_colormap: Arc<Colormap>,
+        foliage_colormap: Arc<Colormap>,
+        dry_foliage_colormap: Arc<Colormap>,
+    ) {
+        let mode = self.mode;
+        let dimension = self.item_model_dimension.clone();
+        let registries = Arc::clone(&self.item_model_registries);
+        *self = Self::new(
+            uv_map,
+            grass_colormap,
+            foliage_colormap,
+            dry_foliage_colormap,
+        );
+        self.mode = mode;
+        self.item_model_dimension = dimension;
+        self.item_model_registries = registries;
+    }
+
+    fn item_particle_region(
+        &self,
+        registry: &BlockRegistry,
+        stack: &azalea_inventory::ItemStack,
+        raw_components: Option<&simdnbt::owned::NbtCompound>,
+    ) -> AtlasRegion {
+        let context = crate::world::block::registry::ItemParticleModelContext {
+            dimension: self.item_model_dimension.as_deref(),
+            registries: Some(self.item_model_registries.as_ref()),
+        };
+        registry
+            .get_item_particle_materials(stack, raw_components, context)
+            .and_then(|materials| {
+                (!materials.is_empty())
+                    .then(|| {
+                        materials
+                            .get(fastrand::usize(..materials.len()))
+                            .copied()
+                            .flatten()
+                    })
+                    .flatten()
+            })
+            .filter(|texture| self.uv_map.has_region(texture))
+            .map_or_else(
+                || self.uv_map.missing_region(),
+                |texture| self.uv_map.get_region(texture),
+            )
+    }
+
+    pub(crate) fn drain_sound_requests(&mut self) -> Vec<ParticleSoundRequest> {
+        std::mem::take(&mut self.sound_requests)
+    }
+
+    pub(crate) fn add_firework_starter(&mut self, request: FireworkStarterRequest) -> bool {
+        if request.explosions.is_empty() {
+            return false;
+        }
+        let twinkle_delay = request.explosions.iter().any(|e| e.has_twinkle);
+        let lifetime = request.explosions.len() * 2 - 1 + usize::from(twinkle_delay) * 15;
+        self.pending_firework_starters.push(FireworkStarter {
+            request,
+            life: 0,
+            lifetime,
+            twinkle_delay,
+        });
+        true
     }
 
     fn accepts_normal_spawn(&self, always_visible: bool, rng: &mut impl FnMut() -> u32) -> bool {
@@ -1672,6 +2424,47 @@ impl ParticleStore {
         self.push(particle);
     }
 
+    /// Spawn the exact ParticleOptions carried by LivingEntity metadata. This
+    /// is the same provider path as server particles, not an EntityEffect
+    /// fallback.
+    pub(crate) fn add_living_effect_server_particles(
+        &mut self,
+        pos: DVec3,
+        width: f32,
+        height: f32,
+        particles: &[(ServerParticleKind, ServerParticleOptions)],
+        ambient: bool,
+        invisible: bool,
+        camera_pos: DVec3,
+        registry: &BlockRegistry,
+        chunks: &ChunkStore,
+        biome_climate: &HashMap<u32, BiomeClimate>,
+    ) {
+        if particles.is_empty() || !effect_particle_selected(fastrand::u32(..), ambient, invisible)
+        {
+            return;
+        }
+        let (kind, options) = &particles[fastrand::usize(..particles.len())];
+        let particle_pos = pos
+            + dvec3(
+                (fastrand::f64() - 0.5) * f64::from(width),
+                fastrand::f64() * f64::from(height),
+                (fastrand::f64() - 0.5) * f64::from(width),
+            );
+        self.add_server_particle(
+            *kind,
+            options.clone(),
+            false,
+            false,
+            particle_pos,
+            DVec3::ZERO,
+            camera_pos,
+            registry,
+            chunks,
+            biome_climate,
+        );
+    }
+
     pub fn add_potion_break_particles(
         &mut self,
         pos: DVec3,
@@ -1686,35 +2479,31 @@ impl ParticleStore {
             count: 1,
             component_patch: azalea_inventory::DataComponentPatch::default(),
         });
-        if let Some(texture) = registry.get_item_particle_icon(&stack)
-            && self.uv_map.has_region(texture)
-        {
-            let sprite = self.uv_map.get_region(texture);
-            for _ in 0..8 {
-                let item_pos = pos;
-                if accept_particle(
-                    self.mode,
-                    false,
-                    false,
-                    camera_pos.distance_squared(item_pos),
-                    &mut || fastrand::u32(..),
-                ) {
-                    self.push(Particle::breaking_item(
-                        item_pos,
-                        dvec3(
-                            gaussian_sample() * 0.15,
-                            fastrand::f64() * 0.2,
-                            gaussian_sample() * 0.15,
-                        ),
-                        sprite,
-                        world_brightness(
-                            chunks,
-                            pos.x.floor() as i32,
-                            pos.y.floor() as i32,
-                            pos.z.floor() as i32,
-                        ),
-                    ));
-                }
+        for _ in 0..8 {
+            let sprite = self.item_particle_region(registry, &stack, None);
+            let item_pos = pos;
+            if accept_particle(
+                self.mode,
+                false,
+                false,
+                camera_pos.distance_squared(item_pos),
+                &mut || fastrand::u32(..),
+            ) {
+                self.push(Particle::breaking_item(
+                    item_pos,
+                    dvec3(
+                        gaussian_sample() * 0.15,
+                        fastrand::f64() * 0.2,
+                        gaussian_sample() * 0.15,
+                    ),
+                    sprite,
+                    world_brightness(
+                        chunks,
+                        pos.x.floor() as i32,
+                        pos.y.floor() as i32,
+                        pos.z.floor() as i32,
+                    ),
+                ));
             }
         }
         let frames = self.potion_break_frames(instant_effect);
@@ -1792,30 +2581,58 @@ impl ParticleStore {
         ));
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_particle_count(&self) -> usize {
+        self.particles.len() + self.pending.len()
+    }
+
     pub fn new(
         uv_map: AtlasUVMap,
         grass_colormap: Arc<Colormap>,
         foliage_colormap: Arc<Colormap>,
         dry_foliage_colormap: Arc<Colormap>,
     ) -> Self {
-        let end_rod_frames = END_ROD_SPRITES.map(|k| uv_map.get_region(k));
-        let entity_effect_frames = ENTITY_EFFECT_SPRITES.map(|k| uv_map.get_region(k));
-        let spell_frames = SPELL_SPRITES.map(|k| uv_map.get_region(k));
-        let raid_omen_sprite = uv_map.get_region(RAID_OMEN_SPRITE);
-        let trial_omen_sprite = uv_map.get_region(TRIAL_OMEN_SPRITE);
-        let generic_frames =
+        let end_rod_frames = descriptor_frames(&uv_map, "minecraft:end_rod", END_ROD_SPRITES);
+        let entity_effect_frames =
+            descriptor_frames(&uv_map, "minecraft:entity_effect", ENTITY_EFFECT_SPRITES);
+        let spell_frames = descriptor_frames(&uv_map, "minecraft:instant_effect", SPELL_SPRITES);
+        let raid_omen_sprite = descriptor_frame(&uv_map, "minecraft:raid_omen", 0)
+            .unwrap_or_else(|| uv_map.get_region(RAID_OMEN_SPRITE));
+        let trial_omen_sprite = descriptor_frame(&uv_map, "minecraft:trial_omen", 0)
+            .unwrap_or_else(|| uv_map.get_region(TRIAL_OMEN_SPRITE));
+        let mut generic_frames =
             std::array::from_fn(|i| uv_map.get_region(GENERIC_PARTICLE_SPRITES[i]));
-        let explosion_frames = EXPLOSION_SPRITES.map(|k| uv_map.get_region(k));
-        let campfire_cosy_frames = CAMPFIRE_COSY_SMOKE_SPRITES.map(|k| uv_map.get_region(k));
-        let campfire_signal_frames = CAMPFIRE_SIGNAL_SMOKE_SPRITES.map(|k| uv_map.get_region(k));
-        let crit_sprite = uv_map.get_region(CRIT_SPRITE);
-        let enchanted_hit_sprite = uv_map.get_region(ENCHANTED_HIT_SPRITE);
+        generic_frames[8] =
+            descriptor_frame(&uv_map, "minecraft:dust", 0).unwrap_or(generic_frames[8]);
+        generic_frames[9] =
+            descriptor_frame(&uv_map, "minecraft:shriek", 0).unwrap_or(generic_frames[9]);
+        generic_frames[10] =
+            descriptor_frame(&uv_map, "minecraft:trail", 0).unwrap_or(generic_frames[10]);
+        generic_frames[11] =
+            descriptor_frame(&uv_map, "minecraft:vibration", 0).unwrap_or(generic_frames[11]);
+        let explosion_frames = descriptor_frames(&uv_map, "minecraft:explosion", EXPLOSION_SPRITES);
+        let campfire_cosy_frames = descriptor_frames(
+            &uv_map,
+            "minecraft:campfire_cosy_smoke",
+            CAMPFIRE_COSY_SMOKE_SPRITES,
+        );
+        let campfire_signal_frames = descriptor_frames(
+            &uv_map,
+            "minecraft:campfire_signal_smoke",
+            CAMPFIRE_SIGNAL_SMOKE_SPRITES,
+        );
+        let crit_sprite = descriptor_frame(&uv_map, "minecraft:crit", 0)
+            .unwrap_or_else(|| uv_map.get_region(CRIT_SPRITE));
+        let enchanted_hit_sprite = descriptor_frame(&uv_map, "minecraft:enchanted_hit", 0)
+            .unwrap_or_else(|| uv_map.get_region(ENCHANTED_HIT_SPRITE));
         Self {
             mode: ParticleMode::All,
             particles: Vec::new(),
             pending: Vec::new(),
             emitters: Vec::new(),
             pending_emitters: Vec::new(),
+            firework_starters: Vec::new(),
+            pending_firework_starters: Vec::new(),
             tracked_explosions: Vec::new(),
             tracking_emitters: Vec::new(),
             crit_sprite,
@@ -1833,6 +2650,9 @@ impl ParticleStore {
             grass_colormap,
             foliage_colormap,
             dry_foliage_colormap,
+            sound_requests: Vec::new(),
+            item_model_dimension: None,
+            item_model_registries: Arc::new(azalea_core::registry_holder::RegistryHolder::default()),
         }
     }
 
@@ -1907,17 +2727,8 @@ impl ParticleStore {
         }
     }
 
-    /// Spawn supported primary explosion options; unsupported options are
-    /// rejected, never remapped.
-    pub fn add_explosion_particle(
-        &mut self,
-        option: &ParticleOptions,
-        pos: DVec3,
-        velocity: DVec3,
-    ) -> bool {
-        if !supports_explosion_particle(option) {
-            return false;
-        }
+    /// Spawn the engine's internally generated explosion effects.
+    fn add_explosion_particle(&mut self, option: &ParticleOptions, pos: DVec3, velocity: DVec3) {
         match option {
             ParticleOptions::Explosion => self.push(Particle::huge_explosion(
                 pos,
@@ -1935,9 +2746,101 @@ impl ParticleStore {
             ParticleOptions::Smoke => {
                 self.push(Particle::smoke(pos, velocity, &self.generic_frames))
             }
-            _ => return false,
+            _ => unreachable!("internal explosion particle kind"),
         }
+    }
+
+    /// Spawn any typed explosion option through the same provider boundary as
+    /// ordinary particle packets. The option codec is shared with metadata.
+    pub(crate) fn add_explosion_packet_particle(
+        &mut self,
+        option: &ParticleOptions,
+        pos: DVec3,
+        velocity: DVec3,
+        camera_pos: DVec3,
+        registry: &BlockRegistry,
+        chunks: &ChunkStore,
+        biome_climate: &HashMap<u32, BiomeClimate>,
+    ) -> bool {
+        let Some((kind, options)) = crate::net::handler::particle_options_from_typed(option) else {
+            return false;
+        };
+        self.add_particles_from_packet(
+            kind,
+            options,
+            false,
+            false,
+            pos,
+            velocity,
+            1.0,
+            0,
+            camera_pos,
+            registry,
+            chunks,
+            biome_climate,
+        );
         true
+    }
+
+    /// Resolve queued block particles using the current world and route them
+    /// through the ordinary typed particle provider.
+    pub(crate) fn spawn_tracked_explosion_particles(
+        &mut self,
+        camera_pos: DVec3,
+        registry: &BlockRegistry,
+        chunks: &ChunkStore,
+        biome_climate: &HashMap<u32, BiomeClimate>,
+    ) {
+        if self.tracked_explosions.is_empty() {
+            return;
+        }
+        let mut rng = fastrand::Rng::new();
+        let spawns = plan_explosion_particles(&self.tracked_explosions, &mut rng, |x, y, z| {
+            is_air(chunks.get_block_state(x, y, z))
+        });
+        for spawn in spawns {
+            if !self.add_explosion_packet_particle(
+                &spawn.particle,
+                spawn.pos,
+                spawn.velocity,
+                camera_pos,
+                registry,
+                chunks,
+                biome_climate,
+            ) {
+                tracing::debug!(particle = ?spawn.particle, "skipping invalid typed explosion particle option");
+            }
+        }
+        self.tracked_explosions.clear();
+    }
+
+    /// Queue both explosion packet particle paths without altering the packet's
+    /// typed option or weighted entries.
+    pub(crate) fn queue_explosion_packet_particles(
+        &mut self,
+        explosion: &crate::net::ExplosionPayload,
+        camera_pos: DVec3,
+        registry: &BlockRegistry,
+        chunks: &ChunkStore,
+        biome_climate: &HashMap<u32, BiomeClimate>,
+    ) -> bool {
+        let center = dvec3(explosion.center.x, explosion.center.y, explosion.center.z);
+        let accepted = self.add_explosion_packet_particle(
+            &explosion.explosion_particle,
+            center,
+            dvec3(1.0, 0.0, 0.0),
+            camera_pos,
+            registry,
+            chunks,
+            biome_climate,
+        );
+        self.track_explosion_effects(
+            center,
+            explosion.radius,
+            explosion.block_count,
+            explosion.block_particles.clone(),
+        );
+        accepted
     }
 
     /// Preserve and queue the complete weighted packet list for the next client
@@ -1957,6 +2860,73 @@ impl ParticleStore {
                 block_particles,
             });
         }
+    }
+
+    /// Vanilla `ClientLevel.addBreakingBlockEffect`: one terrain particle on
+    /// the hit face, sampled from the union bounds of the block outline shape.
+    pub fn add_breaking_block_effect(
+        &mut self,
+        pos: BlockPos,
+        state: BlockState,
+        face: azalea_core::direction::Direction,
+        registry: &BlockRegistry,
+        chunks: &ChunkStore,
+        biome_climate: &HashMap<u32, BiomeClimate>,
+    ) {
+        if is_air(state)
+            || crate::world::block::has_invisible_render_shape(state)
+            || !crate::world::block::should_spawn_terrain_particles(state)
+        {
+            return;
+        }
+
+        let boxes = block_shape::outline_shape(state);
+        let mut bounds = [0.0; 6];
+        if let Some(first) = boxes.first() {
+            bounds = *first;
+            for b in &boxes[1..] {
+                bounds[0] = bounds[0].min(b[0]);
+                bounds[1] = bounds[1].min(b[1]);
+                bounds[2] = bounds[2].min(b[2]);
+                bounds[3] = bounds[3].max(b[3]);
+                bounds[4] = bounds[4].max(b[4]);
+                bounds[5] = bounds[5].max(b[5]);
+            }
+        }
+
+        let p = breaking_effect_position(
+            pos,
+            bounds,
+            face,
+            [fastrand::f64(), fastrand::f64(), fastrand::f64()],
+        );
+
+        let faces = registry.get_textures(state);
+        let mut color = [0.6f32; 3];
+        if let Some(faces) = faces
+            && faces.tint != Tint::None
+            && block_id(state) != "grass_block"
+        {
+            let tint = match faces.tint {
+                Tint::Redstone => crate::world::block::redstone_wire_rgb(state),
+                Tint::Stem => crate::world::block::stem_rgb(state),
+                tint => self.blend_tint(tint, pos, chunks, biome_climate),
+            };
+            for (c, t) in color.iter_mut().zip(tint) {
+                *c *= t;
+            }
+        }
+        let region = match faces {
+            Some(faces) => self
+                .uv_map
+                .get_region(faces.particle.as_deref().unwrap_or(&faces.top)),
+            None => self.uv_map.get_region(""),
+        };
+        let light = world_brightness(chunks, pos.x, pos.y, pos.z);
+        let mut particle = Particle::terrain(p, DVec3::ZERO, region, color, light);
+        particle.vel = terrain_power(particle.vel, 0.2f32);
+        particle.kind = Kind::TerrainScaled;
+        self.push(particle);
     }
 
     /// Vanilla `ClientLevel.addDestroyBlockEffect`: a grid of terrain
@@ -2047,16 +3017,14 @@ impl ParticleStore {
     pub fn add_item_use_particles(
         &mut self,
         count: u32,
-        texture: &str,
+        kind: azalea_registry::builtin::ItemKind,
+        registry: &BlockRegistry,
         eye_pos: DVec3,
         x_rot_deg: f32,
         y_rot_deg: f32,
         chunks: &ChunkStore,
     ) {
-        if !self.uv_map.has_region(texture) {
-            return;
-        }
-        let region = self.uv_map.get_region(texture);
+        let stack = azalea_inventory::ItemStack::new(kind, 1);
         let x_rot = -(x_rot_deg as f64).to_radians();
         let y_rot = -(y_rot_deg as f64).to_radians();
         let light = world_brightness(
@@ -2069,6 +3037,7 @@ impl ParticleStore {
             if !self.accepts_normal_spawn(false, &mut || fastrand::u32(..)) {
                 continue;
             }
+            let region = self.item_particle_region(registry, &stack, None);
             let d = dvec3(
                 (fastrand::f64() - 0.5) * 0.1,
                 fastrand::f64() * 0.1 + 0.1,
@@ -2112,12 +3081,12 @@ impl ParticleStore {
         let Some(count) = packet_particle_count(count) else {
             return;
         };
-        let bypass_limiter = override_limiter || always_show;
         if count == 0 {
             self.add_server_particle(
                 kind,
                 options,
-                bypass_limiter,
+                override_limiter,
+                always_show,
                 pos,
                 dist * max_speed,
                 camera_pos,
@@ -2137,7 +3106,8 @@ impl ParticleStore {
             self.add_server_particle(
                 kind,
                 options.clone(),
-                bypass_limiter,
+                override_limiter,
+                always_show,
                 pos + scatter,
                 vel,
                 camera_pos,
@@ -2148,6 +3118,33 @@ impl ParticleStore {
         }
     }
 
+    /// Shared endpoint for locally sampled world/entity requests (ambient,
+    /// animate-tick, and entity particles). These requests retain the same
+    /// ParticleStore world context as packet-driven item particles.
+    pub(crate) fn add_particle_spawn_request(
+        &mut self,
+        request: crate::world::particle_tick::ParticleSpawnRequest,
+        camera_pos: DVec3,
+        registry: &BlockRegistry,
+        chunks: &ChunkStore,
+        biome_climate: &HashMap<u32, BiomeClimate>,
+    ) {
+        self.add_particles_from_packet(
+            request.kind,
+            request.options,
+            false,
+            request.always_visible,
+            request.position,
+            request.velocity,
+            1.0,
+            0,
+            camera_pos,
+            registry,
+            chunks,
+            biome_climate,
+        );
+    }
+
     /// Vanilla `ClientLevel.doAddParticle`: ordinary particles are culled at
     /// 32 blocks and filtered by the selected status; override-limiter and
     /// long-distance packets bypass both checks.
@@ -2156,6 +3153,7 @@ impl ParticleStore {
         kind: ServerParticleKind,
         options: ServerParticleOptions,
         bypass_limiter: bool,
+        always_show: bool,
         pos: DVec3,
         vel: DVec3,
         camera_pos: DVec3,
@@ -2167,13 +3165,29 @@ impl ParticleStore {
         if !accept_particle(
             self.mode,
             bypass_limiter,
-            false,
+            always_show,
             camera_pos.distance_squared(pos),
             &mut || fastrand::u32(..),
         ) {
             return;
         }
         match kind {
+            ServerParticleKind::Crit | ServerParticleKind::EnchantedHit => {
+                let name = if kind == ServerParticleKind::Crit {
+                    "minecraft:crit"
+                } else {
+                    "minecraft:enchanted_hit"
+                };
+                let sprite = descriptor_frame(&self.uv_map, name, 0)
+                    .unwrap_or_else(|| self.uv_map.missing_region());
+                self.push(Particle::crit(
+                    pos,
+                    vel,
+                    kind == ServerParticleKind::EnchantedHit,
+                    sprite,
+                    chunks,
+                ));
+            }
             ServerParticleKind::EndRod => {
                 self.push(Particle::end_rod(pos, vel, &self.end_rod_frames));
             }
@@ -2323,11 +3337,7 @@ impl ParticleStore {
                 let ServerParticleOptions::Shriek { delay } = options else {
                     return;
                 };
-                self.push(Particle::shriek(
-                    pos,
-                    delay,
-                    self.uv_map.get_region(GENERIC_PARTICLE_SPRITES[9]),
-                ));
+                self.push(Particle::shriek(pos, delay, self.generic_frames[9]));
             }
             ServerParticleKind::Trail => {
                 let ServerParticleOptions::Trail {
@@ -2344,11 +3354,11 @@ impl ParticleStore {
                     target,
                     color,
                     duration,
-                    self.uv_map.get_region(GENERIC_PARTICLE_SPRITES[10]),
+                    self.generic_frames[10],
                 ));
             }
             ServerParticleKind::Vibration => {
-                let sprite = self.uv_map.get_region(GENERIC_PARTICLE_SPRITES[11]);
+                let sprite = self.generic_frames[11];
                 match options {
                     ServerParticleOptions::VibrationBlock {
                         target,
@@ -2386,7 +3396,13 @@ impl ParticleStore {
                     item_id,
                     count,
                     components,
+                    raw_components,
                 } = options
+                else {
+                    return;
+                };
+                let Some(registry_name) = pomme_protocol::registries::RegistryTable::native()
+                    .name_of(pomme_protocol::registries::ClientRegistry::Item, item_id)
                 else {
                     return;
                 };
@@ -2397,6 +3413,9 @@ impl ParticleStore {
                 else {
                     return;
                 };
+                if crate::player::inventory::item_resource_name(kind) != registry_name {
+                    return;
+                }
                 if count <= 0 {
                     return;
                 }
@@ -2405,16 +3424,11 @@ impl ParticleStore {
                     count,
                     component_patch: components,
                 });
-                let Some(texture) = registry.get_item_particle_icon(&stack) else {
-                    return;
-                };
-                if !self.uv_map.has_region(texture) {
-                    return;
-                }
+                let sprite = self.item_particle_region(registry, &stack, raw_components.as_deref());
                 self.push(Particle::breaking_item(
                     pos,
                     vel,
-                    self.uv_map.get_region(texture),
+                    sprite,
                     world_brightness(
                         chunks,
                         pos.x.floor() as i32,
@@ -2423,29 +3437,110 @@ impl ParticleStore {
                     ),
                 ));
             }
-            ServerParticleKind::Dust => {
-                if let ServerParticleOptions::Dust {
-                    packed_color,
-                    scale,
-                } = options
-                {
-                    let packed = packed_color as u32;
-                    let color = [
+            ServerParticleKind::Dust | ServerParticleKind::DustColorTransition => {
+                let (from, to, scale) = match options {
+                    ServerParticleOptions::Dust {
+                        packed_color,
+                        scale,
+                    } => (packed_color, None, scale),
+                    ServerParticleOptions::DustColorTransition {
+                        from_color,
+                        to_color,
+                        scale,
+                    } => (from_color, Some(to_color), scale),
+                    _ => return,
+                };
+                let rgb = |packed: i32| {
+                    let packed = packed as u32;
+                    [
                         ((packed >> 16) & 0xff) as f32 / 255.0,
                         ((packed >> 8) & 0xff) as f32 / 255.0,
                         (packed & 0xff) as f32 / 255.0,
-                    ];
-                    let mut rng = fastrand::Rng::new();
-                    self.push(Particle::dust(
-                        pos,
-                        vel,
-                        color,
-                        scale,
-                        self.uv_map.get_region(DUST_SPRITE),
-                        &mut rng,
-                    ));
-                }
+                    ]
+                };
+                let mut rng = fastrand::Rng::new();
+                self.push(Particle::dust_with_transition(
+                    pos,
+                    vel,
+                    rgb(from),
+                    to.map(rgb),
+                    scale,
+                    descriptor_frame(
+                        &self.uv_map,
+                        if to.is_some() {
+                            "minecraft:dust_color_transition"
+                        } else {
+                            "minecraft:dust"
+                        },
+                        0,
+                    )
+                    .unwrap_or_else(|| self.uv_map.get_region(DUST_SPRITE)),
+                    &mut rng,
+                ));
             }
+            // Family modules own provider behavior; keep this shared dispatch narrow.
+            _ if atmosphere::supports(kind) => {
+                let _ = atmosphere::spawn(
+                    self,
+                    kind,
+                    options,
+                    pos,
+                    vel,
+                    registry,
+                    chunks,
+                    biome_climate,
+                );
+            }
+            _ if water::supports(kind) => {
+                let _ = water::spawn(
+                    self,
+                    kind,
+                    options,
+                    pos,
+                    vel,
+                    registry,
+                    chunks,
+                    biome_climate,
+                );
+            }
+            _ if magic::supports(kind) => {
+                let _ = magic::spawn(
+                    self,
+                    kind,
+                    options,
+                    pos,
+                    vel,
+                    registry,
+                    chunks,
+                    biome_climate,
+                );
+            }
+            _ if terrain_extra::supports(kind) => {
+                let _ = terrain_extra::spawn(
+                    self,
+                    kind,
+                    options,
+                    pos,
+                    vel,
+                    registry,
+                    chunks,
+                    biome_climate,
+                );
+            }
+            _ if emitters::supports(kind) => {
+                let _ = emitters::spawn(
+                    self,
+                    kind,
+                    options,
+                    pos,
+                    vel,
+                    registry,
+                    chunks,
+                    biome_climate,
+                );
+            }
+            // No generic substitute: unsupported providers remain invisible.
+            _ => {}
         }
     }
 
@@ -2481,11 +3576,26 @@ impl ParticleStore {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn pending_terrain_counts_for_test(&self) -> (usize, usize) {
+        let particles = self.pending.iter().chain(&self.particles);
+        let mut total = 0;
+        let mut breaking = 0;
+        for particle in particles {
+            total += 1;
+            breaking += usize::from(particle.kind == Kind::TerrainScaled);
+        }
+        (total, breaking)
+    }
+
     pub(crate) fn clear(&mut self) {
+        self.sound_requests.clear();
         self.particles.clear();
         self.pending.clear();
         self.emitters.clear();
         self.pending_emitters.clear();
+        self.firework_starters.clear();
+        self.pending_firework_starters.clear();
         self.tracked_explosions.clear();
         self.tracking_emitters.clear();
     }
@@ -2530,6 +3640,73 @@ impl ParticleStore {
         for (kind, attachment) in tracking {
             self.emit_tracking_batch(kind, attachment, chunks);
         }
+        self.firework_starters
+            .append(&mut self.pending_firework_starters);
+        let mut firework_sparks = Vec::new();
+        let mut firework_flashes = Vec::new();
+        for starter in &mut self.firework_starters {
+            if starter.life == 0 {
+                let far = starter.request.far_effect;
+                let large = starter.request.explosions.len() >= 3
+                    || starter.request.explosions.iter().any(|e| {
+                        e.shape == azalea_inventory::components::FireworkExplosionShape::LargeBall
+                    });
+                let event = match (large, far) {
+                    (true, true) => "entity.firework_rocket.large_blast_far",
+                    (true, false) => "entity.firework_rocket.large_blast",
+                    (false, true) => "entity.firework_rocket.blast_far",
+                    (false, false) => "entity.firework_rocket.blast",
+                };
+                self.sound_requests.push(ParticleSoundRequest {
+                    event,
+                    pos: starter.request.position,
+                    volume: 20.0,
+                    pitch: 0.95 + fastrand::f32() * 0.1,
+                    seed: fastrand::u64(..),
+                });
+            }
+            if starter.life % 2 == 0 {
+                let index = starter.life / 2;
+                if let Some(explosion) = starter.request.explosions.get(index) {
+                    let colors = if explosion.colors.is_empty() {
+                        &[0x1e1b1b][..]
+                    } else {
+                        explosion.colors.as_slice()
+                    };
+                    firework_flashes.push((starter.request.position, colors[0]));
+                    firework_sparks.extend(firework_explosion_sparks(
+                        &self.uv_map,
+                        &starter.request,
+                        explosion,
+                    ));
+                }
+            }
+            starter.life += 1;
+            if starter.life > starter.lifetime && starter.twinkle_delay {
+                let far = starter.request.far_effect;
+                self.sound_requests.push(ParticleSoundRequest {
+                    event: if far {
+                        "entity.firework_rocket.twinkle_far"
+                    } else {
+                        "entity.firework_rocket.twinkle"
+                    },
+                    pos: starter.request.position,
+                    volume: 20.0,
+                    pitch: 0.9 + fastrand::f32() * 0.15,
+                    seed: fastrand::u64(..),
+                });
+                starter.twinkle_delay = false;
+            }
+        }
+        self.firework_starters.retain(|s| s.life <= s.lifetime);
+        for particle in firework_sparks {
+            self.push(particle);
+        }
+        for (pos, color) in firework_flashes {
+            if let Some(particle) = magic::firework_flash(&self.uv_map, pos, color) {
+                self.push(particle);
+            }
+        }
         self.emitters.append(&mut self.pending_emitters);
         let mut children = Vec::with_capacity(self.emitters.len() * 6);
         for emitter in &mut self.emitters {
@@ -2542,33 +3719,35 @@ impl ParticleStore {
         }
         self.emitters.retain(|e| e.age < 8);
         for (pos, velocity) in children {
-            let _ = self.add_explosion_particle(&ParticleOptions::Explosion, pos, velocity);
-        }
-        if !self.tracked_explosions.is_empty() {
-            let mut rng = fastrand::Rng::new();
-            let spawns = plan_explosion_particles(&self.tracked_explosions, &mut rng, |x, y, z| {
-                is_air(chunks.get_block_state(x, y, z))
-            });
-            for spawn in spawns {
-                if !self.add_explosion_particle(&spawn.particle, spawn.pos, spawn.velocity) {
-                    tracing::debug!(particle = ?spawn.particle, "skipping unsupported explosion block particle option");
-                }
-            }
-            self.tracked_explosions.clear();
+            self.add_explosion_particle(&ParticleOptions::Explosion, pos, velocity);
         }
         let end_frames = self.end_rod_frames;
         let generic_frames = self.generic_frames;
         let effect_frames = self.entity_effect_frames;
         let spell_frames = self.spell_frames;
         let explosion_frames = self.explosion_frames;
+        let atlas = &self.uv_map;
+        let mut family_children = Vec::new();
+        let mut family_sounds = Vec::new();
         self.particles.retain_mut(|p| {
-            let alive = p.tick_with_entity_lookup(
-                chunks,
-                &end_frames,
-                &generic_frames,
-                &explosion_frames,
-                &mut lookup,
-            );
+            let alive = match &p.kind {
+                Kind::Atmosphere(_) => atmosphere::tick(p, chunks, atlas, &mut family_children),
+                Kind::Water(_) => {
+                    water::tick(p, chunks, atlas, &mut family_children, &mut family_sounds)
+                }
+                Kind::Magic(_) => magic::tick(p, chunks, atlas, &mut family_children),
+                Kind::TerrainExtra(_) => {
+                    terrain_extra::tick(p, chunks, atlas, &mut family_children)
+                }
+                Kind::Emitters(_) => emitters::tick(p, chunks, atlas, &mut family_children),
+                _ => p.tick_with_entity_lookup(
+                    chunks,
+                    &end_frames,
+                    &generic_frames,
+                    &explosion_frames,
+                    &mut lookup,
+                ),
+            };
             if alive && matches!(p.kind, Kind::EntityEffect | Kind::SpellEffect) {
                 let frames = if p.kind == Kind::SpellEffect {
                     &spell_frames
@@ -2579,42 +3758,132 @@ impl ParticleStore {
             }
             alive
         });
+        // Child particles join only after the live iteration and bypass spawn-mode
+        // filtering.
+        self.particles.extend(family_children);
         self.particles.append(&mut self.pending);
+        self.sound_requests.extend(family_sounds);
+    }
+
+    /// Apply Java's player attraction after family ticks to surviving
+    /// particles. Only the atmosphere provider owns this post-tick
+    /// transform.
+    pub(crate) fn apply_player_attraction(&mut self, players: &[(DVec3, DVec3)]) {
+        for particle in &mut self.particles {
+            if matches!(particle.kind, Kind::Atmosphere(_)) {
+                atmosphere::apply_player_attraction(particle, players);
+            }
+        }
+    }
+
+    /// Non-quad renderer work requested by active emitter particles.
+    pub(crate) fn model_render_requests(&self, partial_tick: f32) -> Vec<emitters::RenderRequest> {
+        self.particles
+            .iter()
+            .filter_map(|particle| emitters::render_request(particle, partial_tick))
+            .collect()
     }
 
     /// Quad positions are anchor-relative, subtracted in f64 (see
     /// `Camera::anchor`).
-    pub fn extract(&self, partial_tick: f32, anchor: DVec3) -> Vec<ParticleQuad> {
+    pub fn extract(
+        &self,
+        partial_tick: f32,
+        anchor: DVec3,
+        chunks: &ChunkStore,
+    ) -> Vec<ParticleQuad> {
         self.particles
             .iter()
             .flat_map(|p| {
                 if p.kind == Kind::Shriek && p.delay > 0 {
                     return Vec::new();
                 }
-                let pos = (p.prev_pos.lerp(p.pos, partial_tick as f64) - anchor).as_vec3();
-                let channel = |c: f32| (c * p.light * 255.0).round() as u8;
+                let family_appearance = match &p.kind {
+                    Kind::Atmosphere(_) => atmosphere::appearance(p, partial_tick),
+                    Kind::Water(_) => water::appearance(p, partial_tick),
+                    Kind::Magic(_) => magic::appearance(p, partial_tick),
+                    Kind::TerrainExtra(_) => terrain_extra::appearance(p, partial_tick),
+                    Kind::Emitters(_) => emitters::appearance(p, partial_tick),
+                    _ => None,
+                };
+                let is_family_particle = matches!(
+                    &p.kind,
+                    Kind::Atmosphere(_)
+                        | Kind::Water(_)
+                        | Kind::Magic(_)
+                        | Kind::TerrainExtra(_)
+                        | Kind::Emitters(_)
+                );
+                if is_family_particle && family_appearance.is_none() {
+                    return Vec::new();
+                }
+                let world_pos = p.prev_pos.lerp(p.pos, partial_tick as f64);
+                let pos = (world_pos - anchor).as_vec3();
+                let sky = chunks.get_sky_light(
+                    world_pos.x.floor() as i32,
+                    world_pos.y.floor() as i32,
+                    world_pos.z.floor() as i32,
+                );
+                let block_pos = [
+                    world_pos.x.floor() as i32,
+                    world_pos.y.floor() as i32,
+                    world_pos.z.floor() as i32,
+                ];
+                let block = chunks.get_block_light(block_pos[0], block_pos[1], block_pos[2]);
+                let light_uv =
+                    particle_light_uv(&p.kind, sky, block, p.age, p.lifetime, partial_tick);
+                // Java ARGB.colorFromFloat quantizes the base color before the
+                // vertex shader multiplies by the sampled RGBA8 lightmap.
+                let channel = |c: f32| (c.clamp(0.0, 1.0) * 255.0).floor() as u8;
                 let t = (p.age as f32 + partial_tick) / p.lifetime as f32;
-                let size = match p.kind {
-                    Kind::Dust => dust_quad_size(p.base_size, p.age, p.lifetime, partial_tick),
-                    Kind::Shriek => p.size * (t * 0.75).clamp(0.0, 1.0),
-                    _ => p.size,
-                };
-                let alpha = if p.kind == Kind::Shriek {
-                    1.0 - t.clamp(0.0, 1.0)
-                } else {
-                    p.alpha
-                };
+                let size = family_appearance.map_or_else(
+                    || match p.kind {
+                        Kind::Dust | Kind::DustColorTransition => {
+                            dust_quad_size(p.base_size, p.age, p.lifetime, partial_tick)
+                        }
+                        Kind::Shriek => p.size * (t * 0.75).clamp(0.0, 1.0),
+                        _ => p.size,
+                    },
+                    |a| a.size,
+                );
+                let alpha = family_appearance.map_or_else(
+                    || {
+                        if p.kind == Kind::Shriek {
+                            1.0 - t.clamp(0.0, 1.0)
+                        } else {
+                            p.alpha
+                        }
+                    },
+                    |a| a.alpha,
+                );
                 let sway =
                     ((p.age as f32 + partial_tick - std::f32::consts::TAU) * 0.05).sin() * 2.0;
                 let rot = p.rot_o + (p.rot - p.rot_o) * partial_tick;
                 let pitch = p.pitch_o + (p.pitch - p.pitch_o) * partial_tick;
-                let primary = if p.kind == Kind::Vibration {
-                    Quat::from_rotation_y(rot)
-                        * Quat::from_rotation_x(-pitch - std::f32::consts::FRAC_PI_2)
-                        * Quat::from_rotation_y(sway)
-                } else {
-                    p.rotation
-                };
+                let primary = family_appearance.map_or_else(
+                    || {
+                        if p.kind == Kind::Vibration {
+                            Quat::from_rotation_y(rot)
+                                * Quat::from_rotation_x(-pitch - std::f32::consts::FRAC_PI_2)
+                                * Quat::from_rotation_y(sway)
+                        } else {
+                            p.rotation
+                        }
+                    },
+                    |a| a.rotation,
+                );
+                let particle_color = family_appearance.map_or_else(
+                    || {
+                        if p.kind == Kind::DustColorTransition {
+                            let end = p.target.unwrap_or(DVec3::ZERO).as_vec3().to_array();
+                            dust_transition_color(p.color, end, p.age, p.lifetime, partial_tick)
+                        } else {
+                            p.color
+                        }
+                    },
+                    |a| a.color,
+                );
+                let look_at_y = p.kind.look_at_y();
                 let quad = |rotation: Quat| ParticleQuad {
                     pos: pos.into(),
                     size,
@@ -2623,21 +3892,28 @@ impl ParticleStore {
                     v0: p.v0,
                     v1: p.v1,
                     color: u32::from_le_bytes([
-                        channel(p.color[0]),
-                        channel(p.color[1]),
-                        channel(p.color[2]),
-                        (alpha * 255.0).round() as u8,
+                        channel(particle_color[0]),
+                        channel(particle_color[1]),
+                        channel(particle_color[2]),
+                        channel(alpha),
                     ]),
+                    light_uv,
                     translucent: p.kind.translucent(),
+                    look_at_y,
                     rotation: rotation.to_array(),
                 };
-                let second = p.second_rotation.or_else(|| {
-                    (p.kind == Kind::Vibration).then(|| {
-                        Quat::from_rotation_y(-std::f32::consts::PI + rot)
-                            * Quat::from_rotation_x(pitch + std::f32::consts::FRAC_PI_2)
-                            * Quat::from_rotation_y(sway)
-                    })
-                });
+                let second = family_appearance.map_or_else(
+                    || {
+                        p.second_rotation.or_else(|| {
+                            (p.kind == Kind::Vibration).then(|| {
+                                Quat::from_rotation_y(-std::f32::consts::PI + rot)
+                                    * Quat::from_rotation_x(pitch + std::f32::consts::FRAC_PI_2)
+                                    * Quat::from_rotation_y(sway)
+                            })
+                        })
+                    },
+                    |a| a.second_rotation,
+                );
                 let mut quads = vec![quad(primary)];
                 if let Some(rotation) = second {
                     quads.push(quad(rotation));
@@ -2645,6 +3921,42 @@ impl ParticleStore {
                 quads
             })
             .collect()
+    }
+}
+
+fn descriptor_frames<const N: usize>(
+    atlas: &AtlasUVMap,
+    particle: &str,
+    fallback: [&str; N],
+) -> [AtlasRegion; N] {
+    std::array::from_fn(|index| {
+        descriptor_frame(atlas, particle, index)
+            .unwrap_or_else(|| atlas.get_region(fallback[index]))
+    })
+}
+
+/// Look up a descriptor frame without allocating its ordered frame list.
+pub(super) fn descriptor_frame(
+    atlas: &AtlasUVMap,
+    particle: &str,
+    index: usize,
+) -> Option<AtlasRegion> {
+    let names = atlas.particle_sprite_names(particle)?;
+    names.get(index).map(|name| atlas.get_region(name))
+}
+
+pub(super) fn descriptor_age_frame(age: i32, lifetime: i32, frame_count: usize) -> usize {
+    if frame_count == 0 {
+        return 0;
+    }
+    ((age.max(0) as usize * frame_count) / lifetime.max(1) as usize).min(frame_count - 1)
+}
+
+pub(super) fn descriptor_random_frame(frame_count: usize) -> usize {
+    if frame_count == 0 {
+        0
+    } else {
+        fastrand::usize(0..frame_count)
     }
 }
 
@@ -2668,12 +3980,495 @@ mod tests {
     use azalea_buf::AzBuf;
 
     use super::{
-        AtlasRegion, AtlasUVMap, ExplosionParticleInfo, Particle, ParticleOptions,
-        ServerParticleKind, TrackedExplosion, Weighted, animated_frame_index, dust_quad_size,
-        dvec3, explosion_emitter_child, explosion_frame_index, packet_particle_count,
-        plan_explosion_particles, supports_explosion_particle,
+        AtlasRegion, AtlasUVMap, CAMPFIRE_COSY_SMOKE_SPRITES, CAMPFIRE_SIGNAL_SMOKE_SPRITES,
+        END_ROD_SPRITES, EXPLOSION_SPRITES, ExplosionParticleInfo, GENERIC_PARTICLE_SPRITES, Kind,
+        Particle, ParticleOptions, ServerParticleKind, TrackedExplosion, Weighted,
+        animated_frame_index, dust_quad_size, dust_transition_color, dvec3,
+        explosion_emitter_child, explosion_frame_index, packet_particle_count,
+        plan_explosion_particles,
     };
     use crate::world::chunk::ChunkStore;
+
+    #[test]
+    fn breaking_block_effect_uses_hit_face_outline_bounds_and_real_terrain_quad() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut atlas = AtlasUVMap::test_empty();
+        atlas.test_insert_region(
+            "fixture/block_particle",
+            AtlasRegion {
+                u_min: 0.2,
+                v_min: 0.3,
+                u_max: 0.4,
+                v_max: 0.5,
+                pixel_rect: [1, 1, 2, 2],
+                sprite: 1,
+                opaque: true,
+                translucent: false,
+                alpha_counts: [0, 0, 4],
+            },
+        );
+        let mut store = super::ParticleStore::new(atlas, colors.clone(), colors.clone(), colors);
+        let mut registry = crate::world::block::registry::BlockRegistry::test_empty();
+        registry.test_add_particle_fixture();
+        let chunks = ChunkStore::new(2);
+        let stone = crate::world::block::default_state_of("stone").unwrap();
+        let origin = azalea_core::position::BlockPos::new(4, 20, -3);
+        let cases = [
+            (
+                azalea_core::direction::Direction::Down,
+                20.0 - 0.1f32 as f64,
+                0,
+            ),
+            (
+                azalea_core::direction::Direction::Up,
+                21.0 + 0.1f32 as f64,
+                1,
+            ),
+            (
+                azalea_core::direction::Direction::North,
+                -3.0 - 0.1f32 as f64,
+                2,
+            ),
+            (
+                azalea_core::direction::Direction::South,
+                -2.0 + 0.1f32 as f64,
+                3,
+            ),
+            (
+                azalea_core::direction::Direction::West,
+                4.0 - 0.1f32 as f64,
+                4,
+            ),
+            (
+                azalea_core::direction::Direction::East,
+                5.0 + 0.1f32 as f64,
+                5,
+            ),
+        ];
+        for (face, expected, axis) in cases {
+            store.clear();
+            store.add_breaking_block_effect(
+                origin,
+                stone,
+                face,
+                &registry,
+                &chunks,
+                &std::collections::HashMap::new(),
+            );
+            assert_eq!(store.pending.len(), 1, "{face:?}");
+            let particle = &store.pending[0];
+            assert!(particle.kind == super::Kind::TerrainScaled);
+            assert_eq!(
+                particle.light,
+                super::world_brightness(&chunks, origin.x, origin.y, origin.z)
+            );
+            assert_eq!(particle.color, [0.6; 3]);
+            assert_eq!(
+                super::collision_half_width(&particle.kind),
+                f64::from(0.2f32 * 0.6f32) * 0.5
+            );
+            assert!(particle.vel.x.abs() <= 0.036 && particle.vel.z.abs() <= 0.036);
+            assert!((0.06..=0.14).contains(&particle.vel.y));
+            match axis {
+                0 | 1 => {
+                    assert!((particle.pos.y - expected).abs() < 1e-12);
+                    assert!((4.1..=4.9).contains(&particle.pos.x));
+                    assert!((-2.9..=-2.1).contains(&particle.pos.z));
+                }
+                2 | 3 => {
+                    assert!((particle.pos.z - expected).abs() < 1e-12);
+                    assert!((4.1..=4.9).contains(&particle.pos.x));
+                    assert!((20.1..=20.9).contains(&particle.pos.y));
+                }
+                4 | 5 => {
+                    assert!((particle.pos.x - expected).abs() < 1e-12);
+                    assert!((20.1..=20.9).contains(&particle.pos.y));
+                    assert!((-2.9..=-2.1).contains(&particle.pos.z));
+                }
+                _ => unreachable!(),
+            }
+            let quad_size = particle.size;
+            assert!((0.05..=0.1).contains(&quad_size));
+            store.particles.append(&mut store.pending);
+            let quads = store.extract(0.0, glam::DVec3::ZERO, &chunks);
+            assert_eq!(quads.len(), 1, "face {face:?} must reach the quad path");
+            assert!((quads[0].size - quad_size).abs() < 1e-6);
+            assert!((0.2..=0.4).contains(&quads[0].u0));
+            assert!((0.2..=0.4).contains(&quads[0].u1));
+            assert!((0.3..=0.5).contains(&quads[0].v0));
+            assert!((0.3..=0.5).contains(&quads[0].v1));
+        }
+
+        let slab = crate::world::block::default_state_of("oak_slab").unwrap();
+        store.clear();
+        store.add_breaking_block_effect(
+            origin,
+            slab,
+            azalea_core::direction::Direction::Up,
+            &registry,
+            &chunks,
+            &std::collections::HashMap::new(),
+        );
+        assert!((store.pending[0].pos.y - (20.5 + 0.1f32 as f64)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn breaking_block_effect_respects_air_invisible_and_terrain_particle_opt_out() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut store = super::ParticleStore::new(
+            AtlasUVMap::test_empty(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        let registry = crate::world::block::registry::BlockRegistry::test_empty();
+        let chunks = ChunkStore::new(2);
+        let pos = azalea_core::position::BlockPos::new(0, 64, 0);
+        for name in ["air", "barrier", "structure_void", "moving_piston", "water"] {
+            let state = crate::world::block::default_state_of(name).unwrap();
+            store.add_breaking_block_effect(
+                pos,
+                state,
+                azalea_core::direction::Direction::Up,
+                &registry,
+                &chunks,
+                &std::collections::HashMap::new(),
+            );
+            assert!(
+                store.pending.is_empty(),
+                "unexpected terrain particle for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn breaking_particle_power_uses_java_vertical_bias_formula() {
+        let origin = azalea_core::position::BlockPos::new(4, 20, -3);
+        let tiny = [0.4, 0.4, 0.4, 0.45, 0.45, 0.45];
+        let tiny_up = super::breaking_effect_position(
+            origin,
+            tiny,
+            azalea_core::direction::Direction::Up,
+            [0.0; 3],
+        );
+        let tiny_up_expected = glam::DVec3::new(4.5, 20.45 + 0.1f32 as f64, -2.5);
+        assert!((tiny_up - tiny_up_expected).length() < 3.0e-9);
+        let tiny_down = super::breaking_effect_position(
+            origin,
+            tiny,
+            azalea_core::direction::Direction::Down,
+            [0.0; 3],
+        );
+        assert!((tiny_down.y - (20.4 - 0.1f32 as f64)).abs() < 1.0e-12);
+
+        let velocity = glam::DVec3::new(0.25, 0.4, -0.5);
+        let y_offset = f64::from(0.1f32);
+        let power = f64::from(0.2f32);
+        assert_eq!(
+            super::terrain_power(velocity, 0.2f32),
+            glam::DVec3::new(
+                velocity.x * power,
+                (velocity.y - y_offset) * power + y_offset,
+                velocity.z * power,
+            )
+        );
+    }
+
+    #[test]
+    fn java_provider_light_uvs_preserve_sky_emission_and_firefly_bytes() {
+        let kind = ServerParticleKind::Flame;
+        assert_eq!(
+            super::provider_light_uv(kind, 12, 3, 5, 10, 0.0),
+            Some(168 | (192 << 8))
+        );
+        assert_eq!(
+            super::provider_light_uv(kind, 12, 15, 10, 10, 0.0),
+            Some(240 | (192 << 8))
+        );
+        assert_eq!(
+            super::provider_light_uv(ServerParticleKind::SculkSoul, 9, 2, 0, 10, 0.0),
+            Some(240 | (144 << 8))
+        );
+        assert_eq!(
+            super::provider_light_uv(ServerParticleKind::Firefly, 9, 2, 10, 100, 0.0),
+            Some(84)
+        );
+        assert_eq!(
+            super::provider_light_uv(ServerParticleKind::Firefly, 9, 2, 50, 100, 0.0),
+            Some(255)
+        );
+        assert_eq!(
+            super::provider_light_uv(ServerParticleKind::Crit, 9, 2, 0, 10, 0.0),
+            None
+        );
+        assert_eq!(
+            super::particle_light_uv(&super::Kind::EndRod, 2, 1, 0, 10, 0.0),
+            0xF0F0
+        );
+        assert_eq!(
+            super::particle_light_uv(&super::Kind::Vibration, 9, 2, 0, 10, 0.0),
+            240 | (144 << 8)
+        );
+    }
+
+    #[test]
+    fn only_java_trial_spawner_detection_particles_use_look_at_y() {
+        assert!(super::look_at_y(ServerParticleKind::TrialSpawnerDetection));
+        assert!(super::look_at_y(
+            ServerParticleKind::TrialSpawnerDetectionOminous
+        ));
+        assert!(!super::look_at_y(ServerParticleKind::VaultConnection));
+        assert!(!super::look_at_y(ServerParticleKind::OminousSpawning));
+        assert!(!super::look_at_y(ServerParticleKind::SculkCharge));
+    }
+
+    #[test]
+    fn all_104_remaining_provider_kinds_have_one_family_owner() {
+        let names = r#"
+            cloud copper_fire_flame flame soul_fire_flame small_flame large_smoke white_smoke sneeze
+            ash white_ash crimson_spore warped_spore spore_blossom_air falling_spore_blossom mycelium
+            underwater firefly cherry_leaves pale_oak_leaves tinted_leaves angry_villager happy_villager
+            composter heart snowflake noxious_gas sulfur_cube_goo dragon_breath infested soul sculk_soul
+            bubble sulfur_bubbles fishing rain splash bubble_pop current_down bubble_column_up nautilus
+            dolphin squid_ink glow_squid_ink lava dripping_lava falling_lava landing_lava dripping_water
+            falling_water dripping_honey falling_honey landing_honey falling_nectar dripping_obsidian_tear
+            falling_obsidian_tear landing_obsidian_tear dripping_dripstone_lava falling_dripstone_lava
+            dripping_dripstone_water falling_dripstone_water spit crit enchanted_hit damage_indicator enchant
+            note portal reverse_portal glow wax_on wax_off electric_spark scrape egg_crack dust_plume
+            trial_spawner_detection trial_spawner_detection_ominous vault_connection ominous_spawning
+            pause_mob_growth reset_mob_growth firework flash sculk_charge sculk_charge_pop sonic_boom
+            sweep_attack gust small_gust block_marker falling_dust dust_pillar block_crumble item_slime
+            item_cobweb item_snowball geyser geyser_base geyser_poof geyser_plume noxious_gas_cloud
+            gust_emitter_large gust_emitter_small elder_guardian
+        "#;
+        let names: Vec<_> = names.split_whitespace().collect();
+        let unique: std::collections::HashSet<_> = names.iter().copied().collect();
+        assert_eq!(names.len(), 104);
+        assert_eq!(
+            unique.len(),
+            104,
+            "family partition contains duplicate names"
+        );
+
+        for name in names {
+            let kind = ServerParticleKind::from_name(name).expect("native particle name");
+            let owners = [
+                super::atmosphere::supports(kind),
+                super::water::supports(kind),
+                super::magic::supports(kind),
+                super::terrain_extra::supports(kind),
+                super::emitters::supports(kind),
+            ]
+            .into_iter()
+            .filter(|supported| *supported)
+            .count();
+            assert_eq!(owners, 1, "{name} must have exactly one family owner");
+        }
+
+        assert_eq!(names_in_family(super::atmosphere::supports), 31);
+        assert_eq!(names_in_family(super::water::supports), 30);
+        assert_eq!(names_in_family(super::magic::supports), 28);
+        assert_eq!(names_in_family(super::terrain_extra::supports), 7);
+        assert_eq!(names_in_family(super::emitters::supports), 8);
+    }
+
+    fn names_in_family(supports: impl Fn(ServerParticleKind) -> bool) -> usize {
+        let mut count = 0;
+        for id in 0..125 {
+            if let Some(kind) = ServerParticleKind::from_id(id) {
+                count += usize::from(supports(kind));
+            }
+        }
+        count
+    }
+
+    fn firework_test_atlas() -> AtlasUVMap {
+        let mut atlas = AtlasUVMap::test_empty();
+        atlas.test_insert_particle_sprites("firework", vec!["particle/firework".to_owned()]);
+        atlas.test_insert_particle_sprites("flash", vec!["particle/flash".to_owned()]);
+        atlas
+    }
+
+    fn test_firework(
+        shape: azalea_inventory::components::FireworkExplosionShape,
+    ) -> azalea_inventory::components::FireworkExplosion {
+        azalea_inventory::components::FireworkExplosion {
+            shape,
+            colors: vec![0x123456, 0xabcdef],
+            fade_colors: vec![0x654321],
+            has_trail: true,
+            has_twinkle: true,
+        }
+    }
+
+    #[test]
+    fn firework_shapes_create_java_spark_counts_and_velocity_families() {
+        use azalea_inventory::components::FireworkExplosionShape as S;
+        let atlas = firework_test_atlas();
+        let request = super::FireworkStarterRequest {
+            position: dvec3(12.0, 30.0, -7.0),
+            velocity: dvec3(0.2, 0.4, -0.1),
+            far_effect: false,
+            explosions: Vec::new(),
+        };
+        for (shape, expected) in [
+            (S::SmallBall, 98),
+            (S::LargeBall, 386),
+            (S::Star, 121),
+            (S::Creeper, 265),
+            (S::Burst, 70),
+        ] {
+            fastrand::seed(
+                262 + match shape {
+                    S::SmallBall => 0,
+                    S::LargeBall => 1,
+                    S::Star => 2,
+                    S::Creeper => 3,
+                    S::Burst => 4,
+                },
+            );
+            let sparks = super::firework_explosion_sparks(&atlas, &request, &test_firework(shape));
+            assert_eq!(sparks.len(), expected, "{shape:?}");
+            assert!(sparks.iter().all(|p| p.pos == request.position));
+            assert!(sparks.iter().all(|p| p.vel.is_finite()));
+            match shape {
+                S::SmallBall | S::LargeBall => {
+                    assert!(
+                        sparks
+                            .iter()
+                            .all(|p| (0.15..0.65).contains(&p.vel.length()))
+                    );
+                }
+                S::Star | S::Creeper => {
+                    assert!(sparks.iter().all(|p| p.vel.length() <= 0.51), "{shape:?}");
+                }
+                S::Burst => {
+                    assert!(sparks.iter().all(|p| p.vel.y >= 0.2 && p.vel.y < 0.7));
+                }
+            }
+            assert!(sparks.iter().all(|p| matches!(p.kind, super::Kind::Magic(state)
+                if state.firework_trail && state.firework_twinkle && state.firework_fade.is_some())));
+        }
+    }
+
+    #[test]
+    fn firework_starter_sequences_multiple_explosions_and_survives_entity_removal() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        use azalea_inventory::components::FireworkExplosionShape as S;
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut store = super::ParticleStore::new(
+            firework_test_atlas(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        let pos = dvec3(12.0, 30.0, -7.0);
+        let mut rocket = crate::entity::EntityStore::new();
+        let rocket_position = crate::entity::components::Position::new(pos.x, pos.y, pos.z);
+        rocket.set_vehicle_transform(7, rocket_position, dvec3(0.0, 0.2, 0.0));
+        rocket.set_vehicle_kind(7, azalea_registry::builtin::EntityKind::FireworkRocket);
+        let snapshot_position = glam::DVec3::from(rocket.vehicles[&7].position);
+        let snapshot_velocity = rocket.vehicles[&7].velocity;
+        rocket.remove_entity(7);
+        let mut first = test_firework(S::SmallBall);
+        first.has_trail = false;
+        first.has_twinkle = false;
+        let mut second = test_firework(S::Burst);
+        second.has_trail = false;
+        let request = super::FireworkStarterRequest {
+            position: snapshot_position,
+            velocity: snapshot_velocity,
+            far_effect: true,
+            explosions: vec![first, second],
+        };
+        assert!(store.add_firework_starter(request));
+        store.tick(&ChunkStore::new(1));
+        assert_eq!(store.particles.len(), 99); // 98 sparks + flash
+        assert_eq!(store.particles.iter().filter(|p| p.pos == pos).count(), 99);
+        store.tick(&ChunkStore::new(1));
+        assert_eq!(store.particles.len(), 99);
+        store.tick(&ChunkStore::new(1));
+        assert_eq!(store.particles.len(), 170); // +70 sparks + flash
+        assert_eq!(store.firework_starters[0].life, 3);
+        assert!(
+            store
+                .drain_sound_requests()
+                .iter()
+                .any(|s| { s.event == "entity.firework_rocket.blast_far" && s.pos == pos })
+        );
+        for _ in 0..16 {
+            store.tick(&ChunkStore::new(1));
+        }
+        assert!(
+            store
+                .drain_sound_requests()
+                .iter()
+                .any(|s| { s.event == "entity.firework_rocket.twinkle_far" && s.pos == pos })
+        );
+    }
+
+    #[test]
+    fn server_firework_particle_stays_plain_and_separate_from_rocket_starter() {
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut store = super::ParticleStore::new(
+            firework_test_atlas(),
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        assert!(super::magic::spawn(
+            &mut store,
+            super::ServerParticleKind::Firework,
+            super::ServerParticleOptions::Simple,
+            dvec3(1.0, 2.0, 3.0),
+            glam::DVec3::Y,
+            &crate::world::block::registry::BlockRegistry::test_empty(),
+            &ChunkStore::new(1),
+            &std::collections::HashMap::new(),
+        ));
+        assert_eq!(store.pending.len(), 1);
+        assert!(matches!(store.pending[0].kind, super::Kind::Magic(state)
+            if !state.firework_trail && !state.firework_twinkle && state.firework_fade.is_none()));
+    }
+
+    #[test]
+    fn firework_spark_trail_inherits_fade_twinkle_and_color() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let atlas = firework_test_atlas();
+        let mut particle = super::magic::firework_spark(
+            &atlas,
+            dvec3(1.0, 2.0, 3.0),
+            glam::DVec3::ZERO,
+            [0.2, 0.4, 0.6],
+            Some([0.8, 0.7, 0.6]),
+            true,
+            true,
+        )
+        .unwrap();
+        particle.age = 1;
+        particle.lifetime = 48;
+        let mut children = Vec::new();
+        assert!(super::magic::tick(
+            &mut particle,
+            &ChunkStore::new(1),
+            &atlas,
+            &mut children,
+        ));
+        let [child] = children.as_slice() else {
+            panic!("trail child emitted on Java's even-age cadence")
+        };
+        assert_eq!(child.pos, particle.pos);
+        assert_eq!(child.color, [0.2, 0.4, 0.6]);
+        assert_eq!(child.age, child.lifetime / 2);
+        assert!(matches!(child.kind, super::Kind::Magic(state)
+            if !state.firework_trail && state.firework_twinkle && state.firework_fade.is_some()));
+    }
 
     #[test]
     fn living_effect_metadata_spawns_colored_particle() {
@@ -2734,8 +4529,9 @@ mod tests {
         assert!((0.075..=0.15).contains(&p.size));
         assert!(matches!(p.kind, super::Kind::EntityEffect));
         let spawned = store.pending.len();
-        store.tick(&ChunkStore::new(2));
-        let quad = store.extract(0.0, dvec3(0.0, 0.0, 0.0));
+        let chunks = ChunkStore::new(2);
+        store.tick(&chunks);
+        let quad = store.extract(0.0, dvec3(0.0, 0.0, 0.0), &chunks);
         assert_eq!(quad.len(), spawned);
         assert!(quad.iter().all(|q| q.translucent && q.color >> 24 == 38));
     }
@@ -2811,7 +4607,14 @@ mod tests {
                 );
                 assert_eq!(store.pending.len(), 1);
                 let velocity = store.pending[0].vel;
-                assert_eq!(store.pending[0].color, [0x12 as f32 / 255.0, 0x34 as f32 / 255.0, 0x56 as f32 / 255.0]);
+                assert_eq!(
+                    store.pending[0].color,
+                    [
+                        0x12 as f32 / 255.0,
+                        0x34 as f32 / 255.0,
+                        0x56 as f32 / 255.0
+                    ]
+                );
                 if power == 1.0 {
                     baseline[index] = velocity;
                     assert!(matches!(
@@ -2863,40 +4666,47 @@ mod tests {
                 &registry,
                 &chunks,
             );
-            assert_eq!(store.pending.len(), 100);
-            let first = &store.pending[0];
+            assert_eq!(store.pending.len(), 108);
+            assert!(store.pending[..8].iter().all(|particle| {
+                matches!(
+                    particle.kind,
+                    super::Kind::Item | super::Kind::ItemTranslucent
+                ) && particle.pos == dvec3(10.5, 20.0, 30.5)
+            }));
+            let effect_particles = &store.pending[8..];
+            assert_eq!(effect_particles.len(), 100);
+            let first = &effect_particles[0];
             let (expected_pos, expected_vel) = if instant {
                 (
-                    dvec3(10.519969812814976, 20.3, 30.463667547049543),
+                    dvec3(10.42181369123755, 20.3, 30.61682287372779),
                     dvec3(
-                        0.0024226041849925812,
-                        0.07321635713778515,
-                        -0.048858681950659615,
+                        0.027405258023728847,
+                        0.02163990108827317,
+                        -0.1123468668768632,
                     ),
                 )
             } else {
                 (
-                    dvec3(10.39992841852073, 20.3, 30.48689430317673),
+                    dvec3(10.416956909616552, 20.3, 30.575336662981115),
                     dvec3(
-                        0.06648506741623453,
-                        0.0261234664098903,
-                        -0.09859339035413625,
+                        -0.02579559487411549,
+                        0.03152759990844002,
+                        -0.06975067760901371,
                     ),
                 )
             };
             assert!((first.pos - expected_pos).length() < 1.0e-12);
             assert!((first.vel - expected_vel).length() < 1.0e-12);
-            assert!(store.pending.iter().all(|p| {
+            assert!(effect_particles.iter().all(|p| {
                 p.kind == expected_kind
                     && (p.pos.y - 20.3).abs() < 1e-12
                     && (p.pos.x - 10.5).abs() <= 0.4
                     && (p.pos.z - 30.5).abs() <= 0.4
             }));
             assert!(
-                store
-                    .pending
+                effect_particles
                     .iter()
-                    .any(|p| { (p.pos.x - 10.5).abs() > 0.1 || (p.pos.z - 30.5).abs() > 0.1 })
+                    .any(|p| (p.pos.x - 10.5).abs() > 0.1 || (p.pos.z - 30.5).abs() > 0.1)
             );
         }
     }
@@ -2993,7 +4803,7 @@ mod tests {
             for _ in 0..3 {
                 store.tick(&chunks);
             }
-            let quad = store.extract(0.0, dvec3(0.0, 0.0, 0.0));
+            let quad = store.extract(0.0, dvec3(0.0, 0.0, 0.0), &chunks);
             assert_eq!(quad.len(), 1, "{kind:?}");
             let expected_sprite = match kind {
                 ServerParticleKind::EntityEffect | ServerParticleKind::Effect => {
@@ -3033,6 +4843,163 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn item_world_context_matches_packet_and_local_requests_across_switch_and_reload() {
+        use std::sync::Arc;
+
+        use azalea_registry::Registry;
+        use glam::DVec3;
+
+        use crate::renderer::chunk::mesher::Colormap;
+        use crate::world::block::registry::BlockRegistry;
+
+        fn region(sprite: u16, u_min: f32) -> AtlasRegion {
+            AtlasRegion {
+                u_min,
+                v_min: 0.0,
+                u_max: u_min + 0.1,
+                v_max: 0.1,
+                pixel_rect: [0; 4],
+                sprite,
+                opaque: true,
+                translucent: false,
+                alpha_counts: [0, 0, 1],
+            }
+        }
+        fn expected_uv(particle: &Particle, u_min: f32) {
+            assert!(
+                particle.u0 >= u_min + 0.025 && particle.u0 <= u_min + 0.1,
+                "u0={}",
+                particle.u0
+            );
+        }
+
+        let leaves = [
+            ("item/context_overworld", "item/context_overworld_sprite"),
+            ("item/context_nether", "item/context_nether_sprite"),
+            ("item/context_custom", "item/context_custom_sprite"),
+            ("item/context_fallback", "item/context_fallback_sprite"),
+        ];
+        let leaf = |model: &str| serde_json::json!({"type":"minecraft:model","model":format!("minecraft:{model}")});
+        let definition = serde_json::json!({
+            "type":"minecraft:select", "property":"minecraft:context_dimension",
+            "cases":[
+                {"when":"minecraft:overworld", "model":leaf("item/context_overworld")},
+                {"when":"minecraft:the_nether", "model":leaf("item/context_nether")},
+                {"when":"example:underdeep", "model":leaf("item/context_custom")},
+            ],
+            "fallback":leaf("item/context_fallback"),
+        });
+        let mut block_registry = BlockRegistry::test_empty();
+        block_registry.test_set_item_particle_model("stone", definition, &leaves);
+
+        let mut atlas = AtlasUVMap::test_empty();
+        for (index, (_, texture)) in leaves.iter().enumerate() {
+            atlas.test_insert_region(texture, region(index as u16 + 1, index as f32 * 0.2));
+        }
+        let colors = Arc::new(Colormap::test_empty());
+        let mut store = super::ParticleStore::new(atlas, colors.clone(), colors.clone(), colors);
+        let registries = Arc::new(azalea_core::registry_holder::RegistryHolder::default());
+        let stack = azalea_registry::builtin::ItemKind::Stone;
+        let item = || super::ServerParticleOptions::Item {
+            item_id: stack.to_u32(),
+            count: 1,
+            components: azalea_inventory::DataComponentPatch::default(),
+            raw_components: None,
+        };
+        let chunks = ChunkStore::new(1);
+        let climate = std::collections::HashMap::new();
+        let sources = ["level-packet", "ambient-request", "entity-request"];
+        for (dimension, u_min) in [
+            ("minecraft:overworld", 0.0),
+            ("minecraft:the_nether", 0.2),
+            ("example:underdeep", 0.4),
+        ] {
+            // Mirrors the world lifecycle: DimensionInfo invalidates the old
+            // key, then DimensionName installs the actual level key (not type).
+            store.set_item_model_world(None, Arc::clone(&registries));
+            store.set_item_model_world(Some(dimension), Arc::clone(&registries));
+            for source in sources.iter().copied() {
+                store.pending.clear();
+                if source == "level-packet" {
+                    store.add_particles_from_packet(
+                        ServerParticleKind::Item,
+                        item(),
+                        false,
+                        false,
+                        DVec3::ZERO,
+                        DVec3::ZERO,
+                        1.0,
+                        0,
+                        DVec3::ZERO,
+                        &block_registry,
+                        &chunks,
+                        &climate,
+                    );
+                } else if source == "ambient-request" {
+                    store.add_particle_spawn_request(
+                        crate::world::environment_particles::AmbientSpawn {
+                            kind: ServerParticleKind::Item,
+                            options: item(),
+                            position: DVec3::ZERO,
+                            velocity: DVec3::ZERO,
+                            always_visible: false,
+                        },
+                        DVec3::ZERO,
+                        &block_registry,
+                        &chunks,
+                        &climate,
+                    );
+                } else {
+                    store.add_particle_spawn_request(
+                        crate::world::particle_tick::ParticleSpawnRequest {
+                            kind: ServerParticleKind::Item,
+                            options: item(),
+                            position: DVec3::ZERO,
+                            velocity: DVec3::ZERO,
+                            always_visible: false,
+                        },
+                        DVec3::ZERO,
+                        &block_registry,
+                        &chunks,
+                        &climate,
+                    );
+                }
+                assert_eq!(store.pending.len(), 1, "{source} / {dimension}");
+                expected_uv(&store.pending[0], u_min);
+            }
+        }
+
+        let reloaded = {
+            let mut atlas = AtlasUVMap::test_empty();
+            for (index, (_, texture)) in leaves.iter().enumerate() {
+                atlas.test_insert_region(texture, region(index as u16 + 10, index as f32 * 0.2));
+            }
+            atlas
+        };
+        let grass = Arc::clone(&store.grass_colormap);
+        let foliage = Arc::clone(&store.foliage_colormap);
+        let dry_foliage = Arc::clone(&store.dry_foliage_colormap);
+        store.reload_assets(reloaded, grass, foliage, dry_foliage);
+        assert!(Arc::ptr_eq(&store.item_model_registries, &registries));
+        store.pending.clear();
+        store.add_particle_spawn_request(
+            crate::world::particle_tick::ParticleSpawnRequest {
+                kind: ServerParticleKind::Item,
+                options: item(),
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                always_visible: false,
+            },
+            DVec3::ZERO,
+            &block_registry,
+            &chunks,
+            &climate,
+        );
+        assert_eq!(store.pending.len(), 1);
+        expected_uv(&store.pending[0], 0.4);
     }
 
     #[test]
@@ -3101,7 +5068,7 @@ mod tests {
                 assert_eq!(store.particles.len(), 1);
                 let expected_delta = dvec3(spawn_vel.x, spawn_vel.y + 0.004, spawn_vel.z);
                 assert!((store.particles[0].pos - spawn_pos - expected_delta).length() < 1e-12);
-                assert_eq!(store.extract(0.0, dvec3(0.0, 0.0, 0.0)).len(), 1);
+                assert_eq!(store.extract(0.0, dvec3(0.0, 0.0, 0.0), &chunks).len(), 1);
             }
         }
     }
@@ -3214,7 +5181,7 @@ mod tests {
         assert_ne!(store.particles[0].pos, initial_pos);
         assert_eq!(store.particles[0].color, expected_color);
         assert!(store.particles[0].light > 0.0);
-        let quad = store.extract(0.0, dvec3(0.0, 0.0, 0.0));
+        let quad = store.extract(0.0, dvec3(0.0, 0.0, 0.0), &chunks);
         assert_eq!(quad.len(), 1);
         let red = quad[0].color & 0xff;
         let green = (quad[0].color >> 8) & 0xff;
@@ -3475,29 +5442,774 @@ mod tests {
     }
 
     #[test]
-    fn block_particle_id_is_typed_and_unhandled_payload_kinds_stay_unknown() {
-        assert!(matches!(
-            ServerParticleKind::from_id(1),
-            Some(ServerParticleKind::Block)
+    fn every_native_particle_registry_identity_resolves_by_name() {
+        use pomme_protocol::registries::{ClientRegistry, RegistryTable};
+
+        let registry = RegistryTable::native();
+        for id in 0..125 {
+            let name = registry
+                .name_of(ClientRegistry::ParticleType, id)
+                .expect("26.2 particle registry entry");
+            let kind = ServerParticleKind::from_id(id).expect("known native particle");
+            assert_eq!(
+                ServerParticleKind::from_name(name),
+                Some(kind),
+                "{name} id={id}"
+            );
+        }
+        assert_eq!(
+            registry.name_of(ClientRegistry::ParticleType, 70),
+            Some("white_smoke")
+        );
+        assert_eq!(
+            registry.name_of(ClientRegistry::ParticleType, 71),
+            Some("sneeze")
+        );
+        assert_eq!(
+            ServerParticleKind::from_id(70),
+            Some(ServerParticleKind::WhiteSmoke)
+        );
+        assert_eq!(
+            ServerParticleKind::from_id(71),
+            Some(ServerParticleKind::Sneeze)
+        );
+        assert_eq!(
+            ServerParticleKind::from_id(84),
+            Some(ServerParticleKind::CampfireCosySmoke)
+        );
+        assert_eq!(
+            ServerParticleKind::from_id(85),
+            Some(ServerParticleKind::CampfireSignalSmoke)
+        );
+        assert_eq!(ServerParticleKind::from_id(125), None);
+    }
+
+    #[test]
+    fn every_native_particle_kind_spawns_from_a_valid_typed_packet_fixture() {
+        use std::collections::{HashMap, HashSet};
+        use std::sync::Arc;
+
+        use azalea_core::position::{BlockPos, ChunkPos};
+        use azalea_inventory::DataComponentPatch;
+        use azalea_registry::Registry;
+        use glam::DVec3;
+        use pomme_protocol::registries::{ClientRegistry, RegistryTable};
+
+        use super::{ParticleMode, ParticleStore, ServerParticleOptions};
+        use crate::renderer::chunk::mesher::Colormap;
+        use crate::world::block::registry::BlockRegistry;
+
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let stone = crate::world::block::first_state_of("stone").unwrap();
+        let air = crate::world::block::first_state_of("air").unwrap();
+        let water = crate::world::block::first_state_of("water").unwrap();
+        let mut atlas = AtlasUVMap::test_empty();
+        let fixture_region = |index: usize| AtlasRegion {
+            u_min: 0.01 + index as f32 * 0.0001,
+            v_min: 0.2,
+            u_max: 0.06 + index as f32 * 0.0001,
+            v_max: 0.4,
+            pixel_rect: [index as u16, 2, 2, 2],
+            sprite: index as u16,
+            opaque: true,
+            translucent: false,
+            alpha_counts: [0, 0, 4],
+        };
+        // Java 26.2 ParticleResources registrations intersect the client jar's
+        // particle descriptors at 111 kinds. These 14 use terrain/item/model or
+        // emitter-child consumers instead of owning a descriptor.
+        const NO_PARTICLE_DESCRIPTOR: [&str; 14] = [
+            "block",
+            "block_crumble",
+            "block_marker",
+            "dust_pillar",
+            "elder_guardian",
+            "explosion_emitter",
+            "geyser",
+            "gust_emitter_large",
+            "gust_emitter_small",
+            "item",
+            "item_cobweb",
+            "item_slime",
+            "item_snowball",
+            "noxious_gas_cloud",
+        ];
+        let descriptor_frame_count = |name: &str| match name {
+            "dragon_breath" => 3,
+            "fishing" | "sculk_charge_pop" | "rain" | "splash" => 4,
+            "bubble_pop" | "trial_spawner_detection" | "trial_spawner_detection_ominous" => 5,
+            "small_gust" | "sculk_charge" => 7,
+            "noxious_gas"
+            | "geyser_base"
+            | "geyser_poof"
+            | "geyser_plume"
+            | "cloud"
+            | "dust"
+            | "dust_color_transition"
+            | "effect"
+            | "end_rod"
+            | "entity_effect"
+            | "falling_dust"
+            | "firework"
+            | "instant_effect"
+            | "large_smoke"
+            | "poof"
+            | "portal"
+            | "smoke"
+            | "white_smoke"
+            | "sneeze"
+            | "spit"
+            | "squid_ink"
+            | "sweep_attack"
+            | "totem_of_undying"
+            | "witch"
+            | "reverse_portal"
+            | "snowflake"
+            | "glow_squid_ink"
+            | "dust_plume" => 8,
+            "sculk_soul" | "soul" => 11,
+            "gust"
+            | "cherry_leaves"
+            | "pale_oak_leaves"
+            | "tinted_leaves"
+            | "campfire_cosy_smoke"
+            | "campfire_signal_smoke" => 12,
+            "explosion" | "sonic_boom" => 16,
+            "enchant" => 26,
+            _ => 1,
+        };
+        let mut descriptor_uvs = HashMap::<String, Vec<(f32, f32, f32, f32)>>::new();
+        for id in 0..125 {
+            let name = RegistryTable::native()
+                .name_of(ClientRegistry::ParticleType, id)
+                .unwrap();
+            if NO_PARTICLE_DESCRIPTOR.contains(&name) {
+                continue;
+            }
+            let particle = crate::assets::AssetId::parse(&format!("minecraft:{name}")).canonical();
+            let frames = if matches!(name, "poof" | "smoke") {
+                GENERIC_PARTICLE_SPRITES[..descriptor_frame_count(name)]
+                    .iter()
+                    .enumerate()
+                    .map(|(frame, sprite)| ((*sprite).to_owned(), fixture_region(500 + frame)))
+                    .collect::<Vec<_>>()
+            } else {
+                (0..descriptor_frame_count(name))
+                    .map(|frame| {
+                        let sprite_name = format!("particle/fixture_{id}_{frame}");
+                        let region = fixture_region(id as usize * 8 + frame + 1);
+                        atlas.test_insert_region(&sprite_name, region);
+                        (sprite_name, region)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            descriptor_uvs.insert(
+                name.to_owned(),
+                frames
+                    .iter()
+                    .map(|(_, r)| (r.u_min, r.u_max, r.v_min, r.v_max))
+                    .collect(),
+            );
+            atlas.test_insert_particle_sprites(
+                &particle,
+                frames.into_iter().map(|(name, _)| name).collect(),
+            );
+        }
+        assert_eq!(descriptor_uvs.len(), 111);
+        for name in NO_PARTICLE_DESCRIPTOR {
+            assert!(
+                atlas
+                    .particle_sprite_names(&format!("minecraft:{name}"))
+                    .is_none(),
+                "{name} must use its non-descriptor consumer"
+            );
+        }
+        for (index, name) in GENERIC_PARTICLE_SPRITES
+            .into_iter()
+            .chain(END_ROD_SPRITES)
+            .chain(EXPLOSION_SPRITES)
+            .chain(CAMPFIRE_COSY_SMOKE_SPRITES)
+            .chain(CAMPFIRE_SIGNAL_SMOKE_SPRITES)
+            .chain(["fixture/block_particle", "fixture/item_particle"])
+            .enumerate()
+        {
+            atlas.test_insert_region(name, fixture_region(500 + index));
+        }
+        let mut block_registry = BlockRegistry::test_empty();
+        block_registry.test_add_particle_fixture();
+        let mut chunks = ChunkStore::new(2);
+        let mut column = azalea_world::chunk::Chunk::default();
+        column.sections = vec![Default::default(); chunks.section_count() as usize].into();
+        chunks.load_decoded_chunk(ChunkPos::new(0, 0), column);
+        chunks.set_block_state(0, 63, 0, stone);
+        let climate = HashMap::new();
+        let colors = Arc::new(Colormap::test_empty());
+        let mut store = ParticleStore::new(atlas, colors.clone(), colors.clone(), colors);
+        store.set_mode(ParticleMode::All);
+        let mut seen_names = HashSet::new();
+        let mut seen_kinds = HashSet::new();
+        let registry = RegistryTable::native();
+        let mut fixture_count = 0;
+        for id in 0..125 {
+            let name = registry.name_of(ClientRegistry::ParticleType, id).unwrap();
+            assert!(
+                seen_names.insert(name),
+                "duplicate native registry name {name}"
+            );
+            let kind = ServerParticleKind::from_id(id).unwrap();
+            assert_eq!(
+                ServerParticleKind::from_name(name),
+                Some(kind),
+                "id={id} {name}"
+            );
+            assert!(
+                seen_kinds.insert(format!("{kind:?}")),
+                "duplicate fixture kind {kind:?}"
+            );
+            store.clear();
+            chunks.set_block_state(0, 64, 0, air);
+            chunks.set_block_state(0, 63, 0, stone);
+            if matches!(
+                kind,
+                ServerParticleKind::Bubble
+                    | ServerParticleKind::SulfurBubbles
+                    | ServerParticleKind::CurrentDown
+                    | ServerParticleKind::BubbleColumnUp
+            ) {
+                chunks.set_block_state(0, 64, 0, water);
+                if kind == ServerParticleKind::Bubble {
+                    let fluid = crate::world::block::fluid(chunks.get_block_state(0, 64, 0));
+                    assert_eq!(
+                        chunks.get_block_state(0, 64, 0),
+                        water,
+                        "Bubble fixture water state"
+                    );
+                    assert_eq!(
+                        fluid.kind,
+                        crate::world::block::FluidKind::Water,
+                        "Bubble fixture fluid kind"
+                    );
+                    assert_eq!(fluid.amount, 8, "Bubble fixture source amount");
+                    assert!(!fluid.falling, "Bubble fixture must be still source water");
+                    assert_eq!(
+                        chunks.get_block_state(0, 63, 0),
+                        stone,
+                        "Bubble fixture support state"
+                    );
+                }
+            } else if kind == ServerParticleKind::NoxiousGas {
+                // The direct provider's origin is above its source water.
+                chunks.set_block_state(0, 63, 0, water);
+            } else if kind == ServerParticleKind::NoxiousGasCloud {
+                // Its child sampler may pick any point within radius 3. Put the
+                // source inside a full-water patch so every seeded sample has
+                // valid loaded terrain, water below, and unobstructed air.
+                for x in 5..=11 {
+                    for z in 5..=11 {
+                        chunks.set_block_state(x, 63, z, water);
+                    }
+                }
+            }
+            let options = match kind {
+                ServerParticleKind::Block
+                | ServerParticleKind::BlockMarker
+                | ServerParticleKind::FallingDust
+                | ServerParticleKind::DustPillar
+                | ServerParticleKind::BlockCrumble => ServerParticleOptions::Block(stone),
+                ServerParticleKind::Item => ServerParticleOptions::Item {
+                    item_id: azalea_registry::builtin::ItemKind::Stone.to_u32(),
+                    count: 3,
+                    components: DataComponentPatch::default(),
+                    raw_components: Some(Arc::new({
+                        let mut raw = simdnbt::owned::NbtCompound::new();
+                        raw.insert("minecraft:custom_name", "preserve through item particle");
+                        raw
+                    })),
+                },
+                ServerParticleKind::EntityEffect => {
+                    ServerParticleOptions::EntityEffect { color: 0xff55_aa33 }
+                }
+                ServerParticleKind::Effect | ServerParticleKind::InstantEffect => {
+                    ServerParticleOptions::Spell {
+                        color: 0x55aa33,
+                        power: 1.0,
+                    }
+                }
+                ServerParticleKind::Dust => ServerParticleOptions::Dust {
+                    packed_color: 0x55aa33,
+                    scale: 1.0,
+                },
+                ServerParticleKind::DustColorTransition => {
+                    ServerParticleOptions::DustColorTransition {
+                        from_color: 0xff0000,
+                        to_color: 0x0000ff,
+                        scale: 1.0,
+                    }
+                }
+                ServerParticleKind::TintedLeaves => {
+                    ServerParticleOptions::Color { color: 0x55aa33 }
+                }
+                ServerParticleKind::DragonBreath => ServerParticleOptions::Power { power: 1.0 },
+                ServerParticleKind::SculkCharge => {
+                    ServerParticleOptions::SculkCharge { roll: 0.25 }
+                }
+                ServerParticleKind::Geyser | ServerParticleKind::GeyserPlume => {
+                    ServerParticleOptions::Geyser { water_blocks: 2 }
+                }
+                ServerParticleKind::GeyserBase | ServerParticleKind::GeyserPoof => {
+                    ServerParticleOptions::GeyserBase {
+                        water_blocks: 2,
+                        burst_impulse_base: 1.0,
+                    }
+                }
+                ServerParticleKind::Shriek => ServerParticleOptions::Shriek { delay: 0 },
+                ServerParticleKind::Trail => ServerParticleOptions::Trail {
+                    target: dvec3(2.0, 65.0, 1.0),
+                    color: 0x55aa33,
+                    duration: 10,
+                },
+                ServerParticleKind::Vibration => ServerParticleOptions::VibrationBlock {
+                    target: BlockPos::new(2, 65, 1),
+                    arrival_ticks: 10,
+                },
+                _ => ServerParticleOptions::Simple,
+            };
+
+            let spawn_pos = if kind == ServerParticleKind::NoxiousGasCloud {
+                dvec3(8.5, 64.5, 8.5)
+            } else {
+                dvec3(0.5, 64.5, 0.5)
+            };
+            let packet_max_speed = if kind == ServerParticleKind::Bubble {
+                0.0
+            } else {
+                1.0
+            };
+            let before = store.pending.len()
+                + store.pending_emitters.len()
+                + store.pending_firework_starters.len();
+            store.add_particles_from_packet(
+                kind,
+                options,
+                false,
+                false,
+                spawn_pos,
+                DVec3::ZERO,
+                packet_max_speed,
+                1,
+                spawn_pos,
+                &block_registry,
+                &chunks,
+                &climate,
+            );
+            let after = store.pending.len()
+                + store.pending_emitters.len()
+                + store.pending_firework_starters.len();
+            assert!(
+                after > before,
+                "{name} (id {id}, {kind:?}) produced no pending/live particle, emitter, or model state"
+            );
+            if kind == ServerParticleKind::Bubble {
+                assert!(
+                    store.pending.iter().any(|particle| matches!(
+                        particle.kind,
+                        Kind::Water(state) if state.kind == ServerParticleKind::Bubble
+                    )),
+                    "Bubble packet max_speed={packet_max_speed}, state={:?}, pos={spawn_pos:?} produced no Bubble particle",
+                    chunks.get_block_state(0, 64, 0)
+                );
+            }
+            store.particles.append(&mut store.pending);
+            if kind == ServerParticleKind::NoxiousGasCloud {
+                fastrand::seed(0x4e4f_5849_4f55_53);
+            }
+            if kind != ServerParticleKind::SulfurBubbles {
+                store.tick(&chunks);
+            }
+            if kind == ServerParticleKind::Bubble {
+                assert!(
+                    store.particles.iter().any(|particle| matches!(
+                        particle.kind,
+                        Kind::Water(state) if state.kind == ServerParticleKind::Bubble
+                    )),
+                    "Bubble packet max_speed={packet_max_speed}, state={:?}, pos={spawn_pos:?} did not survive one tick",
+                    chunks.get_block_state(0, 64, 0)
+                );
+            }
+            if kind == ServerParticleKind::NoxiousGasCloud {
+                // Java's cloud samples for children every second tick.
+                store.tick(&chunks);
+            } else if kind == ServerParticleKind::GustEmitterSmall {
+                // Small gusts emit their first child after the provider's 2-tick delay.
+                store.tick(&chunks);
+                store.tick(&chunks);
+            }
+            let quads = store.extract(0.5, DVec3::ZERO, &chunks);
+            if kind == ServerParticleKind::ElderGuardian {
+                assert!(
+                    store
+                        .model_render_requests(0.5)
+                        .iter()
+                        .any(|request| matches!(
+                            request,
+                            super::emitters::RenderRequest::ElderGuardianModel { .. }
+                        )),
+                    "{name} did not reach the ElderGuardian model consumer"
+                );
+            } else if matches!(
+                kind,
+                ServerParticleKind::NoxiousGasCloud | ServerParticleKind::GustEmitterSmall
+            ) {
+                assert!(
+                    store.particles.iter().any(|particle| matches!(
+                        particle.kind,
+                        super::Kind::Emitters(super::emitters::State { kind: emitter_kind, .. })
+                            if emitter_kind == kind
+                    )),
+                    "{name} emitter did not survive its initial tick"
+                );
+            } else {
+                assert!(
+                    !quads.is_empty(),
+                    "{name} (id {id}, {kind:?}) did not reach quad extraction after provider tick; packet max_speed={packet_max_speed}, state={:?}, pos={spawn_pos:?}",
+                    chunks.get_block_state(0, 64, 0)
+                );
+                let camera = crate::renderer::camera::Camera::new(16.0 / 9.0);
+                let (vertices, _) =
+                    crate::renderer::pipelines::particle::build_particle_vertices(&camera, &quads);
+                assert_eq!(
+                    vertices.len(),
+                    quads.len() * 6,
+                    "{name} CPU vertex conversion"
+                );
+                let material = match kind {
+                    ServerParticleKind::Block
+                    | ServerParticleKind::BlockMarker
+                    | ServerParticleKind::BlockCrumble
+                    | ServerParticleKind::DustPillar => Some("fixture/block_particle"),
+                    ServerParticleKind::Item
+                    | ServerParticleKind::ItemSlime
+                    | ServerParticleKind::ItemCobweb
+                    | ServerParticleKind::ItemSnowball => Some("fixture/item_particle"),
+                    _ => None,
+                };
+                if let Some(material) = material {
+                    let region = store.uv_map.get_region(material);
+                    assert!(
+                        quads.iter().any(|quad| {
+                            quad.u0 >= region.u_min
+                                && quad.u1 <= region.u_max
+                                && quad.v0 >= region.v_min
+                                && quad.v1 <= region.v_max
+                        }),
+                        "{name} lost its terrain/item material or sampled outside its atlas region"
+                    );
+                }
+                let child_descriptor = match kind {
+                    ServerParticleKind::ExplosionEmitter => Some("explosion"),
+                    ServerParticleKind::Geyser => Some("geyser_plume"),
+                    ServerParticleKind::NoxiousGasCloud => Some("noxious_gas"),
+                    ServerParticleKind::GustEmitterLarge => Some("gust"),
+                    ServerParticleKind::GustEmitterSmall => Some("small_gust"),
+                    _ => None,
+                };
+                let has_native_material = matches!(
+                    kind,
+                    ServerParticleKind::Block
+                        | ServerParticleKind::BlockMarker
+                        | ServerParticleKind::DustPillar
+                        | ServerParticleKind::BlockCrumble
+                        | ServerParticleKind::Item
+                        | ServerParticleKind::ItemSlime
+                        | ServerParticleKind::ItemCobweb
+                        | ServerParticleKind::ItemSnowball
+                );
+                let sprite_descriptor = match kind {
+                    ServerParticleKind::EntityEffect | ServerParticleKind::Effect => {
+                        "entity_effect"
+                    }
+                    ServerParticleKind::InstantEffect | ServerParticleKind::Witch => {
+                        "instant_effect"
+                    }
+                    ServerParticleKind::Totem => "end_rod",
+                    _ => name,
+                };
+                let expected_descriptor = child_descriptor.unwrap_or(sprite_descriptor);
+                if !has_native_material && kind != ServerParticleKind::ElderGuardian {
+                    let expected = descriptor_uvs.get(expected_descriptor).unwrap_or_else(|| {
+                        panic!("{name} reached a texture consumer without its Java descriptor")
+                    });
+                    assert!(
+                        quads.iter().any(|quad| {
+                            expected.iter().any(|&(u0, u1, v0, v1)| {
+                                quad.u0 == u0 && quad.u1 == u1 && quad.v0 == v0 && quad.v1 == v1
+                            })
+                        }),
+                        "{name} did not use its own descriptor frame or expected child material"
+                    );
+                }
+            }
+            let child_descriptor = match kind {
+                ServerParticleKind::ExplosionEmitter => Some("explosion"),
+                ServerParticleKind::Geyser => Some("geyser_plume"),
+                ServerParticleKind::NoxiousGasCloud => Some("noxious_gas"),
+                ServerParticleKind::GustEmitterLarge => Some("gust"),
+                ServerParticleKind::GustEmitterSmall => Some("small_gust"),
+                _ => None,
+            };
+            if let Some(descriptor) = child_descriptor {
+                assert!(!quads.is_empty(), "{name} emitted no child quad");
+                let expected = descriptor_uvs
+                    .get(descriptor)
+                    .unwrap_or_else(|| panic!("missing child descriptor {descriptor}"));
+                assert!(
+                    quads.iter().any(|quad| {
+                        expected.iter().any(|&(u0, u1, v0, v1)| {
+                            quad.u0 == u0 && quad.u1 == u1 && quad.v0 == v0 && quad.v1 == v1
+                        })
+                    }),
+                    "{name} child did not use {descriptor}'s real Java descriptor frame"
+                );
+                let expected_child = match kind {
+                    ServerParticleKind::ExplosionEmitter => store
+                        .particles
+                        .iter()
+                        .any(|child| matches!(child.kind, super::Kind::Explosion)),
+                    ServerParticleKind::Geyser => store.particles.iter().any(|child| {
+                        matches!(
+                            child.kind,
+                            super::Kind::Emitters(super::emitters::State {
+                                kind: ServerParticleKind::GeyserPlume,
+                                ..
+                            })
+                        )
+                    }),
+                    ServerParticleKind::NoxiousGasCloud => store.particles.iter().any(|child| {
+                        matches!(
+                            child.kind,
+                            super::Kind::Emitters(super::emitters::State {
+                                kind: ServerParticleKind::NoxiousGas,
+                                ..
+                            })
+                        )
+                    }),
+                    ServerParticleKind::GustEmitterLarge | ServerParticleKind::GustEmitterSmall => {
+                        let expected_kind = if kind == ServerParticleKind::GustEmitterLarge {
+                            ServerParticleKind::Gust
+                        } else {
+                            ServerParticleKind::SmallGust
+                        };
+                        store.particles.iter().any(|child| matches!(
+                            child.kind,
+                            super::Kind::Emitters(super::emitters::State { kind: child_kind, .. })
+                                if child_kind == expected_kind
+                        ))
+                    }
+                    _ => unreachable!(),
+                };
+                assert!(
+                    expected_child,
+                    "{name} did not produce the expected child kind"
+                );
+            }
+            fixture_count += 1;
+        }
+        assert_eq!(fixture_count, 125);
+        assert_eq!(seen_names.len(), 125);
+        assert_eq!(seen_kinds.len(), 125);
+
+        assert_eq!(descriptor_uvs.len(), 111);
+        for (name, frames) in &descriptor_uvs {
+            assert_eq!(
+                frames.len(),
+                descriptor_frame_count(name),
+                "Java descriptor frame count for {name}"
+            );
+            for &(u0, u1, v0, v1) in frames {
+                assert!(0.0 <= u0 && u0 < u1 && u1 <= 1.0);
+                assert!(0.0 <= v0 && v0 < v1 && v1 <= 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn particle_asset_reload_replaces_transient_state_and_uses_new_ordered_frames() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        use glam::DVec3;
+
+        use super::{ParticleMode, ParticleStore, ServerParticleOptions};
+        use crate::renderer::chunk::mesher::Colormap;
+
+        let region = |sprite: u16, u_min: f32| AtlasRegion {
+            u_min,
+            v_min: 0.1,
+            u_max: u_min + 0.1,
+            v_max: 0.2,
+            pixel_rect: [u16::from(sprite), 0, 1, 1],
+            sprite,
+            opaque: true,
+            translucent: false,
+            alpha_counts: [0, 0, 1],
+        };
+        let mut old_atlas = AtlasUVMap::test_empty();
+        for (name, sprite, u_min) in [("particle/old_a", 1, 0.1), ("particle/old_b", 2, 0.2)] {
+            old_atlas.test_insert_region(name, region(sprite, u_min));
+        }
+        old_atlas.test_insert_particle_sprites(
+            "end_rod",
+            vec!["particle/old_a".into(), "particle/old_b".into()],
+        );
+        let mut new_atlas = AtlasUVMap::test_empty();
+        for (name, sprite, u_min) in [
+            ("particle/new_a", 3, 0.6),
+            ("particle/new_b", 4, 0.7),
+            ("particle/new_c", 5, 0.8),
+        ] {
+            new_atlas.test_insert_region(name, region(sprite, u_min));
+        }
+        new_atlas.test_insert_particle_sprites(
+            "end_rod",
+            vec![
+                "particle/new_a".into(),
+                "particle/new_b".into(),
+                "particle/new_c".into(),
+            ],
+        );
+        let old_colors = Arc::new(Colormap::test_empty());
+        let new_colors = Arc::new(Colormap::test_empty());
+        let mut store = ParticleStore::new(
+            old_atlas,
+            old_colors.clone(),
+            old_colors.clone(),
+            old_colors.clone(),
+        );
+        store.set_mode(ParticleMode::Decreased);
+        store.particles.push(Particle::end_rod(
+            DVec3::ZERO,
+            DVec3::ZERO,
+            &store.end_rod_frames,
         ));
-        assert!(ServerParticleKind::from_id(43).is_none()); // item requires its own codec
-        assert!(ServerParticleKind::from_id(44).is_none()); // vibration requires target data
-        assert!(matches!(
-            ServerParticleKind::from_id(54),
-            Some(ServerParticleKind::Item)
+        super::emitters::spawn(
+            &mut store,
+            ServerParticleKind::ElderGuardian,
+            ServerParticleOptions::Simple,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            &crate::world::block::registry::BlockRegistry::test_empty(),
+            &ChunkStore::new(2),
+            &HashMap::new(),
+        );
+        store.particles.append(&mut store.pending);
+        assert_eq!(store.model_render_requests(0.0).len(), 1);
+        store.pending.push(Particle::end_rod(
+            DVec3::ZERO,
+            DVec3::ZERO,
+            &store.end_rod_frames,
         ));
-        assert!(matches!(
-            ServerParticleKind::from_id(55),
-            Some(ServerParticleKind::Vibration)
-        ));
-        assert!(matches!(
-            ServerParticleKind::from_id(56),
-            Some(ServerParticleKind::Trail)
-        ));
-        assert!(matches!(
-            ServerParticleKind::from_id(112),
-            Some(ServerParticleKind::Shriek)
-        ));
+        store.emitters.push(super::ExplosionEmitter {
+            pos: DVec3::ZERO,
+            age: 0,
+        });
+        store.pending_emitters.push(super::ExplosionEmitter {
+            pos: DVec3::ZERO,
+            age: 0,
+        });
+        store.firework_starters.push(super::FireworkStarter {
+            request: super::FireworkStarterRequest {
+                position: DVec3::ZERO,
+                velocity: DVec3::ZERO,
+                far_effect: false,
+                explosions: vec![],
+            },
+            life: 0,
+            lifetime: 1,
+            twinkle_delay: false,
+        });
+        store
+            .pending_firework_starters
+            .push(super::FireworkStarter {
+                request: super::FireworkStarterRequest {
+                    position: DVec3::ZERO,
+                    velocity: DVec3::ZERO,
+                    far_effect: false,
+                    explosions: vec![],
+                },
+                life: 0,
+                lifetime: 1,
+                twinkle_delay: false,
+            });
+        store.tracked_explosions.push(TrackedExplosion {
+            center: DVec3::ZERO,
+            radius: 1.0,
+            block_count: 1,
+            block_particles: vec![],
+        });
+        store.tracking_emitters.push(super::TrackingEmitter {
+            entity_id: Some(1),
+            attachment: super::TrackingAttachment {
+                position: DVec3::ZERO,
+                width: 1.0,
+                height: 1.0,
+            },
+            age: 1,
+            kind: super::TrackingParticleKind::Crit,
+        });
+        store.sound_requests.push(super::ParticleSoundRequest {
+            event: "entity.firework_rocket.blast",
+            pos: DVec3::ZERO,
+            volume: 1.0,
+            pitch: 1.0,
+            seed: 1,
+        });
+
+        store.reload_assets(
+            new_atlas,
+            new_colors.clone(),
+            new_colors.clone(),
+            new_colors.clone(),
+        );
+
+        assert!(Arc::ptr_eq(&store.grass_colormap, &new_colors));
+        assert!(Arc::ptr_eq(&store.foliage_colormap, &new_colors));
+        assert!(Arc::ptr_eq(&store.dry_foliage_colormap, &new_colors));
+        assert!(!Arc::ptr_eq(&store.grass_colormap, &old_colors));
+        assert_eq!(store.mode, ParticleMode::Decreased);
+        assert!(store.particles.is_empty() && store.pending.is_empty());
+        assert!(store.emitters.is_empty() && store.pending_emitters.is_empty());
+        assert!(store.firework_starters.is_empty() && store.pending_firework_starters.is_empty());
+        assert!(store.tracked_explosions.is_empty() && store.tracking_emitters.is_empty());
+        assert!(store.sound_requests.is_empty());
+        assert!(store.model_render_requests(0.0).is_empty());
+        let frames = store.uv_map.particle_sprite_names("end_rod").unwrap();
+        assert_eq!(
+            frames.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["particle/new_a", "particle/new_b", "particle/new_c"]
+        );
+        assert_eq!(store.end_rod_frames[0].u_min, 0.6);
+        assert_eq!(store.end_rod_frames[1].u_min, 0.7);
+
+        let registry = crate::world::block::registry::BlockRegistry::test_empty();
+        let chunks = ChunkStore::new(2);
+        store.add_particles_from_packet(
+            ServerParticleKind::EndRod,
+            ServerParticleOptions::Simple,
+            true,
+            false,
+            DVec3::ZERO,
+            DVec3::ZERO,
+            1.0,
+            0,
+            DVec3::ZERO,
+            &registry,
+            &chunks,
+            &HashMap::new(),
+        );
+        let spawned = store.pending.last().unwrap();
+        assert!((spawned.u0 - 0.6).abs() < f32::EPSILON);
+        assert!((spawned.u1 - 0.7).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -3659,6 +6371,65 @@ mod tests {
         assert_eq!(dust_quad_size(2.0, 0, 40, 0.0), 0.0);
         assert_eq!(dust_quad_size(2.0, 1, 40, 0.0), 1.6);
         assert_eq!(dust_quad_size(2.0, 40, 40, 0.0), 2.0);
+    }
+
+    #[test]
+    fn dust_color_transition_uses_java_lifetime_plus_one_interpolation() {
+        assert_eq!(
+            dust_transition_color([0.0, 0.25, 1.0], [1.0, 0.75, 0.0], 5, 9, 0.0),
+            [0.5, 0.5, 0.5]
+        );
+        assert_eq!(
+            dust_transition_color([0.0; 3], [1.0; 3], 9, 9, 0.0),
+            [0.9; 3]
+        );
+    }
+
+    #[test]
+    fn dust_color_transition_packet_constructs_transition_particle() {
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut uv = AtlasUVMap::test_empty();
+        uv.test_insert_region(
+            super::DUST_SPRITE,
+            AtlasRegion {
+                u_min: 0.1,
+                v_min: 0.1,
+                u_max: 0.2,
+                v_max: 0.2,
+                pixel_rect: [0; 4],
+                sprite: 1,
+                opaque: true,
+                translucent: false,
+                alpha_counts: [0, 0, 1],
+            },
+        );
+        let mut store = super::ParticleStore::new(uv, colors.clone(), colors.clone(), colors);
+        let chunks = ChunkStore::new(2);
+        store.add_particles_from_packet(
+            ServerParticleKind::DustColorTransition,
+            super::ServerParticleOptions::DustColorTransition {
+                from_color: 0x00ff_0000,
+                to_color: 0x0000_00ff,
+                scale: 1.0,
+            },
+            true,
+            false,
+            dvec3(0.0, 0.0, 0.0),
+            dvec3(0.0, 0.0, 0.0),
+            0.0,
+            0,
+            dvec3(0.0, 0.0, 0.0),
+            &crate::world::block::registry::BlockRegistry::test_empty(),
+            &chunks,
+            &Default::default(),
+        );
+        assert_eq!(store.pending.len(), 1);
+        assert!(matches!(
+            store.pending[0].kind,
+            super::Kind::DustColorTransition
+        ));
+        assert!(store.pending[0].target.is_some());
+        assert_eq!(store.pending[0].u0, 0.1);
     }
 
     fn explosion_fixture(block_count: i32, weight: i32) -> TrackedExplosion {
@@ -4252,9 +7023,183 @@ mod tests {
 
         let primary = super::Particle::huge_explosion(pos, dvec3(1.0, 0.0, 0.0), &frames);
         assert_eq!(primary.size, 1.0);
-        assert!(supports_explosion_particle(&ParticleOptions::Explosion));
-        assert!(supports_explosion_particle(&ParticleOptions::Poof));
-        assert!(supports_explosion_particle(&ParticleOptions::Smoke));
+    }
+
+    #[test]
+    fn explosion_packet_options_use_shared_typed_particle_spawn_boundary() {
+        use azalea_core::color::RgbColor;
+        use azalea_core::position::BlockPos;
+        use azalea_entity::particle::{
+            BlockParticle, ColorPowerParticle, DustParticle, ItemParticle, TrailParticle,
+            VibrationParticle,
+        };
+
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let mut uv = AtlasUVMap::test_empty();
+        uv.test_insert_particle_sprites("gust", vec!["particle/gust_test".into()]);
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut store = super::ParticleStore::new(uv, colors.clone(), colors.clone(), colors);
+        let mut registry = crate::world::block::registry::BlockRegistry::test_empty();
+        registry.test_add_particle_fixture();
+        let chunks = ChunkStore::new(2);
+        let climate = std::collections::HashMap::new();
+        let pos = dvec3(2.0, 64.0, 3.0);
+        let camera = pos;
+
+        let cases = [
+            (ParticleOptions::Gust, ServerParticleKind::Gust),
+            (
+                ParticleOptions::GustEmitterLarge,
+                ServerParticleKind::GustEmitterLarge,
+            ),
+            (
+                ParticleOptions::GustEmitterSmall,
+                ServerParticleKind::GustEmitterSmall,
+            ),
+            (
+                ParticleOptions::Dust(DustParticle {
+                    color: RgbColor::new(20, 40, 60),
+                    scale: 1.0,
+                }),
+                ServerParticleKind::Dust,
+            ),
+            (
+                ParticleOptions::Effect(ColorPowerParticle {
+                    color: 0x123456,
+                    power: 1.0,
+                }),
+                ServerParticleKind::Effect,
+            ),
+            (
+                ParticleOptions::Block(BlockParticle {
+                    block_state: crate::world::block::find_state("stone", &[]),
+                }),
+                ServerParticleKind::Block,
+            ),
+            (
+                ParticleOptions::Item(ItemParticle {
+                    item: azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData {
+                        kind: azalea_registry::builtin::ItemKind::Stone,
+                        count: 3,
+                        component_patch: azalea_inventory::DataComponentPatch::default(),
+                    }),
+                }),
+                ServerParticleKind::Item,
+            ),
+            (
+                ParticleOptions::Trail(Box::new(TrailParticle {
+                    target: azalea_core::position::Vec3 {
+                        x: 5.0,
+                        y: 6.0,
+                        z: 7.0,
+                    },
+                    color: 0x0012_3456,
+                    duration: 17,
+                })),
+                ServerParticleKind::Trail,
+            ),
+            (
+                ParticleOptions::Vibration(Box::new(VibrationParticle {
+                    position: azalea_entity::particle::PositionSource::Block(BlockPos::new(
+                        4, 65, 6,
+                    )),
+                    ticks: 23,
+                })),
+                ServerParticleKind::Vibration,
+            ),
+        ];
+        for (option, expected) in cases {
+            store.pending.clear();
+            assert!(store.add_explosion_packet_particle(
+                &option,
+                pos,
+                dvec3(1.0, 0.0, 0.0),
+                camera,
+                &registry,
+                &chunks,
+                &climate,
+            ));
+            assert_eq!(store.test_pending().len(), 1, "{expected:?}");
+            assert_eq!(store.test_pending()[0].pos, pos, "{expected:?}");
+        }
+
+        // Existing packet options remain routed through the same providers.
+        for option in [
+            ParticleOptions::Explosion,
+            ParticleOptions::EndRod,
+            ParticleOptions::Poof,
+            ParticleOptions::Smoke,
+        ] {
+            store.pending.clear();
+            assert!(store.add_explosion_packet_particle(
+                &option,
+                pos,
+                dvec3(0.0, 1.0, 0.0),
+                camera,
+                &registry,
+                &chunks,
+                &climate,
+            ));
+            assert_eq!(store.test_pending().len(), 1);
+        }
+        store.pending_emitters.clear();
+        assert!(store.add_explosion_packet_particle(
+            &ParticleOptions::ExplosionEmitter,
+            pos,
+            glam::DVec3::ZERO,
+            camera,
+            &registry,
+            &chunks,
+            &climate,
+        ));
+        assert_eq!(store.pending_emitters.len(), 1);
+
+        store.pending.clear();
+        store.track_explosion_effects(
+            pos,
+            1.0,
+            1,
+            vec![super::Weighted {
+                value: super::ExplosionParticleInfo {
+                    particle: ParticleOptions::Gust,
+                    scaling: 1.0,
+                    speed: 1.0,
+                },
+                weight: 1,
+            }],
+        );
+        store.spawn_tracked_explosion_particles(camera, &registry, &chunks, &climate);
+        assert_eq!(
+            store.test_pending().len(),
+            1,
+            "weighted GUST reaches its provider"
+        );
+
+        store.track_explosion_effects(pos, 1.0, 1, Vec::new());
+        assert!(
+            store.tracked_explosions.is_empty(),
+            "empty weighted lists are ignored"
+        );
+        store.track_explosion_effects(
+            pos,
+            1.0,
+            1,
+            vec![super::Weighted {
+                value: super::ExplosionParticleInfo {
+                    particle: ParticleOptions::Gust,
+                    scaling: 1.0,
+                    speed: 1.0,
+                },
+                weight: 0,
+            }],
+        );
+        store.pending.clear();
+        store.spawn_tracked_explosion_particles(camera, &registry, &chunks, &climate);
+        assert!(
+            store.test_pending().is_empty(),
+            "zero-weight options are not selected"
+        );
     }
 
     #[test]
@@ -4284,17 +7229,18 @@ mod tests {
     #[test]
     fn poof_and_smoke_advance_frames_and_smoke_grows_during_tick() {
         let _protocol = crate::world::block::test_protocol_guard();
-        let generic_frames = std::array::from_fn(|i| super::AtlasRegion {
-            u_min: i as f32 / 8.0,
-            u_max: (i + 1) as f32 / 8.0,
-            v_min: 0.0,
-            v_max: 1.0,
-            pixel_rect: [0; 4],
-            sprite: i as u16,
-            opaque: true,
-            translucent: false,
-            alpha_counts: [0; 3],
-        });
+        let generic_frames: [super::AtlasRegion; 12] =
+            std::array::from_fn(|i| super::AtlasRegion {
+                u_min: i as f32 / 8.0,
+                u_max: (i + 1) as f32 / 8.0,
+                v_min: 0.0,
+                v_max: 1.0,
+                pixel_rect: [0; 4],
+                sprite: i as u16,
+                opaque: true,
+                translucent: false,
+                alpha_counts: [0; 3],
+            });
         crate::world::block::init("26.2");
         let chunks = crate::world::chunk::ChunkStore::new(2);
         let pos = dvec3(3.0, 4.0, 5.0);
@@ -4349,7 +7295,6 @@ mod tests {
             for spawn in
                 plan_explosion_particles(std::slice::from_ref(&weighted), &mut rng, |_, _, _| true)
             {
-                assert!(supports_explosion_particle(&spawn.particle));
                 found_poof |= matches!(spawn.particle, ParticleOptions::Poof);
                 found_smoke |= matches!(spawn.particle, ParticleOptions::Smoke);
             }
@@ -4527,14 +7472,29 @@ mod tests {
             0.0,
             &mut || 0
         ));
-        // Override/long-distance bypasses both native distance culling and status.
+        // Override/long-distance bypasses both distance and status checks.
+        let mut draws = 0;
         assert!(accept_particle(
             Mode::Minimal,
             true,
             false,
             4096.0,
-            &mut || 0
+            &mut || {
+                draws += 1;
+                0
+            }
         ));
+        assert_eq!(draws, 0);
+        // Java computes particle status (and consumes its RNG) before bypassing.
+        let mut rolls = [0, 1].into_iter();
+        assert!(accept_particle(
+            Mode::Minimal,
+            true,
+            true,
+            4096.0,
+            &mut || rolls.next().unwrap()
+        ));
+        assert_eq!(rolls.next(), None);
         // addAlwaysVisibleParticle grants the native 10% Minimal fallback to Decreased.
         let mut rolls = [0, 1].into_iter();
         assert!(accept_particle(
@@ -4562,31 +7522,106 @@ mod tests {
     }
 
     #[test]
-    fn server_particle_ids_match_26_2_registry_for_supported_simple_options() {
+    fn particle_override_limiter_matches_java_26_2_registry_flags() {
+        use pomme_protocol::{ClientRegistry, RegistryTable};
+
+        let registry = RegistryTable::native();
+        let overridden = [
+            "block_marker",
+            "geyser",
+            "geyser_base",
+            "geyser_poof",
+            "geyser_plume",
+            "damage_indicator",
+            "elder_guardian",
+            "explosion_emitter",
+            "explosion",
+            "gust",
+            "gust_emitter_large",
+            "gust_emitter_small",
+            "sonic_boom",
+            "sculk_charge",
+            "sculk_charge_pop",
+            "poof",
+            "spit",
+            "squid_ink",
+            "sweep_attack",
+            "campfire_cosy_smoke",
+            "campfire_signal_smoke",
+            "glow_squid_ink",
+            "glow",
+            "wax_on",
+            "wax_off",
+            "electric_spark",
+            "scrape",
+            "trial_spawner_detection",
+            "trial_spawner_detection_ominous",
+            "vault_connection",
+            "ominous_spawning",
+            "vibration",
+        ];
+        for name in overridden {
+            let id = registry.id_of(ClientRegistry::ParticleType, name).unwrap();
+            assert!(
+                ServerParticleKind::from_id(id).unwrap().override_limiter(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_particle_ids_match_26_2_registry_for_supported_kinds() {
+        use pomme_protocol::{ClientRegistry, RegistryTable};
+
         use super::ServerParticleKind as Kind;
 
-        assert!(matches!(Kind::from_id(27), Some(Kind::EndRod)));
-        assert!(matches!(Kind::from_id(23), Some(Kind::Effect)));
-        assert!(matches!(Kind::from_id(28), Some(Kind::EntityEffect)));
-        assert!(matches!(Kind::from_id(53), Some(Kind::InstantEffect)));
-        assert!(matches!(Kind::from_id(78), Some(Kind::Witch)));
-        assert!(matches!(Kind::from_id(120), Some(Kind::RaidOmen)));
-        assert!(matches!(Kind::from_id(121), Some(Kind::TrialOmen)));
-        assert!(matches!(Kind::from_id(29), Some(Kind::ExplosionEmitter)));
-        assert!(matches!(Kind::from_id(30), Some(Kind::Explosion)));
-        assert!(matches!(Kind::from_id(66), Some(Kind::Poof)));
-        assert!(matches!(Kind::from_id(69), Some(Kind::Smoke)));
-        assert!(matches!(Kind::from_id(70), Some(Kind::CampfireCosySmoke)));
-        assert!(matches!(Kind::from_id(71), Some(Kind::CampfireSignalSmoke)));
+        let registry = RegistryTable::native();
+        let supported = [
+            ("end_rod", Kind::EndRod),
+            ("effect", Kind::Effect),
+            ("entity_effect", Kind::EntityEffect),
+            ("instant_effect", Kind::InstantEffect),
+            ("witch", Kind::Witch),
+            ("raid_omen", Kind::RaidOmen),
+            ("trial_omen", Kind::TrialOmen),
+            ("explosion_emitter", Kind::ExplosionEmitter),
+            ("explosion", Kind::Explosion),
+            ("poof", Kind::Poof),
+            ("smoke", Kind::Smoke),
+            ("campfire_cosy_smoke", Kind::CampfireCosySmoke),
+            ("campfire_signal_smoke", Kind::CampfireSignalSmoke),
+            ("totem_of_undying", Kind::Totem),
+            ("dust", Kind::Dust),
+            ("block", Kind::Block),
+            ("item", Kind::Item),
+            ("shriek", Kind::Shriek),
+            ("trail", Kind::Trail),
+            ("vibration", Kind::Vibration),
+        ];
+
+        for (name, expected_kind) in supported {
+            let id = registry
+                .id_of(ClientRegistry::ParticleType, name)
+                .unwrap_or_else(|| panic!("native particle registry is missing {name}"));
+            assert_eq!(
+                Kind::from_id(id),
+                Some(expected_kind),
+                "native particle {name} at id {id}"
+            );
+        }
+
+        for (id, expected_name) in [(70, "white_smoke"), (71, "sneeze")] {
+            assert_eq!(
+                registry.name_of(ClientRegistry::ParticleType, id),
+                Some(expected_name)
+            );
+            assert!(!matches!(
+                Kind::from_id(id),
+                Some(Kind::CampfireCosySmoke | Kind::CampfireSignalSmoke)
+            ));
+        }
         assert!(Kind::CampfireCosySmoke.override_limiter());
         assert!(Kind::CampfireSignalSmoke.override_limiter());
-        assert!(matches!(Kind::from_id(75), Some(Kind::Totem)));
-        assert!(matches!(Kind::from_id(21), Some(Kind::Dust))); // RGB + scale decoded separately.
-        assert!(matches!(Kind::from_id(1), Some(Kind::Block))); // Block carries a block-state ID.
-        assert!(matches!(Kind::from_id(54), Some(Kind::Item))); // item
-        assert!(matches!(Kind::from_id(55), Some(Kind::Vibration))); // vibration
-        assert!(matches!(Kind::from_id(56), Some(Kind::Trail))); // trail
-        assert!(matches!(Kind::from_id(112), Some(Kind::Shriek))); // shriek
     }
 }
 

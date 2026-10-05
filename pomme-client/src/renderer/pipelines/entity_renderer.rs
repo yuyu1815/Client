@@ -4141,13 +4141,16 @@ impl EntityRenderer {
         cmd: vk::CommandBuffer,
         frame: usize,
         entities: &[EntityRenderInfo],
+        elder_guardian_particles: &[crate::particle::SpecialParticleRenderRequest],
+        camera_orientation: glam::Quat,
+        camera_position_relative: glam::Vec3,
         frustum: &[[f32; 4]; 6],
         anchor: glam::DVec3,
         eye: glam::DVec3,
         entity_view_scale: f32,
         benchmark_timing: bool,
     ) -> (f32, u32) {
-        if entities.is_empty() {
+        if entities.is_empty() && elder_guardian_particles.is_empty() {
             return (0.0, 0);
         }
         let mut entity_pose_ms = 0.0;
@@ -4158,7 +4161,7 @@ impl EntityRenderer {
         // part) becomes a single instanced draw. `vis`/`groups` borrow self.mobs
         // and are dropped at the end of this block, before the buffer write below.
         let mut instances: Vec<EntityInstance> = Vec::new();
-        let (opaque, culled, body, eyes, swirl, glint, water_patch, beam_records) = {
+        let (opaque, culled, mut body, eyes, swirl, glint, water_patch, beam_records) = {
             let mut vis: Vec<VisEntity> = Vec::new();
             for info in entities {
                 let Some(entry) = self.mobs.get(&info.entity_kind) else {
@@ -4191,7 +4194,7 @@ impl EntityRenderer {
                     entity_pose_count += 1;
                 }
             }
-            if vis.is_empty() {
+            if vis.is_empty() && elder_guardian_particles.is_empty() {
                 return (entity_pose_ms, entity_pose_count);
             }
 
@@ -4396,6 +4399,23 @@ impl EntityRenderer {
                 beam_records,
             )
         };
+
+        for request in elder_guardian_particles {
+            let Some(entry) = self.mobs.get(&EntityKind::ElderGuardian) else {
+                continue;
+            };
+            let variant = entry.base_variant(false, 0);
+            append_elder_guardian_particle_draws(
+                &variant.model,
+                variant.vertex_buffer,
+                variant.texture_set,
+                request,
+                camera_position_relative,
+                camera_orientation,
+                &mut instances,
+                &mut body,
+            );
+        }
 
         // Write the instance buffer (clamped to capacity; the cap is far above any
         // realistic entity count, so overflow only drops the tail with a warning).
@@ -4702,6 +4722,74 @@ struct DrawRecord {
     instance_count: u32,
     /// Native packed light input retained until an entity lightmap is wired.
     light_coords_override: Option<u32>,
+}
+
+fn elder_guardian_particle_root(
+    request: &crate::particle::SpecialParticleRenderRequest,
+    camera_position_relative: glam::Vec3,
+    camera_orientation: glam::Quat,
+) -> glam::Mat4 {
+    use crate::particle::SpecialParticleRenderRequest::ElderGuardianModel;
+    let ElderGuardianModel {
+        rotation_x_degrees,
+        scale,
+        model_translation,
+        ..
+    } = *request;
+    glam::Mat4::from_translation(camera_position_relative)
+        * glam::Mat4::from_quat(camera_orientation)
+        * glam::Mat4::from_rotation_x(rotation_x_degrees.to_radians())
+        * glam::Mat4::from_scale(glam::Vec3::from_array(scale))
+        * glam::Mat4::from_translation(glam::Vec3::from_array(model_translation))
+}
+
+/// Append an Elder Guardian particle as normal entity-model part draws. This
+/// reuses the entity-owned model mesh and texture descriptor, but carries its
+/// per-particle alpha and camera transform in the instance buffer.
+fn append_elder_guardian_particle_draws(
+    model: &BakedEntityModel,
+    vertex_buffer: vk::Buffer,
+    texture_set: vk::DescriptorSet,
+    request: &crate::particle::SpecialParticleRenderRequest,
+    camera_position_relative: glam::Vec3,
+    camera_orientation: glam::Quat,
+    instances: &mut Vec<EntityInstance>,
+    records: &mut Vec<DrawRecord>,
+) -> usize {
+    use crate::particle::SpecialParticleRenderRequest::ElderGuardianModel;
+    let ElderGuardianModel { alpha, .. } = *request;
+    let root = elder_guardian_particle_root(request, camera_position_relative, camera_orientation);
+    let part_transforms = model.compute_part_transforms(&entity_model::PartAnim::default());
+    let mut draws = 0;
+    for (index, &(part_start, part_count)) in model.part_ranges.iter().enumerate() {
+        if part_count == 0 {
+            continue;
+        }
+        let Some(&part_transform) = part_transforms.get(index) else {
+            continue;
+        };
+        let first_instance = instances.len() as u32;
+        instances.push(EntityInstance {
+            model: (root * part_transform).to_cols_array_2d(),
+            tint: [1.0, 1.0, 1.0, alpha],
+            overlay_color: [0.0; 4],
+            uv_params: [0.0; 4],
+        });
+        records.push(DrawRecord {
+            texture_set,
+            vertex_buffer,
+            part_start,
+            part_count,
+            first_instance,
+            instance_count: 1,
+            // ELDER_GUARDIANS uses packed full-bright 15728880. Entity mesh
+            // shader has no lightmap input, so the existing entity material is
+            // already full-bright; retain the native value for the draw contract.
+            light_coords_override: Some(15_728_880),
+        });
+        draws += 1;
+    }
+    draws
 }
 
 fn happy_ghast_harness_draw_record(
@@ -6161,6 +6249,111 @@ pub(super) fn create_pipeline(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn elder_guardian_particle_maps_camera_matrix_and_real_model_parts_to_draw_records() {
+        use glam::{DVec3, Mat4, Quat, Vec3};
+        use pyronyx::vk;
+
+        use super::{
+            EntityInstance, append_elder_guardian_particle_draws, elder_guardian_particle_root,
+        };
+        use crate::particle::SpecialParticleRenderRequest::ElderGuardianModel;
+        use crate::renderer::entity_models::aquatic::bake_guardian_model;
+
+        let request = ElderGuardianModel {
+            position: DVec3::new(12.0, 70.0, -5.0),
+            age: 15.0,
+            alpha: 0.55,
+            rotation_x_degrees: -15.0,
+            scale: [0.42553192, -0.42553192, -0.42553192],
+            model_translation: [0.0, -0.56, 3.5],
+        };
+        let ElderGuardianModel {
+            position,
+            rotation_x_degrees,
+            scale,
+            model_translation,
+            ..
+        } = request;
+        let anchor = DVec3::new(10.0, 68.0, -8.0);
+        let eye = anchor + DVec3::new(0.25, 1.7, -0.4);
+        let camera_position_relative = (eye - anchor).as_vec3();
+        let camera = Quat::from_rotation_y(0.7);
+        let expected = Mat4::from_translation(camera_position_relative)
+            * Mat4::from_quat(camera)
+            * Mat4::from_rotation_x(rotation_x_degrees.to_radians())
+            * Mat4::from_scale(Vec3::from_array(scale))
+            * Mat4::from_translation(Vec3::from_array(model_translation));
+        assert!(
+            elder_guardian_particle_root(&request, camera_position_relative, camera)
+                .abs_diff_eq(expected, 1e-6)
+        );
+        assert!((expected.transform_vector3(Vec3::X).length() - 0.42553192).abs() < 1e-6);
+
+        let model = bake_guardian_model(true);
+        let mut instances: Vec<EntityInstance> = Vec::new();
+        let mut draw_list = Vec::new();
+        let count = append_elder_guardian_particle_draws(
+            &model,
+            vk::Buffer::null(),
+            vk::DescriptorSet::null(),
+            &request,
+            camera_position_relative,
+            camera,
+            &mut instances,
+            &mut draw_list,
+        );
+        let visible_parts = model.part_ranges.iter().filter(|range| range.1 > 0).count();
+        assert!(visible_parts > 0);
+        assert_eq!(count, visible_parts);
+        assert_eq!(draw_list.len(), visible_parts);
+        assert_eq!(instances.len(), visible_parts);
+        assert!(
+            instances
+                .iter()
+                .all(|instance| instance.tint == [1.0, 1.0, 1.0, 0.55])
+        );
+        let part_pose =
+            model.compute_part_transforms(&crate::renderer::entity_model::PartAnim::default());
+        let first_model = Mat4::from_cols_array_2d(&instances[0].model);
+        assert!(first_model.abs_diff_eq(expected * part_pose[0], 1e-6));
+        assert!(draw_list.iter().all(|record| record.instance_count == 1));
+        assert!(
+            draw_list
+                .iter()
+                .all(|record| record.light_coords_override == Some(15_728_880))
+        );
+        assert_eq!(draw_list[0].vertex_buffer, vk::Buffer::null());
+
+        // entity.vert subtracts CameraUniform.camera_pos. Moving eye and anchor
+        // together preserves both that relative position and shader output.
+        let shader_relative_origin =
+            expected.transform_point3(Vec3::ZERO) - camera_position_relative;
+        let translated_anchor = DVec3::new(100_010.0, -31.0, 99_992.0);
+        let translated_eye = translated_anchor + (eye - anchor);
+        let translated_camera_relative = (translated_eye - translated_anchor).as_vec3();
+        let shifted_root =
+            elder_guardian_particle_root(&request, translated_camera_relative, camera);
+        assert!(shifted_root.abs_diff_eq(expected, 1e-6));
+        assert!(
+            (shifted_root.transform_point3(Vec3::ZERO) - translated_camera_relative)
+                .abs_diff_eq(shader_relative_origin, 1e-6)
+        );
+        let moved_spawn = ElderGuardianModel {
+            position: position + DVec3::new(500.0, -200.0, 90.0),
+            age: 15.0,
+            alpha: 0.55,
+            rotation_x_degrees,
+            scale,
+            model_translation,
+        };
+        assert!(
+            elder_guardian_particle_root(&moved_spawn, camera_position_relative, camera)
+                .abs_diff_eq(expected, 1e-6)
+        );
+        assert_ne!(anchor, translated_anchor);
+    }
+
     #[test]
     fn player_skin_capacity_allows_replacement_but_not_new_skin_when_full() {
         use super::player_skin_cache_allows;

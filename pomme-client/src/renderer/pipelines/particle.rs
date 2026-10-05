@@ -14,8 +14,8 @@ use crate::renderer::{MAX_FRAMES_IN_FLIGHT, shader, util};
 pub const MAX_PARTICLE_QUADS: usize = 16384;
 const MAX_VERTS: usize = MAX_PARTICLE_QUADS * 6;
 
-/// One camera-facing particle billboard, extracted per frame from the
-/// particle store.
+/// One particle quad, extracted per frame from the particle store. Most use a
+/// full-camera billboard; Java LOOKAT_Y quads keep a yaw-only orientation.
 pub struct ParticleQuad {
     /// Partial-tick-lerped world-space position (quad center).
     pub pos: [f32; 3],
@@ -25,20 +25,27 @@ pub struct ParticleQuad {
     pub u1: f32,
     pub v0: f32,
     pub v1: f32,
-    /// Packed RGBA8; rgb already multiplied by tint and world light.
+    /// Java `ARGB.colorFromFloat` packed RGBA8, before lightmap multiplication.
     pub color: u32,
+    /// Packed byte UV2 (block in low byte, sky in next byte); regular nibbles
+    /// are level*16 and smooth emission retains its sub-nibble values.
+    pub light_uv: u32,
     /// Vanilla `SingleQuadParticle.Layer`: false = opaque/cutout terrain
     /// layer, true = alpha-blended translucent layer.
     pub translucent: bool,
+    /// Java `SingleQuadParticle.FacingCameraMode.LOOKAT_Y`; all other quads
+    /// use the normal full-camera billboard.
+    pub look_at_y: bool,
     pub rotation: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct ParticleVertex {
+pub(crate) struct ParticleVertex {
     position: [f32; 3],
     uv: [f32; 2],
     color: u32,
+    light_uv: u32,
 }
 
 fn particle_billboard_axes(right: Vec3, up: Vec3, rotation: [f32; 4]) -> (Vec3, Vec3) {
@@ -52,6 +59,18 @@ fn particle_billboard_axes(right: Vec3, up: Vec3, rotation: [f32; 4]) -> (Vec3, 
     }
 }
 
+fn particle_camera_axes(camera: &Camera, look_at_y: bool) -> (Vec3, Vec3) {
+    if look_at_y {
+        let orientation = camera.orientation();
+        // Java LOOKAT_Y uses Quaternion.set(0, camera.rotation().y, 0,
+        // camera.rotation().w), intentionally discarding camera pitch.
+        let yaw = Quat::from_xyzw(0.0, orientation.y, 0.0, orientation.w).normalize();
+        (yaw * Vec3::X, yaw * Vec3::Y)
+    } else {
+        camera.billboard_axes()
+    }
+}
+
 fn particle_corner_position(
     center: Vec3,
     right: Vec3,
@@ -61,6 +80,58 @@ fn particle_corner_position(
     quad_size: f32,
 ) -> Vec3 {
     center + (right * nx + up * ny) * quad_size
+}
+
+/// The CPU-side vertex conversion used immediately before the GPU upload.
+pub(crate) fn build_particle_vertices(
+    camera: &Camera,
+    quads: &[ParticleQuad],
+) -> (Vec<ParticleVertex>, usize) {
+    let (xyz_right, xyz_up) = camera.billboard_axes();
+    let (look_right, look_up) = particle_camera_axes(camera, true);
+    let mut verts = Vec::with_capacity(quads.len().min(MAX_PARTICLE_QUADS) * 6);
+    let emit = |verts: &mut Vec<ParticleVertex>, translucent: bool| {
+        for quad in quads.iter().filter(|q| q.translucent == translucent) {
+            if verts.len() >= MAX_VERTS {
+                return;
+            }
+            let center = Vec3::from(quad.pos);
+            let (base_right, base_up) = if quad.look_at_y {
+                (look_right, look_up)
+            } else {
+                (xyz_right, xyz_up)
+            };
+            let (rotated_right, rotated_up) =
+                particle_billboard_axes(base_right, base_up, quad.rotation);
+            let corner = |nx: f32, ny: f32, u: f32, v: f32| ParticleVertex {
+                position: particle_corner_position(
+                    center,
+                    rotated_right,
+                    rotated_up,
+                    nx,
+                    ny,
+                    quad.size,
+                )
+                .into(),
+                uv: [u, v],
+                color: quad.color,
+                light_uv: quad.light_uv,
+            };
+            let corners = [
+                corner(1.0, -1.0, quad.u1, quad.v1),
+                corner(1.0, 1.0, quad.u1, quad.v0),
+                corner(-1.0, 1.0, quad.u0, quad.v0),
+                corner(-1.0, -1.0, quad.u0, quad.v1),
+            ];
+            for &i in &[0usize, 1, 2, 0, 2, 3] {
+                verts.push(corners[i]);
+            }
+        }
+    };
+    emit(&mut verts, false);
+    let opaque_verts = verts.len();
+    emit(&mut verts, true);
+    (verts, opaque_verts)
 }
 
 pub struct ParticlePipeline {
@@ -256,47 +327,10 @@ impl ParticlePipeline {
             return;
         }
 
-        let (right, up) = camera.billboard_axes();
+        // Opaque quads first, then translucent (Vanilla's separate layers).
+        let (vertices, opaque_verts) = build_particle_vertices(camera, quads);
+        self.vertices = vertices;
         let verts = &mut self.vertices;
-        verts.clear();
-        verts.reserve(quads.len().min(MAX_PARTICLE_QUADS) * 6);
-        // Opaque quads first, then translucent, so each layer is one
-        // contiguous draw range (vanilla renders the layers separately).
-        let emit = |verts: &mut Vec<ParticleVertex>, translucent: bool| {
-            for quad in quads.iter().filter(|q| q.translucent == translucent) {
-                if verts.len() >= MAX_VERTS {
-                    return;
-                }
-                let center = Vec3::from(quad.pos);
-                let (rotated_right, rotated_up) = particle_billboard_axes(right, up, quad.rotation);
-                let corner = |nx: f32, ny: f32, u: f32, v: f32| ParticleVertex {
-                    position: particle_corner_position(
-                        center,
-                        rotated_right,
-                        rotated_up,
-                        nx,
-                        ny,
-                        quad.size,
-                    )
-                    .into(),
-                    uv: [u, v],
-                    color: quad.color,
-                };
-                // Vanilla QuadParticleRenderState corner order and UV mapping.
-                let corners = [
-                    corner(1.0, -1.0, quad.u1, quad.v1),
-                    corner(1.0, 1.0, quad.u1, quad.v0),
-                    corner(-1.0, 1.0, quad.u0, quad.v0),
-                    corner(-1.0, -1.0, quad.u0, quad.v1),
-                ];
-                for &i in &[0usize, 1, 2, 0, 2, 3] {
-                    verts.push(corners[i]);
-                }
-            }
-        };
-        emit(verts, false);
-        let opaque_verts = verts.len();
-        emit(verts, true);
 
         let bytes = bytemuck::cast_slice::<ParticleVertex, u8>(&verts);
         if let Some(alloc) = self.vertex_allocations[frame].as_mut() {
@@ -362,7 +396,10 @@ impl ParticlePipeline {
 mod tests {
     use glam::{Quat, Vec3};
 
-    use super::{particle_billboard_axes, particle_corner_position};
+    use super::{
+        ParticleVertex, build_particle_vertices, particle_billboard_axes, particle_camera_axes,
+        particle_corner_position,
+    };
 
     #[test]
     fn unrotated_particle_axes_match_the_original_quaternion_path() {
@@ -397,6 +434,102 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn lookat_y_discards_camera_pitch_while_xyz_tracks_it() {
+        use crate::renderer::camera::Camera;
+
+        let mut camera = Camera::new(16.0 / 9.0);
+        camera.look_dir = crate::entity::components::LookDirection::new(35.0, 0.0);
+        let (yaw_right, yaw_up) = particle_camera_axes(&camera, true);
+        let (xyz_right, xyz_up) = particle_camera_axes(&camera, false);
+        camera.look_dir = crate::entity::components::LookDirection::new(35.0, 55.0);
+        let (pitched_yaw_right, pitched_yaw_up) = particle_camera_axes(&camera, true);
+        let (pitched_xyz_right, pitched_xyz_up) = particle_camera_axes(&camera, false);
+
+        assert!((yaw_right - pitched_yaw_right).length() < 1e-5);
+        assert!((yaw_up - pitched_yaw_up).length() < 1e-5);
+        assert!((xyz_right - pitched_xyz_right).length() < 1e-5);
+        assert!((xyz_up - pitched_xyz_up).length() > 0.1);
+        assert!(yaw_up.y > 0.999);
+        assert!(yaw_right.y.abs() < 1e-5);
+    }
+
+    #[test]
+    fn particle_vertex_stride_matches_shader_attribute_offsets() {
+        assert_eq!(std::mem::size_of::<ParticleVertex>(), 28);
+        assert_eq!(std::mem::offset_of!(ParticleVertex, position), 0);
+        assert_eq!(std::mem::offset_of!(ParticleVertex, uv), 12);
+        assert_eq!(std::mem::offset_of!(ParticleVertex, color), 20);
+        assert_eq!(std::mem::offset_of!(ParticleVertex, light_uv), 24);
+    }
+
+    #[test]
+    fn pure_vertex_builder_preserves_material_uv_light_and_layer_order() {
+        use crate::renderer::ParticleQuad;
+        use crate::renderer::camera::Camera;
+
+        let quad = |u0, u1, translucent| ParticleQuad {
+            pos: [2.0, 3.0, 4.0],
+            size: 0.25,
+            u0,
+            u1,
+            v0: 0.2,
+            v1: 0.4,
+            color: 0x1234_5678,
+            light_uv: 0x00f0_00a0,
+            translucent,
+            look_at_y: false,
+            rotation: Quat::IDENTITY.to_array(),
+        };
+        let camera = Camera::new(16.0 / 9.0);
+        let (vertices, opaque_count) =
+            build_particle_vertices(&camera, &[quad(0.11, 0.19, true), quad(0.31, 0.39, false)]);
+        assert_eq!(vertices.len(), 12);
+        assert_eq!(opaque_count, 6);
+        assert_eq!(vertices[0].uv, [0.39, 0.4]);
+        assert_eq!(vertices[2].uv, [0.31, 0.2]);
+        assert_eq!(vertices[0].color, 0x1234_5678);
+        assert_eq!(vertices[0].light_uv, 0x00f0_00a0);
+        assert_eq!(vertices[6].uv, [0.19, 0.4]);
+        assert_eq!(vertices[8].uv, [0.11, 0.2]);
+    }
+
+    #[test]
+    fn cpu_vertex_builder_applies_lookat_y_before_output() {
+        use crate::renderer::ParticleQuad;
+        use crate::renderer::camera::Camera;
+
+        let quad = |look_at_y| ParticleQuad {
+            pos: [0.0; 3],
+            size: 1.0,
+            u0: 0.1,
+            u1: 0.2,
+            v0: 0.3,
+            v1: 0.4,
+            color: u32::MAX,
+            light_uv: 0,
+            translucent: false,
+            look_at_y,
+            rotation: Quat::IDENTITY.to_array(),
+        };
+        let mut camera = Camera::new(16.0 / 9.0);
+        camera.look_dir = crate::entity::components::LookDirection::new(35.0, 0.0);
+        let (flat_look, _) = build_particle_vertices(&camera, &[quad(true)]);
+        let (flat_billboard, _) = build_particle_vertices(&camera, &[quad(false)]);
+        camera.look_dir = crate::entity::components::LookDirection::new(35.0, 55.0);
+        let (pitched_look, _) = build_particle_vertices(&camera, &[quad(true)]);
+        let (pitched_billboard, _) = build_particle_vertices(&camera, &[quad(false)]);
+        assert!(
+            (Vec3::from(flat_look[0].position) - Vec3::from(pitched_look[0].position)).length()
+                < 1e-5
+        );
+        assert!(
+            (Vec3::from(flat_billboard[0].position) - Vec3::from(pitched_billboard[0].position))
+                .length()
+                > 0.1
+        );
     }
 
     #[test]
@@ -461,6 +594,12 @@ fn create_pipeline(
             binding: 0,
             format: vk::Format::R8G8B8A8Unorm,
             offset: 20,
+        },
+        vk::VertexInputAttributeDescription {
+            location: 3,
+            binding: 0,
+            format: vk::Format::R32Uint,
+            offset: 24,
         },
     ];
     let vertex_input = vk::PipelineVertexInputStateCreateInfo {
