@@ -6,7 +6,7 @@
 - 比較環境を分離する。**A=Pomme→公式26.2 dedicated server**はclient semantic boundaryだけを比較し、serverが権威を持つ状態をPomme実装欠如と誤判定しない。**B=SteelMC singleplayer→公式 integrated server**はgameplay authority比較の主系統とする。Aはpacket、prediction、応答適用などclient境界の補助比較に限定する。
 - 母集合出所: entity/command/recipe/loot/criteria/damage/attributeの登録は公式逆コンパイルsource内の登録箇所。Itemsの1177は`minecraft-26.2-decompiled/src/net/minecraft/world/item/Items.java:152-1358`の直接宣言数であって完全ID集合ではない。Steelのregistry/generated dataは比較対象・coverage証拠であり、公式母集合の代替ではない。
 - 確認方法: 回収draftとscratch調査記録を統合し、sourceは静的確認のみ。build/test/server/clientの実行比較、asset provenanceの独立認証は未実施であり、一致件数・互換率を主張しない。
-- Evidence status: cited path/symbol/line proves only that bounded source span. Directly rechecked claims are marked `確認済み`; draft-inherited citations not re-opened in this pass are investigation leads, not new verification. Bounded search failure is `unknown`, never proof of absence. Official source is an unverified local 26.2 candidate until artifact hash/provenance gate passes.
+- Evidence status: this repair mechanically checked existence and 1-based line bounds for all cited source paths/spans (75 paths, 204 spans); that check does not prove each symbol or claim. Rechecked registration/ID counts are identified below. Other inherited source-based claims whose symbol/content was not re-opened remain explicitly `未検証 / unknown` investigation leads, not verified findings. Bounded search failure is `unknown`, never proof of absence. Official source is an unverified local 26.2 candidate until artifact hash/provenance gate passes.
 
 ## 対象と責任境界
 
