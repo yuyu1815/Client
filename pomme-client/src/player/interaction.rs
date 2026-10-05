@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use azalea_block::BlockState;
 use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
@@ -47,6 +47,276 @@ const SWING_DURATION: i32 = 6;
 const CONSUME_EFFECTS_START_FRACTION: f32 = 0.21875;
 const CONSUME_EFFECTS_INTERVAL: i32 = 4;
 const MAX_FOOD_LEVEL: u32 = 20;
+
+fn brush_dust_tick(elapsed: i32) -> bool {
+    elapsed % 10 == 5
+}
+
+fn brush_arm_flip(hand: InteractionHand, main_hand_right: bool) -> f64 {
+    if (hand == InteractionHand::MainHand) == main_hand_right {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+fn brush_dust_direction(face: Direction, view: Vec3) -> (f32, f32) {
+    match face {
+        Direction::Down | Direction::Up => (view.z, -view.x),
+        Direction::North => (1.0, -0.1),
+        Direction::South => (-1.0, 0.1),
+        Direction::West => (-0.1, -1.0),
+        Direction::East => (0.1, 1.0),
+    }
+}
+
+fn brush_block_particle(
+    state: BlockState,
+) -> (
+    crate::particle::ServerParticleKind,
+    crate::particle::ServerParticleOptions,
+) {
+    (
+        crate::particle::ServerParticleKind::Block,
+        crate::particle::ServerParticleOptions::Block(state),
+    )
+}
+
+fn water_bucket_destination(
+    hit: BlockHitResult,
+    chunks: &ChunkStore,
+    creative: bool,
+    sneaking: bool,
+) -> Option<BlockPos> {
+    use crate::world::block::{
+        can_be_replaced_by_water, can_place_water, is_air, liquid_block_container_type,
+    };
+
+    if hit.world_border {
+        return None;
+    }
+    let loaded_state = |pos: BlockPos| {
+        chunks
+            .get_chunk(&azalea_core::position::ChunkPos::new(
+                pos.x.div_euclid(16),
+                pos.z.div_euclid(16),
+            ))
+            .map(|_| chunks.get_block_state(pos.x, pos.y, pos.z))
+    };
+    let adjacent = hit.block_pos.offset_with_direction(hit.face);
+    let clicked = loaded_state(hit.block_pos)?;
+    // BucketItem.use chooses the first location from the block's Java type,
+    // before asking whether this particular state can accept water.
+    let is_container = liquid_block_container_type(clicked)
+        // Older per-protocol state tables predate `k`; preserve their historical
+        // candidate rule until those tables can carry Java interface metadata.
+        .unwrap_or_else(|| can_place_water(clicked, creative));
+    let initial = if is_container {
+        hit.block_pos
+    } else {
+        adjacent
+    };
+    let accepts = |state: BlockState, hit_result_present: bool| {
+        let can_place_inside = match liquid_block_container_type(state) {
+            Some(is_container) => is_container && can_place_water(state, creative),
+            // Preserve the old selector/acceptance contract on historical
+            // version tables that do not carry exact Java container metadata.
+            None => can_place_water(state, creative),
+        };
+        is_air(state)
+            || ((can_be_replaced_by_water(state) || can_place_inside)
+                && (!sneaking || !hit_result_present))
+    };
+    if let Some(state) = loaded_state(initial)
+        && accepts(state, true)
+    {
+        Some(initial)
+    } else if let Some(state) = loaded_state(adjacent)
+        && accepts(state, false)
+    {
+        // emptyContents retries relative to the original hit with a null hit
+        // result; sneak restrictions therefore do not apply to the fallback.
+        Some(adjacent)
+    } else {
+        None
+    }
+}
+
+fn bucket_evaporation_particle() -> (
+    crate::particle::ServerParticleKind,
+    crate::particle::ServerParticleOptions,
+) {
+    (
+        crate::particle::ServerParticleKind::LargeSmoke,
+        crate::particle::ServerParticleOptions::Simple,
+    )
+}
+
+fn candle_particle_offsets(state: BlockState) -> Option<&'static [(f64, f64, f64)]> {
+    use crate::world::block::{block_id, block_properties};
+    match block_id(state) {
+        "candle" | "white_candle" | "light_gray_candle" | "gray_candle" | "black_candle"
+        | "brown_candle" | "red_candle" | "orange_candle" | "yellow_candle" | "lime_candle"
+        | "green_candle" | "cyan_candle" | "light_blue_candle" | "blue_candle"
+        | "purple_candle" | "magenta_candle" | "pink_candle" => {
+            const OFFSETS: [&[(f64, f64, f64)]; 4] = [
+                &[(0.5, 0.5, 0.5)],
+                &[(0.375, 0.4375, 0.5), (0.625, 0.5, 0.4375)],
+                &[
+                    (0.5, 0.3125, 0.625),
+                    (0.375, 0.4375, 0.5),
+                    (0.5625, 0.5, 0.4375),
+                ],
+                &[
+                    (0.4375, 0.3125, 0.5625),
+                    (0.625, 0.4375, 0.5625),
+                    (0.375, 0.4375, 0.375),
+                    (0.5625, 0.5, 0.375),
+                ],
+            ];
+            let count = block_properties(state)
+                .get("candles")
+                .and_then(|value| value.parse::<usize>().ok())?
+                .clamp(1, 4);
+            Some(OFFSETS[count - 1])
+        }
+        "candle_cake"
+        | "white_candle_cake"
+        | "light_gray_candle_cake"
+        | "gray_candle_cake"
+        | "black_candle_cake"
+        | "brown_candle_cake"
+        | "red_candle_cake"
+        | "orange_candle_cake"
+        | "yellow_candle_cake"
+        | "lime_candle_cake"
+        | "green_candle_cake"
+        | "cyan_candle_cake"
+        | "light_blue_candle_cake"
+        | "blue_candle_cake"
+        | "purple_candle_cake"
+        | "magenta_candle_cake"
+        | "pink_candle_cake" => Some(&[(0.5, 1.0, 0.5)]),
+        _ => None,
+    }
+}
+
+fn candle_extinguish_requests(
+    state: BlockState,
+    pos: BlockPos,
+    hit_y: f64,
+    hand_empty: bool,
+    may_build: bool,
+) -> Vec<crate::world::particle_tick::ParticleSpawnRequest> {
+    use crate::particle::{ServerParticleKind as Kind, ServerParticleOptions as Options};
+    use crate::world::block::{block_id, block_properties};
+    let Some(offsets) = candle_particle_offsets(state) else {
+        return Vec::new();
+    };
+    let id = block_id(state);
+    let candle_cake = id == "candle_cake" || id.ends_with("_candle_cake");
+    if !hand_empty
+        || !may_build
+        || block_properties(state).get("lit") != Some("true")
+        || (candle_cake && hit_y - f64::from(pos.y) <= 0.5)
+    {
+        return Vec::new();
+    }
+    offsets
+        .iter()
+        .map(
+            |&(x, y, z)| crate::world::particle_tick::ParticleSpawnRequest {
+                kind: Kind::Smoke,
+                options: Options::Simple,
+                position: dvec3(
+                    f64::from(pos.x) + x,
+                    f64::from(pos.y) + y,
+                    f64::from(pos.z) + z,
+                ),
+                velocity: dvec3(0.0, 0.1, 0.0),
+                always_visible: false,
+            },
+        )
+        .collect()
+}
+
+fn dragon_egg_teleport_requests(
+    pos: BlockPos,
+    chunks: &ChunkStore,
+    border: &crate::world::border::WorldBorder,
+    seed: u64,
+) -> Vec<crate::world::particle_tick::ParticleSpawnRequest> {
+    use crate::particle::{ServerParticleKind as Kind, ServerParticleOptions as Options};
+    let mut rng = fastrand::Rng::with_seed(seed);
+    let min_y = chunks.min_y();
+    let max_y = min_y + chunks.height() as i32;
+    for _ in 0..1000 {
+        let candidate = BlockPos::new(
+            pos.x + rng.i32(0..16) - rng.i32(0..16),
+            pos.y + rng.i32(0..8) - rng.i32(0..8),
+            pos.z + rng.i32(0..16) - rng.i32(0..16),
+        );
+        if candidate.y < min_y
+            || candidate.y >= max_y
+            || !border.contains(f64::from(candidate.x), f64::from(candidate.z))
+            || chunks
+                .get_chunk(&azalea_core::position::ChunkPos::new(
+                    candidate.x.div_euclid(16),
+                    candidate.z.div_euclid(16),
+                ))
+                .is_none()
+            || !is_air(chunks.get_block_state(candidate.x, candidate.y, candidate.z))
+            || is_air(chunks.get_block_state(candidate.x, candidate.y - 1, candidate.z))
+        {
+            continue;
+        }
+        return (0..128)
+            .map(|_| {
+                let t = rng.f64();
+                let velocity = dvec3(
+                    f64::from((rng.f32() - 0.5) * 0.2),
+                    f64::from((rng.f32() - 0.5) * 0.2),
+                    f64::from((rng.f32() - 0.5) * 0.2),
+                );
+                let x = (f64::from(candidate.x) + t * (f64::from(pos.x) - f64::from(candidate.x)))
+                    + (rng.f64() - 0.5)
+                    + 0.5;
+                let y = f64::from(candidate.y)
+                    + t * (f64::from(pos.y) - f64::from(candidate.y))
+                    + rng.f64()
+                    - 0.5;
+                let z = (f64::from(candidate.z) + t * (f64::from(pos.z) - f64::from(candidate.z)))
+                    + (rng.f64() - 0.5)
+                    + 0.5;
+                crate::world::particle_tick::ParticleSpawnRequest {
+                    kind: Kind::Portal,
+                    options: Options::Simple,
+                    position: dvec3(x, y, z),
+                    velocity,
+                    always_visible: false,
+                }
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+fn spawn_interaction_particle_requests(
+    requests: Vec<crate::world::particle_tick::ParticleSpawnRequest>,
+    camera_pos: DVec3,
+    chunks: &ChunkStore,
+    effects: &mut BreakEffects,
+) {
+    for request in requests {
+        effects.particles.add_particle_spawn_request(
+            request,
+            camera_pos,
+            effects.registry,
+            chunks,
+            effects.biome_climate,
+        );
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ItemUseResult {
@@ -126,8 +396,6 @@ struct ActiveUse {
     bow: bool,
     sound: SoundRef,
     has_particles: bool,
-    /// Atlas key for the crumb particles, e.g. `item/cooked_beef`.
-    texture: String,
     use_effects: UseEffects,
     duration: i32,
     /// Counts down from `duration`; vanilla lets it run negative until the
@@ -163,8 +431,7 @@ impl MiningContext {
         let mut result = Self {
             mining_efficiency: player.attribute_value("minecraft:mining_efficiency", 0.0) as f32,
             block_break_speed: player.attribute_value("minecraft:block_break_speed", 1.0) as f32,
-            submerged_mining_speed: player
-                .attribute_value("minecraft:submerged_mining_speed", 0.2)
+            submerged_mining_speed: player.attribute_value("minecraft:submerged_mining_speed", 0.2)
                 as f32,
             eyes_in_water: player.eyes_in_water,
             ..Self::default()
@@ -188,6 +455,8 @@ impl MiningContext {
 
 pub struct InteractionState {
     pub target: Option<HitResult>,
+    world_border: crate::world::border::WorldBorder,
+    may_build: bool,
     seq: u32,
     carried_slot: u8,
     last_teleport_seq: u32,
@@ -207,6 +476,9 @@ pub struct InteractionState {
     pending_writable_book: Option<InteractionHand>,
     pub pending_command_block: Option<(BlockPos, std::time::Instant)>,
     using_item: Option<ActiveUse>,
+    brush_use: Option<(InteractionHand, i32)>,
+    water_evaporates: bool,
+    main_hand_right: bool,
     /// Keeps charge/one-shot items from retriggering while the use button stays
     /// down, even if the server clears its using-item metadata mid-hold.
     use_latch: Option<(InteractionHand, ItemKind)>,
@@ -229,12 +501,25 @@ pub struct InteractionState {
     /// Vanilla `Player.lastItemInMainHand`; `None` is the empty hand.
     last_item_in_main_hand: Option<ItemStackData>,
     mining_context: MiningContext,
+    item_tags: BTreeMap<String, Vec<ItemKind>>,
+    thundering: bool,
+    animal_particle_interactions: Vec<AnimalParticleInteraction>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AnimalParticleInteraction {
+    ForcedAge(i32),
+    AgeLock(i32, bool),
+    Immediate(i32, crate::entity::particle_animals::InteractionParticle),
+    MooshroomStew(i32, ItemKind),
 }
 
 impl InteractionState {
     pub fn new() -> Self {
         Self {
             target: None,
+            world_border: crate::world::border::WorldBorder::default(),
+            may_build: true,
             seq: 0,
             // Vanilla `MultiPlayerGameMode.carriedIndex` starts at 0, the slot
             // a fresh inventory selects, so a join sends nothing until it
@@ -258,6 +543,9 @@ impl InteractionState {
             pending_writable_book: None,
             pending_command_block: None,
             using_item: None,
+            brush_use: None,
+            water_evaporates: false,
+            main_hand_right: true,
             use_latch: None,
             using_bow: false,
             swinging: false,
@@ -273,11 +561,28 @@ impl InteractionState {
             attack_strength_ticker: 0,
             last_item_in_main_hand: None,
             mining_context: MiningContext::default(),
+            item_tags: BTreeMap::new(),
+            thundering: false,
+            animal_particle_interactions: Vec::new(),
         }
     }
 
     pub fn take_visual_edits(&mut self) -> Vec<(BlockPos, BlockState)> {
         std::mem::take(&mut self.visual_edits)
+    }
+
+    pub(crate) fn set_item_tags(&mut self, tags: &BTreeMap<String, Vec<ItemKind>>) {
+        if self.item_tags != *tags {
+            self.item_tags.clone_from(tags);
+        }
+    }
+
+    pub(crate) fn set_thundering(&mut self, thundering: bool) {
+        self.thundering = thundering;
+    }
+
+    pub(crate) fn take_animal_particle_interactions(&mut self) -> Vec<AnimalParticleInteraction> {
+        std::mem::take(&mut self.animal_particle_interactions)
     }
 
     /// Vanilla `retainKnownServerState`: an existing entry only gets its
@@ -541,6 +846,7 @@ impl InteractionState {
         creative: bool,
         world_border: &crate::world::border::WorldBorder,
     ) {
+        self.world_border = *world_border;
         let entity_reach = ENTITY_REACH
             + if creative {
                 CREATIVE_ENTITY_REACH_BONUS
@@ -599,6 +905,7 @@ impl InteractionState {
         effects: &mut BreakEffects,
     ) -> Vec<BlockPos> {
         self.mining_context = MiningContext::from_player(player);
+        self.may_build = player.may_build;
         let mut dirty_chunks = Vec::new();
         self.tick_hand_animation(look);
         self.update_placement_heights(held_stack, offhand_stack);
@@ -646,6 +953,15 @@ impl InteractionState {
                 look,
                 effects,
             );
+            self.tick_brush_use(
+                input,
+                held_stack,
+                offhand_stack,
+                look,
+                eye_pos,
+                chunks,
+                effects,
+            );
             self.tick_attack_cooldown(held_stack);
             self.update_swing();
             return dirty_chunks;
@@ -653,7 +969,7 @@ impl InteractionState {
 
         // Vanilla `handleKeybinds` drains attack clicks while an item is in
         // use, and `continueAttack` early-returns on `isUsingItem`.
-        let using = self.using_item.is_some() || self.using_bow;
+        let using = self.using_item.is_some() || self.using_bow || self.brush_use.is_some();
         let use_latched = self.use_latch.is_some();
 
         if !using && !use_latched && input.action_just_pressed(input::Action::Destroy) {
@@ -775,10 +1091,118 @@ impl InteractionState {
             look,
             effects,
         );
+        self.tick_brush_use(
+            input,
+            held_stack,
+            offhand_stack,
+            look,
+            eye_pos,
+            chunks,
+            effects,
+        );
         self.tick_attack_cooldown(held_stack);
         self.update_swing();
 
         dirty_chunks
+    }
+
+    fn tick_brush_use(
+        &mut self,
+        input: &InputState,
+        held_stack: Option<&ItemStackData>,
+        offhand_stack: Option<&ItemStackData>,
+        look: LookDirection,
+        eye_pos: DVec3,
+        chunks: &ChunkStore,
+        effects: &mut BreakEffects,
+    ) {
+        let Some((hand, elapsed)) = self.brush_use else {
+            return;
+        };
+        if !input.performing_action(input::Action::Use)
+            || stack_for_hand(hand, held_stack, offhand_stack)
+                .is_none_or(|stack| stack.kind != ItemKind::Brush)
+        {
+            self.brush_use = None;
+            return;
+        }
+        let elapsed = elapsed + 1;
+        self.brush_use = Some((hand, elapsed));
+        if !brush_dust_tick(elapsed) {
+            return;
+        }
+        let Some(HitResult::Block(hit)) = self.target else {
+            self.brush_use = None;
+            return;
+        };
+        let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
+        if !crate::world::block::should_spawn_terrain_particles(state)
+            || crate::world::block::has_invisible_render_shape(state)
+        {
+            return;
+        }
+        let dir = look.as_vec();
+        let flip = brush_arm_flip(hand, self.main_hand_right);
+        let (dx, dz) = brush_dust_direction(hit.face, dir);
+        let mut pos = hit.hit_point;
+        if hit.face == Direction::West {
+            pos.x -= 1.0e-6;
+        } else if hit.face == Direction::North {
+            pos.z -= 1.0e-6;
+        }
+        let count = fastrand::usize(7..12);
+        for _ in 0..count {
+            self.spawn_interaction_block_particle(
+                state,
+                pos,
+                dvec3(
+                    f64::from(dx) * flip * 3.0 * fastrand::f64(),
+                    0.0,
+                    f64::from(dz) * flip * 3.0 * fastrand::f64(),
+                ),
+                eye_pos,
+                chunks,
+                effects,
+            );
+        }
+    }
+
+    fn spawn_dragon_egg_particles(
+        &self,
+        pos: BlockPos,
+        camera_pos: DVec3,
+        chunks: &ChunkStore,
+        effects: &mut BreakEffects,
+    ) {
+        let requests =
+            dragon_egg_teleport_requests(pos, chunks, &self.world_border, fastrand::u64(..));
+        spawn_interaction_particle_requests(requests, camera_pos, chunks, effects);
+    }
+
+    fn spawn_interaction_block_particle(
+        &self,
+        state: BlockState,
+        pos: DVec3,
+        velocity: DVec3,
+        camera_pos: DVec3,
+        chunks: &ChunkStore,
+        effects: &mut BreakEffects,
+    ) {
+        let (kind, options) = brush_block_particle(state);
+        effects.particles.add_particles_from_packet(
+            kind,
+            options,
+            false,
+            false,
+            pos,
+            velocity,
+            1.0,
+            0,
+            camera_pos,
+            effects.registry,
+            chunks,
+            effects.biome_climate,
+        );
     }
 
     fn pick_block_or_entity(&self, sender: &PacketSender, include_data: bool) {
@@ -887,6 +1311,22 @@ impl InteractionState {
             return;
         }
 
+        if crate::world::block::block_id(state) == "dragon_egg" {
+            self.spawn_dragon_egg_particles(hit.block_pos, player_pos, chunks, effects);
+        }
+        if !hit.world_border && self.may_build {
+            spawn_interaction_particle_requests(
+                crate::world::particle_tick::redstone_ore_interaction_requests(
+                    chunks,
+                    hit.block_pos,
+                    (self.seq as u64).wrapping_add(0x7265_6473_746f_6e65),
+                ),
+                player_pos,
+                chunks,
+                effects,
+            );
+        }
+
         self.start_destroy_block(
             hit,
             chunks,
@@ -932,7 +1372,7 @@ impl InteractionState {
             return;
         }
 
-        self.continue_destroy_block(
+        if self.continue_destroy_block(
             hit,
             chunks,
             sender,
@@ -943,7 +1383,18 @@ impl InteractionState {
             held_stack,
             effects,
             dirty_chunks,
-        );
+        ) {
+            let current_state =
+                chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
+            effects.particles.add_breaking_block_effect(
+                hit.block_pos,
+                current_state,
+                hit.face,
+                effects.registry,
+                chunks,
+                effects.biome_climate,
+            );
+        }
         self.swing(sender);
     }
 
@@ -992,6 +1443,21 @@ impl InteractionState {
                 hit.location - hit.entity_pos,
                 sneaking,
             ));
+            // Vanilla runs mobInteract locally before the server result arrives.
+            // Mirror only the exact client-side particle branch; never consume or
+            // mutate the player's inventory here.
+            if !spectator
+                && let Some(stack) = held_stack.filter(|stack| stack.count > 0)
+                && let Some(action) = animal_particle_interaction(
+                    entities,
+                    hit.entity_id,
+                    stack,
+                    &self.item_tags,
+                    self.thundering,
+                )
+            {
+                self.animal_particle_interactions.push(action);
+            }
             // Spectator entity interaction is packet-only; no local item use.
             if spectator || !entity_interaction_passes(entities, hit.entity_id, held_stack) {
                 if !spectator {
@@ -1051,18 +1517,86 @@ impl InteractionState {
                 },
                 seq: self.seq,
             }));
-            // A menu-opening block consumes the click (vanilla `useWithoutItem`)
+            // Blocks whose vanilla useWithoutItem succeeds consume the click
             // unless sneaking with something in hand.
-            // TODO: other interactive blocks (brewing stand, dispenser, ...)
-            // should consume the click here too once their menus render.
             // Spectator block use is packet-only so the server can open/observe
             // containers; never predict local placement or item use.
             if spectator {
                 return true;
             }
+            let target = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
+            let target_id = crate::world::block::block_id(target);
+            if !suppress_block_use
+                && held_stack.is_some_and(|stack| stack.kind == ItemKind::WaterBucket)
+                && matches!(
+                    target_id,
+                    "cauldron" | "water_cauldron" | "lava_cauldron" | "powder_snow_cauldron"
+                )
+            {
+                // CauldronInteractions maps WATER_BUCKET to a successful
+                // block use on each cauldron variant; BucketItem.use is skipped.
+                return true;
+            }
+            if !suppress_block_use && hand == InteractionHand::MainHand && target_id == "dragon_egg"
+            {
+                self.spawn_dragon_egg_particles(hit.block_pos, eye_pos, chunks, effects);
+                return true;
+            }
+            if !suppress_block_use
+                && !hit.world_border
+                && matches!(target_id, "redstone_ore" | "deepslate_redstone_ore")
+            {
+                spawn_interaction_particle_requests(
+                    crate::world::particle_tick::redstone_ore_interaction_requests(
+                        chunks,
+                        hit.block_pos,
+                        (self.seq as u64).wrapping_add(0x7265_6473_746f_6e65),
+                    ),
+                    eye_pos,
+                    chunks,
+                    effects,
+                );
+                // RedStoneOreBlock.useItemOn consumes non-BlockItems, including
+                // buckets, but passes a BlockItem through when placement is valid.
+                let placement_possible = place_block.is_some_and(|predicted| {
+                    placement_target(hit, crate::world::block::block_id(predicted), chunks)
+                        .is_some()
+                });
+                if !placement_possible {
+                    return true;
+                }
+            }
             if !suppress_block_use {
-                let target =
-                    chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
+                let requests = candle_extinguish_requests(
+                    target,
+                    hit.block_pos,
+                    hit.hit_point.y,
+                    held_stack.is_none_or(|stack| stack.count <= 0),
+                    self.may_build,
+                );
+                if !requests.is_empty() {
+                    let mut properties: Vec<_> = crate::world::block::block_properties(target)
+                        .entries()
+                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                        .collect();
+                    if let Some((_, value)) = properties.iter_mut().find(|(key, _)| key == "lit") {
+                        *value = "false".to_owned();
+                    }
+                    let predicted =
+                        crate::world::block::state_with_properties(target_id, &properties)
+                            .unwrap_or(target);
+                    self.retain_known_server_state(hit.block_pos, target, player_pos);
+                    self.visual_edits.push((hit.block_pos, target));
+                    chunks.set_block_state(
+                        hit.block_pos.x,
+                        hit.block_pos.y,
+                        hit.block_pos.z,
+                        predicted,
+                    );
+                    mark_dirty(&hit.block_pos, dirty_chunks);
+                    spawn_interaction_particle_requests(requests, eye_pos, chunks, effects);
+                    return true;
+                }
                 if opens_menu(target) {
                     return true;
                 }
@@ -1080,6 +1614,41 @@ impl InteractionState {
                 dirty_chunks,
             ) {
                 return result;
+            }
+            let destination = water_bucket_destination(hit, chunks, creative, sneaking);
+            if held_stack.is_some_and(|stack| stack.kind == ItemKind::WaterBucket)
+                && self.water_evaporates
+                && let Some(destination) = destination
+            {
+                let pos = dvec3(
+                    destination.x as f64,
+                    destination.y as f64,
+                    destination.z as f64,
+                );
+                let (kind, options) = bucket_evaporation_particle();
+                for _ in 0..8 {
+                    effects.particles.add_particles_from_packet(
+                        kind,
+                        options.clone(),
+                        false,
+                        false,
+                        dvec3(
+                            pos.x + fastrand::f64(),
+                            pos.y + fastrand::f64(),
+                            pos.z + fastrand::f64(),
+                        ),
+                        dvec3(0.0, 0.0, 0.0),
+                        1.0,
+                        0,
+                        eye_pos,
+                        effects.registry,
+                        chunks,
+                        effects.biome_climate,
+                    );
+                }
+            }
+            if held_stack.is_some_and(|stack| stack.kind == ItemKind::Brush) {
+                self.brush_use = Some((hand, 0));
             }
             held_stack.is_some()
         } else {
@@ -1173,6 +1742,26 @@ impl InteractionState {
         hit_block
     }
 
+    pub fn water_bucket_destination(
+        &self,
+        chunks: &ChunkStore,
+        creative: bool,
+        sneaking: bool,
+    ) -> Option<BlockPos> {
+        let HitResult::Block(hit) = self.target? else {
+            return None;
+        };
+        water_bucket_destination(hit, chunks, creative, sneaking)
+    }
+
+    pub fn set_water_evaporates(&mut self, water_evaporates: bool) {
+        self.water_evaporates = water_evaporates;
+    }
+
+    pub fn set_main_hand_right(&mut self, main_hand_right: bool) {
+        self.main_hand_right = main_hand_right;
+    }
+
     pub fn take_writable_book_open(&mut self) -> Option<InteractionHand> {
         self.pending_writable_book.take()
     }
@@ -1260,7 +1849,6 @@ impl InteractionState {
                 bow: use_kind == ActiveUseKind::Bow,
                 sound: SoundRef::event("entity.generic.eat"),
                 has_particles: false,
-                texture: String::new(),
                 use_effects: crate::player::menu_click::component::<UseEffects>(stack)
                     .unwrap_or_default(),
                 duration,
@@ -1297,7 +1885,6 @@ impl InteractionState {
             bow: false,
             sound: SoundRef::resolve(&consumable.sound),
             has_particles: consumable.has_consume_particles,
-            texture: format!("item/{}", item_resource_name(stack.kind)),
             use_effects: crate::player::menu_click::component::<UseEffects>(stack)
                 .unwrap_or_default(),
             duration,
@@ -1313,6 +1900,7 @@ impl InteractionState {
                 16,
                 audio,
                 effects.particles,
+                effects.registry,
                 chunks,
                 player_pos,
                 eye_pos,
@@ -1327,6 +1915,7 @@ impl InteractionState {
     /// longer-lived interaction controller; block prediction/sequences remain.
     pub fn reset_player_transients_for_respawn(&mut self) {
         self.using_item = None;
+        self.brush_use = None;
         self.use_latch = None;
         self.using_bow = false;
         self.swinging = false;
@@ -1352,6 +1941,7 @@ impl InteractionState {
         // UseItem send.
         if !is_using {
             self.using_item = None;
+            self.brush_use = None;
             self.using_bow = false;
         }
     }
@@ -1435,6 +2025,7 @@ impl InteractionState {
                 5,
                 audio,
                 effects.particles,
+                effects.registry,
                 chunks,
                 player_pos,
                 eye_pos,
@@ -1477,6 +2068,7 @@ impl InteractionState {
         &mut self,
         audio: &mut AudioEngine,
         particles: &mut ParticleStore,
+        registry: &BlockRegistry,
         chunks: &ChunkStore,
         player_pos: DVec3,
         eye_pos: DVec3,
@@ -1489,7 +2081,7 @@ impl InteractionState {
             return;
         }
         emit_consume_effects(
-            &active, 16, audio, particles, chunks, player_pos, eye_pos, look,
+            &active, 16, audio, particles, registry, chunks, player_pos, eye_pos, look,
         );
     }
 
@@ -1598,7 +2190,8 @@ impl InteractionState {
             return;
         }
 
-        let progress = destroy_progress(state, on_ground, creative, held_stack, self.mining_context);
+        let progress =
+            destroy_progress(state, on_ground, creative, held_stack, self.mining_context);
 
         if progress >= 1.0 {
             if self.is_destroying {
@@ -1680,10 +2273,10 @@ impl InteractionState {
         held_stack: Option<&ItemStackData>,
         effects: &mut BreakEffects,
         dirty_chunks: &mut Vec<BlockPos>,
-    ) {
+    ) -> bool {
         if self.destroy_delay > 0 {
             self.destroy_delay -= 1;
-            return;
+            return true;
         }
 
         if !self.same_destroy_target(hit.block_pos, held_stack) {
@@ -1699,22 +2292,17 @@ impl InteractionState {
                 effects,
                 dirty_chunks,
             );
-            return;
+            return true;
         }
 
         let state = chunks.get_block_state(hit.block_pos.x, hit.block_pos.y, hit.block_pos.z);
         if is_air(state) {
             self.is_destroying = false;
-            return;
+            return false;
         }
 
-        self.destroy_progress += destroy_progress(
-            state,
-            on_ground,
-            creative,
-            held_stack,
-            self.mining_context,
-        );
+        self.destroy_progress +=
+            destroy_progress(state, on_ground, creative, held_stack, self.mining_context);
         if self.destroy_ticks % 4.0 == 0.0 {
             play_hit_sound(audio, state, hit.block_pos);
         }
@@ -1745,6 +2333,7 @@ impl InteractionState {
             self.destroy_progress = 0.0;
             self.destroy_ticks = 0.0;
         }
+        true
     }
 
     /// Ports vanilla `MultiPlayerGameMode.ensureHasSentCarriedItem`: tell the
@@ -1853,13 +2442,14 @@ fn same_item_same_components(a: Option<&ItemStackData>, b: Option<&ItemStackData
     }
 }
 
-/// Whether right-clicking this block opens a menu we render (so the use
-/// click is consumed: no block placement, no item use).
+/// Whether known vanilla block-use behavior consumes the click, so we do not
+/// locally fall through to block placement or item use.
 fn opens_menu(state: BlockState) -> bool {
     let id = crate::world::block::block_id(state);
     matches!(
         id,
         "crafting_table"
+            | "brewing_stand"
             | "furnace"
             | "blast_furnace"
             | "smoker"
@@ -1993,6 +2583,7 @@ fn emit_consume_effects(
     particle_count: u32,
     audio: &mut AudioEngine,
     particles: &mut ParticleStore,
+    registry: &BlockRegistry,
     chunks: &ChunkStore,
     player_pos: DVec3,
     eye_pos: DVec3,
@@ -2001,7 +2592,8 @@ fn emit_consume_effects(
     if active.has_particles {
         particles.add_item_use_particles(
             particle_count,
-            &active.texture,
+            active.kind,
+            registry,
             eye_pos,
             look.x_rot_deg(),
             look.y_rot_deg(),
@@ -2044,6 +2636,172 @@ fn play_block_sound(audio: &mut AudioEngine, event: &str, pos: BlockPos, volume:
         pitch,
         fastrand::u64(..),
     );
+}
+
+fn animal_particle_interaction(
+    entities: &EntityStore,
+    entity_id: i32,
+    stack: &ItemStackData,
+    item_tags: &BTreeMap<String, Vec<ItemKind>>,
+    thundering: bool,
+) -> Option<AnimalParticleInteraction> {
+    let entity = entities.living.get(&entity_id)?;
+    if entity.health <= 0.0 {
+        return None;
+    }
+    let kind = entity.entity_type;
+    let item = stack.kind;
+    let has_tag = |name: &str| {
+        item_tags
+            .get(&format!("minecraft:{name}"))
+            .is_some_and(|items| items.contains(&item))
+    };
+    let baby_can_age = entity.is_baby && !entity.age_locked;
+
+    if item == ItemKind::GoldenDandelion
+        && entity.is_baby
+        && crate::entity::is_ageable_mob(kind)
+        && !matches!(
+            kind,
+            EntityKind::Villager | EntityKind::ZombieHorse | EntityKind::SkeletonHorse
+        )
+    {
+        return Some(AnimalParticleInteraction::AgeLock(
+            entity_id,
+            !entity.age_locked,
+        ));
+    }
+    if kind == EntityKind::Mooshroom
+        && entity.variant == 1
+        && !entity.is_baby
+        && suspicious_stew_effect_item(item)
+    {
+        return Some(AnimalParticleInteraction::MooshroomStew(entity_id, item));
+    }
+    if matches!(kind, EntityKind::Camel | EntityKind::CamelHusk)
+        && baby_can_age
+        && has_tag(if kind == EntityKind::Camel {
+            "camel_food"
+        } else {
+            "camel_husk_food"
+        })
+    {
+        return Some(AnimalParticleInteraction::Immediate(
+            entity_id,
+            crate::entity::particle_animals::InteractionParticle::AgeUpHappyVillager,
+        ));
+    }
+    if matches!(kind, EntityKind::Llama | EntityKind::TraderLlama)
+        && baby_can_age
+        && has_tag("llama_food")
+    {
+        return Some(AnimalParticleInteraction::Immediate(
+            entity_id,
+            crate::entity::particle_animals::InteractionParticle::AgeUpHappyVillager,
+        ));
+    }
+    if kind == EntityKind::Dolphin && baby_can_age && has_tag("fishes") {
+        return Some(AnimalParticleInteraction::ForcedAge(entity_id));
+    }
+    if kind == EntityKind::Tadpole && !entity.age_locked && has_tag("frog_food") {
+        return Some(AnimalParticleInteraction::Immediate(
+            entity_id,
+            crate::entity::particle_animals::InteractionParticle::AgeUpHappyVillager,
+        ));
+    }
+    if kind == EntityKind::Panda
+        && baby_can_age
+        && entity.panda_flags & 0x10 == 0
+        && !(entity.variant == 2 && thundering)
+        && has_tag("panda_food")
+    {
+        return Some(AnimalParticleInteraction::ForcedAge(entity_id));
+    }
+    let max_health = entity
+        .attributes
+        .get("minecraft:max_health")
+        .map(|&health| health as f32)
+        .unwrap_or(match kind {
+            EntityKind::Wolf => 40.0,
+            EntityKind::Cat | EntityKind::Ocelot => 10.0,
+            _ => f32::INFINITY,
+        });
+    if entity.is_tame
+        && entity.health < max_health
+        && matches!(
+            kind,
+            EntityKind::Wolf | EntityKind::Cat | EntityKind::Ocelot
+        )
+    {
+        return None;
+    }
+    if crate::entity::is_equine(&kind)
+        && baby_can_age
+        && matches!(
+            item,
+            ItemKind::Wheat
+                | ItemKind::Sugar
+                | ItemKind::HayBlock
+                | ItemKind::Apple
+                | ItemKind::Carrot
+                | ItemKind::GoldenCarrot
+                | ItemKind::GoldenApple
+                | ItemKind::EnchantedGoldenApple
+        )
+    {
+        return Some(AnimalParticleInteraction::Immediate(
+            entity_id,
+            crate::entity::particle_animals::InteractionParticle::AgeUpHappyVillager,
+        ));
+    }
+    if baby_can_age
+        && animal_food_tag(kind).is_some_and(has_tag)
+        && crate::entity::is_ageable_mob(kind)
+    {
+        return Some(AnimalParticleInteraction::ForcedAge(entity_id));
+    }
+    None
+}
+
+fn animal_food_tag(kind: EntityKind) -> Option<&'static str> {
+    Some(match kind {
+        EntityKind::Pig => "pig_food",
+        EntityKind::Cow | EntityKind::Mooshroom => "cow_food",
+        EntityKind::Sheep => "sheep_food",
+        EntityKind::Chicken => "chicken_food",
+        EntityKind::Rabbit => "rabbit_food",
+        EntityKind::Goat => "goat_food",
+        EntityKind::Turtle => "turtle_food",
+        EntityKind::Wolf => "wolf_food",
+        EntityKind::Cat => "cat_food",
+        EntityKind::Ocelot => "ocelot_food",
+        EntityKind::Fox => "fox_food",
+        EntityKind::Sniffer => "sniffer_food",
+        EntityKind::Armadillo => "armadillo_food",
+        EntityKind::Axolotl => "axolotl_food",
+        _ => return None,
+    })
+}
+
+fn suspicious_stew_effect_item(item: ItemKind) -> bool {
+    matches!(
+        item,
+        ItemKind::Dandelion
+            | ItemKind::GoldenDandelion
+            | ItemKind::Torchflower
+            | ItemKind::Poppy
+            | ItemKind::BlueOrchid
+            | ItemKind::Allium
+            | ItemKind::AzureBluet
+            | ItemKind::RedTulip
+            | ItemKind::OrangeTulip
+            | ItemKind::WhiteTulip
+            | ItemKind::PinkTulip
+            | ItemKind::OxeyeDaisy
+            | ItemKind::Cornflower
+            | ItemKind::WitherRose
+            | ItemKind::LilyOfTheValley
+    )
 }
 
 fn entity_interaction_passes(
@@ -2236,6 +2994,57 @@ pub fn raycast(
     chunks: &ChunkStore,
     world_border: &crate::world::border::WorldBorder,
 ) -> Option<BlockHitResult> {
+    raycast_with_shape(
+        origin,
+        dir,
+        max_dist,
+        chunks,
+        world_border,
+        BlockRayShape::Outline,
+    )
+}
+
+/// Projectile/block collision ray. This is deliberately separate from the
+/// player selection ray: Java BlockClipContext uses COLLIDER and Fluid.NONE.
+pub fn raycast_collision(
+    origin: DVec3,
+    dir: Vec3,
+    max_dist: f32,
+    chunks: &ChunkStore,
+    world_border: &crate::world::border::WorldBorder,
+    entity_bottom: f64,
+    descending: bool,
+) -> Option<BlockHitResult> {
+    raycast_with_shape(
+        origin,
+        dir,
+        max_dist,
+        chunks,
+        world_border,
+        BlockRayShape::Collision {
+            entity_bottom,
+            descending,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+enum BlockRayShape {
+    Outline,
+    Collision {
+        entity_bottom: f64,
+        descending: bool,
+    },
+}
+
+fn raycast_with_shape(
+    origin: DVec3,
+    dir: Vec3,
+    max_dist: f32,
+    chunks: &ChunkStore,
+    world_border: &crate::world::border::WorldBorder,
+    shape: BlockRayShape,
+) -> Option<BlockHitResult> {
     let dir = dir.as_dvec3();
     let mut bx = origin.x.floor() as i32;
     let mut by = origin.y.floor() as i32;
@@ -2284,26 +3093,51 @@ pub fn raycast(
     while t <= max_dist as f64 {
         // A 26.2 offset shape can protrude up to 1/16 block across its cell.
         // Check horizontal neighbors as well; state-only shape tables stay canonical.
+        let min_block_y = if matches!(shape, BlockRayShape::Collision { .. }) {
+            by - 1
+        } else {
+            by
+        };
         for x in bx - 1..=bx + 1 {
-            for z in bz - 1..=bz + 1 {
-                let block_pos = BlockPos { x, y: by, z };
-                if !checked.insert(block_pos) {
-                    continue;
-                }
-                let state = chunks.get_block_state(x, by, z);
-                if is_air(state) {
-                    continue;
-                }
-                let outline = block_shape::outline_shape(state);
-                if let Some((hit_point, face, inside)) =
-                    clip_with_interaction_override(origin, reach_end, block_pos, outline, state)
-                {
-                    let hit = border_hit(origin, hit_point, block_pos, face, inside, world_border);
-                    if nearest.is_none_or(|old| {
-                        hit.hit_point.distance_squared(origin)
-                            < old.hit_point.distance_squared(origin)
-                    }) {
-                        nearest = Some(hit);
+            for y in min_block_y..=by {
+                for z in bz - 1..=bz + 1 {
+                    let block_pos = BlockPos { x, y, z };
+                    if !checked.insert(block_pos) {
+                        continue;
+                    }
+                    let state = chunks.get_block_state(x, y, z);
+                    if is_air(state) {
+                        continue;
+                    }
+                    let clipped = match shape {
+                        BlockRayShape::Outline => {
+                            let outline = block_shape::outline_shape(state);
+                            clip_with_interaction_override(
+                                origin, reach_end, block_pos, outline, state,
+                            )
+                        }
+                        BlockRayShape::Collision {
+                            entity_bottom,
+                            descending,
+                        } => clip_collision_shape(
+                            origin,
+                            reach_end,
+                            block_pos,
+                            state,
+                            chunks,
+                            entity_bottom,
+                            descending,
+                        ),
+                    };
+                    if let Some((hit_point, face, inside)) = clipped {
+                        let hit =
+                            border_hit(origin, hit_point, block_pos, face, inside, world_border);
+                        if nearest.is_none_or(|old| {
+                            hit.hit_point.distance_squared(origin)
+                                < old.hit_point.distance_squared(origin)
+                        }) {
+                            nearest = Some(hit);
+                        }
                     }
                 }
             }
@@ -2526,6 +3360,69 @@ fn clip_with_interaction_override(
     Some((point, face, inside))
 }
 
+const COLLISION_FULL_CUBE: &[LocalBox] = &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
+const SCAFFOLD_STABLE: &[LocalBox] = &[
+    [0.0, 0.875, 0.0, 1.0, 1.0, 1.0],
+    [0.0, 0.0, 0.0, 0.125, 1.0, 0.125],
+    [0.0, 0.0, 0.875, 0.125, 1.0, 1.0],
+    [0.875, 0.0, 0.0, 1.0, 1.0, 0.125],
+    [0.875, 0.0, 0.875, 1.0, 1.0, 1.0],
+];
+const SCAFFOLD_UNSTABLE_BOTTOM: &[LocalBox] = &[[0.0, 0.0, 0.0, 1.0, 0.125, 1.0]];
+const EMPTY_COLLISION: &[LocalBox] = &[];
+
+fn clip_collision_shape(
+    from: DVec3,
+    to: DVec3,
+    pos: BlockPos,
+    state: BlockState,
+    chunks: &ChunkStore,
+    entity_bottom: f64,
+    descending: bool,
+) -> Option<(DVec3, Direction, bool)> {
+    let block_origin = dvec3(pos.x as f64, pos.y as f64, pos.z as f64);
+    let (boxes, offset) = match crate::world::block::block_id(state) {
+        "moving_piston" => {
+            let moved = chunks
+                .block_entities
+                .get(&pos)
+                .and_then(|entity| crate::world::block_entity::moving_block_collision(&entity.nbt));
+            if let Some((moved_state, progress)) = moved {
+                (
+                    block_shape::partial_shape(moved_state).unwrap_or(COLLISION_FULL_CUBE),
+                    crate::world::block::block_offset(moved_state, pos) + block_origin + progress,
+                )
+            } else {
+                (
+                    block_shape::partial_shape(state).unwrap_or(COLLISION_FULL_CUBE),
+                    block_origin,
+                )
+            }
+        }
+        "powder_snow" => (EMPTY_COLLISION, block_origin),
+        "scaffolding" => {
+            let props = crate::world::block::block_properties(state);
+            let is_above_block = entity_bottom > pos.y as f64 + 1.0 - f64::from(1.0e-5_f32);
+            let boxes = if is_above_block && !descending {
+                SCAFFOLD_STABLE
+            } else if props.get("distance") != Some("0")
+                && props.get("bottom") == Some("true")
+                && entity_bottom > pos.y as f64 - f64::from(1.0e-5_f32)
+            {
+                SCAFFOLD_UNSTABLE_BOTTOM
+            } else {
+                EMPTY_COLLISION
+            };
+            (boxes, block_origin)
+        }
+        _ => (
+            block_shape::partial_shape(state).unwrap_or(COLLISION_FULL_CUBE),
+            block_origin + crate::world::block::block_offset(state, pos),
+        ),
+    };
+    clip_shape_with_offset(from, to, pos, boxes, offset - block_origin)
+}
+
 /// Vanilla `AABB.getDirection`: a ray entering a box's min face on an axis is
 /// travelling positive along it, so the face it hit points back the other way.
 fn face_direction(face: Face) -> Direction {
@@ -2615,11 +3512,279 @@ mod tests {
     }
 
     #[test]
+    fn camel_feed_input_routes_only_valid_baby_food_to_the_particle_store() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        let mut entities = EntityStore::new();
+        entities.spawn_living(
+            42,
+            EntityKind::Camel,
+            dvec3(1.0, 2.0, 3.0).into(),
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        entities.living.get_mut(&42).unwrap().is_baby = true;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let mut audio = AudioEngine::silent_for_test();
+        let chunks = ChunkStore::new(1);
+        let registry = BlockRegistry::test_empty();
+        let mut particle_atlas = crate::renderer::chunk::atlas::AtlasUVMap::test_empty();
+        for kind in ["happy_villager", "pause_mob_growth", "reset_mob_growth"] {
+            particle_atlas.test_insert_particle_sprites(kind, vec!["particle/animal_test".into()]);
+        }
+        let mut particles = ParticleStore::new(
+            particle_atlas,
+            std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty()),
+            std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty()),
+            std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty()),
+        );
+        let climate = HashMap::new();
+        let mut state = InteractionState::new();
+        state
+            .item_tags
+            .insert("minecraft:camel_food".into(), vec![ItemKind::Cactus]);
+        state.target = Some(HitResult::Entity(EntityHitResult {
+            entity_id: 42,
+            location: dvec3(1.0, 2.5, 3.0),
+            entity_pos: dvec3(1.0, 2.0, 3.0),
+        }));
+
+        macro_rules! interact {
+            ($stack:expr, $offhand:expr) => {{
+                let mut effects = BreakEffects {
+                    particles: &mut particles,
+                    registry: &registry,
+                    biome_climate: &climate,
+                };
+                let success = state.start_use_item(
+                    &sender,
+                    &mut audio,
+                    &chunks,
+                    dvec3(0.0, 0.0, 0.0),
+                    Aabb::from_center(DVec3::ZERO, 0.6, 1.8),
+                    DVec3::ZERO,
+                    LookDirection::default(),
+                    None,
+                    None,
+                    $stack,
+                    20,
+                    false,
+                    false,
+                    &entities,
+                    InteractionHand::MainHand,
+                    false,
+                    $offhand,
+                    false,
+                    false,
+                    false,
+                    false,
+                    &mut effects,
+                    &mut Vec::new(),
+                );
+                (
+                    success,
+                    std::mem::take(&mut state.animal_particle_interactions),
+                )
+            }};
+        }
+
+        let wrong_food = ItemStackData::new(ItemKind::Wheat, 1);
+        let (success, actions) = interact!(Some(&wrong_food), None);
+        assert!(success);
+        assert!(actions.is_empty());
+        let cactus = ItemStackData::new(ItemKind::Cactus, 1);
+        let (success, actions) = interact!(None, Some(&cactus));
+        assert!(success);
+        assert!(actions.is_empty());
+        entities.living.get_mut(&42).unwrap().is_baby = false;
+        let (success, actions) = interact!(Some(&cactus), None);
+        assert!(success);
+        assert!(actions.is_empty());
+        entities.living.get_mut(&42).unwrap().is_baby = true;
+        entities.living.get_mut(&42).unwrap().age_locked = true;
+        let (success, actions) = interact!(Some(&cactus), None);
+        assert!(success);
+        assert!(actions.is_empty());
+
+        entities.living.get_mut(&42).unwrap().age_locked = false;
+        let (success, actions) = interact!(Some(&cactus), None);
+        assert!(success);
+        assert!(matches!(
+            actions.as_slice(),
+            [AnimalParticleInteraction::Immediate(42, _)]
+        ));
+        let request = entities
+            .interaction_particle_requests(
+                42,
+                crate::entity::particle_animals::InteractionParticle::AgeUpHappyVillager,
+                7,
+            )
+            .pop()
+            .unwrap();
+        particles.add_particle_spawn_request(request, DVec3::ZERO, &registry, &chunks, &climate);
+        assert_eq!(particles.test_particle_count(), 1);
+
+        entities.living.get_mut(&42).unwrap().entity_type = EntityKind::Mooshroom;
+        entities.living.get_mut(&42).unwrap().variant = 1;
+        entities.living.get_mut(&42).unwrap().is_baby = true;
+        let flower = ItemStackData::new(ItemKind::Poppy, 1);
+        let (success, actions) = interact!(Some(&flower), None);
+        assert!(success);
+        assert!(actions.is_empty());
+        entities.living.get_mut(&42).unwrap().is_baby = false;
+        entities.living.get_mut(&42).unwrap().variant = 0;
+        let (success, actions) = interact!(Some(&flower), None);
+        assert!(success);
+        assert!(actions.is_empty());
+        entities.living.get_mut(&42).unwrap().variant = 1;
+        entities.living.get_mut(&42).unwrap().health = 0.0;
+        let (success, actions) = interact!(Some(&flower), None);
+        assert!(success);
+        assert!(actions.is_empty());
+        entities.living.get_mut(&42).unwrap().health = 20.0;
+        for excluded in [ItemKind::Bowl, ItemKind::Shears, ItemKind::Cactus] {
+            let excluded = ItemStackData::new(excluded, 1);
+            let (success, actions) = interact!(Some(&excluded), None);
+            assert!(success);
+            assert!(actions.is_empty());
+        }
+        let (success, actions) = interact!(Some(&flower), None);
+        assert!(success);
+        assert!(matches!(
+            actions.as_slice(),
+            [AnimalParticleInteraction::MooshroomStew(
+                42,
+                ItemKind::Poppy
+            )]
+        ));
+        let first = entities.mooshroom_stew_item_requests(42, flower.kind, 8);
+        assert_eq!(first.len(), 4);
+        assert!(
+            first
+                .iter()
+                .all(|p| p.kind == crate::particle::ServerParticleKind::Effect)
+        );
+        for request in first {
+            particles.add_particle_spawn_request(
+                request,
+                DVec3::ZERO,
+                &registry,
+                &chunks,
+                &climate,
+            );
+        }
+        let repeated = entities.mooshroom_stew_item_requests(42, flower.kind, 9);
+        assert_eq!(repeated.len(), 2);
+        assert!(
+            repeated
+                .iter()
+                .all(|p| p.kind == crate::particle::ServerParticleKind::Smoke)
+        );
+        for request in repeated {
+            particles.add_particle_spawn_request(
+                request,
+                DVec3::ZERO,
+                &registry,
+                &chunks,
+                &climate,
+            );
+        }
+        assert_eq!(particles.test_particle_count(), 7);
+
+        entities.living.get_mut(&42).unwrap().entity_type = EntityKind::Cow;
+        entities.living.get_mut(&42).unwrap().is_baby = true;
+        let golden_dandelion = ItemStackData::new(ItemKind::GoldenDandelion, 1);
+        let (success, actions) = interact!(Some(&golden_dandelion), None);
+        assert!(success);
+        assert!(matches!(
+            actions.as_slice(),
+            [AnimalParticleInteraction::AgeLock(42, true)]
+        ));
+        assert!(entities.start_age_lock_particle_timer(42, true));
+        let lock_request = entities
+            .tick_animal_particles(&chunks, 0)
+            .pop()
+            .expect("golden dandelion starts the age-lock burst");
+        assert_eq!(
+            lock_request.kind,
+            crate::particle::ServerParticleKind::PauseMobGrowth
+        );
+        particles.add_particle_spawn_request(
+            lock_request,
+            DVec3::ZERO,
+            &registry,
+            &chunks,
+            &climate,
+        );
+        assert_eq!(particles.test_particle_count(), 8);
+        for tick in 1..40 {
+            let _ = entities.tick_animal_particles(&chunks, tick);
+        }
+        assert!(entities.living[&42].age_locked);
+        let (success, actions) = interact!(Some(&golden_dandelion), None);
+        assert!(success);
+        assert!(matches!(
+            actions.as_slice(),
+            [AnimalParticleInteraction::AgeLock(42, false)]
+        ));
+        assert!(entities.start_age_lock_particle_timer(42, false));
+        let reset_request = entities
+            .tick_animal_particles(&chunks, 40)
+            .pop()
+            .expect("second golden dandelion emits reset particles");
+        assert_eq!(
+            reset_request.kind,
+            crate::particle::ServerParticleKind::ResetMobGrowth
+        );
+        particles.add_particle_spawn_request(
+            reset_request,
+            DVec3::ZERO,
+            &registry,
+            &chunks,
+            &climate,
+        );
+        assert_eq!(particles.test_particle_count(), 9);
+
+        state
+            .item_tags
+            .insert("minecraft:cow_food".into(), vec![ItemKind::Wheat]);
+        entities.living.get_mut(&42).unwrap().age_locked = false;
+        let (success, actions) = interact!(Some(&wrong_food), None);
+        assert!(success);
+        assert!(matches!(
+            actions.as_slice(),
+            [AnimalParticleInteraction::ForcedAge(42)]
+        ));
+        assert!(entities.start_age_up_particle_timer(42));
+        let age_request = entities
+            .tick_animal_particles(&chunks, 41)
+            .pop()
+            .expect("forced age call emits its first four-tick particle");
+        assert_eq!(
+            age_request.kind,
+            crate::particle::ServerParticleKind::HappyVillager
+        );
+        particles.add_particle_spawn_request(
+            age_request,
+            DVec3::ZERO,
+            &registry,
+            &chunks,
+            &climate,
+        );
+        assert_eq!(particles.test_particle_count(), 10);
+    }
+
+    #[test]
     fn hopper_block_use_is_consumed_by_menu() {
         let _protocol = crate::world::block::test_protocol_guard();
         crate::world::block::init("26.2");
         assert!(opens_menu(
             crate::world::block::first_state_of("hopper").unwrap()
+        ));
+        assert!(opens_menu(
+            crate::world::block::first_state_of("brewing_stand").unwrap()
         ));
         assert!(!opens_menu(
             crate::world::block::first_state_of("stone").unwrap()
@@ -2839,7 +4004,6 @@ mod tests {
             bow: false,
             sound: SoundRef::event("entity.generic.eat"),
             has_particles: true,
-            texture: "item/apple".to_string(),
             use_effects: UseEffects::default(),
             duration: 32,
             remaining: 12,
@@ -2868,7 +4032,6 @@ mod tests {
             bow: false,
             sound: SoundRef::event("entity.generic.eat"),
             has_particles: true,
-            texture: "item/apple".to_string(),
             use_effects: UseEffects::default(),
             duration: 32,
             remaining: 12,
@@ -2913,7 +4076,6 @@ mod tests {
             bow: false,
             sound: SoundRef::event("item.armor.equip_generic"),
             has_particles: false,
-            texture: "entity/shield/shield_base_nopattern".to_string(),
             use_effects: UseEffects::default(),
             duration: 72_000,
             remaining: 12,
@@ -3069,6 +4231,813 @@ mod tests {
             ),
             BlockRegistry::test_empty(),
         )
+    }
+
+    #[test]
+    fn item_interaction_particles_use_native_options_and_brush_cadence() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let state = crate::world::block::first_state_of("stone").unwrap();
+        let (brush_kind, brush_options) = brush_block_particle(state);
+        assert!(matches!(
+            brush_kind,
+            crate::particle::ServerParticleKind::Block
+        ));
+        assert!(
+            matches!(brush_options, crate::particle::ServerParticleOptions::Block(s) if s == state)
+        );
+        let (bucket_kind, bucket_options) = bucket_evaporation_particle();
+        assert!(matches!(
+            bucket_kind,
+            crate::particle::ServerParticleKind::LargeSmoke
+        ));
+        assert!(matches!(
+            bucket_options,
+            crate::particle::ServerParticleOptions::Simple
+        ));
+        assert_eq!(
+            (1..=25)
+                .filter(|tick| brush_dust_tick(*tick))
+                .collect::<Vec<_>>(),
+            [5, 15, 25]
+        );
+        for (main_hand_right, main_flip, off_flip) in [(true, 1.0, -1.0), (false, -1.0, 1.0)] {
+            assert_eq!(
+                brush_arm_flip(InteractionHand::MainHand, main_hand_right),
+                main_flip
+            );
+            assert_eq!(
+                brush_arm_flip(InteractionHand::OffHand, main_hand_right),
+                off_flip
+            );
+        }
+        assert_eq!(
+            brush_dust_direction(Direction::Up, Vec3::new(0.2, 0.3, 0.4)),
+            (0.4, -0.2)
+        );
+        assert_eq!(
+            brush_dust_direction(Direction::Down, Vec3::new(0.2, 0.3, 0.4)),
+            (0.4, -0.2)
+        );
+        assert_eq!(
+            brush_dust_direction(Direction::North, Vec3::ZERO),
+            (1.0, -0.1)
+        );
+        assert_eq!(
+            brush_dust_direction(Direction::South, Vec3::ZERO),
+            (-1.0, 0.1)
+        );
+        assert_eq!(
+            brush_dust_direction(Direction::West, Vec3::ZERO),
+            (-0.1, -1.0)
+        );
+        assert_eq!(
+            brush_dust_direction(Direction::East, Vec3::ZERO),
+            (0.1, 1.0)
+        );
+    }
+
+    #[test]
+    fn water_bucket_destination_uses_open_liquid_container_before_adjacent_block() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        let mut column = azalea_world::chunk::Chunk::default();
+        column.sections = vec![Default::default(); chunks.section_count() as usize].into();
+        chunks.load_decoded_chunk(azalea_core::position::ChunkPos::new(0, 0), column);
+        let clicked = BlockPos::new(1, 64, 1);
+        let hit = BlockHitResult {
+            block_pos: clicked,
+            face: Direction::East,
+            hit_point: DVec3::ZERO,
+            inside: false,
+            world_border: false,
+        };
+        let stairs = crate::world::block::default_state_of("oak_stairs").unwrap();
+        chunks.set_block_state(clicked.x, clicked.y, clicked.z, stairs);
+        assert_eq!(
+            water_bucket_destination(hit, &chunks, false, false),
+            Some(clicked)
+        );
+        assert_eq!(
+            water_bucket_destination(hit, &chunks, false, true),
+            Some(BlockPos::new(2, 64, 1)),
+            "sneak blocks insertion into clicked dry stairs, then vanilla retries adjacent"
+        );
+        assert_eq!(
+            water_bucket_destination(
+                BlockHitResult {
+                    world_border: true,
+                    ..hit
+                },
+                &chunks,
+                false,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            water_bucket_destination(hit, &ChunkStore::new(1), false, false),
+            None,
+            "unloaded clicked block cannot be a water placement candidate"
+        );
+
+        // BucketItem.use selects adjacent for replaceable non-container clicks;
+        // it does not empty into hit.block_pos.
+        let replaceable = crate::world::block::default_state_of("short_grass").unwrap();
+        chunks.set_block_state(clicked.x, clicked.y, clicked.z, replaceable);
+        assert_eq!(
+            water_bucket_destination(hit, &chunks, false, false),
+            Some(BlockPos::new(2, 64, 1))
+        );
+
+        chunks.set_block_state(
+            clicked.x,
+            clicked.y,
+            clicked.z,
+            crate::world::block::default_state_of("stone").unwrap(),
+        );
+        let stone = crate::world::block::default_state_of("stone").unwrap();
+        chunks.set_block_state(2, 64, 1, stone);
+        assert_eq!(water_bucket_destination(hit, &chunks, false, false), None);
+        for name in ["end_portal", "end_gateway"] {
+            chunks.set_block_state(
+                2,
+                64,
+                1,
+                crate::world::block::default_state_of(name).unwrap(),
+            );
+            assert_eq!(
+                water_bucket_destination(hit, &chunks, false, false),
+                None,
+                "{name}"
+            );
+        }
+
+        let barrier = crate::world::block::default_state_of("barrier").unwrap();
+        chunks.set_block_state(clicked.x, clicked.y, clicked.z, barrier);
+        chunks.set_block_state(
+            2,
+            64,
+            1,
+            crate::world::block::default_state_of("air").unwrap(),
+        );
+        assert_eq!(
+            water_bucket_destination(hit, &chunks, false, false),
+            Some(BlockPos::new(2, 64, 1))
+        );
+        assert_eq!(
+            water_bucket_destination(hit, &chunks, true, false),
+            Some(clicked),
+            "BarrierBlock is a LiquidBlockContainer; only creative state acceptance changes the result"
+        );
+
+        let ladder_dry = crate::world::block::find_state(
+            "ladder",
+            &[("facing", "north"), ("waterlogged", "false")],
+        );
+        let ladder_wet = crate::world::block::find_state(
+            "ladder",
+            &[("facing", "north"), ("waterlogged", "true")],
+        );
+        for ladder in [ladder_dry, ladder_wet] {
+            chunks.set_block_state(clicked.x, clicked.y, clicked.z, ladder);
+            assert_eq!(
+                water_bucket_destination(hit, &chunks, false, false),
+                Some(clicked),
+                "LiquidBlockContainer type selects clicked before state-specific acceptance"
+            );
+            assert_eq!(
+                water_bucket_destination(hit, &chunks, false, true),
+                Some(BlockPos::new(2, 64, 1)),
+                "sneaking makes emptyContents retry adjacent with no hit result"
+            );
+        }
+
+        let wet_sign = crate::world::block::find_state(
+            "oak_sign",
+            &[("rotation", "0"), ("waterlogged", "true")],
+        );
+        chunks.set_block_state(clicked.x, clicked.y, clicked.z, wet_sign);
+        assert_eq!(
+            water_bucket_destination(hit, &chunks, false, false),
+            Some(clicked),
+            "wet SignBlock has w=false but SimpleWaterloggedBlock.canPlaceLiquid still returns true"
+        );
+        let double_slab = crate::world::block::find_state(
+            "oak_slab",
+            &[("type", "double"), ("waterlogged", "false")],
+        );
+        chunks.set_block_state(clicked.x, clicked.y, clicked.z, double_slab);
+        assert_eq!(
+            water_bucket_destination(hit, &chunks, false, false),
+            Some(BlockPos::new(2, 64, 1)),
+            "double slab type is selected first but its Java override rejects liquid"
+        );
+
+        for name in ["seagrass", "kelp", "kelp_plant"] {
+            let state = crate::world::block::default_state_of(name).unwrap();
+            chunks.set_block_state(clicked.x, clicked.y, clicked.z, state);
+            assert_eq!(
+                water_bucket_destination(hit, &chunks, false, false),
+                Some(clicked),
+                "propertyless LiquidBlockContainer {name}"
+            );
+        }
+
+        // Older version tables do not yet have Java class-membership metadata;
+        // keep their previous state-based candidate rule rather than pretending
+        // the native 26.2 class data describes those older APIs.
+        crate::world::block::init("1.21.11");
+        let old_ladder_dry = crate::world::block::find_state(
+            "ladder",
+            &[("facing", "north"), ("waterlogged", "false")],
+        );
+        let old_ladder_wet = crate::world::block::find_state(
+            "ladder",
+            &[("facing", "north"), ("waterlogged", "true")],
+        );
+        assert_eq!(
+            crate::world::block::liquid_block_container_type(old_ladder_dry),
+            None
+        );
+        chunks.set_block_state(
+            2,
+            64,
+            1,
+            crate::world::block::default_state_of("air").unwrap(),
+        );
+        chunks.set_block_state(clicked.x, clicked.y, clicked.z, old_ladder_dry);
+        assert_eq!(
+            water_bucket_destination(hit, &chunks, false, false),
+            Some(clicked)
+        );
+        chunks.set_block_state(clicked.x, clicked.y, clicked.z, old_ladder_wet);
+        assert_eq!(
+            water_bucket_destination(hit, &chunks, false, false),
+            Some(BlockPos::new(2, 64, 1))
+        );
+    }
+
+    #[test]
+    fn redstone_ore_attack_uses_the_same_immediate_visible_dust_source() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let (mut chunks, border) = border_test_world();
+        let pos = BlockPos::new(4, 64, 4);
+        chunks.set_block_state(
+            pos.x,
+            pos.y,
+            pos.z,
+            crate::world::block::find_state("deepslate_redstone_ore", &[("lit", "false")]),
+        );
+        let mut particles = particle_test_store();
+        let registry = BlockRegistry::test_empty();
+        let climate = HashMap::new();
+        let mut audio = AudioEngine::silent_for_test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let mut interaction = InteractionState::new();
+        interaction.world_border = border;
+        interaction.target = Some(HitResult::Block(BlockHitResult {
+            block_pos: pos,
+            face: Direction::Up,
+            hit_point: dvec3(4.5, 65.0, 4.5),
+            inside: false,
+            world_border: false,
+        }));
+        interaction.start_attack(
+            &chunks,
+            &sender,
+            &mut audio,
+            &InputState::new(),
+            dvec3(4.5, 64.0, 4.5),
+            true,
+            false,
+            false,
+            None,
+            &mut BreakEffects {
+                particles: &mut particles,
+                registry: &registry,
+                biome_climate: &climate,
+            },
+            &mut Vec::new(),
+        );
+        assert_eq!(particles.test_particle_count(), 6);
+    }
+
+    #[test]
+    fn redstone_ore_use_consumes_bucket_before_bucket_use_and_enqueues_visible_dust() {
+        use winit::event::{ElementState, MouseButton};
+
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let (mut chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+        let pos = BlockPos::new(8, 64, 8);
+        chunks.set_block_state(
+            pos.x,
+            pos.y,
+            pos.z,
+            crate::world::block::find_state("redstone_ore", &[("lit", "false")]),
+        );
+        let mut input = InputState::new();
+        input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let mut interaction = InteractionState::new();
+        interaction.set_water_evaporates(true);
+        interaction.target = Some(HitResult::Block(BlockHitResult {
+            block_pos: pos,
+            face: Direction::Up,
+            hit_point: dvec3(8.5, 65.0, 8.5),
+            inside: false,
+            world_border: false,
+        }));
+        let stack = ItemStackData::new(ItemKind::WaterBucket, 1);
+        let player_pos = dvec3(8.5, 64.0, 8.5);
+        let biome_climate = HashMap::new();
+        interaction.tick(
+            &input,
+            &chunks,
+            &sender,
+            &mut audio,
+            player_pos,
+            Aabb::from_center(player_pos, 0.3, 0.9),
+            player_pos + DVec3::Y * 1.62,
+            LookDirection::default(),
+            true,
+            false,
+            false,
+            &entities,
+            InteractionHand::MainHand,
+            false,
+            20,
+            0,
+            Some(&stack),
+            None,
+            false,
+            None,
+            None,
+            false,
+            false,
+            &crate::player::LocalPlayer::new(),
+            &mut BreakEffects {
+                particles: &mut particles,
+                registry: &registry,
+                biome_climate: &biome_climate,
+            },
+        );
+        assert_eq!(
+            particles.test_particle_count(),
+            6,
+            "ore Dust is emitted; consumed RedStoneOre use must not add 8 water-bucket smoke particles"
+        );
+    }
+
+    #[test]
+    fn water_bucket_evaporation_is_a_client_local_eight_large_smoke_burst() {
+        use winit::event::{ElementState, MouseButton};
+
+        let run = |water_evaporates: bool, stack_kind: ItemKind| {
+            let (chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+            let mut input = InputState::new();
+            input.on_mouse_button(MouseButton::Right, ElementState::Pressed);
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let sender = PacketSender::new(tx);
+            let mut state = InteractionState::new();
+            state.set_water_evaporates(water_evaporates);
+            state.target = Some(HitResult::Block(BlockHitResult {
+                block_pos: BlockPos::new(0, 64, 0),
+                face: Direction::Up,
+                hit_point: dvec3(0.5, 65.0, 0.5),
+                inside: false,
+                world_border: false,
+            }));
+            let stack = ItemStackData::new(stack_kind, 1);
+            let pos = dvec3(0.5, 64.0, 0.5);
+            let biome_climate = HashMap::new();
+            state.tick(
+                &input,
+                &chunks,
+                &sender,
+                &mut audio,
+                pos,
+                Aabb::from_center(pos, 0.3, 0.9),
+                pos + DVec3::Y * 1.62,
+                LookDirection::default(),
+                true,
+                false,
+                false,
+                &entities,
+                InteractionHand::MainHand,
+                false,
+                20,
+                0,
+                Some(&stack),
+                None,
+                false,
+                None,
+                None,
+                false,
+                false,
+                &crate::player::LocalPlayer::new(),
+                &mut BreakEffects {
+                    particles: &mut particles,
+                    registry: &registry,
+                    biome_climate: &biome_climate,
+                },
+            );
+            particles.test_pending().len()
+        };
+
+        assert_eq!(run(false, ItemKind::WaterBucket), 0);
+        assert_eq!(run(true, ItemKind::Bucket), 0);
+        assert_eq!(run(true, ItemKind::WaterBucket), 8);
+    }
+
+    #[test]
+    fn water_bucket_block_use_consumption_matches_java_before_evaporation_particles() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+
+        let run = |block: &str, sneaking: bool, water_evaporates: bool| {
+            let (mut chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+            let state = crate::world::block::default_state_of(block).unwrap();
+            chunks.set_block_state(0, 64, 0, state);
+            let hit = BlockHitResult {
+                block_pos: BlockPos::new(0, 64, 0),
+                face: Direction::Up,
+                hit_point: dvec3(0.5, 65.0, 0.5),
+                inside: false,
+                world_border: false,
+            };
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let sender = PacketSender::new(tx);
+            let mut interaction = InteractionState::new();
+            interaction.set_water_evaporates(water_evaporates);
+            interaction.target = Some(HitResult::Block(hit));
+            let player_pos = dvec3(0.5, 64.0, 0.5);
+            let biome_climate = HashMap::new();
+            interaction.start_use_item(
+                &sender,
+                &mut audio,
+                &chunks,
+                player_pos,
+                Aabb::from_center(player_pos, 0.3, 0.9),
+                player_pos + DVec3::Y * 1.62,
+                LookDirection::default(),
+                None,
+                None,
+                Some(&ItemStackData::new(ItemKind::WaterBucket, 1)),
+                20,
+                false,
+                false,
+                &entities,
+                InteractionHand::MainHand,
+                false,
+                None,
+                false,
+                false,
+                sneaking,
+                sneaking,
+                &mut BreakEffects {
+                    particles: &mut particles,
+                    registry: &registry,
+                    biome_climate: &biome_climate,
+                },
+                &mut Vec::new(),
+            );
+            particles.test_pending().len()
+        };
+
+        assert_eq!(run("brewing_stand", false, true), 0);
+        assert_eq!(run("brewing_stand", true, true), 8);
+        assert_eq!(run("stone", false, true), 8);
+        assert_eq!(run("stone", false, false), 0);
+    }
+
+    #[test]
+    fn water_bucket_empty_contents_uses_exact_java_replaceability_and_candidate_position() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let run = |clicked_state: BlockState,
+                   adjacent_state: BlockState,
+                   evaporates_at: (bool, bool),
+                   sneaking: bool| {
+            let (mut chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+            let mut column = azalea_world::chunk::Chunk::default();
+            column.sections = vec![Default::default(); chunks.section_count() as usize].into();
+            chunks.load_decoded_chunk(azalea_core::position::ChunkPos::new(0, 0), column);
+            let hit_pos = BlockPos::new(0, 64, 0);
+            let adjacent = BlockPos::new(0, 65, 0);
+            chunks.set_block_state(hit_pos.x, hit_pos.y, hit_pos.z, clicked_state);
+            chunks.set_block_state(adjacent.x, adjacent.y, adjacent.z, adjacent_state);
+            assert_eq!(
+                chunks.get_block_state(hit_pos.x, hit_pos.y, hit_pos.z),
+                clicked_state
+            );
+            assert_eq!(
+                chunks.get_block_state(adjacent.x, adjacent.y, adjacent.z),
+                adjacent_state
+            );
+            let hit = BlockHitResult {
+                block_pos: hit_pos,
+                face: Direction::Up,
+                hit_point: dvec3(0.5, 65.0, 0.5),
+                inside: false,
+                world_border: false,
+            };
+            let destination = water_bucket_destination(hit, &chunks, false, sneaking);
+            let evaporates = match destination {
+                Some(pos) if pos == hit_pos => evaporates_at.0,
+                Some(pos) if pos == adjacent => evaporates_at.1,
+                _ => false,
+            };
+
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let sender = PacketSender::new(tx);
+            let mut interaction = InteractionState::new();
+            interaction.set_water_evaporates(evaporates);
+            interaction.target = Some(HitResult::Block(hit));
+            let player_pos = dvec3(0.5, 64.0, 0.5);
+            let biome_climate = HashMap::new();
+            interaction.start_use_item(
+                &sender,
+                &mut audio,
+                &chunks,
+                player_pos,
+                Aabb::from_center(player_pos, 0.3, 0.9),
+                player_pos + DVec3::Y * 1.62,
+                LookDirection::default(),
+                None,
+                None,
+                Some(&ItemStackData::new(ItemKind::WaterBucket, 1)),
+                20,
+                false,
+                false,
+                &entities,
+                InteractionHand::MainHand,
+                false,
+                None,
+                false,
+                false,
+                sneaking,
+                sneaking,
+                &mut BreakEffects {
+                    particles: &mut particles,
+                    registry: &registry,
+                    biome_climate: &biome_climate,
+                },
+                &mut Vec::new(),
+            );
+            (
+                destination,
+                particles.test_pending().len(),
+                particles.test_pending_positions(),
+            )
+        };
+
+        let in_block = |positions: &[DVec3], block: BlockPos| {
+            positions.iter().all(|p| {
+                p.x >= block.x as f64
+                    && p.x < block.x as f64 + 1.0
+                    && p.y >= block.y as f64
+                    && p.y < block.y as f64 + 1.0
+                    && p.z >= block.z as f64
+                    && p.z < block.z as f64 + 1.0
+            })
+        };
+        let stone = crate::world::block::default_state_of("stone").unwrap();
+        let cobweb = crate::world::block::default_state_of("cobweb").unwrap();
+        let adjacent = BlockPos::new(0, 65, 0);
+        let assert_output = |(destination, count, positions): (
+            Option<BlockPos>,
+            usize,
+            Vec<DVec3>,
+        ),
+                             expected: Option<BlockPos>,
+                             particle_block: Option<BlockPos>| {
+            assert_eq!(destination, expected);
+            assert_eq!(
+                count,
+                if particle_block.is_some() { 8 } else { 0 },
+                "destination={destination:?}, particle_block={particle_block:?}, positions={positions:?}"
+            );
+            if let Some(block) = particle_block {
+                assert!(
+                    in_block(&positions, block),
+                    "particles not inside {block:?}: {positions:?}"
+                );
+            } else {
+                assert!(positions.is_empty());
+            }
+        };
+        assert_output(run(stone, cobweb, (true, false), false), None, None);
+
+        let standing_sign = crate::world::block::default_state_of("oak_sign").unwrap();
+        // Dry sign accepts water through LiquidBlockContainer even though w=false.
+        assert_output(
+            run(stone, standing_sign, (false, true), false),
+            Some(adjacent),
+            Some(adjacent),
+        );
+        let waterlogged_sign = crate::world::block::find_state(
+            "oak_sign",
+            &[("rotation", "0"), ("waterlogged", "true")],
+        );
+        // Java SignBlock inherits SimpleWaterloggedBlock.canPlaceLiquid, which
+        // accepts WATER independent of WATERLOGGED. Thus w=false does not force
+        // fallback; the environment branch runs before placeLiquid.
+        assert_output(
+            run(waterlogged_sign, BlockState::AIR, (true, false), false),
+            Some(BlockPos::new(0, 64, 0)),
+            Some(BlockPos::new(0, 64, 0)),
+        );
+        let double_slab = crate::world::block::find_state(
+            "oak_slab",
+            &[("type", "double"), ("waterlogged", "false")],
+        );
+        // Give the clicked and adjacent coordinates opposite environment
+        // values. The result must query only the chosen candidate: a dry ladder
+        // is selected at clicked (true there, false adjacent), while a double
+        // slab rejects at clicked and retries to adjacent (false clicked, true
+        // adjacent).
+        assert_output(
+            run(double_slab, BlockState::AIR, (false, true), false),
+            Some(adjacent),
+            Some(adjacent),
+        );
+        assert_output(
+            run(double_slab, BlockState::AIR, (true, false), false),
+            Some(adjacent),
+            None,
+        );
+
+        let air = BlockState::AIR;
+        for waterlogged in ["false", "true"] {
+            let ladder = crate::world::block::find_state(
+                "ladder",
+                &[("facing", "north"), ("waterlogged", waterlogged)],
+            );
+            // Java selects clicked by block type. SimpleWaterloggedBlock's
+            // canPlaceLiquid accepts WATER regardless of the wet state, and the
+            // Ladder also has exact w=true for the replaceability route.
+            assert_output(
+                run(ladder, air, (true, false), false),
+                Some(BlockPos::new(0, 64, 0)),
+                Some(BlockPos::new(0, 64, 0)),
+            );
+            // Sneak is checked by emptyContents, not BucketItem.use's initial
+            // type choice; failure recurses to adjacent with a null hit result.
+            assert_output(
+                run(ladder, air, (false, true), true),
+                Some(adjacent),
+                Some(adjacent),
+            );
+            assert_output(
+                run(ladder, air, (false, true), false),
+                Some(BlockPos::new(0, 64, 0)),
+                None,
+            );
+        }
+
+        // Non-container hit chooses adjacent. Types without a waterlogged
+        // property are taken directly from Java's interface membership.
+        assert_output(
+            run(stone, air, (false, true), false),
+            Some(adjacent),
+            Some(adjacent),
+        );
+        for name in ["seagrass", "kelp", "kelp_plant"] {
+            let state = crate::world::block::default_state_of(name).unwrap();
+            assert_output(
+                run(state, air, (true, false), false),
+                Some(BlockPos::new(0, 64, 0)),
+                Some(BlockPos::new(0, 64, 0)),
+            );
+        }
+
+        let moving_piston = crate::world::block::default_state_of("moving_piston").unwrap();
+        assert_output(run(stone, moving_piston, (false, true), false), None, None);
+        let big_dripleaf = crate::world::block::default_state_of("big_dripleaf").unwrap();
+        assert_output(
+            run(stone, big_dripleaf, (false, true), false),
+            Some(adjacent),
+            Some(adjacent),
+        );
+        assert_output(
+            run(stone, big_dripleaf, (true, false), false),
+            Some(adjacent),
+            None,
+        );
+    }
+
+    #[test]
+    fn water_bucket_unloaded_fallback_does_not_emit_evaporation_particles() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let (mut chunks, mut audio, entities, mut particles, registry) = headless_use_fixture();
+        let mut column = azalea_world::chunk::Chunk::default();
+        column.sections = vec![Default::default(); chunks.section_count() as usize].into();
+        chunks.load_decoded_chunk(azalea_core::position::ChunkPos::new(0, 0), column);
+        let hit_pos = BlockPos::new(15, 64, 0);
+        let hit = BlockHitResult {
+            block_pos: hit_pos,
+            face: Direction::East,
+            hit_point: dvec3(16.0, 64.5, 0.5),
+            inside: false,
+            world_border: false,
+        };
+        chunks.set_block_state(
+            hit_pos.x,
+            hit_pos.y,
+            hit_pos.z,
+            crate::world::block::default_state_of("stone").unwrap(),
+        );
+        assert!(
+            chunks
+                .get_chunk(&azalea_core::position::ChunkPos::new(1, 0))
+                .is_none()
+        );
+        assert_eq!(water_bucket_destination(hit, &chunks, false, false), None);
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let mut interaction = InteractionState::new();
+        interaction.set_water_evaporates(true);
+        interaction.target = Some(HitResult::Block(hit));
+        let player_pos = dvec3(15.5, 64.0, 0.5);
+        let biome_climate = HashMap::new();
+        interaction.start_use_item(
+            &sender,
+            &mut audio,
+            &chunks,
+            player_pos,
+            Aabb::from_center(player_pos, 0.3, 0.9),
+            player_pos + DVec3::Y * 1.62,
+            LookDirection::default(),
+            None,
+            None,
+            Some(&ItemStackData::new(ItemKind::WaterBucket, 1)),
+            20,
+            false,
+            false,
+            &entities,
+            InteractionHand::MainHand,
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            &mut BreakEffects {
+                particles: &mut particles,
+                registry: &registry,
+                biome_climate: &biome_climate,
+            },
+            &mut Vec::new(),
+        );
+        assert!(particles.test_pending().is_empty());
+
+        // CauldronInteractions consumes WATER_BUCKET before BucketItem.use, so
+        // the evaporation path must not run even when its environment is true.
+        chunks.set_block_state(
+            hit_pos.x,
+            hit_pos.y,
+            hit_pos.z,
+            crate::world::block::default_state_of("water_cauldron").unwrap(),
+        );
+        interaction.target = Some(HitResult::Block(hit));
+        assert!(interaction.start_use_item(
+            &sender,
+            &mut audio,
+            &chunks,
+            player_pos,
+            Aabb::from_center(player_pos, 0.3, 0.9),
+            player_pos + DVec3::Y * 1.62,
+            LookDirection::default(),
+            None,
+            None,
+            Some(&ItemStackData::new(ItemKind::WaterBucket, 1)),
+            20,
+            false,
+            false,
+            &entities,
+            InteractionHand::MainHand,
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            &mut BreakEffects {
+                particles: &mut particles,
+                registry: &registry,
+                biome_climate: &biome_climate,
+            },
+            &mut Vec::new(),
+        ));
+        assert!(particles.test_pending().is_empty());
     }
 
     #[test]
@@ -5121,7 +7090,10 @@ mod tests {
         let mut neutral = InputState::released();
         neutral.set_selected_slot(8);
         interaction.ensure_has_sent_carried_item(&sender, neutral.selected_slot());
-        assert!(rx.try_recv().is_err(), "GUI neutral input must not resend slot 8");
+        assert!(
+            rx.try_recv().is_err(),
+            "GUI neutral input must not resend slot 8"
+        );
 
         interaction.ensure_has_sent_carried_item(&sender, 4);
         assert!(matches!(
@@ -5187,10 +7159,17 @@ mod tests {
         let gold_ore = crate::world::block::default_state_of("gold_ore").unwrap();
         let golden_pickaxe = ItemStackData::new(ItemKind::GoldenPickaxe, 1);
         let gold_tool = crate::player::menu_click::component::<Tool>(&golden_pickaxe).unwrap();
-        assert_eq!(tool_mining_speed(&gold_tool, "gold_ore".parse().unwrap()), 12.0);
-        assert!(!tool_correct_for_drops(&gold_tool, "gold_ore".parse().unwrap()));
+        assert_eq!(
+            tool_mining_speed(&gold_tool, "gold_ore".parse().unwrap()),
+            12.0
+        );
+        assert!(!tool_correct_for_drops(
+            &gold_tool,
+            "gold_ore".parse().unwrap()
+        ));
         let gold_context = MiningContext::from_player(&player);
-        let increment = destroy_progress(gold_ore, true, false, Some(&golden_pickaxe), gold_context);
+        let increment =
+            destroy_progress(gold_ore, true, false, Some(&golden_pickaxe), gold_context);
         assert_eq!(increment, 12.0 * 1.2 * 0.00081 / 3.0 / 100.0);
         assert!(increment * 25.0 < 1.0);
 
@@ -5199,8 +7178,12 @@ mod tests {
         player.set_attribute_value("minecraft:submerged_mining_speed", 0.25);
         player.eyes_in_water = true;
         let context = MiningContext::from_player(&player);
-        let water_increment = destroy_progress(gold_ore, true, false, Some(&golden_pickaxe), context);
-        assert_eq!(water_increment, 14.0 * 1.2 * 0.00081 * 1.5 * 0.25 / 3.0 / 100.0);
+        let water_increment =
+            destroy_progress(gold_ore, true, false, Some(&golden_pickaxe), context);
+        assert_eq!(
+            water_increment,
+            14.0 * 1.2 * 0.00081 * 1.5 * 0.25 / 3.0 / 100.0
+        );
         assert_eq!(
             destroy_progress(
                 oak_wood,
@@ -5215,5 +7198,427 @@ mod tests {
             1.0 / 60.0,
             "mining efficiency does not increase a base speed of 1",
         );
+    }
+
+    fn particle_test_store() -> ParticleStore {
+        use std::sync::Arc;
+        let mut atlas = crate::renderer::chunk::atlas::AtlasUVMap::test_empty();
+        atlas.test_insert_particle_sprites("smoke", vec!["particle/smoke".into()]);
+        atlas.test_insert_particle_sprites("portal", vec!["particle/portal".into()]);
+        let colors = Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        ParticleStore::new(atlas, colors.clone(), colors.clone(), colors)
+    }
+
+    fn egg_test_chunks(with_floor: bool) -> ChunkStore {
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(1);
+        for x in -1..=1 {
+            for z in -1..=1 {
+                let mut chunk = azalea_world::chunk::Chunk::default();
+                chunk.sections = vec![Default::default(); chunks.section_count() as usize].into();
+                chunks.load_decoded_chunk(azalea_core::position::ChunkPos::new(x, z), chunk);
+            }
+        }
+        if with_floor {
+            let stone = crate::world::block::default_state_of("stone").unwrap();
+            for x in -7..=23 {
+                for z in -7..=23 {
+                    chunks.set_block_state(x, 64, z, stone);
+                }
+            }
+        }
+        chunks
+    }
+
+    #[test]
+    fn candle_block_use_emits_one_smoke_per_lit_candle_then_predicts_unlit() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let pos = BlockPos::new(2, 64, 2);
+        let mut chunks = ChunkStore::new(1);
+        let mut chunk = azalea_world::chunk::Chunk::default();
+        chunk.sections = vec![Default::default(); chunks.section_count() as usize].into();
+        chunks.load_decoded_chunk(azalea_core::position::ChunkPos::new(0, 0), chunk);
+        let lit =
+            crate::world::block::find_state("cyan_candle", &[("candles", "3"), ("lit", "true")]);
+        chunks.set_block_state(pos.x, pos.y, pos.z, lit);
+        let mut particles = particle_test_store();
+        let registry = BlockRegistry::test_empty();
+        let climate = HashMap::new();
+        let mut audio = AudioEngine::silent_for_test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let mut interaction = InteractionState::new();
+        interaction.target = Some(HitResult::Block(BlockHitResult {
+            block_pos: pos,
+            face: Direction::Up,
+            hit_point: dvec3(2.5, 65.0, 2.5),
+            inside: false,
+            world_border: false,
+        }));
+        let mut dirty = Vec::new();
+        let call = |interaction: &mut InteractionState,
+                    particles: &mut ParticleStore,
+                    audio: &mut AudioEngine,
+                    dirty: &mut Vec<BlockPos>| {
+            let mut effects = BreakEffects {
+                particles,
+                registry: &registry,
+                biome_climate: &climate,
+            };
+            interaction.start_use_item(
+                &sender,
+                audio,
+                &chunks,
+                dvec3(0.0, 64.0, 0.0),
+                Aabb::from_center(DVec3::ZERO, 0.6, 1.8),
+                dvec3(0.0, 65.62, 0.0),
+                LookDirection::default(),
+                None,
+                None,
+                None,
+                20,
+                false,
+                false,
+                &EntityStore::new(),
+                InteractionHand::MainHand,
+                false,
+                None,
+                false,
+                false,
+                false,
+                false,
+                &mut effects,
+                dirty,
+            )
+        };
+        assert!(call(
+            &mut interaction,
+            &mut particles,
+            &mut audio,
+            &mut dirty
+        ));
+        assert_eq!(particles.test_particle_count(), 3);
+        assert!(!dirty.is_empty());
+        assert_eq!(
+            crate::world::block::block_properties(chunks.get_block_state(pos.x, pos.y, pos.z))
+                .get("lit"),
+            Some("false")
+        );
+        let _ = call(&mut interaction, &mut particles, &mut audio, &mut dirty);
+        assert_eq!(
+            particles.test_particle_count(),
+            3,
+            "same lit candle only extinguishes once"
+        );
+    }
+
+    #[test]
+    fn candle_offsets_and_gates_match_java_for_counts_cake_hit_hand_and_permission() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let pos = BlockPos::new(0, 64, 0);
+        for count in 1..=4 {
+            let state = crate::world::block::find_state(
+                "red_candle",
+                &[
+                    (
+                        "candles",
+                        match count {
+                            1 => "1",
+                            2 => "2",
+                            3 => "3",
+                            _ => "4",
+                        },
+                    ),
+                    ("lit", "true"),
+                ],
+            );
+            let requests = candle_extinguish_requests(state, pos, 65.0, true, true);
+            assert_eq!(requests.len(), count);
+            assert!(
+                requests
+                    .iter()
+                    .all(|r| r.kind == crate::particle::ServerParticleKind::Smoke
+                        && r.velocity == dvec3(0.0, 0.1, 0.0))
+            );
+        }
+        let cake = crate::world::block::find_state("blue_candle_cake", &[("lit", "true")]);
+        assert!(candle_extinguish_requests(cake, pos, 64.5, true, true).is_empty());
+        let top = candle_extinguish_requests(cake, pos, 64.500_001, true, true);
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].position, dvec3(0.5, 65.0, 0.5));
+        assert!(candle_extinguish_requests(cake, pos, 65.0, false, true).is_empty());
+        assert!(candle_extinguish_requests(cake, pos, 65.0, true, false).is_empty());
+        let unlit =
+            crate::world::block::find_state("red_candle", &[("candles", "4"), ("lit", "false")]);
+        assert!(candle_extinguish_requests(unlit, pos, 65.0, true, true).is_empty());
+    }
+
+    #[test]
+    fn dragon_egg_use_and_attack_emit_exactly_128_portals_only_for_valid_candidate() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let origin = BlockPos::new(8, 64, 8);
+        let chunks = egg_test_chunks(true);
+        let egg = crate::world::block::default_state_of("dragon_egg").unwrap();
+        chunks.set_block_state(origin.x, origin.y, origin.z, egg);
+        let border = crate::world::border::WorldBorder::default();
+        let seed = (0..1000)
+            .find(|seed| !dragon_egg_teleport_requests(origin, &chunks, &border, *seed).is_empty())
+            .unwrap();
+        let requests = dragon_egg_teleport_requests(origin, &chunks, &border, seed);
+        assert_eq!(requests.len(), 128);
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.kind == crate::particle::ServerParticleKind::Portal)
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.velocity.abs().cmple(dvec3(0.1, 0.1, 0.1)).all())
+        );
+        assert!(requests.iter().all(|r| {
+            (-7.0..24.0).contains(&r.position.x)
+                && (-7.0..24.0).contains(&r.position.z)
+                && (63.5..65.5).contains(&r.position.y)
+        }));
+        let mut particles = particle_test_store();
+        let registry = BlockRegistry::test_empty();
+        let climate = HashMap::new();
+        spawn_interaction_particle_requests(
+            requests,
+            dvec3(8.5, 64.5, 8.5),
+            &chunks,
+            &mut BreakEffects {
+                particles: &mut particles,
+                registry: &registry,
+                biome_climate: &climate,
+            },
+        );
+        assert_eq!(particles.test_particle_count(), 128);
+
+        // Exercise both Java input branches through the same interaction owner.
+        let run_input =
+            |attack: bool, held_stack: Option<&ItemStackData>, hand: InteractionHand| {
+                let mut particles = particle_test_store();
+                let registry = BlockRegistry::test_empty();
+                let climate = HashMap::new();
+                let mut audio = AudioEngine::silent_for_test();
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                let sender = PacketSender::new(tx);
+                let mut interaction = InteractionState::new();
+                interaction.world_border = border;
+                interaction.target = Some(HitResult::Block(BlockHitResult {
+                    block_pos: origin,
+                    face: Direction::Up,
+                    hit_point: dvec3(8.5, 65.0, 8.5),
+                    inside: false,
+                    world_border: false,
+                }));
+                fastrand::seed(1);
+                let mut effects = BreakEffects {
+                    particles: &mut particles,
+                    registry: &registry,
+                    biome_climate: &climate,
+                };
+                if attack {
+                    interaction.start_attack(
+                        &chunks,
+                        &sender,
+                        &mut audio,
+                        &InputState::new(),
+                        dvec3(8.5, 64.0, 8.5),
+                        true,
+                        false,
+                        false,
+                        None,
+                        &mut effects,
+                        &mut Vec::new(),
+                    );
+                } else {
+                    assert!(interaction.start_use_item(
+                        &sender,
+                        &mut audio,
+                        &chunks,
+                        dvec3(8.5, 64.0, 8.5),
+                        Aabb::from_center(dvec3(8.5, 64.0, 8.5), 0.6, 1.8),
+                        dvec3(8.5, 65.62, 8.5),
+                        LookDirection::default(),
+                        None,
+                        None,
+                        held_stack,
+                        20,
+                        false,
+                        false,
+                        &EntityStore::new(),
+                        hand,
+                        false,
+                        None,
+                        false,
+                        false,
+                        false,
+                        false,
+                        &mut effects,
+                        &mut Vec::new(),
+                    ));
+                }
+                assert_eq!(effects.particles.test_particle_count(), 128);
+                assert_eq!(chunks.get_block_state(origin.x, origin.y, origin.z), egg);
+            };
+        let held_item = ItemStackData::new(ItemKind::Dirt, 1);
+        run_input(false, Some(&held_item), InteractionHand::MainHand);
+        run_input(false, None, InteractionHand::MainHand);
+        run_input(true, None, InteractionHand::MainHand);
+
+        let no_floor = egg_test_chunks(false);
+        assert!(dragon_egg_teleport_requests(origin, &no_floor, &border, seed).is_empty());
+        let mut outside = border;
+        outside.set_size(0.0);
+        assert!(dragon_egg_teleport_requests(origin, &chunks, &outside, seed).is_empty());
+        assert!(
+            dragon_egg_teleport_requests(
+                BlockPos::new(8, chunks.min_y() + chunks.height() as i32 + 20, 8),
+                &chunks,
+                &border,
+                seed
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn continued_mining_routes_one_face_particle_and_never_duplicates_final_break_burst() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let (chunks, mut audio, _, mut particles, registry) = headless_use_fixture();
+        let climate = HashMap::new();
+        let stone = crate::world::block::default_state_of("stone").unwrap();
+        let pos = BlockPos::new(2, 64, 2);
+        chunks.set_block_state(pos.x, pos.y, pos.z, stone);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(tx);
+        let mut interaction = InteractionState::new();
+        interaction.target = Some(HitResult::Block(BlockHitResult {
+            block_pos: pos,
+            face: Direction::East,
+            hit_point: dvec3(3.0, 64.5, 2.5),
+            inside: false,
+            world_border: false,
+        }));
+        interaction.is_destroying = true;
+        interaction.destroy_pos = pos;
+        let mut effects = BreakEffects {
+            particles: &mut particles,
+            registry: &registry,
+            biome_climate: &climate,
+        };
+        interaction.continue_attack(
+            &chunks,
+            &sender,
+            &mut audio,
+            dvec3(2.5, 64.0, 2.5),
+            true,
+            false,
+            None,
+            &mut effects,
+            &mut Vec::new(),
+        );
+        assert_eq!(effects.particles.pending_terrain_counts_for_test(), (1, 1));
+
+        let next_pos = BlockPos::new(3, 64, 2);
+        let dirt = crate::world::block::default_state_of("dirt").unwrap();
+        chunks.set_block_state(next_pos.x, next_pos.y, next_pos.z, dirt);
+        interaction.target = Some(HitResult::Block(BlockHitResult {
+            block_pos: next_pos,
+            face: Direction::North,
+            hit_point: dvec3(3.5, 64.5, 2.0),
+            inside: false,
+            world_border: false,
+        }));
+        interaction.continue_attack(
+            &chunks,
+            &sender,
+            &mut audio,
+            dvec3(2.5, 64.0, 2.5),
+            true,
+            false,
+            None,
+            &mut effects,
+            &mut Vec::new(),
+        );
+        assert_eq!(effects.particles.pending_terrain_counts_for_test(), (2, 2));
+
+        interaction.target = None;
+        interaction.continue_attack(
+            &chunks,
+            &sender,
+            &mut audio,
+            dvec3(2.5, 64.0, 2.5),
+            true,
+            false,
+            None,
+            &mut effects,
+            &mut Vec::new(),
+        );
+        assert_eq!(effects.particles.pending_terrain_counts_for_test(), (2, 2));
+
+        // The normal ray-pick limit leaves a block beyond 4.5 blocks out of
+        // the target; continuing attack then follows the no-hit/stop path.
+        chunks.set_block_state(pos.x, pos.y, pos.z, BlockState::AIR);
+        chunks.set_block_state(next_pos.x, next_pos.y, next_pos.z, BlockState::AIR);
+        let far_pos = BlockPos::new(2, 64, 8);
+        chunks.set_block_state(far_pos.x, far_pos.y, far_pos.z, stone);
+        let mut far_border = crate::world::border::WorldBorder::default();
+        far_border.set_size(1000.0);
+        interaction.update_target(
+            Position::new(2.5, 64.5, 2.5),
+            LookDirection::default(),
+            &chunks,
+            &EntityStore::new(),
+            false,
+            &far_border,
+        );
+        assert!(interaction.target.is_none());
+        interaction.continue_attack(
+            &chunks,
+            &sender,
+            &mut audio,
+            dvec3(2.5, 64.0, 2.5),
+            true,
+            false,
+            None,
+            &mut effects,
+            &mut Vec::new(),
+        );
+        assert_eq!(effects.particles.pending_terrain_counts_for_test(), (2, 2));
+
+        // A final predicted break keeps its separate volume burst and the
+        // current block has become air before the hit-face effect is considered.
+        chunks.set_block_state(pos.x, pos.y, pos.z, stone);
+        interaction.target = Some(HitResult::Block(BlockHitResult {
+            block_pos: pos,
+            face: Direction::Up,
+            hit_point: dvec3(2.5, 65.0, 2.5),
+            inside: false,
+            world_border: false,
+        }));
+        interaction.is_destroying = true;
+        interaction.destroy_pos = pos;
+        effects.particles.clear();
+        interaction.continue_attack(
+            &chunks,
+            &sender,
+            &mut audio,
+            dvec3(2.5, 64.0, 2.5),
+            true,
+            true,
+            None,
+            &mut effects,
+            &mut Vec::new(),
+        );
+        assert!(is_air(chunks.get_block_state(pos.x, pos.y, pos.z)));
+        assert_eq!(effects.particles.pending_terrain_counts_for_test(), (64, 0));
     }
 }

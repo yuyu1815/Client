@@ -885,7 +885,6 @@ fn apply_collision_with_context(
     player.last_travel_observation.block_speed_factor = Some(speed_factor as f32);
     player.velocity.x *= speed_factor;
     player.velocity.z *= speed_factor;
-
 }
 
 fn apply_bubble_column_effect(
@@ -2438,7 +2437,11 @@ mod tests {
         }
 
         assert!(contacted_wall, "diagonal movement reaches the wall");
-        assert_eq!(stopping_tick_speed, Some(0.1_f32), "stop precedes the next tick's travel");
+        assert_eq!(
+            stopping_tick_speed,
+            Some(0.1_f32),
+            "stop precedes the next tick's travel"
+        );
         assert_eq!(movement_speed(&player), 0.1_f32);
     }
 

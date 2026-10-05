@@ -206,6 +206,12 @@ pub struct LocalPlayer {
     pub swimming: bool,
     pub invisible: bool,
     pub effect_particles: Vec<azalea_entity::particle::Particle>,
+    pub effect_particle_options: Option<
+        Vec<(
+            crate::particle::ServerParticleKind,
+            crate::particle::ServerParticleOptions,
+        )>,
+    >,
     pub effect_particles_ambient: bool,
     pub legacy_effect_color: Option<u32>,
     /// Shared LivingEntity flag bit 0x80; packet authority remains external.
@@ -213,6 +219,9 @@ pub struct LocalPlayer {
     pub fall_flying_ticks: u32,
     pub fall_distance: f64,
     pub air_supply: i32,
+    /// Vanilla LocalPlayer.waterVisionTime, used with Conduit Power by
+    /// Lightmap.
+    pub water_vision_time: i32,
     /// Vanilla LocalPlayer.portalEffectIntensity: drives the full-screen
     /// portal overlay while standing in a nether portal.
     pub portal_effect_intensity: f32,
@@ -296,12 +305,14 @@ impl LocalPlayer {
             swimming: false,
             invisible: false,
             effect_particles: Vec::new(),
+            effect_particle_options: None,
             effect_particles_ambient: false,
             legacy_effect_color: None,
             fall_flying: false,
             fall_flying_ticks: 0,
             fall_distance: 0.0,
             air_supply: MAX_AIR_SUPPLY,
+            water_vision_time: 0,
             portal_effect_intensity: 0.0,
             prev_portal_effect_intensity: 0.0,
             sleeping_pos: None,
@@ -323,6 +334,7 @@ impl LocalPlayer {
     pub fn apply_effect_metadata(&mut self, index: u8, value: crate::entity::MetaValue) {
         match (index, value) {
             (10, crate::entity::MetaValue::Int(color)) => {
+                self.effect_particle_options = None;
                 let color = color as u32 & 0x00ff_ffff;
                 self.legacy_effect_color = Some(color);
                 self.effect_particles =
@@ -336,6 +348,16 @@ impl LocalPlayer {
             }
             _ => {}
         }
+    }
+
+    pub fn set_effect_particle_options(
+        &mut self,
+        particles: Vec<(
+            crate::particle::ServerParticleKind,
+            crate::particle::ServerParticleOptions,
+        )>,
+    ) {
+        self.effect_particle_options = Some(particles);
     }
 
     pub fn set_effect_particles(
@@ -434,6 +456,7 @@ impl LocalPlayer {
         self.reset_hurt_state();
         self.effects = crate::mob_effect::ActiveMobEffects::default();
         self.effect_particles.clear();
+        self.effect_particle_options = None;
         self.effect_particles_ambient = false;
         self.legacy_effect_color = None;
         self.attributes.clear();
@@ -474,6 +497,7 @@ impl LocalPlayer {
         self.lava_height = 0.0;
         self.eyes_in_water = false;
         self.eyes_in_bubble_column = false;
+        self.water_vision_time = 0;
         self.swimming = false;
         self.fall_flying = false;
         self.fall_flying_ticks = 0;
@@ -652,6 +676,23 @@ impl LocalPlayer {
         self.bob += (target - self.bob) * 0.4;
     }
 
+    pub fn water_vision(&self) -> f32 {
+        if !self.eyes_in_water {
+            return 0.0;
+        }
+        let time = self.water_vision_time as f32;
+        if self.water_vision_time >= 600 {
+            return 1.0;
+        }
+        let a = (time / 100.0).clamp(0.0, 1.0);
+        let b = if self.water_vision_time < 100 {
+            0.0
+        } else {
+            ((time - 100.0) / 500.0).clamp(0.0, 1.0)
+        };
+        a * 0.6 + b * 0.39999998
+    }
+
     pub fn prev_eye_pos(&self) -> Position {
         self.prev_position + dvec3(0.0, f64::from(self.prev_eye_height), 0.0)
     }
@@ -662,6 +703,12 @@ impl LocalPlayer {
 
     // TODO: OXYGEN_BONUS attribute - chance to skip air loss per tick
     pub fn tick_air_supply(&mut self) {
+        if self.eyes_in_water {
+            let step = if self.game_mode == 3 { 10 } else { 1 };
+            self.water_vision_time = (self.water_vision_time + step).min(600);
+        } else {
+            self.water_vision_time = (self.water_vision_time - 10).max(0);
+        }
         if self.eyes_in_water && !self.eyes_in_bubble_column {
             self.air_supply -= 1;
             if self.air_supply <= DROWN_DAMAGE_THRESHOLD {
@@ -923,6 +970,25 @@ mod tests {
         player.air_supply = 100;
         player.tick_air_supply();
         assert_eq!(player.air_supply, 104);
+    }
+
+    #[test]
+    fn water_vision_time_and_blend_follow_local_player_water_state() {
+        let mut player = LocalPlayer::new();
+        assert_eq!(player.water_vision(), 0.0);
+        player.eyes_in_water = true;
+        for _ in 0..100 {
+            player.tick_air_supply();
+        }
+        assert_eq!(player.water_vision_time, 100);
+        assert!((player.water_vision() - 0.6).abs() < 1e-6);
+        player.game_mode = 3;
+        player.tick_air_supply();
+        assert_eq!(player.water_vision_time, 110);
+        player.eyes_in_water = false;
+        player.tick_air_supply();
+        assert_eq!(player.water_vision_time, 100);
+        assert_eq!(player.water_vision(), 0.0); // Java returns zero outside water.
     }
 
     #[test]
