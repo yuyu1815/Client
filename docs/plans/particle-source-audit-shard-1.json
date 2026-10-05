@@ -1,0 +1,628 @@
+{
+  "schema": "particle-source-audit-shard-v1",
+  "shard": 1,
+  "index_rule": "0-based current CSV row index modulo 8",
+  "review_level": "mechanical Java extraction only; semantic audit unresolved",
+  "source_rows": [
+    {
+      "csv_index": 1,
+      "java_source_path": "net/minecraft/client/multiplayer/ClientLevel.java",
+      "callsite_records": [
+        {
+          "java_line": 395,
+          "java_method_line": 359,
+          "java_method_signature": "public void tickWeatherEffects() { ParticleStatus particleStatus = this.minecraft.options.particles().get(); int weatherRadius = this.minecraft.options.weatherRadius().get();",
+          "java_invocation": "this.addParticle( \t\t\t\t\t\tparticleType, rainParticlePosition.getX() + blockX, rainParticlePosition.getY() + particleY, rainParticlePosition.getZ() + blockZ, 0.0, 0.0, 0.0 \t\t\t\t\t)",
+          "guard_and_state_context": "389: \t\t\t\t\tdouble blockTop = blockShape.max(Axis.Y, blockX, blockZ);\n390: \t\t\t\t\tdouble fluidTop = fluid.getHeight(this, rainParticlePosition);\n391: \t\t\t\t\tdouble particleY = Math.max(blockTop, fluidTop);\n392: \t\t\t\t\tParticleOptions particleType = !fluid.is(FluidTags.LAVA) && !block.is(Blocks.MAGMA_BLOCK) && !CampfireBlock.isLitCampfire(block)\n393: \t\t\t\t\t\t? ParticleTypes.RAIN\n394: \t\t\t\t\t\t: ParticleTypes.SMOKE;\n395: \t\t\t\t\tthis.addParticle(\n396: \t\t\t\t\t\tparticleType, rainParticlePosition.getX() + blockX, rainParticlePosition.getY() + particleY, rainParticlePosition.getZ() + blockZ, 0.0, 0.0, 0.0\n397: \t\t\t\t\t);\n398: \t\t\t\t}\n399: \t\t\t}\n400: \n401: \t\t\tif (rainParticlePosition != null && random.nextInt(3) < this.rainSoundTime++) {\n402: \t\t\t\tthis.rainSoundTime = 0;",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "client_packet_or_world_callback",
+          "rust_entry_candidate_from_inventory": "app/core.rs LevelEvent; app/core.rs event17; player/interaction.rs; particle.rs::ParticleStore::add_firework_starter/add_destroy_block_effect",
+          "rust_gap_candidate_from_inventory": "Firework packet event17 routed to ParticleStore; player block breaking and block destroy use add_destroy_block_effect. Exact local ClientLevel.addBreakingBlockEffect path/condition vs Rust interaction path and the other 9 API lines remain to be verified. Firework typed component parsing task was in progress.",
+          "audit_status": "packet_world_or_internal_candidate"
+        },
+        {
+          "java_line": 619,
+          "java_method_line": 592,
+          "java_method_signature": "public void doAnimateTick( final int xt, final int yt,",
+          "java_invocation": "this.addParticle(new BlockParticleOption(ParticleTypes.BLOCK_MARKER, state), x + 0.5, y + 0.5, z + 0.5, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "613: \t\t\t\tBlockPos below = pos.below();\n614: \t\t\t\tthis.trySpawnDripParticles(below, this.getBlockState(below), dripParticle, hasWatertightBottom);\n615: \t\t\t}\n616: \t\t}\n617: \n618: \t\tif (markerParticleTarget == state.getBlock()) {\n619: \t\t\tthis.addParticle(new BlockParticleOption(ParticleTypes.BLOCK_MARKER, state), x + 0.5, y + 0.5, z + 0.5, 0.0, 0.0, 0.0);\n620: \t\t}\n621: \n622: \t\tif (!state.isCollisionShapeFullBlock(this, pos)) {\n623: \t\t\tfor (AmbientParticle particle : (List)this.environmentAttributes().getValue(EnvironmentAttributes.AMBIENT_PARTICLES, pos)) {\n624: \t\t\t\tif (particle.canSpawn(this.random)) {\n625: \t\t\t\t\tthis.addParticle(\n626: \t\t\t\t\t\tparticle.particle(), pos.getX() + this.random.nextDouble(), pos.getY() + this.random.nextDouble(), pos.getZ() + this.random.nextDouble(), 0.0, 0.0, 0.0",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "client_packet_or_world_callback",
+          "rust_entry_candidate_from_inventory": "app/core.rs LevelEvent; app/core.rs event17; player/interaction.rs; particle.rs::ParticleStore::add_firework_starter/add_destroy_block_effect",
+          "rust_gap_candidate_from_inventory": "Firework packet event17 routed to ParticleStore; player block breaking and block destroy use add_destroy_block_effect. Exact local ClientLevel.addBreakingBlockEffect path/condition vs Rust interaction path and the other 9 API lines remain to be verified. Firework typed component parsing task was in progress.",
+          "audit_status": "packet_world_or_internal_candidate"
+        },
+        {
+          "java_line": 625,
+          "java_method_line": 592,
+          "java_method_signature": "public void doAnimateTick( final int xt, final int yt,",
+          "java_invocation": "this.addParticle( \t\t\t\t\t\tparticle.particle(), pos.getX() + this.random.nextDouble(), pos.getY() + this.random.nextDouble(), pos.getZ() + this.random.nextDouble(), 0.0, 0.0, 0.0 \t\t\t\t\t)",
+          "guard_and_state_context": "619: \t\t\tthis.addParticle(new BlockParticleOption(ParticleTypes.BLOCK_MARKER, state), x + 0.5, y + 0.5, z + 0.5, 0.0, 0.0, 0.0);\n620: \t\t}\n621: \n622: \t\tif (!state.isCollisionShapeFullBlock(this, pos)) {\n623: \t\t\tfor (AmbientParticle particle : (List)this.environmentAttributes().getValue(EnvironmentAttributes.AMBIENT_PARTICLES, pos)) {\n624: \t\t\t\tif (particle.canSpawn(this.random)) {\n625: \t\t\t\t\tthis.addParticle(\n626: \t\t\t\t\t\tparticle.particle(), pos.getX() + this.random.nextDouble(), pos.getY() + this.random.nextDouble(), pos.getZ() + this.random.nextDouble(), 0.0, 0.0, 0.0\n627: \t\t\t\t\t);\n628: \t\t\t\t}\n629: \t\t\t}\n630: \t\t}\n631: \t}\n632: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "client_packet_or_world_callback",
+          "rust_entry_candidate_from_inventory": "app/core.rs LevelEvent; app/core.rs event17; player/interaction.rs; particle.rs::ParticleStore::add_firework_starter/add_destroy_block_effect",
+          "rust_gap_candidate_from_inventory": "Firework packet event17 routed to ParticleStore; player block breaking and block destroy use add_destroy_block_effect. Exact local ClientLevel.addBreakingBlockEffect path/condition vs Rust interaction path and the other 9 API lines remain to be verified. Firework typed component parsing task was in progress.",
+          "audit_status": "packet_world_or_internal_candidate"
+        },
+        {
+          "java_line": 670,
+          "java_method_line": 669,
+          "java_method_signature": "private void spawnFluidParticle(final double x1, final double x2, final double z1, final double z2, final double y, final ParticleOptions dripParticle) { this.addParticle(dripParticle, Mth.lerp(this.random.nextDouble(), x1, x2), y, Mth.lerp(this.random.nextDouble(), z1, z2), 0.0, 0.0, 0.0); }",
+          "java_invocation": "this.addParticle(dripParticle, Mth.lerp(this.random.nextDouble(), x1, x2), y, Mth.lerp(this.random.nextDouble(), z1, z2), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "664: \t\t\theight,\n665: \t\t\tdripParticle\n666: \t\t);\n667: \t}\n668: \n669: \tprivate void spawnFluidParticle(final double x1, final double x2, final double z1, final double z2, final double y, final ParticleOptions dripParticle) {\n670: \t\tthis.addParticle(dripParticle, Mth.lerp(this.random.nextDouble(), x1, x2), y, Mth.lerp(this.random.nextDouble(), z1, z2), 0.0, 0.0, 0.0);\n671: \t}\n672: \n673: \tpublic CrashReportCategory fillReportDetails(final CrashReport report) {\n674: \t\tCrashReportCategory category = super.fillReportDetails(report);\n675: \t\tcategory.setDetail(\"Server brand\", () -> this.minecraft.player.connection.serverBrand());\n676: \t\tcategory.setDetail(\n677: \t\t\t\"Server type\", () -> this.minecraft.getSingleplayerServer() == null ? \"Non-integrated multiplayer server\" : \"Integrated singleplayer server\"",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "client_packet_or_world_callback",
+          "rust_entry_candidate_from_inventory": "app/core.rs LevelEvent; app/core.rs event17; player/interaction.rs; particle.rs::ParticleStore::add_firework_starter/add_destroy_block_effect",
+          "rust_gap_candidate_from_inventory": "Firework packet event17 routed to ParticleStore; player block breaking and block destroy use add_destroy_block_effect. Exact local ClientLevel.addBreakingBlockEffect path/condition vs Rust interaction path and the other 9 API lines remain to be verified. Firework typed component parsing task was in progress.",
+          "audit_status": "packet_world_or_internal_candidate"
+        },
+        {
+          "java_line": 763,
+          "java_method_line": 758,
+          "java_method_signature": "public void createFireworks( final double x, final double y, final double z, final double xd, final double yd, final double zd, final List<FireworkExplosion> explosions ) {",
+          "java_invocation": "this.addParticle(ParticleTypes.POOF, x, y, z, this.random.nextGaussian() * 0.05, 0.005, this.random.nextGaussian() * 0.05)",
+          "guard_and_state_context": "757: \n758: \tpublic void createFireworks(\n759: \t\tfinal double x, final double y, final double z, final double xd, final double yd, final double zd, final List<FireworkExplosion> explosions\n760: \t) {\n761: \t\tif (explosions.isEmpty()) {\n762: \t\t\tfor (int i = 0; i < this.random.nextInt(3) + 2; i++) {\n763: \t\t\t\tthis.addParticle(ParticleTypes.POOF, x, y, z, this.random.nextGaussian() * 0.05, 0.005, this.random.nextGaussian() * 0.05);\n764: \t\t\t}\n765: \t\t} else {\n766: \t\t\tthis.minecraft.particleEngine.add(new FireworkParticles.Starter(this, x, y, z, xd, yd, zd, this.minecraft.particleEngine, explosions));\n767: \t\t}\n768: \t}\n769: \n770: \tpublic void sendPacketToServer(final Packet<?> packet) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "client_packet_or_world_callback",
+          "rust_entry_candidate_from_inventory": "app/core.rs LevelEvent; app/core.rs event17; player/interaction.rs; particle.rs::ParticleStore::add_firework_starter/add_destroy_block_effect",
+          "rust_gap_candidate_from_inventory": "Firework packet event17 routed to ParticleStore; player block breaking and block destroy use add_destroy_block_effect. Exact local ClientLevel.addBreakingBlockEffect path/condition vs Rust interaction path and the other 9 API lines remain to be verified. Firework typed component parsing task was in progress.",
+          "audit_status": "packet_world_or_internal_candidate"
+        },
+        {
+          "java_line": 766,
+          "java_method_line": 758,
+          "java_method_signature": "public void createFireworks( final double x, final double y, final double z, final double xd, final double yd, final double zd, final List<FireworkExplosion> explosions ) {",
+          "java_invocation": "this.minecraft.particleEngine.add(new FireworkParticles.Starter(this, x, y, z, xd, yd, zd, this.minecraft.particleEngine, explosions))",
+          "guard_and_state_context": "760: \t) {\n761: \t\tif (explosions.isEmpty()) {\n762: \t\t\tfor (int i = 0; i < this.random.nextInt(3) + 2; i++) {\n763: \t\t\t\tthis.addParticle(ParticleTypes.POOF, x, y, z, this.random.nextGaussian() * 0.05, 0.005, this.random.nextGaussian() * 0.05);\n764: \t\t\t}\n765: \t\t} else {\n766: \t\t\tthis.minecraft.particleEngine.add(new FireworkParticles.Starter(this, x, y, z, xd, yd, zd, this.minecraft.particleEngine, explosions));\n767: \t\t}\n768: \t}\n769: \n770: \tpublic void sendPacketToServer(final Packet<?> packet) {\n771: \t\tthis.connection.send(packet);\n772: \t}\n773: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "client_packet_or_world_callback",
+          "rust_entry_candidate_from_inventory": "app/core.rs LevelEvent; app/core.rs event17; player/interaction.rs; particle.rs::ParticleStore::add_firework_starter/add_destroy_block_effect",
+          "rust_gap_candidate_from_inventory": "Firework packet event17 routed to ParticleStore; player block breaking and block destroy use add_destroy_block_effect. Exact local ClientLevel.addBreakingBlockEffect path/condition vs Rust interaction path and the other 9 API lines remain to be verified. Firework typed component parsing task was in progress.",
+          "audit_status": "packet_world_or_internal_candidate"
+        },
+        {
+          "java_line": 877,
+          "java_method_line": 877,
+          "java_method_signature": "public void addParticle(final ParticleOptions particle, final double x, final double y, final double z, final double xd, final double yd, final double zd) { this.doAddParticle(particle, particle.getType().getOverrideLimiter(), false, x, y, z, xd, yd, zd); }",
+          "java_invocation": "addParticle(final ParticleOptions particle, final double x, final double y, final double z, final double xd, final double yd, final double zd)",
+          "guard_and_state_context": "871: \t\t\tcategory.setDetail(\"Event type\", type);\n872: \t\t\tcategory.setDetail(\"Event data\", data);\n873: \t\t\tthrow new ReportedException(report);\n874: \t\t}\n875: \t}\n876: \n877: \tpublic void addParticle(final ParticleOptions particle, final double x, final double y, final double z, final double xd, final double yd, final double zd) {\n878: \t\tthis.doAddParticle(particle, particle.getType().getOverrideLimiter(), false, x, y, z, xd, yd, zd);\n879: \t}\n880: \n881: \tpublic void addParticle(\n882: \t\tfinal ParticleOptions particle,\n883: \t\tfinal boolean overrideLimiter,\n884: \t\tfinal boolean alwaysShow,",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "client_packet_or_world_callback",
+          "rust_entry_candidate_from_inventory": "app/core.rs LevelEvent; app/core.rs event17; player/interaction.rs; particle.rs::ParticleStore::add_firework_starter/add_destroy_block_effect",
+          "rust_gap_candidate_from_inventory": "Firework packet event17 routed to ParticleStore; player block breaking and block destroy use add_destroy_block_effect. Exact local ClientLevel.addBreakingBlockEffect path/condition vs Rust interaction path and the other 9 API lines remain to be verified. Firework typed component parsing task was in progress.",
+          "audit_status": "packet_world_or_internal_candidate"
+        },
+        {
+          "java_line": 881,
+          "java_method_line": 881,
+          "java_method_signature": "public void addParticle( final ParticleOptions particle, final boolean overrideLimiter,",
+          "java_invocation": "addParticle( \t\tfinal ParticleOptions particle, \t\tfinal boolean overrideLimiter, \t\tfinal boolean alwaysShow, \t\tfinal double x, \t\tfinal double y, \t\tfinal double z, \t\tfinal double xd, \t\tfinal double yd, \t\tfinal double zd \t)",
+          "guard_and_state_context": "875: \t}\n876: \n877: \tpublic void addParticle(final ParticleOptions particle, final double x, final double y, final double z, final double xd, final double yd, final double zd) {\n878: \t\tthis.doAddParticle(particle, particle.getType().getOverrideLimiter(), false, x, y, z, xd, yd, zd);\n879: \t}\n880: \n881: \tpublic void addParticle(\n882: \t\tfinal ParticleOptions particle,\n883: \t\tfinal boolean overrideLimiter,\n884: \t\tfinal boolean alwaysShow,\n885: \t\tfinal double x,\n886: \t\tfinal double y,\n887: \t\tfinal double z,\n888: \t\tfinal double xd,",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "helper_or_api_declaration",
+          "rust_entry_candidate_from_inventory": "app/core.rs LevelEvent; app/core.rs event17; player/interaction.rs; particle.rs::ParticleStore::add_firework_starter/add_destroy_block_effect",
+          "rust_gap_candidate_from_inventory": "Firework packet event17 routed to ParticleStore; player block breaking and block destroy use add_destroy_block_effect. Exact local ClientLevel.addBreakingBlockEffect path/condition vs Rust interaction path and the other 9 API lines remain to be verified. Firework typed component parsing task was in progress.",
+          "audit_status": "uncertain"
+        },
+        {
+          "java_line": 895,
+          "java_method_line": 895,
+          "java_method_signature": "public void addAlwaysVisibleParticle( final ParticleOptions particle, final double x, final double y, final double z, final double xd, final double yd, final double zd ) {",
+          "java_invocation": "addAlwaysVisibleParticle( \t\tfinal ParticleOptions particle, final double x, final double y, final double z, final double xd, final double yd, final double zd \t)",
+          "guard_and_state_context": "889: \t\tfinal double yd,\n890: \t\tfinal double zd\n891: \t) {\n892: \t\tthis.doAddParticle(particle, particle.getType().getOverrideLimiter() || overrideLimiter, alwaysShow, x, y, z, xd, yd, zd);\n893: \t}\n894: \n895: \tpublic void addAlwaysVisibleParticle(\n896: \t\tfinal ParticleOptions particle, final double x, final double y, final double z, final double xd, final double yd, final double zd\n897: \t) {\n898: \t\tthis.doAddParticle(particle, false, true, x, y, z, xd, yd, zd);\n899: \t}\n900: \n901: \tpublic void addAlwaysVisibleParticle(\n902: \t\tfinal ParticleOptions particle,",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "helper_or_api_declaration",
+          "rust_entry_candidate_from_inventory": "app/core.rs LevelEvent; app/core.rs event17; player/interaction.rs; particle.rs::ParticleStore::add_firework_starter/add_destroy_block_effect",
+          "rust_gap_candidate_from_inventory": "Firework packet event17 routed to ParticleStore; player block breaking and block destroy use add_destroy_block_effect. Exact local ClientLevel.addBreakingBlockEffect path/condition vs Rust interaction path and the other 9 API lines remain to be verified. Firework typed component parsing task was in progress.",
+          "audit_status": "uncertain"
+        },
+        {
+          "java_line": 901,
+          "java_method_line": 901,
+          "java_method_signature": "public void addAlwaysVisibleParticle( final ParticleOptions particle, final boolean overrideLimiter,",
+          "java_invocation": "addAlwaysVisibleParticle( \t\tfinal ParticleOptions particle, \t\tfinal boolean overrideLimiter, \t\tfinal double x, \t\tfinal double y, \t\tfinal double z, \t\tfinal double xd, \t\tfinal double yd, \t\tfinal double zd \t)",
+          "guard_and_state_context": "895: \tpublic void addAlwaysVisibleParticle(\n896: \t\tfinal ParticleOptions particle, final double x, final double y, final double z, final double xd, final double yd, final double zd\n897: \t) {\n898: \t\tthis.doAddParticle(particle, false, true, x, y, z, xd, yd, zd);\n899: \t}\n900: \n901: \tpublic void addAlwaysVisibleParticle(\n902: \t\tfinal ParticleOptions particle,\n903: \t\tfinal boolean overrideLimiter,\n904: \t\tfinal double x,\n905: \t\tfinal double y,\n906: \t\tfinal double z,\n907: \t\tfinal double xd,\n908: \t\tfinal double yd,",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "helper_or_api_declaration",
+          "rust_entry_candidate_from_inventory": "app/core.rs LevelEvent; app/core.rs event17; player/interaction.rs; particle.rs::ParticleStore::add_firework_starter/add_destroy_block_effect",
+          "rust_gap_candidate_from_inventory": "Firework packet event17 routed to ParticleStore; player block breaking and block destroy use add_destroy_block_effect. Exact local ClientLevel.addBreakingBlockEffect path/condition vs Rust interaction path and the other 9 API lines remain to be verified. Firework typed component parsing task was in progress.",
+          "audit_status": "uncertain"
+        },
+        {
+          "java_line": 1073,
+          "java_method_line": 1051,
+          "java_method_signature": "public void addDestroyBlockEffect(final BlockPos pos, final BlockState blockState) { if (!blockState.isAir() && blockState.shouldSpawnTerrainParticles()) { VoxelShape shape = blockState.getShape(this, pos);",
+          "java_invocation": "this.minecraft \t\t\t\t\t\t\t\t\t.particleEngine \t\t\t\t\t\t\t\t\t.add(new TerrainParticle(this, pos.getX() + x, pos.getY() + y, pos.getZ() + z, relX - 0.5, relY - 0.5, relZ - 0.5, blockState, pos))",
+          "guard_and_state_context": "1067: \t\t\t\t\t\t\t\tdouble relX = (xx + 0.5) / countX;\n1068: \t\t\t\t\t\t\t\tdouble relY = (yy + 0.5) / countY;\n1069: \t\t\t\t\t\t\t\tdouble relZ = (zz + 0.5) / countZ;\n1070: \t\t\t\t\t\t\t\tdouble x = relX * widthX + x1;\n1071: \t\t\t\t\t\t\t\tdouble y = relY * widthY + y1;\n1072: \t\t\t\t\t\t\t\tdouble z = relZ * widthZ + z1;\n1073: \t\t\t\t\t\t\t\tthis.minecraft\n1074: \t\t\t\t\t\t\t\t\t.particleEngine\n1075: \t\t\t\t\t\t\t\t\t.add(new TerrainParticle(this, pos.getX() + x, pos.getY() + y, pos.getZ() + z, relX - 0.5, relY - 0.5, relZ - 0.5, blockState, pos));\n1076: \t\t\t\t\t\t\t}\n1077: \t\t\t\t\t\t}\n1078: \t\t\t\t\t}\n1079: \t\t\t\t}\n1080: \t\t\t);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "client_packet_or_world_callback",
+          "rust_entry_candidate_from_inventory": "app/core.rs LevelEvent; app/core.rs event17; player/interaction.rs; particle.rs::ParticleStore::add_firework_starter/add_destroy_block_effect",
+          "rust_gap_candidate_from_inventory": "Firework packet event17 routed to ParticleStore; player block breaking and block destroy use add_destroy_block_effect. Exact local ClientLevel.addBreakingBlockEffect path/condition vs Rust interaction path and the other 9 API lines remain to be verified. Firework typed component parsing task was in progress.",
+          "audit_status": "packet_world_or_internal_candidate"
+        },
+        {
+          "java_line": 1119,
+          "java_method_line": 1084,
+          "java_method_signature": "public void addBreakingBlockEffect(final BlockPos pos, final Direction direction) { BlockState blockState = this.getBlockState(pos); if (blockState.getRenderShape() != RenderShape.INVISIBLE && blockState.shouldSpawnTerrainParticles()) {",
+          "java_invocation": "this.minecraft.particleEngine.add(new TerrainParticle(this, xp, yp, zp, 0.0, 0.0, 0.0, blockState, pos).setPower(0.2F).scale(0.6F))",
+          "guard_and_state_context": "1113: \t\t\t}\n1114: \n1115: \t\t\tif (direction == Direction.EAST) {\n1116: \t\t\t\txp = x + shape.maxX + 0.1F;\n1117: \t\t\t}\n1118: \n1119: \t\t\tthis.minecraft.particleEngine.add(new TerrainParticle(this, xp, yp, zp, 0.0, 0.0, 0.0, blockState, pos).setPower(0.2F).scale(0.6F));\n1120: \t\t}\n1121: \t}\n1122: \n1123: \tpublic void setServerSimulationDistance(final int serverSimulationDistance) {\n1124: \t\tthis.serverSimulationDistance = serverSimulationDistance;\n1125: \t}\n1126: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "client_packet_or_world_callback",
+          "rust_entry_candidate_from_inventory": "app/core.rs LevelEvent; app/core.rs event17; player/interaction.rs; particle.rs::ParticleStore::add_firework_starter/add_destroy_block_effect",
+          "rust_gap_candidate_from_inventory": "Firework packet event17 routed to ParticleStore; player block breaking and block destroy use add_destroy_block_effect. Exact local ClientLevel.addBreakingBlockEffect path/condition vs Rust interaction path and the other 9 API lines remain to be verified. Firework typed component parsing task was in progress.",
+          "audit_status": "packet_world_or_internal_candidate"
+        }
+      ],
+      "record_count": 12,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 9,
+      "java_source_path": "net/minecraft/client/particle/TrackingEmitter.java",
+      "callsite_records": [
+        {
+          "java_line": 40,
+          "java_method_line": 31,
+          "java_method_signature": "public void tick() { for (int i = 0; i < 16; i++) { double xa = this.random.nextFloat() * 2.0F - 1.0F;",
+          "java_invocation": "this.level.addParticle(this.particleType, x, y, z, xa, ya + 0.2, za)",
+          "guard_and_state_context": "34: \t\t\tdouble ya = this.random.nextFloat() * 2.0F - 1.0F;\n35: \t\t\tdouble za = this.random.nextFloat() * 2.0F - 1.0F;\n36: \t\t\tif (!(xa * xa + ya * ya + za * za > 1.0)) {\n37: \t\t\t\tdouble x = this.entity.getX(xa / 4.0);\n38: \t\t\t\tdouble y = this.entity.getY(0.5 + ya / 4.0);\n39: \t\t\t\tdouble z = this.entity.getZ(za / 4.0);\n40: \t\t\t\tthis.level.addParticle(this.particleType, x, y, z, xa, ya + 0.2, za);\n41: \t\t\t}\n42: \t\t}\n43: \n44: \t\tthis.life++;\n45: \t\tif (this.life >= this.lifeTime) {\n46: \t\t\tthis.remove();\n47: \t\t}",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "particle_engine_internal_child",
+          "rust_entry_candidate_from_inventory": "particle::ParticleStore tick/provider処理",
+          "rust_gap_candidate_from_inventory": "Storeはtick/追跡管理の入口あり。子粒子/特殊連鎖ごとの完全性は別provider調査中。",
+          "audit_status": "internal_child_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 17,
+      "java_source_path": "net/minecraft/world/entity/AgeableMob.java",
+      "callsite_records": [
+        {
+          "java_line": 197,
+          "java_method_line": 192,
+          "java_method_signature": "public void aiStep() { super.aiStep(); if (this.level().isClientSide()) {",
+          "java_invocation": "addParticle(ParticleTypes.HAPPY_VILLAGER, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "191:     @Override\n192:     public void aiStep() {\n193:         super.aiStep();\n194:         if (this.level().isClientSide()) {\n195:             if (this.forcedAgeTimer > 0) {\n196:                 if (this.forcedAgeTimer % 4 == 0) {\n197:                     this.level().addParticle(ParticleTypes.HAPPY_VILLAGER, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), 0.0, 0.0, 0.0);\n198:                 }\n199:                 --this.forcedAgeTimer;\n200:             }\n201:         } else if (this.isAlive()) {\n202:             int age = this.getAge();\n203:             if (this.canAgeUp()) {\n204:                 this.setAge(++age);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        },
+        {
+          "java_line": 221,
+          "java_method_line": 216,
+          "java_method_signature": "public static int makeAgeLockedParticle(Level level, Mob mob, int ageLockParticleTimer, boolean isAgeLocked) { if (ageLockParticleTimer > 0) { if (level.isClientSide() && ageLockParticleTimer % 2 == 0) {",
+          "java_invocation": "level.addParticle(isAgeLocked ? ParticleTypes.PAUSE_MOB_GROWTH : ParticleTypes.RESET_MOB_GROWTH, spawnPosition.x, spawnPosition.y, spawnPosition.z, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "215: \n216:     public static int makeAgeLockedParticle(Level level, Mob mob, int ageLockParticleTimer, boolean isAgeLocked) {\n217:         if (ageLockParticleTimer > 0) {\n218:             if (level.isClientSide() && ageLockParticleTimer % 2 == 0) {\n219:                 float yParticleOffset = isAgeLocked ? 0.2f : 0.0f;\n220:                 Vec3 spawnPosition = new Vec3(mob.getRandomX(1.0), mob.getRandomY(0.2) + (double)mob.getBbHeight() + (double)yParticleOffset, mob.getRandomZ(1.0));\n221:                 level.addParticle(isAgeLocked ? ParticleTypes.PAUSE_MOB_GROWTH : ParticleTypes.RESET_MOB_GROWTH, spawnPosition.x, spawnPosition.y, spawnPosition.z, 0.0, 0.0, 0.0);\n222:             }\n223:             --ageLockParticleTimer;\n224:         }\n225:         return ageLockParticleTimer;\n226:     }\n227: \n228:     protected void ageBoundaryReached() {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 25,
+      "java_source_path": "net/minecraft/world/entity/animal/Animal.java",
+      "callsite_records": [
+        {
+          "java_line": 85,
+          "java_method_line": 74,
+          "java_method_signature": "public void aiStep() { super.aiStep(); if (this.getAge() != 0) {",
+          "java_invocation": "addParticle(ParticleTypes.HEART, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), xa, ya, za)",
+          "guard_and_state_context": "79:         if (this.inLove > 0) {\n80:             --this.inLove;\n81:             if (this.inLove % 10 == 0) {\n82:                 double xa = this.random.nextGaussian() * 0.02;\n83:                 double ya = this.random.nextGaussian() * 0.02;\n84:                 double za = this.random.nextGaussian() * 0.02;\n85:                 this.level().addParticle(ParticleTypes.HEART, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), xa, ya, za);\n86:             }\n87:         }\n88:     }\n89: \n90:     @Override\n91:     protected void actuallyHurt(ServerLevel level, DamageSource source, float dmg) {\n92:         this.resetLove();",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        },
+        {
+          "java_line": 250,
+          "java_method_line": 244,
+          "java_method_signature": "public void handleEntityEvent(byte id) { if (id == 18) { for (int i = 0; i < 7; ++i) {",
+          "java_invocation": "addParticle(ParticleTypes.HEART, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), xa, ya, za)",
+          "guard_and_state_context": "244:     public void handleEntityEvent(byte id) {\n245:         if (id == 18) {\n246:             for (int i = 0; i < 7; ++i) {\n247:                 double xa = this.random.nextGaussian() * 0.02;\n248:                 double ya = this.random.nextGaussian() * 0.02;\n249:                 double za = this.random.nextGaussian() * 0.02;\n250:                 this.level().addParticle(ParticleTypes.HEART, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), xa, ya, za);\n251:             }\n252:         } else {\n253:             super.handleEntityEvent(id);\n254:         }\n255:     }\n256: \n257:     @Override",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 33,
+      "java_source_path": "net/minecraft/world/entity/animal/feline/Ocelot.java",
+      "callsite_records": [
+        {
+          "java_line": 212,
+          "java_method_line": 203,
+          "java_method_signature": "private void spawnTrustingParticles(boolean success) { SimpleParticleType particle = ParticleTypes.HEART; if (!success) {",
+          "java_invocation": "addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), xa, ya, za)",
+          "guard_and_state_context": "206:             particle = ParticleTypes.SMOKE;\n207:         }\n208:         for (int i = 0; i < 7; ++i) {\n209:             double xa = this.random.nextGaussian() * 0.02;\n210:             double ya = this.random.nextGaussian() * 0.02;\n211:             double za = this.random.nextGaussian() * 0.02;\n212:             this.level().addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), xa, ya, za);\n213:         }\n214:     }\n215: \n216:     protected void reassessTrustingGoals() {\n217:         if (this.ocelotAvoidPlayersGoal == null) {\n218:             this.ocelotAvoidPlayersGoal = new OcelotAvoidEntityGoal<Player>(this, Player.class, 16.0f, 0.8, 1.33);\n219:         }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 41,
+      "java_source_path": "net/minecraft/world/entity/animal/wolf/Wolf.java",
+      "callsite_records": [
+        {
+          "java_line": 366,
+          "java_method_line": 333,
+          "java_method_signature": "public void tick() { super.tick(); if (!this.isAlive()) {",
+          "java_invocation": "addParticle(ParticleTypes.SPLASH, this.getX() + (double)xo, yt + 0.8f, this.getZ() + (double)zo, movement.x, movement.y, movement.z)",
+          "guard_and_state_context": "360:                 float yt = (float)this.getY();\n361:                 int shakeCount = (int)(Mth.sin((this.shakeAnim - 0.4f) * (float)Math.PI) * 7.0f);\n362:                 Vec3 movement = this.getDeltaMovement();\n363:                 for (int i = 0; i < shakeCount; ++i) {\n364:                     float xo = (this.random.nextFloat() * 2.0f - 1.0f) * this.getBbWidth() * 0.5f;\n365:                     float zo = (this.random.nextFloat() * 2.0f - 1.0f) * this.getBbWidth() * 0.5f;\n366:                     this.level().addParticle(ParticleTypes.SPLASH, this.getX() + (double)xo, yt + 0.8f, this.getZ() + (double)zo, movement.x, movement.y, movement.z);\n367:                 }\n368:             }\n369:         }\n370:     }\n371: \n372:     private void cancelShake() {\n373:         this.isShaking = false;",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "entity state/event owner + server packet receive (callsite別に分離)",
+          "rust_gap_candidate_from_inventory": "explicit server sends flow through LevelParticles; direct addParticle is a separate local client implementation and cannot be co-counted.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        },
+        {
+          "java_line": 431,
+          "java_method_line": 420,
+          "java_method_signature": "protected void actuallyHurt(ServerLevel level, DamageSource source, float damage) { if (!this.canArmorAbsorb(source)) { super.actuallyHurt(level, source, damage);",
+          "java_invocation": "level.sendParticles(new ItemParticleOption(ParticleTypes.ITEM, Items.ARMADILLO_SCUTE), this.getX(), this.getY() + 1.0, this.getZ(), 20, 0.2, 0.1, 0.2, 0.1)",
+          "guard_and_state_context": "425:         ItemStack armorBefore = this.getBodyArmorItem();\n426:         int damageBefore = armorBefore.getDamageValue();\n427:         int maxDamage = armorBefore.getMaxDamage();\n428:         armorBefore.hurtAndBreak(Mth.ceil(damage), (LivingEntity)this, EquipmentSlot.BODY);\n429:         if (Crackiness.WOLF_ARMOR.byDamage(damageBefore, maxDamage) != Crackiness.WOLF_ARMOR.byDamage(this.getBodyArmorItem())) {\n430:             this.playSound(SoundEvents.WOLF_ARMOR_CRACK);\n431:             level.sendParticles(new ItemParticleOption(ParticleTypes.ITEM, Items.ARMADILLO_SCUTE), this.getX(), this.getY() + 1.0, this.getZ(), 20, 0.2, 0.1, 0.2, 0.1);\n432:         }\n433:     }\n434: \n435:     private boolean canArmorAbsorb(DamageSource source) {\n436:         return this.getBodyArmorItem().is(Items.WOLF_ARMOR) && !source.is(DamageTypeTags.BYPASSES_WOLF_ARMOR);\n437:     }\n438: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "entity state/event owner + server packet receive (callsite別に分離)",
+          "rust_gap_candidate_from_inventory": "explicit server sends flow through LevelParticles; direct addParticle is a separate local client implementation and cannot be co-counted.",
+          "audit_status": "packet_owned_candidate"
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 49,
+      "java_source_path": "net/minecraft/world/entity/monster/Blaze.java",
+      "callsite_records": [
+        {
+          "java_line": 101,
+          "java_method_line": 92,
+          "java_method_signature": "public void aiStep() { if (!this.onGround() && this.getDeltaMovement().y < 0.0) { this.setDeltaMovement(this.getDeltaMovement().multiply(1.0, 0.6, 1.0));",
+          "java_invocation": "addParticle(ParticleTypes.LARGE_SMOKE, this.getRandomX(0.5), this.getRandomY(), this.getRandomZ(0.5), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "95:         }\n96:         if (this.level().isClientSide()) {\n97:             if (this.random.nextInt(24) == 0 && !this.isSilent()) {\n98:                 this.level().playLocalSound(this.getX() + 0.5, this.getY() + 0.5, this.getZ() + 0.5, SoundEvents.BLAZE_BURN, this.getSoundSource(), 1.0f + this.random.nextFloat(), this.random.nextFloat() * 0.7f + 0.3f, false);\n99:             }\n100:             for (int i = 0; i < 2; ++i) {\n101:                 this.level().addParticle(ParticleTypes.LARGE_SMOKE, this.getRandomX(0.5), this.getRandomY(), this.getRandomZ(0.5), 0.0, 0.0, 0.0);\n102:             }\n103:         }\n104:         super.aiStep();\n105:     }\n106: \n107:     @Override\n108:     public boolean isSensitiveToWater() {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 57,
+      "java_source_path": "net/minecraft/world/entity/monster/creaking/Creaking.java",
+      "callsite_records": [
+        {
+          "java_line": 288,
+          "java_method_line": 279,
+          "java_method_signature": "public void tearDown() { Level level = this.level(); if (level instanceof ServerLevel) {",
+          "java_invocation": "serverLevel.sendParticles(new BlockParticleOption(ParticleTypes.BLOCK_CRUMBLE, Blocks.PALE_OAK_WOOD.defaultBlockState()), center.x, center.y, center.z, 100, xSpread, ySpread, zSpread, 0.0)",
+          "guard_and_state_context": "282:             ServerLevel serverLevel = (ServerLevel)level;\n283:             AABB box = this.getBoundingBox();\n284:             Vec3 center = box.getCenter();\n285:             double xSpread = box.getXsize() * 0.3;\n286:             double ySpread = box.getYsize() * 0.3;\n287:             double zSpread = box.getZsize() * 0.3;\n288:             serverLevel.sendParticles(new BlockParticleOption(ParticleTypes.BLOCK_CRUMBLE, Blocks.PALE_OAK_WOOD.defaultBlockState()), center.x, center.y, center.z, 100, xSpread, ySpread, zSpread, 0.0);\n289:             serverLevel.sendParticles(new BlockParticleOption(ParticleTypes.BLOCK_CRUMBLE, (BlockState)Blocks.CREAKING_HEART.defaultBlockState().setValue(CreakingHeartBlock.STATE, CreakingHeartState.AWAKE)), center.x, center.y, center.z, 10, xSpread, ySpread, zSpread, 0.0);\n290:         }\n291:         this.makeSound(this.getDeathSound());\n292:         this.remove(Entity.RemovalReason.DISCARDED);\n293:     }\n294: \n295:     public void creakingDeathEffects(DamageSource source) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        },
+        {
+          "java_line": 289,
+          "java_method_line": 279,
+          "java_method_signature": "public void tearDown() { Level level = this.level(); if (level instanceof ServerLevel) {",
+          "java_invocation": "serverLevel.sendParticles(new BlockParticleOption(ParticleTypes.BLOCK_CRUMBLE, (BlockState)Blocks.CREAKING_HEART.defaultBlockState().setValue(CreakingHeartBlock.STATE, CreakingHeartState.AWAKE)), center.x, center.y, center.z, 10, xSpread, ySpread, zSpread, 0.0)",
+          "guard_and_state_context": "283:             AABB box = this.getBoundingBox();\n284:             Vec3 center = box.getCenter();\n285:             double xSpread = box.getXsize() * 0.3;\n286:             double ySpread = box.getYsize() * 0.3;\n287:             double zSpread = box.getZsize() * 0.3;\n288:             serverLevel.sendParticles(new BlockParticleOption(ParticleTypes.BLOCK_CRUMBLE, Blocks.PALE_OAK_WOOD.defaultBlockState()), center.x, center.y, center.z, 100, xSpread, ySpread, zSpread, 0.0);\n289:             serverLevel.sendParticles(new BlockParticleOption(ParticleTypes.BLOCK_CRUMBLE, (BlockState)Blocks.CREAKING_HEART.defaultBlockState().setValue(CreakingHeartBlock.STATE, CreakingHeartState.AWAKE)), center.x, center.y, center.z, 10, xSpread, ySpread, zSpread, 0.0);\n290:         }\n291:         this.makeSound(this.getDeathSound());\n292:         this.remove(Entity.RemovalReason.DISCARDED);\n293:     }\n294: \n295:     public void creakingDeathEffects(DamageSource source) {\n296:         this.blameSourceForDamage(source);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 65,
+      "java_source_path": "net/minecraft/world/entity/projectile/EvokerFangs.java",
+      "callsite_records": [
+        {
+          "java_line": 91,
+          "java_method_line": 78,
+          "java_method_signature": "public void tick() { super.tick(); if (this.level().isClientSide()) {",
+          "java_invocation": "addParticle(ParticleTypes.CRIT, x, y + 1.0, z, xd, yd, zd)",
+          "guard_and_state_context": "85:                         double x = this.getX() + (this.random.nextDouble() * 2.0 - 1.0) * (double)this.getBbWidth() * 0.5;\n86:                         double y = this.getY() + 0.05 + this.random.nextDouble();\n87:                         double z = this.getZ() + (this.random.nextDouble() * 2.0 - 1.0) * (double)this.getBbWidth() * 0.5;\n88:                         double xd = (this.random.nextDouble() * 2.0 - 1.0) * 0.3;\n89:                         double yd = 0.3 + this.random.nextDouble() * 0.3;\n90:                         double zd = (this.random.nextDouble() * 2.0 - 1.0) * 0.3;\n91:                         this.level().addParticle(ParticleTypes.CRIT, x, y + 1.0, z, xd, yd, zd);\n92:                     }\n93:                 }\n94:             }\n95:         } else if (--this.warmupDelayTicks < 0) {\n96:             if (this.warmupDelayTicks == -8) {\n97:                 List<LivingEntity> entities = this.level().getEntitiesOfClass(LivingEntity.class, this.getBoundingBox().inflate(0.2, 0.0, 0.2));\n98:                 for (LivingEntity entity : entities) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 73,
+      "java_source_path": "net/minecraft/world/entity/projectile/arrow/Arrow.java",
+      "callsite_records": [
+        {
+          "java_line": 105,
+          "java_method_line": 99,
+          "java_method_signature": "private void makeParticle(int amount) { int colorValue = this.getColor(); if (colorValue == -1 || amount <= 0) {",
+          "java_invocation": "addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, colorValue), this.getRandomX(0.5), this.getRandomY(), this.getRandomZ(0.5), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "99:     private void makeParticle(int amount) {\n100:         int colorValue = this.getColor();\n101:         if (colorValue == -1 || amount <= 0) {\n102:             return;\n103:         }\n104:         for (int i = 0; i < amount; ++i) {\n105:             this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, colorValue), this.getRandomX(0.5), this.getRandomY(), this.getRandomZ(0.5), 0.0, 0.0, 0.0);\n106:         }\n107:     }\n108: \n109:     public int getColor() {\n110:         return this.entityData.get(ID_EFFECT_COLOR);\n111:     }\n112: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        },
+        {
+          "java_line": 136,
+          "java_method_line": 128,
+          "java_method_signature": "public void handleEntityEvent(byte id) { if (id == 0) { int colorValue = this.getColor();",
+          "java_invocation": "addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, red, green, blue), this.getRandomX(0.5), this.getRandomY(), this.getRandomZ(0.5), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "130:             int colorValue = this.getColor();\n131:             if (colorValue != -1) {\n132:                 float red = (float)(colorValue >> 16 & 0xFF) / 255.0f;\n133:                 float green = (float)(colorValue >> 8 & 0xFF) / 255.0f;\n134:                 float blue = (float)(colorValue >> 0 & 0xFF) / 255.0f;\n135:                 for (int i = 0; i < 20; ++i) {\n136:                     this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, red, green, blue), this.getRandomX(0.5), this.getRandomY(), this.getRandomZ(0.5), 0.0, 0.0, 0.0);\n137:                 }\n138:             }\n139:         } else {\n140:             super.handleEntityEvent(id);\n141:         }\n142:     }\n143: }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 81,
+      "java_source_path": "net/minecraft/world/entity/vehicle/minecart/MinecartTNT.java",
+      "callsite_records": [
+        {
+          "java_line": 63,
+          "java_method_line": 58,
+          "java_method_signature": "public void tick() { double speedSqr; super.tick();",
+          "java_invocation": "addParticle(ParticleTypes.SMOKE, this.getX(), this.getY() + 0.5, this.getZ(), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "57:     @Override\n58:     public void tick() {\n59:         double speedSqr;\n60:         super.tick();\n61:         if (this.fuse > 0) {\n62:             --this.fuse;\n63:             this.level().addParticle(ParticleTypes.SMOKE, this.getX(), this.getY() + 0.5, this.getZ(), 0.0, 0.0, 0.0);\n64:         } else if (this.fuse == 0) {\n65:             this.explode(this.ignitionSource, this.getDeltaMovement().horizontalDistanceSqr());\n66:         }\n67:         if (this.horizontalCollision && (speedSqr = this.getDeltaMovement().horizontalDistanceSqr()) >= (double)0.01f) {\n68:             this.explode(this.ignitionSource, speedSqr);\n69:         }\n70:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 89,
+      "java_source_path": "net/minecraft/world/level/LevelAccessor.java",
+      "callsite_records": [
+        {
+          "java_line": 83,
+          "java_method_line": 83,
+          "java_method_signature": "public void addParticle(ParticleOptions var1, double var2, double var4, double var6, double var8, double var10, double var12);  public void levelEvent(@Nullable Entity var1, int var2, BlockPos var3, int var4);",
+          "java_invocation": "addParticle(ParticleOptions var1, double var2, double var4, double var6, double var8, double var10, double var12)",
+          "guard_and_state_context": "77:     default public void playSound(@Nullable Entity except, BlockPos pos, SoundEvent soundEvent, SoundSource source) {\n78:         this.playSound(except, pos, soundEvent, source, 1.0f, 1.0f);\n79:     }\n80: \n81:     public void playSound(@Nullable Entity var1, BlockPos var2, SoundEvent var3, SoundSource var4, float var5, float var6);\n82: \n83:     public void addParticle(ParticleOptions var1, double var2, double var4, double var6, double var8, double var10, double var12);\n84: \n85:     public void levelEvent(@Nullable Entity var1, int var2, BlockPos var3, int var4);\n86: \n87:     default public void levelEvent(int type, BlockPos pos, int data) {\n88:         this.levelEvent(null, type, pos, data);\n89:     }\n90: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "helper_or_other",
+          "rust_entry_candidate_from_inventory": "Java Level/LevelAccessor API",
+          "rust_gap_candidate_from_inventory": "固有の生成元なし。発生条件は実際の呼び出し元へ帰属。",
+          "audit_status": "uncertain"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 97,
+      "java_source_path": "net/minecraft/world/level/block/CampfireBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 163,
+          "java_method_line": 154,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { if (!state.getValue(LIT).booleanValue()) { return;",
+          "java_invocation": "level.addParticle(ParticleTypes.LAVA, (double)pos.getX() + 0.5, (double)pos.getY() + 0.5, (double)pos.getZ() + 0.5, random.nextFloat() / 2.0f, 5.0E-5, random.nextFloat() / 2.0f)",
+          "guard_and_state_context": "157:         }\n158:         if (random.nextInt(10) == 0) {\n159:             level.playLocalSound((double)pos.getX() + 0.5, (double)pos.getY() + 0.5, (double)pos.getZ() + 0.5, SoundEvents.CAMPFIRE_CRACKLE, SoundSource.BLOCKS, 0.5f + random.nextFloat(), random.nextFloat() * 0.7f + 0.6f, false);\n160:         }\n161:         if (this.spawnParticles && random.nextInt(5) == 0) {\n162:             for (int i = 0; i < random.nextInt(1) + 1; ++i) {\n163:                 level.addParticle(ParticleTypes.LAVA, (double)pos.getX() + 0.5, (double)pos.getY() + 0.5, (double)pos.getZ() + 0.5, random.nextFloat() / 2.0f, 5.0E-5, random.nextFloat() / 2.0f);\n164:             }\n165:         }\n166:     }\n167: \n168:     public static void dowse(@Nullable Entity source, LevelAccessor level, BlockPos pos, BlockState state) {\n169:         if (level.isClientSide()) {\n170:             for (int j = 0; j < 20; ++j) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        },
+        {
+          "java_line": 208,
+          "java_method_line": 205,
+          "java_method_signature": "public static void makeParticles(Level level, BlockPos pos, boolean isSignalFire, boolean smoking) { RandomSource random = level.getRandom(); SimpleParticleType smokeParticle = isSignalFire ? ParticleTypes.CAMPFIRE_SIGNAL_SMOKE : ParticleTypes.CAMPFIRE_COSY_SMOKE;",
+          "java_invocation": "level.addAlwaysVisibleParticle(smokeParticle, true, (double)pos.getX() + 0.5 + random.nextDouble() / 3.0 * (double)(random.nextBoolean() ? 1 : -1), (double)pos.getY() + random.nextDouble() + random.nextDouble(), (double)pos.getZ() + 0.5 + random.nextDouble() / 3.0 * (double)(random.nextBoolean() ? 1 : -1), 0.0, 0.07, 0.0)",
+          "guard_and_state_context": "202:         }\n203:     }\n204: \n205:     public static void makeParticles(Level level, BlockPos pos, boolean isSignalFire, boolean smoking) {\n206:         RandomSource random = level.getRandom();\n207:         SimpleParticleType smokeParticle = isSignalFire ? ParticleTypes.CAMPFIRE_SIGNAL_SMOKE : ParticleTypes.CAMPFIRE_COSY_SMOKE;\n208:         level.addAlwaysVisibleParticle(smokeParticle, true, (double)pos.getX() + 0.5 + random.nextDouble() / 3.0 * (double)(random.nextBoolean() ? 1 : -1), (double)pos.getY() + random.nextDouble() + random.nextDouble(), (double)pos.getZ() + 0.5 + random.nextDouble() / 3.0 * (double)(random.nextBoolean() ? 1 : -1), 0.0, 0.07, 0.0);\n209:         if (smoking) {\n210:             level.addParticle(ParticleTypes.SMOKE, (double)pos.getX() + 0.5 + random.nextDouble() / 4.0 * (double)(random.nextBoolean() ? 1 : -1), (double)pos.getY() + 0.4, (double)pos.getZ() + 0.5 + random.nextDouble() / 4.0 * (double)(random.nextBoolean() ? 1 : -1), 0.0, 0.005, 0.0);\n211:         }\n212:     }\n213: \n214:     public static boolean isSmokeyPos(Level level, BlockPos pos) {\n215:         for (int i = 1; i <= 5; ++i) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        },
+        {
+          "java_line": 210,
+          "java_method_line": 205,
+          "java_method_signature": "public static void makeParticles(Level level, BlockPos pos, boolean isSignalFire, boolean smoking) { RandomSource random = level.getRandom(); SimpleParticleType smokeParticle = isSignalFire ? ParticleTypes.CAMPFIRE_SIGNAL_SMOKE : ParticleTypes.CAMPFIRE_COSY_SMOKE;",
+          "java_invocation": "level.addParticle(ParticleTypes.SMOKE, (double)pos.getX() + 0.5 + random.nextDouble() / 4.0 * (double)(random.nextBoolean() ? 1 : -1), (double)pos.getY() + 0.4, (double)pos.getZ() + 0.5 + random.nextDouble() / 4.0 * (double)(random.nextBoolean() ? 1 : -1), 0.0, 0.005, 0.0)",
+          "guard_and_state_context": "204: \n205:     public static void makeParticles(Level level, BlockPos pos, boolean isSignalFire, boolean smoking) {\n206:         RandomSource random = level.getRandom();\n207:         SimpleParticleType smokeParticle = isSignalFire ? ParticleTypes.CAMPFIRE_SIGNAL_SMOKE : ParticleTypes.CAMPFIRE_COSY_SMOKE;\n208:         level.addAlwaysVisibleParticle(smokeParticle, true, (double)pos.getX() + 0.5 + random.nextDouble() / 3.0 * (double)(random.nextBoolean() ? 1 : -1), (double)pos.getY() + random.nextDouble() + random.nextDouble(), (double)pos.getZ() + 0.5 + random.nextDouble() / 3.0 * (double)(random.nextBoolean() ? 1 : -1), 0.0, 0.07, 0.0);\n209:         if (smoking) {\n210:             level.addParticle(ParticleTypes.SMOKE, (double)pos.getX() + 0.5 + random.nextDouble() / 4.0 * (double)(random.nextBoolean() ? 1 : -1), (double)pos.getY() + 0.4, (double)pos.getZ() + 0.5 + random.nextDouble() / 4.0 * (double)(random.nextBoolean() ? 1 : -1), 0.0, 0.005, 0.0);\n211:         }\n212:     }\n213: \n214:     public static boolean isSmokeyPos(Level level, BlockPos pos) {\n215:         for (int i = 1; i <= 5; ++i) {\n216:             BlockPos posToCheck = pos.below(i);\n217:             BlockState blockState = level.getBlockState(posToCheck);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        }
+      ],
+      "record_count": 3,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 105,
+      "java_source_path": "net/minecraft/world/level/block/EndPortalBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 129,
+          "java_method_line": 125,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { double x = (double)pos.getX() + random.nextDouble(); double y = (double)pos.getY() + 0.8;",
+          "java_invocation": "level.addParticle(ParticleTypes.SMOKE, x, y, z, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "123: \n124:     @Override\n125:     public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) {\n126:         double x = (double)pos.getX() + random.nextDouble();\n127:         double y = (double)pos.getY() + 0.8;\n128:         double z = (double)pos.getZ() + random.nextDouble();\n129:         level.addParticle(ParticleTypes.SMOKE, x, y, z, 0.0, 0.0, 0.0);\n130:     }\n131: \n132:     @Override\n133:     protected ItemStack getCloneItemStack(LevelReader level, BlockPos pos, BlockState state, boolean includeData) {\n134:         return ItemStack.EMPTY;\n135:     }\n136: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 113,
+      "java_source_path": "net/minecraft/world/level/block/MyceliumBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 35,
+          "java_method_line": 32,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { super.animateTick(state, level, pos, random); if (random.nextInt(10) == 0) {",
+          "java_invocation": "level.addParticle(ParticleTypes.MYCELIUM, (double)pos.getX() + random.nextDouble(), (double)pos.getY() + 1.1, (double)pos.getZ() + random.nextDouble(), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "29:     }\n30: \n31:     @Override\n32:     public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) {\n33:         super.animateTick(state, level, pos, random);\n34:         if (random.nextInt(10) == 0) {\n35:             level.addParticle(ParticleTypes.MYCELIUM, (double)pos.getX() + random.nextDouble(), (double)pos.getY() + 1.1, (double)pos.getZ() + random.nextDouble(), 0.0, 0.0, 0.0);\n36:         }\n37:     }\n38: }\n39: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 121,
+      "java_source_path": "net/minecraft/world/level/block/RedstoneTorchBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 134,
+          "java_method_line": 127,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { if (!state.getValue(LIT).booleanValue()) { return;",
+          "java_invocation": "level.addParticle(DustParticleOptions.REDSTONE, x, y, z, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "128:         if (!state.getValue(LIT).booleanValue()) {\n129:             return;\n130:         }\n131:         double x = (double)pos.getX() + 0.5 + (random.nextDouble() - 0.5) * 0.2;\n132:         double y = (double)pos.getY() + 0.7 + (random.nextDouble() - 0.5) * 0.2;\n133:         double z = (double)pos.getZ() + 0.5 + (random.nextDouble() - 0.5) * 0.2;\n134:         level.addParticle(DustParticleOptions.REDSTONE, x, y, z, 0.0, 0.0, 0.0);\n135:     }\n136: \n137:     @Override\n138:     protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> builder) {\n139:         builder.add(LIT);\n140:     }\n141: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 129,
+      "java_source_path": "net/minecraft/world/level/block/WallTorchBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 109,
+          "java_method_line": 101,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { Direction direction = state.getValue(FACING); double x = (double)pos.getX() + 0.5;",
+          "java_invocation": "level.addParticle(ParticleTypes.SMOKE, x + 0.27 * (double)opposite.getStepX(), y + 0.22, z + 0.27 * (double)opposite.getStepZ(), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "103:         double x = (double)pos.getX() + 0.5;\n104:         double y = (double)pos.getY() + 0.7;\n105:         double z = (double)pos.getZ() + 0.5;\n106:         double h = 0.22;\n107:         double r = 0.27;\n108:         Direction opposite = direction.getOpposite();\n109:         level.addParticle(ParticleTypes.SMOKE, x + 0.27 * (double)opposite.getStepX(), y + 0.22, z + 0.27 * (double)opposite.getStepZ(), 0.0, 0.0, 0.0);\n110:         level.addParticle(this.flameParticle, x + 0.27 * (double)opposite.getStepX(), y + 0.22, z + 0.27 * (double)opposite.getStepZ(), 0.0, 0.0, 0.0);\n111:     }\n112: \n113:     @Override\n114:     protected BlockState rotate(BlockState state, Rotation rotation) {\n115:         return (BlockState)state.setValue(FACING, rotation.rotate(state.getValue(FACING)));\n116:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        },
+        {
+          "java_line": 110,
+          "java_method_line": 101,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { Direction direction = state.getValue(FACING); double x = (double)pos.getX() + 0.5;",
+          "java_invocation": "level.addParticle(this.flameParticle, x + 0.27 * (double)opposite.getStepX(), y + 0.22, z + 0.27 * (double)opposite.getStepZ(), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "104:         double y = (double)pos.getY() + 0.7;\n105:         double z = (double)pos.getZ() + 0.5;\n106:         double h = 0.22;\n107:         double r = 0.27;\n108:         Direction opposite = direction.getOpposite();\n109:         level.addParticle(ParticleTypes.SMOKE, x + 0.27 * (double)opposite.getStepX(), y + 0.22, z + 0.27 * (double)opposite.getStepZ(), 0.0, 0.0, 0.0);\n110:         level.addParticle(this.flameParticle, x + 0.27 * (double)opposite.getStepX(), y + 0.22, z + 0.27 * (double)opposite.getStepZ(), 0.0, 0.0, 0.0);\n111:     }\n112: \n113:     @Override\n114:     protected BlockState rotate(BlockState state, Rotation rotation) {\n115:         return (BlockState)state.setValue(FACING, rotation.rotate(state.getValue(FACING)));\n116:     }\n117: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 137,
+      "java_source_path": "net/minecraft/world/level/block/entity/SculkCatalystBlockEntity.java",
+      "callsite_records": [
+        {
+          "java_line": 125,
+          "java_method_line": 122,
+          "java_method_signature": "private void bloom(ServerLevel level, BlockPos pos, BlockState state, RandomSource random) { level.setBlock(pos, (BlockState)state.setValue(SculkCatalystBlock.PULSE, true), 3); level.scheduleTick(pos, state.getBlock(), 8);",
+          "java_invocation": "level.sendParticles(ParticleTypes.SCULK_SOUL, (double)pos.getX() + 0.5, (double)pos.getY() + 1.15, (double)pos.getZ() + 0.5, 2, 0.2, 0.0, 0.2, 0.0)",
+          "guard_and_state_context": "119:             return this.sculkSpreader;\n120:         }\n121: \n122:         private void bloom(ServerLevel level, BlockPos pos, BlockState state, RandomSource random) {\n123:             level.setBlock(pos, (BlockState)state.setValue(SculkCatalystBlock.PULSE, true), 3);\n124:             level.scheduleTick(pos, state.getBlock(), 8);\n125:             level.sendParticles(ParticleTypes.SCULK_SOUL, (double)pos.getX() + 0.5, (double)pos.getY() + 1.15, (double)pos.getZ() + 0.5, 2, 0.2, 0.0, 0.2, 0.0);\n126:             level.playSound(null, pos, SoundEvents.SCULK_CATALYST_BLOOM, SoundSource.BLOCKS, 2.0f, 0.6f + random.nextFloat() * 0.4f);\n127:         }\n128: \n129:         private void tryAwardItSpreadsAdvancement(Level level, LivingEntity mob) {\n130:             LivingEntity lastHurtByMob = mob.getLastHurtByMob();\n131:             if (lastHurtByMob instanceof ServerPlayer) {\n132:                 ServerPlayer player = (ServerPlayer)lastHurtByMob;",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 145,
+      "java_source_path": "net/minecraft/client/particle/ParticleEngine.java",
+      "callsite_records": [
+        {
+          "java_line": 41,
+          "java_method_line": 41,
+          "java_method_signature": "public void createTrackingEmitter(final Entity entity, final ParticleOptions particle) { this.trackingEmitters.add(new TrackingEmitter(this.level, entity, particle)); }",
+          "java_invocation": "createTrackingEmitter(final Entity entity, final ParticleOptions particle)",
+          "guard_and_state_context": "35: \n36: \tpublic ParticleEngine(final ClientLevel level, final ParticleResources resourceManager) {\n37: \t\tthis.level = level;\n38: \t\tthis.resourceManager = resourceManager;\n39: \t}\n40: \n41: \tpublic void createTrackingEmitter(final Entity entity, final ParticleOptions particle) {\n42: \t\tthis.trackingEmitters.add(new TrackingEmitter(this.level, entity, particle));\n43: \t}\n44: \n45: \tpublic void createTrackingEmitter(final Entity entity, final ParticleOptions particle, final int lifeTime) {\n46: \t\tthis.trackingEmitters.add(new TrackingEmitter(this.level, entity, particle, lifeTime));\n47: \t}\n48: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "particle_engine_internal_child",
+          "rust_entry_candidate_from_inventory": "pomme-client/src/particle.rs::ParticleStore::add_tracking_emitter; tick_tracking_emitters",
+          "rust_gap_candidate_from_inventory": "Provider implementation exists; all concrete callers and attachment lifetime must map to event/interaction dispatch; emitter presence alone is not proof source integration.",
+          "audit_status": "internal_child_candidate"
+        },
+        {
+          "java_line": 45,
+          "java_method_line": 45,
+          "java_method_signature": "public void createTrackingEmitter(final Entity entity, final ParticleOptions particle, final int lifeTime) { this.trackingEmitters.add(new TrackingEmitter(this.level, entity, particle, lifeTime)); }",
+          "java_invocation": "createTrackingEmitter(final Entity entity, final ParticleOptions particle, final int lifeTime)",
+          "guard_and_state_context": "39: \t}\n40: \n41: \tpublic void createTrackingEmitter(final Entity entity, final ParticleOptions particle) {\n42: \t\tthis.trackingEmitters.add(new TrackingEmitter(this.level, entity, particle));\n43: \t}\n44: \n45: \tpublic void createTrackingEmitter(final Entity entity, final ParticleOptions particle, final int lifeTime) {\n46: \t\tthis.trackingEmitters.add(new TrackingEmitter(this.level, entity, particle, lifeTime));\n47: \t}\n48: \n49: \tpublic @Nullable Particle createParticle(\n50: \t\tfinal ParticleOptions options, final double x, final double y, final double z, final double xa, final double ya, final double za\n51: \t) {\n52: \t\tParticle particle = this.makeParticle(options, x, y, z, xa, ya, za);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "particle_engine_internal_child",
+          "rust_entry_candidate_from_inventory": "pomme-client/src/particle.rs::ParticleStore::add_tracking_emitter; tick_tracking_emitters",
+          "rust_gap_candidate_from_inventory": "Provider implementation exists; all concrete callers and attachment lifetime must map to event/interaction dispatch; emitter presence alone is not proof source integration.",
+          "audit_status": "internal_child_candidate"
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    }
+  ]
+}

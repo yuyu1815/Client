@@ -1,0 +1,524 @@
+{
+  "schema": "particle-source-audit-shard-v1",
+  "shard": 5,
+  "index_rule": "0-based current CSV row index modulo 8",
+  "review_level": "mechanical Java extraction only; semantic audit unresolved",
+  "source_rows": [
+    {
+      "csv_index": 5,
+      "java_source_path": "net/minecraft/client/particle/GustSeedParticle.java",
+      "callsite_records": [
+        {
+          "java_line": 28,
+          "java_method_line": 22,
+          "java_method_signature": "public void tick() { if (this.age % (this.tickDelayInBetween + 1) == 0) { for (int i = 0; i < 3; i++) {",
+          "java_invocation": "this.level.addParticle(ParticleTypes.GUST, x, y, z, (float)this.age / this.lifetime, 0.0, 0.0)",
+          "guard_and_state_context": "22: \tpublic void tick() {\n23: \t\tif (this.age % (this.tickDelayInBetween + 1) == 0) {\n24: \t\t\tfor (int i = 0; i < 3; i++) {\n25: \t\t\t\tdouble x = this.x + (this.random.nextDouble() - this.random.nextDouble()) * this.scale;\n26: \t\t\t\tdouble y = this.y + (this.random.nextDouble() - this.random.nextDouble()) * this.scale;\n27: \t\t\t\tdouble z = this.z + (this.random.nextDouble() - this.random.nextDouble()) * this.scale;\n28: \t\t\t\tthis.level.addParticle(ParticleTypes.GUST, x, y, z, (float)this.age / this.lifetime, 0.0, 0.0);\n29: \t\t\t}\n30: \t\t}\n31: \n32: \t\tif (this.age++ == this.lifetime) {\n33: \t\t\tthis.remove();\n34: \t\t}\n35: \t}",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "particle_engine_internal_child",
+          "rust_entry_candidate_from_inventory": "particle::ParticleStore tick/provider処理",
+          "rust_gap_candidate_from_inventory": "Storeはtick/追跡管理の入口あり。子粒子/特殊連鎖ごとの完全性は別provider調査中。",
+          "audit_status": "internal_child_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 13,
+      "java_source_path": "net/minecraft/server/level/ServerLevel.java",
+      "callsite_records": [
+        {
+          "java_line": 1141,
+          "java_method_line": 1141,
+          "java_method_signature": "public <T extends ParticleOptions> int sendParticles(T particle, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) { return this.sendParticles(particle, false, false, x, y, z, count, xDist, yDist, zDist, speed); }",
+          "java_invocation": "sendParticles(T particle, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed)",
+          "guard_and_state_context": "1135:     }\n1136: \n1137:     public StructureTemplateManager getStructureManager() {\n1138:         return this.server.getStructureManager();\n1139:     }\n1140: \n1141:     public <T extends ParticleOptions> int sendParticles(T particle, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) {\n1142:         return this.sendParticles(particle, false, false, x, y, z, count, xDist, yDist, zDist, speed);\n1143:     }\n1144: \n1145:     public <T extends ParticleOptions> int sendParticles(T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) {\n1146:         ClientboundLevelParticlesPacket packet = new ClientboundLevelParticlesPacket(particle, overrideLimiter, alwaysShow, x, y, z, (float)xDist, (float)yDist, (float)zDist, (float)speed, count);\n1147:         int result = 0;\n1148:         for (int i = 0; i < this.players.size(); ++i) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        },
+        {
+          "java_line": 1142,
+          "java_method_line": 1141,
+          "java_method_signature": "public <T extends ParticleOptions> int sendParticles(T particle, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) { return this.sendParticles(particle, false, false, x, y, z, count, xDist, yDist, zDist, speed); }",
+          "java_invocation": "this.sendParticles(particle, false, false, x, y, z, count, xDist, yDist, zDist, speed)",
+          "guard_and_state_context": "1136: \n1137:     public StructureTemplateManager getStructureManager() {\n1138:         return this.server.getStructureManager();\n1139:     }\n1140: \n1141:     public <T extends ParticleOptions> int sendParticles(T particle, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) {\n1142:         return this.sendParticles(particle, false, false, x, y, z, count, xDist, yDist, zDist, speed);\n1143:     }\n1144: \n1145:     public <T extends ParticleOptions> int sendParticles(T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) {\n1146:         ClientboundLevelParticlesPacket packet = new ClientboundLevelParticlesPacket(particle, overrideLimiter, alwaysShow, x, y, z, (float)xDist, (float)yDist, (float)zDist, (float)speed, count);\n1147:         int result = 0;\n1148:         for (int i = 0; i < this.players.size(); ++i) {\n1149:             ServerPlayer player = this.players.get(i);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        },
+        {
+          "java_line": 1145,
+          "java_method_line": 1145,
+          "java_method_signature": "public <T extends ParticleOptions> int sendParticles(T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) { ClientboundLevelParticlesPacket packet = new ClientboundLevelParticlesPacket(particle, overrideLimiter, alwaysShow, x, y, z, (float)xDist, (float)yDist, (float)zDist, (float)speed, count); in",
+          "java_invocation": "sendParticles(T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed)",
+          "guard_and_state_context": "1139:     }\n1140: \n1141:     public <T extends ParticleOptions> int sendParticles(T particle, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) {\n1142:         return this.sendParticles(particle, false, false, x, y, z, count, xDist, yDist, zDist, speed);\n1143:     }\n1144: \n1145:     public <T extends ParticleOptions> int sendParticles(T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) {\n1146:         ClientboundLevelParticlesPacket packet = new ClientboundLevelParticlesPacket(particle, overrideLimiter, alwaysShow, x, y, z, (float)xDist, (float)yDist, (float)zDist, (float)speed, count);\n1147:         int result = 0;\n1148:         for (int i = 0; i < this.players.size(); ++i) {\n1149:             ServerPlayer player = this.players.get(i);\n1150:             if (!this.sendParticles(player, overrideLimiter, x, y, z, packet)) continue;\n1151:             ++result;\n1152:         }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        },
+        {
+          "java_line": 1150,
+          "java_method_line": 1145,
+          "java_method_signature": "public <T extends ParticleOptions> int sendParticles(T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) { ClientboundLevelParticlesPacket packet = new ClientboundLevelParticlesPacket(particle, overrideLimiter, alwaysShow, x, y, z, (float)xDist, (float)yDist, (float)zDist, (float)speed, count); in",
+          "java_invocation": "this.sendParticles(player, overrideLimiter, x, y, z, packet)",
+          "guard_and_state_context": "1144: \n1145:     public <T extends ParticleOptions> int sendParticles(T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) {\n1146:         ClientboundLevelParticlesPacket packet = new ClientboundLevelParticlesPacket(particle, overrideLimiter, alwaysShow, x, y, z, (float)xDist, (float)yDist, (float)zDist, (float)speed, count);\n1147:         int result = 0;\n1148:         for (int i = 0; i < this.players.size(); ++i) {\n1149:             ServerPlayer player = this.players.get(i);\n1150:             if (!this.sendParticles(player, overrideLimiter, x, y, z, packet)) continue;\n1151:             ++result;\n1152:         }\n1153:         return result;\n1154:     }\n1155: \n1156:     public <T extends ParticleOptions> boolean sendParticles(ServerPlayer player, T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) {\n1157:         ClientboundLevelParticlesPacket packet = new ClientboundLevelParticlesPacket(particle, overrideLimiter, alwaysShow, x, y, z, (float)xDist, (float)yDist, (float)zDist, (float)speed, count);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        },
+        {
+          "java_line": 1156,
+          "java_method_line": 1156,
+          "java_method_signature": "public <T extends ParticleOptions> boolean sendParticles(ServerPlayer player, T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) { ClientboundLevelParticlesPacket packet = new ClientboundLevelParticlesPacket(particle, overrideLimiter, alwaysShow, x, y, z, (float)xDist, (float)yDist, (float)zDist,",
+          "java_invocation": "sendParticles(ServerPlayer player, T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed)",
+          "guard_and_state_context": "1150:             if (!this.sendParticles(player, overrideLimiter, x, y, z, packet)) continue;\n1151:             ++result;\n1152:         }\n1153:         return result;\n1154:     }\n1155: \n1156:     public <T extends ParticleOptions> boolean sendParticles(ServerPlayer player, T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) {\n1157:         ClientboundLevelParticlesPacket packet = new ClientboundLevelParticlesPacket(particle, overrideLimiter, alwaysShow, x, y, z, (float)xDist, (float)yDist, (float)zDist, (float)speed, count);\n1158:         return this.sendParticles(player, overrideLimiter, x, y, z, packet);\n1159:     }\n1160: \n1161:     private boolean sendParticles(ServerPlayer player, boolean overrideLimiter, double x, double y, double z, Packet<?> packet) {\n1162:         if (player.level() != this) {\n1163:             return false;",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        },
+        {
+          "java_line": 1158,
+          "java_method_line": 1156,
+          "java_method_signature": "public <T extends ParticleOptions> boolean sendParticles(ServerPlayer player, T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) { ClientboundLevelParticlesPacket packet = new ClientboundLevelParticlesPacket(particle, overrideLimiter, alwaysShow, x, y, z, (float)xDist, (float)yDist, (float)zDist,",
+          "java_invocation": "this.sendParticles(player, overrideLimiter, x, y, z, packet)",
+          "guard_and_state_context": "1152:         }\n1153:         return result;\n1154:     }\n1155: \n1156:     public <T extends ParticleOptions> boolean sendParticles(ServerPlayer player, T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) {\n1157:         ClientboundLevelParticlesPacket packet = new ClientboundLevelParticlesPacket(particle, overrideLimiter, alwaysShow, x, y, z, (float)xDist, (float)yDist, (float)zDist, (float)speed, count);\n1158:         return this.sendParticles(player, overrideLimiter, x, y, z, packet);\n1159:     }\n1160: \n1161:     private boolean sendParticles(ServerPlayer player, boolean overrideLimiter, double x, double y, double z, Packet<?> packet) {\n1162:         if (player.level() != this) {\n1163:             return false;\n1164:         }\n1165:         BlockPos pos = player.blockPosition();",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        },
+        {
+          "java_line": 1161,
+          "java_method_line": 1161,
+          "java_method_signature": "private boolean sendParticles(ServerPlayer player, boolean overrideLimiter, double x, double y, double z, Packet<?> packet) { if (player.level() != this) { return false;",
+          "java_invocation": "sendParticles(ServerPlayer player, boolean overrideLimiter, double x, double y, double z, Packet<?> packet)",
+          "guard_and_state_context": "1155: \n1156:     public <T extends ParticleOptions> boolean sendParticles(ServerPlayer player, T particle, boolean overrideLimiter, boolean alwaysShow, double x, double y, double z, int count, double xDist, double yDist, double zDist, double speed) {\n1157:         ClientboundLevelParticlesPacket packet = new ClientboundLevelParticlesPacket(particle, overrideLimiter, alwaysShow, x, y, z, (float)xDist, (float)yDist, (float)zDist, (float)speed, count);\n1158:         return this.sendParticles(player, overrideLimiter, x, y, z, packet);\n1159:     }\n1160: \n1161:     private boolean sendParticles(ServerPlayer player, boolean overrideLimiter, double x, double y, double z, Packet<?> packet) {\n1162:         if (player.level() != this) {\n1163:             return false;\n1164:         }\n1165:         BlockPos pos = player.blockPosition();\n1166:         if (pos.closerToCenterThan(new Vec3(x, y, z), overrideLimiter ? 512.0 : 32.0)) {\n1167:             player.connection.send(packet);\n1168:             return true;",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        }
+      ],
+      "record_count": 7,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 21,
+      "java_source_path": "net/minecraft/world/entity/OminousItemSpawner.java",
+      "callsite_records": [
+        {
+          "java_line": 76,
+          "java_method_line": 74,
+          "java_method_signature": "private void tickClient() { if (this.level().getGameTime() % 5L == 0L) { this.addParticles();",
+          "java_invocation": "this.addParticles()",
+          "guard_and_state_context": "70:             this.kill(level);\n71:         }\n72:     }\n73: \n74:     private void tickClient() {\n75:         if (this.level().getGameTime() % 5L == 0L) {\n76:             this.addParticles();\n77:         }\n78:     }\n79: \n80:     private void spawnItem() {\n81:         Entity spawnedEntity;\n82:         Level level = this.level();\n83:         if (!(level instanceof ServerLevel)) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        },
+        {
+          "java_line": 157,
+          "java_method_line": 157,
+          "java_method_signature": "public void addParticles() { Vec3 flyTowards = this.position(); int particleCount = this.random.nextIntBetweenInclusive(1, 3);",
+          "java_invocation": "addParticles()",
+          "guard_and_state_context": "151: \n152:     @Override\n153:     public boolean isIgnoringBlockTriggers() {\n154:         return true;\n155:     }\n156: \n157:     public void addParticles() {\n158:         Vec3 flyTowards = this.position();\n159:         int particleCount = this.random.nextIntBetweenInclusive(1, 3);\n160:         for (int i = 0; i < particleCount; ++i) {\n161:             double radius = 0.4;\n162:             Vec3 flyFrom = new Vec3(this.getX() + 0.4 * (this.random.nextGaussian() - this.random.nextGaussian()), this.getY() + 0.4 * (this.random.nextGaussian() - this.random.nextGaussian()), this.getZ() + 0.4 * (this.random.nextGaussian() - this.random.nextGaussian()));\n163:             Vec3 randomDirection = flyTowards.vectorTo(flyFrom);\n164:             this.level().addParticle(ParticleTypes.OMINOUS_SPAWNING, flyTowards.x(), flyTowards.y(), flyTowards.z(), randomDirection.x(), randomDirection.y(), randomDirection.z());",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        },
+        {
+          "java_line": 164,
+          "java_method_line": 157,
+          "java_method_signature": "public void addParticles() { Vec3 flyTowards = this.position(); int particleCount = this.random.nextIntBetweenInclusive(1, 3);",
+          "java_invocation": "addParticle(ParticleTypes.OMINOUS_SPAWNING, flyTowards.x(), flyTowards.y(), flyTowards.z(), randomDirection.x(), randomDirection.y(), randomDirection.z())",
+          "guard_and_state_context": "158:         Vec3 flyTowards = this.position();\n159:         int particleCount = this.random.nextIntBetweenInclusive(1, 3);\n160:         for (int i = 0; i < particleCount; ++i) {\n161:             double radius = 0.4;\n162:             Vec3 flyFrom = new Vec3(this.getX() + 0.4 * (this.random.nextGaussian() - this.random.nextGaussian()), this.getY() + 0.4 * (this.random.nextGaussian() - this.random.nextGaussian()), this.getZ() + 0.4 * (this.random.nextGaussian() - this.random.nextGaussian()));\n163:             Vec3 randomDirection = flyTowards.vectorTo(flyFrom);\n164:             this.level().addParticle(ParticleTypes.OMINOUS_SPAWNING, flyTowards.x(), flyTowards.y(), flyTowards.z(), randomDirection.x(), randomDirection.y(), randomDirection.z());\n165:         }\n166:     }\n167: \n168:     public ItemStack getItem() {\n169:         return this.getEntityData().get(DATA_ITEM);\n170:     }\n171: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 3,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 29,
+      "java_source_path": "net/minecraft/world/entity/animal/cow/MushroomCow.java",
+      "callsite_records": [
+        {
+          "java_line": 147,
+          "java_method_line": 111,
+          "java_method_signature": "public InteractionResult mobInteract(Player player, InteractionHand hand) { ItemStack itemStack = player.getItemInHand(hand); if (itemStack.is(Items.BOWL) && !this.isBaby()) {",
+          "java_invocation": "addParticle(ParticleTypes.SMOKE, this.getX() + this.random.nextDouble() / 2.0, this.getY(0.5), this.getZ() + this.random.nextDouble() / 2.0, 0.0, this.random.nextDouble() / 5.0, 0.0)",
+          "guard_and_state_context": "141:             Optional<SuspiciousStewEffects> effectsFromItemStack = this.getEffectsFromItemStack(itemStack);\n142:             if (effectsFromItemStack.isEmpty()) {\n143:                 return super.mobInteract(player, hand);\n144:             }\n145:             if (this.stewEffects != null) {\n146:                 for (int i = 0; i < 2; ++i) {\n147:                     this.level().addParticle(ParticleTypes.SMOKE, this.getX() + this.random.nextDouble() / 2.0, this.getY(0.5), this.getZ() + this.random.nextDouble() / 2.0, 0.0, this.random.nextDouble() / 5.0, 0.0);\n148:                 }\n149:             } else {\n150:                 itemStack.consume(1, player);\n151:                 SpellParticleOption particle = SpellParticleOption.create(ParticleTypes.EFFECT, -1, 1.0f);\n152:                 for (int i = 0; i < 4; ++i) {\n153:                     this.level().addParticle(particle, this.getX() + this.random.nextDouble() / 2.0, this.getY(0.5), this.getZ() + this.random.nextDouble() / 2.0, 0.0, this.random.nextDouble() / 5.0, 0.0);\n154:                 }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "entity state/event owner + server packet receive (callsite別に分離)",
+          "rust_gap_candidate_from_inventory": "explicit server sends flow through LevelParticles; direct addParticle is a separate local client implementation and cannot be co-counted.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        },
+        {
+          "java_line": 153,
+          "java_method_line": 111,
+          "java_method_signature": "public InteractionResult mobInteract(Player player, InteractionHand hand) { ItemStack itemStack = player.getItemInHand(hand); if (itemStack.is(Items.BOWL) && !this.isBaby()) {",
+          "java_invocation": "addParticle(particle, this.getX() + this.random.nextDouble() / 2.0, this.getY(0.5), this.getZ() + this.random.nextDouble() / 2.0, 0.0, this.random.nextDouble() / 5.0, 0.0)",
+          "guard_and_state_context": "147:                     this.level().addParticle(ParticleTypes.SMOKE, this.getX() + this.random.nextDouble() / 2.0, this.getY(0.5), this.getZ() + this.random.nextDouble() / 2.0, 0.0, this.random.nextDouble() / 5.0, 0.0);\n148:                 }\n149:             } else {\n150:                 itemStack.consume(1, player);\n151:                 SpellParticleOption particle = SpellParticleOption.create(ParticleTypes.EFFECT, -1, 1.0f);\n152:                 for (int i = 0; i < 4; ++i) {\n153:                     this.level().addParticle(particle, this.getX() + this.random.nextDouble() / 2.0, this.getY(0.5), this.getZ() + this.random.nextDouble() / 2.0, 0.0, this.random.nextDouble() / 5.0, 0.0);\n154:                 }\n155:                 this.stewEffects = effectsFromItemStack.get();\n156:                 this.playSound(SoundEvents.MOOSHROOM_EAT, 2.0f, 1.0f);\n157:             }\n158:             return InteractionResult.SUCCESS;\n159:         }\n160:         return super.mobInteract(player, hand);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "entity state/event owner + server packet receive (callsite別に分離)",
+          "rust_gap_candidate_from_inventory": "explicit server sends flow through LevelParticles; direct addParticle is a separate local client implementation and cannot be co-counted.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        },
+        {
+          "java_line": 167,
+          "java_method_line": 164,
+          "java_method_signature": "public void shear(ServerLevel level, SoundSource soundSource, ItemStack tool) { level.playSound(null, this, SoundEvents.MOOSHROOM_SHEAR, soundSource, 1.0f, 1.0f); this.convertTo(EntityTypes.COW, ConversionParams.single(this, false, false), cow -> {",
+          "java_invocation": "level.sendParticles(ParticleTypes.EXPLOSION, this.getX(), this.getY(0.5), this.getZ(), 1, 0.0, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "161:     }\n162: \n163:     @Override\n164:     public void shear(ServerLevel level, SoundSource soundSource, ItemStack tool) {\n165:         level.playSound(null, this, SoundEvents.MOOSHROOM_SHEAR, soundSource, 1.0f, 1.0f);\n166:         this.convertTo(EntityTypes.COW, ConversionParams.single(this, false, false), cow -> {\n167:             level.sendParticles(ParticleTypes.EXPLOSION, this.getX(), this.getY(0.5), this.getZ(), 1, 0.0, 0.0, 0.0, 0.0);\n168:             this.dropFromShearingLootTable(level, BuiltInLootTables.SHEAR_MOOSHROOM, tool, (l, drop) -> {\n169:                 for (int i = 0; i < drop.getCount(); ++i) {\n170:                     l.addFreshEntity(new ItemEntity(this.level(), this.getX(), this.getY(1.0), this.getZ(), drop.copyWithCount(1)));\n171:                 }\n172:             });\n173:         });\n174:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "entity state/event owner + server packet receive (callsite別に分離)",
+          "rust_gap_candidate_from_inventory": "explicit server sends flow through LevelParticles; direct addParticle is a separate local client implementation and cannot be co-counted.",
+          "audit_status": "packet_owned_candidate"
+        }
+      ],
+      "record_count": 3,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 37,
+      "java_source_path": "net/minecraft/world/entity/animal/panda/Panda.java",
+      "callsite_records": [
+        {
+          "java_line": 422,
+          "java_method_line": 413,
+          "java_method_signature": "private void addEatingParticles() { if (this.getEatCounter() % 5 == 0) { this.playSound(SoundEvents.PANDA_EAT, 0.5f + 0.5f * (float)this.random.nextInt(2), (this.random.nextFloat() - this.random.nextFloat()) * 0.2f + 1.0f);",
+          "java_invocation": "addParticle(breakParticle, position.x, position.y, position.z, velocity.x, velocity.y + 0.05, velocity.z)",
+          "guard_and_state_context": "416:             ItemStack heldItem = this.getItemBySlot(EquipmentSlot.MAINHAND);\n417:             if (!heldItem.isEmpty()) {\n418:                 ItemParticleOption breakParticle = new ItemParticleOption(ParticleTypes.ITEM, ItemStackTemplate.fromNonEmptyStack(heldItem));\n419:                 for (int i = 0; i < 6; ++i) {\n420:                     Vec3 velocity = new Vec3(((double)this.random.nextFloat() - 0.5) * 0.1, (double)this.random.nextFloat() * 0.1 + 0.1, ((double)this.random.nextFloat() - 0.5) * 0.1).xRot(-this.getXRot() * ((float)Math.PI / 180)).yRot(-this.getYRot() * ((float)Math.PI / 180));\n421:                     Vec3 position = new Vec3(((double)this.random.nextFloat() - 0.5) * 0.8, (double)(-this.random.nextFloat()) * 0.6 - 0.3, 1.0 + ((double)this.random.nextFloat() - 0.5) * 0.4).yRot(-this.yBodyRot * ((float)Math.PI / 180)).add(this.getX(), this.getEyeY() + 1.0, this.getZ());\n422:                     this.level().addParticle(breakParticle, position.x, position.y, position.z, velocity.x, velocity.y + 0.05, velocity.z);\n423:                 }\n424:             }\n425:         }\n426:     }\n427: \n428:     private void updateSitAmount() {\n429:         this.sitAmountO = this.sitAmount;",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        },
+        {
+          "java_line": 480,
+          "java_method_line": 476,
+          "java_method_signature": "private void afterSneeze() { ServerLevel serverLevel; Vec3 movement = this.getDeltaMovement();",
+          "java_invocation": "level.addParticle(ParticleTypes.SNEEZE, this.getX() - (double)(this.getBbWidth() + 1.0f) * 0.5 * (double)Mth.sin(this.yBodyRot * ((float)Math.PI / 180)), this.getEyeY() - (double)0.1f, this.getZ() + (double)(this.getBbWidth() + 1.0f) * 0.5 * (double)Mth.cos(this.yBodyRot * ((float)Math.PI / 180)), movement.x, 0.0, movement.z)",
+          "guard_and_state_context": "474:     }\n475: \n476:     private void afterSneeze() {\n477:         ServerLevel serverLevel;\n478:         Vec3 movement = this.getDeltaMovement();\n479:         Level level = this.level();\n480:         level.addParticle(ParticleTypes.SNEEZE, this.getX() - (double)(this.getBbWidth() + 1.0f) * 0.5 * (double)Mth.sin(this.yBodyRot * ((float)Math.PI / 180)), this.getEyeY() - (double)0.1f, this.getZ() + (double)(this.getBbWidth() + 1.0f) * 0.5 * (double)Mth.cos(this.yBodyRot * ((float)Math.PI / 180)), movement.x, 0.0, movement.z);\n481:         this.playSound(SoundEvents.PANDA_SNEEZE, 1.0f, 1.0f);\n482:         List<Panda> pandas = level.getEntitiesOfClass(Panda.class, this.getBoundingBox().inflate(10.0));\n483:         for (Panda panda : pandas) {\n484:             if (panda.isBaby() || !panda.onGround() || panda.isInWater() || !panda.canPerformAction()) continue;\n485:             panda.jumpFromGround();\n486:         }\n487:         Level level2 = this.level();",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 45,
+      "java_source_path": "net/minecraft/world/entity/boss/enderdragon/phases/DragonSittingFlamingPhase.java",
+      "callsite_records": [
+        {
+          "java_line": 50,
+          "java_method_line": 37,
+          "java_method_signature": "public void doClientTick() { ++this.flameTicks; if (this.flameTicks % 2 == 0 && this.flameTicks < 10) {",
+          "java_invocation": "addParticle(PowerParticleOption.create(ParticleTypes.DRAGON_BREATH, 1.0f), px, py, pz, -look.x * (double)0.08f * (double)j, -look.y * (double)0.6f, -look.z * (double)0.08f * (double)j)",
+          "guard_and_state_context": "44:             double particleZ = this.dragon.head.getZ();\n45:             for (int i = 0; i < 8; ++i) {\n46:                 double px = particleX + this.dragon.getRandom().nextGaussian() / 2.0;\n47:                 double py = particleY + this.dragon.getRandom().nextGaussian() / 2.0;\n48:                 double pz = particleZ + this.dragon.getRandom().nextGaussian() / 2.0;\n49:                 for (int j = 0; j < 6; ++j) {\n50:                     this.dragon.level().addParticle(PowerParticleOption.create(ParticleTypes.DRAGON_BREATH, 1.0f), px, py, pz, -look.x * (double)0.08f * (double)j, -look.y * (double)0.6f, -look.z * (double)0.08f * (double)j);\n51:                 }\n52:                 look.yRot(0.19634955f);\n53:             }\n54:         }\n55:     }\n56: \n57:     @Override",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 53,
+      "java_source_path": "net/minecraft/world/entity/monster/Phantom.java",
+      "callsite_records": [
+        {
+          "java_line": 131,
+          "java_method_line": 119,
+          "java_method_signature": "public void tick() { super.tick(); if (this.level().isClientSide()) {",
+          "java_invocation": "addParticle(ParticleTypes.MYCELIUM, this.getX() + (double)c, this.getY() + (double)h, this.getZ() + (double)s, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "125:                 this.level().playLocalSound(this.getX(), this.getY(), this.getZ(), SoundEvents.PHANTOM_FLAP, this.getSoundSource(), 0.95f + this.random.nextFloat() * 0.05f, 0.95f + this.random.nextFloat() * 0.05f, false);\n126:             }\n127:             float width = this.getBbWidth() * 1.48f;\n128:             float c = Mth.cos(this.getYRot() * ((float)Math.PI / 180)) * width;\n129:             float s = Mth.sin(this.getYRot() * ((float)Math.PI / 180)) * width;\n130:             float h = (0.3f + anim * 0.45f) * this.getBbHeight() * 2.5f;\n131:             this.level().addParticle(ParticleTypes.MYCELIUM, this.getX() + (double)c, this.getY() + (double)h, this.getZ() + (double)s, 0.0, 0.0, 0.0);\n132:             this.level().addParticle(ParticleTypes.MYCELIUM, this.getX() - (double)c, this.getY() + (double)h, this.getZ() - (double)s, 0.0, 0.0, 0.0);\n133:         }\n134:     }\n135: \n136:     @Override\n137:     protected void checkFallDamage(double ya, boolean onGround, BlockState onState, BlockPos pos) {\n138:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        },
+        {
+          "java_line": 132,
+          "java_method_line": 119,
+          "java_method_signature": "public void tick() { super.tick(); if (this.level().isClientSide()) {",
+          "java_invocation": "addParticle(ParticleTypes.MYCELIUM, this.getX() - (double)c, this.getY() + (double)h, this.getZ() - (double)s, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "126:             }\n127:             float width = this.getBbWidth() * 1.48f;\n128:             float c = Mth.cos(this.getYRot() * ((float)Math.PI / 180)) * width;\n129:             float s = Mth.sin(this.getYRot() * ((float)Math.PI / 180)) * width;\n130:             float h = (0.3f + anim * 0.45f) * this.getBbHeight() * 2.5f;\n131:             this.level().addParticle(ParticleTypes.MYCELIUM, this.getX() + (double)c, this.getY() + (double)h, this.getZ() + (double)s, 0.0, 0.0, 0.0);\n132:             this.level().addParticle(ParticleTypes.MYCELIUM, this.getX() - (double)c, this.getY() + (double)h, this.getZ() - (double)s, 0.0, 0.0, 0.0);\n133:         }\n134:     }\n135: \n136:     @Override\n137:     protected void checkFallDamage(double ya, boolean onGround, BlockState onState, BlockPos pos) {\n138:     }\n139: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 61,
+      "java_source_path": "net/minecraft/world/entity/monster/warden/Warden.java",
+      "callsite_records": [
+        {
+          "java_line": 345,
+          "java_method_line": 336,
+          "java_method_signature": "private void clientDiggingParticles(AnimationState state) { if ((float)state.getTimeInMillis(this.tickCount) < 4500.0f) { RandomSource random = this.getRandom();",
+          "java_invocation": "addParticle(new BlockParticleOption(ParticleTypes.BLOCK, stateBelow), xx, yy, zz, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "339:             BlockState stateBelow = this.getBlockStateOn();\n340:             if (stateBelow.getRenderShape() != RenderShape.INVISIBLE) {\n341:                 for (int i = 0; i < 30; ++i) {\n342:                     double xx = this.getX() + (double)Mth.randomBetween(random, -0.7f, 0.7f);\n343:                     double yy = this.getY();\n344:                     double zz = this.getZ() + (double)Mth.randomBetween(random, -0.7f, 0.7f);\n345:                     this.level().addParticle(new BlockParticleOption(ParticleTypes.BLOCK, stateBelow), xx, yy, zz, 0.0, 0.0, 0.0);\n346:                 }\n347:             }\n348:         }\n349:     }\n350: \n351:     @Override\n352:     public void onSyncedDataUpdated(EntityDataAccessor<?> accessor) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 69,
+      "java_source_path": "net/minecraft/world/entity/projectile/LlamaSpit.java",
+      "callsite_records": [
+        {
+          "java_line": 106,
+          "java_method_line": 101,
+          "java_method_signature": "public void recreateFromPacket(ClientboundAddEntityPacket packet) { super.recreateFromPacket(packet); Vec3 movement = packet.getMovement();",
+          "java_invocation": "addParticle(ParticleTypes.SPIT, this.getX(), this.getY(), this.getZ(), movement.x * k, movement.y, movement.z * k)",
+          "guard_and_state_context": "100:     @Override\n101:     public void recreateFromPacket(ClientboundAddEntityPacket packet) {\n102:         super.recreateFromPacket(packet);\n103:         Vec3 movement = packet.getMovement();\n104:         for (int i = 0; i < 7; ++i) {\n105:             double k = 0.4 + 0.1 * (double)i;\n106:             this.level().addParticle(ParticleTypes.SPIT, this.getX(), this.getY(), this.getZ(), movement.x * k, movement.y, movement.z * k);\n107:         }\n108:         this.setDeltaMovement(movement);\n109:     }\n110: }\n111: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 77,
+      "java_source_path": "net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEgg.java",
+      "callsite_records": [
+        {
+          "java_line": 47,
+          "java_method_line": 42,
+          "java_method_signature": "public void handleEntityEvent(byte id) { ItemStack item; if (id == 3 && !(item = this.getItem()).isEmpty()) {",
+          "java_invocation": "addParticle(breakParticle, this.getX(), this.getY(), this.getZ(), ((double)this.random.nextFloat() - 0.5) * 0.08, ((double)this.random.nextFloat() - 0.5) * 0.08, ((double)this.random.nextFloat() - 0.5) * 0.08)",
+          "guard_and_state_context": "41:     @Override\n42:     public void handleEntityEvent(byte id) {\n43:         ItemStack item;\n44:         if (id == 3 && !(item = this.getItem()).isEmpty()) {\n45:             ItemParticleOption breakParticle = new ItemParticleOption(ParticleTypes.ITEM, ItemStackTemplate.fromNonEmptyStack(item));\n46:             for (int i = 0; i < 8; ++i) {\n47:                 this.level().addParticle(breakParticle, this.getX(), this.getY(), this.getZ(), ((double)this.random.nextFloat() - 0.5) * 0.08, ((double)this.random.nextFloat() - 0.5) * 0.08, ((double)this.random.nextFloat() - 0.5) * 0.08);\n48:             }\n49:         }\n50:     }\n51: \n52:     @Override\n53:     protected void onHitEntity(EntityHitResult hitResult) {\n54:         super.onHitEntity(hitResult);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 85,
+      "java_source_path": "net/minecraft/world/item/PotionItem.java",
+      "callsite_records": [
+        {
+          "java_line": 56,
+          "java_method_line": 43,
+          "java_method_signature": "public InteractionResult useOn(UseOnContext context) { Level level = context.getLevel(); BlockPos pos = context.getClickedPos();",
+          "java_invocation": "serverLevel.sendParticles(ParticleTypes.SPLASH, (double)pos.getX() + level.getRandom().nextDouble(), pos.getY() + 1, (double)pos.getZ() + level.getRandom().nextDouble(), 1, 0.0, 0.0, 0.0, 1.0)",
+          "guard_and_state_context": "50:         if (context.getClickedFace() != Direction.DOWN && blockState.is(BlockTags.CONVERTABLE_TO_MUD) && potionContents.is(Potions.WATER)) {\n51:             level.playSound(null, pos, SoundEvents.GENERIC_SPLASH, SoundSource.BLOCKS, 1.0f, 1.0f);\n52:             player.setItemInHand(context.getHand(), ItemUtils.createFilledResult(itemStack, player, new ItemStack(Items.GLASS_BOTTLE)));\n53:             if (!level.isClientSide()) {\n54:                 ServerLevel serverLevel = (ServerLevel)level;\n55:                 for (int i = 0; i < 5; ++i) {\n56:                     serverLevel.sendParticles(ParticleTypes.SPLASH, (double)pos.getX() + level.getRandom().nextDouble(), pos.getY() + 1, (double)pos.getZ() + level.getRandom().nextDouble(), 1, 0.0, 0.0, 0.0, 1.0);\n57:                 }\n58:             }\n59:             level.playSound(null, pos, SoundEvents.BOTTLE_EMPTY, SoundSource.BLOCKS, 1.0f, 1.0f);\n60:             level.gameEvent(null, GameEvent.FLUID_PLACE, pos);\n61:             level.setBlockAndUpdate(pos, Blocks.MUD.defaultBlockState());\n62:             return InteractionResult.SUCCESS;\n63:         }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 93,
+      "java_source_path": "net/minecraft/world/level/block/BlastFurnaceBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 80,
+          "java_method_line": 63,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { if (!state.getValue(LIT).booleanValue()) { return;",
+          "java_invocation": "level.addParticle(ParticleTypes.SMOKE, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "74:         Direction.Axis axis = direction.getAxis();\n75:         double r = 0.52;\n76:         double ss = random.nextDouble() * 0.6 - 0.3;\n77:         double dx = axis == Direction.Axis.X ? (double)direction.getStepX() * 0.52 : ss;\n78:         double dy = random.nextDouble() * 9.0 / 16.0;\n79:         double dz = axis == Direction.Axis.Z ? (double)direction.getStepZ() * 0.52 : ss;\n80:         level.addParticle(ParticleTypes.SMOKE, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0);\n81:     }\n82: }\n83: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 101,
+      "java_source_path": "net/minecraft/world/level/block/DragonEggBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 72,
+          "java_method_line": 57,
+          "java_method_signature": "private void teleport(BlockState state, Level level, BlockPos pos) { WorldBorder worldBorder = level.getWorldBorder(); RandomSource random = level.getRandom();",
+          "java_invocation": "level.addParticle(ParticleTypes.PORTAL, x, y, z, xa, ya, za)",
+          "guard_and_state_context": "66:                     float xa = (random.nextFloat() - 0.5f) * 0.2f;\n67:                     float ya = (random.nextFloat() - 0.5f) * 0.2f;\n68:                     float za = (random.nextFloat() - 0.5f) * 0.2f;\n69:                     double x = Mth.lerp(d, (double)testPos.getX(), (double)pos.getX()) + (random.nextDouble() - 0.5) + 0.5;\n70:                     double y = Mth.lerp(d, (double)testPos.getY(), (double)pos.getY()) + random.nextDouble() - 0.5;\n71:                     double z = Mth.lerp(d, (double)testPos.getZ(), (double)pos.getZ()) + (random.nextDouble() - 0.5) + 0.5;\n72:                     level.addParticle(ParticleTypes.PORTAL, x, y, z, xa, ya, za);\n73:                 }\n74:             } else {\n75:                 level.setBlock(testPos, state, 2);\n76:                 level.removeBlock(pos, false);\n77:             }\n78:             return;\n79:         }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 109,
+      "java_source_path": "net/minecraft/world/level/block/FireflyBushBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 52,
+          "java_method_line": 44,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { if (random.nextInt(30) == 0 && level.environmentAttributes().getValue(EnvironmentAttributes.FIREFLY_BUSH_SOUNDS, pos).booleanValue() && level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, pos) <= pos.getY()) { level.playLocalSound(pos, SoundEvents.FIREFLY_BUSH_IDLE, SoundSource.AMBIENT, 1.0f, 1.0f, f",
+          "java_invocation": "level.addParticle(ParticleTypes.FIREFLY, fireflyX, fireflyY, fireflyZ, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "46:             level.playLocalSound(pos, SoundEvents.FIREFLY_BUSH_IDLE, SoundSource.AMBIENT, 1.0f, 1.0f, false);\n47:         }\n48:         if (level.getMaxLocalRawBrightness(pos) <= 13 && random.nextDouble() <= 0.7) {\n49:             double fireflyX = (double)pos.getX() + random.nextDouble() * 10.0 - 5.0;\n50:             double fireflyY = (double)pos.getY() + random.nextDouble() * 5.0;\n51:             double fireflyZ = (double)pos.getZ() + random.nextDouble() * 10.0 - 5.0;\n52:             level.addParticle(ParticleTypes.FIREFLY, fireflyX, fireflyY, fireflyZ, 0.0, 0.0, 0.0);\n53:         }\n54:     }\n55: \n56:     @Override\n57:     public boolean isValidBonemealTarget(LevelReader level, BlockPos pos, BlockState state) {\n58:         return BonemealableBlock.hasSpreadableNeighbourPos(level, pos, state);\n59:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 117,
+      "java_source_path": "net/minecraft/world/level/block/PotentSulfurBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 130,
+          "java_method_line": 129,
+          "java_method_signature": "private static void spawnBubbleParticlesAt(Level level, RandomSource random, double x, double y, double z) { level.addAlwaysVisibleParticle(ParticleTypes.SULFUR_BUBBLES, x + (double)random.nextFloat(), y + (double)random.nextFloat(), z + (double)random.nextFloat(), 0.0, 0.0, 0.0); }",
+          "java_invocation": "level.addAlwaysVisibleParticle(ParticleTypes.SULFUR_BUBBLES, x + (double)random.nextFloat(), y + (double)random.nextFloat(), z + (double)random.nextFloat(), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "124:         if (random.nextInt(10) == 0) {\n125:             level.playLocalSound(pos.getX(), pos.getY(), pos.getZ(), SoundEvents.NOXIOUS_GAS, SoundSource.AMBIENT, 1.0f, 1.0f, false);\n126:         }\n127:     }\n128: \n129:     private static void spawnBubbleParticlesAt(Level level, RandomSource random, double x, double y, double z) {\n130:         level.addAlwaysVisibleParticle(ParticleTypes.SULFUR_BUBBLES, x + (double)random.nextFloat(), y + (double)random.nextFloat(), z + (double)random.nextFloat(), 0.0, 0.0, 0.0);\n131:     }\n132: \n133:     @Override\n134:     protected boolean triggerEvent(BlockState state, Level level, BlockPos pos, int b0, int b1) {\n135:         BlockEntity blockEntity = level.getBlockEntity(pos);\n136:         if (blockEntity instanceof PotentSulfurBlockEntity) {\n137:             PotentSulfurBlockEntity entity = (PotentSulfurBlockEntity)blockEntity;",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 125,
+      "java_source_path": "net/minecraft/world/level/block/SculkSensorBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 248,
+          "java_method_line": 236,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { if (SculkSensorBlock.getPhase(state) != SculkSensorPhase.ACTIVE) { return;",
+          "java_invocation": "level.addParticle(DustColorTransitionOptions.SCULK_TO_REDSTONE, x, y, z, 0.0, ya, 0.0)",
+          "guard_and_state_context": "242:             return;\n243:         }\n244:         double x = (double)pos.getX() + 0.5 + (dir.getStepX() == 0 ? 0.5 - random.nextDouble() : (double)dir.getStepX() * 0.6);\n245:         double y = (double)pos.getY() + 0.25;\n246:         double z = (double)pos.getZ() + 0.5 + (dir.getStepZ() == 0 ? 0.5 - random.nextDouble() : (double)dir.getStepZ() * 0.6);\n247:         double ya = (double)random.nextFloat() * 0.04;\n248:         level.addParticle(DustColorTransitionOptions.SCULK_TO_REDSTONE, x, y, z, 0.0, ya, 0.0);\n249:     }\n250: \n251:     @Override\n252:     protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> builder) {\n253:         builder.add(PHASE, POWER, WATERLOGGED);\n254:     }\n255: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 133,
+      "java_source_path": "net/minecraft/world/level/block/entity/CampfireBlockEntity.java",
+      "callsite_records": [
+        {
+          "java_line": 114,
+          "java_method_line": 98,
+          "java_method_signature": "public static void particleTick(Level level, BlockPos pos, BlockState state, CampfireBlockEntity entity) { RandomSource random = level.getRandom(); if (random.nextFloat() < 0.11f) {",
+          "java_invocation": "level.addParticle(ParticleTypes.SMOKE, x, y, z, 0.0, 5.0E-4, 0.0)",
+          "guard_and_state_context": "108:             Direction direction = Direction.from2DDataValue(Math.floorMod(slot + rotation, 4));\n109:             float distanceFromCenter = 0.3125f;\n110:             double x = (double)pos.getX() + 0.5 - (double)((float)direction.getStepX() * 0.3125f) + (double)((float)direction.getClockWise().getStepX() * 0.3125f);\n111:             double y = (double)pos.getY() + 0.5;\n112:             double z = (double)pos.getZ() + 0.5 - (double)((float)direction.getStepZ() * 0.3125f) + (double)((float)direction.getClockWise().getStepZ() * 0.3125f);\n113:             for (int i = 0; i < 4; ++i) {\n114:                 level.addParticle(ParticleTypes.SMOKE, x, y, z, 0.0, 5.0E-4, 0.0);\n115:             }\n116:         }\n117:     }\n118: \n119:     public NonNullList<ItemStack> getItems() {\n120:         return this.items;\n121:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "StoredBlockEntity/ChunkStore + NetworkEvent::BlockEvent/LevelEvent; world sampler for state-driven ticks",
+          "rust_gap_candidate_from_inventory": "ChunkStore retains BE NBT; selected fields parsed (campfire slots, bell/book/wobble); most TrialSpawner/Vault/Conduit/PotentSulfur timing/state has no dedicated tick model.",
+          "audit_status": "world_sampler_or_event_candidate"
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    },
+    {
+      "csv_index": 141,
+      "java_source_path": "net/minecraft/world/level/gameevent/vibrations/VibrationSystem.java",
+      "callsite_records": [
+        {
+          "java_line": 204,
+          "java_method_line": 199,
+          "java_method_signature": "private static void trySelectAndScheduleVibration(ServerLevel serverLevel, Data data, User user) { data.getSelectionStrategy().chosenCandidate(serverLevel.getGameTime()).ifPresent(context -> { data.setCurrentVibration((VibrationInfo)context);",
+          "java_invocation": "serverLevel.sendParticles(new VibrationParticleOption(user.getPositionSource(), data.getTravelTimeInTicks()), origin.x, origin.y, origin.z, 1, 0.0, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "198: \n199:         private static void trySelectAndScheduleVibration(ServerLevel serverLevel, Data data, User user) {\n200:             data.getSelectionStrategy().chosenCandidate(serverLevel.getGameTime()).ifPresent(context -> {\n201:                 data.setCurrentVibration((VibrationInfo)context);\n202:                 Vec3 origin = context.pos();\n203:                 data.setTravelTimeInTicks(user.calculateTravelTimeInTicks(context.distance()));\n204:                 serverLevel.sendParticles(new VibrationParticleOption(user.getPositionSource(), data.getTravelTimeInTicks()), origin.x, origin.y, origin.z, 1, 0.0, 0.0, 0.0, 0.0);\n205:                 user.onDataChanged();\n206:                 data.getSelectionStrategy().startOver();\n207:             });\n208:         }\n209: \n210:         private static void tryReloadVibrationParticle(ServerLevel level, Data data, User user) {\n211:             double newInitialZ;",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        },
+        {
+          "java_line": 228,
+          "java_method_line": 210,
+          "java_method_signature": "private static void tryReloadVibrationParticle(ServerLevel level, Data data, User user) { double newInitialZ; double newInitialY;",
+          "java_invocation": "level.sendParticles(new VibrationParticleOption(positionSource, travelTimeInTicks), newInitialX = Mth.lerp(alpha = 1.0 - (double)travelTimeInTicks / (double)(initialTravelTime = user.calculateTravelTimeInTicks(data.currentVibration.distance())), origin.x, destination.x), newInitialY = Mth.lerp(alpha, origin.y, destination.y), newInitialZ = Mth.lerp(alpha, origin.z, destination.z), 1, 0.0, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "222:                 return;\n223:             }\n224:             Vec3 origin = data.currentVibration.pos();\n225:             PositionSource positionSource = user.getPositionSource();\n226:             Vec3 destination = positionSource.getPosition(level).orElse(origin);\n227:             int travelTimeInTicks = data.getTravelTimeInTicks();\n228:             boolean bl = particleWasSent = level.sendParticles(new VibrationParticleOption(positionSource, travelTimeInTicks), newInitialX = Mth.lerp(alpha = 1.0 - (double)travelTimeInTicks / (double)(initialTravelTime = user.calculateTravelTimeInTicks(data.currentVibration.distance())), origin.x, destination.x), newInitialY = Mth.lerp(alpha, origin.y, destination.y), newInitialZ = Mth.lerp(alpha, origin.z, destination.z), 1, 0.0, 0.0, 0.0, 0.0) > 0;\n229:             if (particleWasSent) {\n230:                 data.setReloadVibrationParticle(false);\n231:             }\n232:         }\n233: \n234:         private static boolean receiveVibration(ServerLevel serverLevel, Data data, User user, VibrationInfo currentVibration) {\n235:             BlockPos origin = BlockPos.containing(currentVibration.pos());",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate"
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed"
+    }
+  ]
+}

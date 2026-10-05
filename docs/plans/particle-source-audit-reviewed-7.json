@@ -1,0 +1,765 @@
+{
+  "schema": "particle-source-audit-shard-v1",
+  "shard": 7,
+  "index_rule": "0-based current CSV row index modulo 8",
+  "review_level": "semantic audit complete: shard-7 missing/uncertain candidates rechecked against Java callsites and Rust production paths",
+  "source_rows": [
+    {
+      "csv_index": 7,
+      "java_source_path": "net/minecraft/client/particle/LavaParticle.java",
+      "callsite_records": [
+        {
+          "java_line": 45,
+          "java_method_line": 40,
+          "java_method_signature": "public void tick() { super.tick(); if (!this.removed) {",
+          "java_invocation": "this.level.addParticle(ParticleTypes.SMOKE, this.x, this.y, this.z, this.xd, this.yd, this.zd)",
+          "guard_and_state_context": "39: \t@Override\n40: \tpublic void tick() {\n41: \t\tsuper.tick();\n42: \t\tif (!this.removed) {\n43: \t\t\tfloat odds = (float)this.age / this.lifetime;\n44: \t\t\tif (this.random.nextFloat() > odds) {\n45: \t\t\t\tthis.level.addParticle(ParticleTypes.SMOKE, this.x, this.y, this.z, this.xd, this.yd, this.zd);\n46: \t\t\t}\n47: \t\t}\n48: \t}\n49: \n50: \tpublic static class Provider implements ParticleProvider<SimpleParticleType> {\n51: \t\tprivate final SpriteSet sprite;\n52: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "particle_engine_internal_child",
+          "rust_entry_candidate_from_inventory": "particle::ParticleStore tick/provider処理",
+          "rust_gap_candidate_from_inventory": "Storeはtick/追跡管理の入口あり。子粒子/特殊連鎖ごとの完全性は別provider調査中。",
+          "audit_status": "internal_child_candidate",
+          "semantic_audit": {
+            "java_method": "public void tick() { super.tick(); if (!this.removed) {",
+            "java_callsite_line": 45,
+            "caller_side_guard_and_state": "Client ParticleEngine live-particle tick; !removed and randomFloat > age/lifetime; client-local age/lifetime.",
+            "kind_options_origin": "SMOKE simple; parent xyz and xd/yd/zd, one random trial per live tick with chance declining by age/lifetime. Provider support is not source behavior.",
+            "rust_path_function": "particle::ParticleStore::tick / Particle::tick",
+            "status": "connected",
+            "evidence": "Java LavaParticle.tick() line 40 (child add line 45): after superclass tick, while not removed, emit one SMOKE at parent xyz with parent velocity exactly when nextFloat() > age/lifetime. Rust reaches the same client-local source through ParticleStore::tick -> particle::water::tick Kind::Water(Lava) -> push_lava_smoke; child is accumulated and appended after live-particle iteration. push_lava_smoke rejects sample <= age/lifetime, equivalent strict > predicate, and uses parent pos/vel and SMOKE provider. No missing child hook remains; reproduction: spawn Lava and inspect live particle output on successive ages."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "semantic audit complete: Java callsite/caller and Rust production path compared",
+      "semantic_status": "connected",
+      "audit_summary": {
+        "rust_production_entry": "particle::ParticleStore::tick / Particle::tick",
+        "coverage_evidence": "Java LavaParticle.tick() line 40 (child add line 45): after superclass tick, while not removed, emit one SMOKE at parent xyz with parent velocity exactly when nextFloat() > age/lifetime. Rust reaches the same client-local source through ParticleStore::tick -> particle::water::tick Kind::Water(Lava) -> push_lava_smoke; child is accumulated and appended after live-particle iteration. push_lava_smoke rejects sample <= age/lifetime, equivalent strict > predicate, and uses parent pos/vel and SMOKE provider. No missing child hook remains; reproduction: spawn Lava and inspect live particle output on successive ages."
+      }
+    },
+    {
+      "csv_index": 15,
+      "java_source_path": "net/minecraft/server/level/WorldGenRegion.java",
+      "callsite_records": [
+        {
+          "java_line": 416,
+          "java_method_line": 416,
+          "java_method_signature": "public void addParticle(ParticleOptions particle, double x, double y, double z, double xd, double yd, double zd) { } ",
+          "java_invocation": "addParticle(ParticleOptions particle, double x, double y, double z, double xd, double yd, double zd)",
+          "guard_and_state_context": "410: \n411:     @Override\n412:     public void playSound(@Nullable Entity except, BlockPos pos, SoundEvent sound, SoundSource source, float volume, float pitch) {\n413:     }\n414: \n415:     @Override\n416:     public void addParticle(ParticleOptions particle, double x, double y, double z, double xd, double yd, double zd) {\n417:     }\n418: \n419:     @Override\n420:     public void levelEvent(@Nullable Entity source, int type, BlockPos pos, int data) {\n421:     }\n422: \n423:     @Override",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "helper_or_other",
+          "rust_entry_candidate_from_inventory": "server worldgen",
+          "rust_gap_candidate_from_inventory": "Rust client does not run server worldgen particle callbacks.",
+          "audit_status": "uncertain",
+          "semantic_audit": {
+            "java_method": "public void addParticle(ParticleOptions particle, double x, double y, double z, double xd, double yd, double zd) { } ",
+            "java_callsite_line": 416,
+            "caller_side_guard_and_state": "WorldGenRegion override is empty; request discarded.",
+            "kind_options_origin": "Unused ParticleOptions and coordinates; no effective kind/options. No Rust client worldgen reproduction required.",
+            "rust_path_function": "None; WorldGenRegion::addParticle intentional no-op",
+            "status": "connected",
+            "evidence": "API override receives calls during server worldgen but body is empty, hence no output, packet, or visual state. This is a declaration/implementation sink, not actual particle production."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed",
+      "semantic_status": "connected",
+      "audit_summary": {
+        "rust_production_entry": "None; WorldGenRegion::addParticle intentional no-op",
+        "coverage_evidence": "API override receives calls during server worldgen but body is empty, hence no output, packet, or visual state. This is a declaration/implementation sink, not actual particle production."
+      }
+    },
+    {
+      "csv_index": 23,
+      "java_source_path": "net/minecraft/world/entity/ai/behavior/warden/SonicBoom.java",
+      "callsite_records": [
+        {
+          "java_line": 72,
+          "java_method_line": 59,
+          "java_method_signature": "protected void tick(ServerLevel level, Warden body, long timestamp) { body.getBrain().getMemory(MemoryModuleType.ATTACK_TARGET).ifPresent(target -> body.getLookControl().setLookAt(target.position())); if (body.getBrain().hasMemoryValue(MemoryModuleType.SONIC_BOOM_SOUND_DELAY) || body.getBrain().hasMemoryValue(MemoryModuleType.SONIC_BOOM_SOUND_COOLDOWN)) {",
+          "java_invocation": "level.sendParticles(ParticleTypes.SONIC_BOOM, particlePos.x, particlePos.y, particlePos.z, 1, 0.0, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "66:             Vec3 source = body.position().add(body.getAttachments().get(EntityAttachment.WARDEN_CHEST, 0, body.getYRot()));\n67:             Vec3 delta = target.getEyePosition().subtract(source);\n68:             Vec3 normalize = delta.normalize();\n69:             int steps = Mth.floor(delta.length()) + 7;\n70:             for (int i = 1; i < steps; ++i) {\n71:                 Vec3 particlePos = source.add(normalize.scale(i));\n72:                 level.sendParticles(ParticleTypes.SONIC_BOOM, particlePos.x, particlePos.y, particlePos.z, 1, 0.0, 0.0, 0.0, 0.0);\n73:             }\n74:             body.playSound(SoundEvents.WARDEN_SONIC_BOOM, 3.0f, 1.0f);\n75:             if (target.hurtServer(level, level.damageSources().sonicBoom(body), 10.0f)) {\n76:                 double knockbackVertical = 0.5 * (1.0 - target.getAttributeValue(Attributes.KNOCKBACK_RESISTANCE));\n77:                 double knockbackHorizontal = 2.5 * (1.0 - target.getAttributeValue(Attributes.KNOCKBACK_RESISTANCE));\n78:                 target.push(normalize.x() * knockbackHorizontal, normalize.y() * knockbackVertical, normalize.z() * knockbackHorizontal);\n79:             }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate",
+          "semantic_audit": {
+            "java_method": "protected void tick(ServerLevel level, Warden body, long timestamp) { body.getBrain().getMemory(MemoryModuleType.ATTACK_TARGET).ifPresent(target -> body.getLookControl().setLookAt(target.position())); if (body.getBrain().hasMemoryValue(MemoryModuleType.SONIC_BOOM_SOUND_DELAY) || body.getBrain().hasMemoryValue(MemoryModuleType.SONIC_BOOM_SOUND_COOLDOWN)) {",
+            "java_callsite_line": 72,
+            "caller_side_guard_and_state": "Server SonicBoom behavior attack branch guarded by target/memory/cooldown/delay; ServerLevel.sendParticles.",
+            "kind_options_origin": "SONIC_BOOM count 1 per step; zero spread/speed; position along normalized vector. Rust typed particle/event route and provider own network instance; client must not replay AI.",
+            "rust_path_function": "net::handler::parse_level_particles_impl -> app::core LevelParticles event -> ParticleStore",
+            "status": "packet_owned",
+            "evidence": "SonicBoom server behavior after target/memory/cooldown/delay guards; sends line from Warden chest attachment toward target eye (i=1..<floor(distance)+7). Brain/attack is server authoritative; sendParticles owns client delivery."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed",
+      "semantic_status": "packet_owned",
+      "audit_summary": {
+        "rust_production_entry": "net::handler::parse_level_particles_impl -> app::core LevelParticles event -> ParticleStore",
+        "coverage_evidence": "SonicBoom server behavior after target/memory/cooldown/delay guards; sends line from Warden chest attachment toward target eye (i=1..<floor(distance)+7). Brain/attack is server authoritative; sendParticles owns client delivery."
+      }
+    },
+    {
+      "csv_index": 31,
+      "java_source_path": "net/minecraft/world/entity/animal/equine/AbstractHorse.java",
+      "callsite_records": [
+        {
+          "java_line": 460,
+          "java_method_line": 410,
+          "java_method_signature": "protected boolean handleEating(Player player, ItemStack itemStack) { boolean itemUsed = false; float heal = 0.0f;",
+          "java_invocation": "addParticle(ParticleTypes.HAPPY_VILLAGER, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "454:         }\n455:         if (this.getHealth() < this.getMaxHealth() && heal > 0.0f) {\n456:             this.heal(heal);\n457:             itemUsed = true;\n458:         }\n459:         if (this.isBaby() && ageUp > 0 && !this.isAgeLocked()) {\n460:             this.level().addParticle(ParticleTypes.HAPPY_VILLAGER, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), 0.0, 0.0, 0.0);\n461:             if (!this.level().isClientSide()) {\n462:                 this.ageUp(ageUp);\n463:                 itemUsed = true;\n464:             }\n465:         }\n466:         if (!(temper <= 0 || !itemUsed && this.isTamed() || this.getTemper() >= this.getMaxTemper() || this.level().isClientSide())) {\n467:             this.modifyTemper(temper);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "java_method": "protected boolean handleEating(Player player, ItemStack itemStack) { boolean itemUsed = false; float heal = 0.0f;",
+            "java_callsite_line": 460,
+            "caller_side_guard_and_state": "Horse feed both sides; baby && ageUp>0 && !ageLocked; age mutation server-only. Taming from client entity event 7/6.",
+            "kind_options_origin": "460: HAPPY_VILLAGER simple, zero velocity. 872: HEART/SMOKE chosen by success, 7 samples, Gaussian velocity sigma .02. Generic event transport exists; no horse-specific producer asserted.",
+            "rust_path_function": "net::handler EntityParticleEvent -> app::core entity event dispatcher; horse interaction work concurrent",
+            "status": "in_progress",
+            "evidence": "Horse feed interaction runs both sides; baby && ageUp>0 && !ageLocked produces HAPPY_VILLAGER; ageUp and item consumption server-only. Taming source is handleEntityEvent id 7/6 (success/failure) with 7 emissions on client. Assigned concurrent animal interaction implementation."
+          }
+        },
+        {
+          "java_line": 872,
+          "java_method_line": 866,
+          "java_method_signature": "protected void spawnTamingParticles(boolean success) { SimpleParticleType particle = success ? ParticleTypes.HEART : ParticleTypes.SMOKE; for (int i = 0; i < 7; ++i) {",
+          "java_invocation": "addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), xa, ya, za)",
+          "guard_and_state_context": "866:     protected void spawnTamingParticles(boolean success) {\n867:         SimpleParticleType particle = success ? ParticleTypes.HEART : ParticleTypes.SMOKE;\n868:         for (int i = 0; i < 7; ++i) {\n869:             double xa = this.random.nextGaussian() * 0.02;\n870:             double ya = this.random.nextGaussian() * 0.02;\n871:             double za = this.random.nextGaussian() * 0.02;\n872:             this.level().addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), xa, ya, za);\n873:         }\n874:     }\n875: \n876:     @Override\n877:     public void handleEntityEvent(byte id) {\n878:         if (id == 7) {\n879:             this.spawnTamingParticles(true);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "java_method": "protected void spawnTamingParticles(boolean success) { SimpleParticleType particle = success ? ParticleTypes.HEART : ParticleTypes.SMOKE; for (int i = 0; i < 7; ++i) {",
+            "java_callsite_line": 872,
+            "caller_side_guard_and_state": "Horse feed both sides; baby && ageUp>0 && !ageLocked; age mutation server-only. Taming from client entity event 7/6.",
+            "kind_options_origin": "460: HAPPY_VILLAGER simple, zero velocity. 872: HEART/SMOKE chosen by success, 7 samples, Gaussian velocity sigma .02. Generic event transport exists; no horse-specific producer asserted.",
+            "rust_path_function": "net::handler EntityParticleEvent -> app::core entity event dispatcher; horse interaction work concurrent",
+            "status": "in_progress",
+            "evidence": "Horse feed interaction runs both sides; baby && ageUp>0 && !ageLocked produces HAPPY_VILLAGER; ageUp and item consumption server-only. Taming source is handleEntityEvent id 7/6 (success/failure) with 7 emissions on client. Assigned concurrent animal interaction implementation."
+          }
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed",
+      "semantic_status": "in_progress",
+      "audit_summary": {
+        "rust_production_entry": "net::handler EntityParticleEvent -> app::core entity event dispatcher; horse interaction work concurrent",
+        "coverage_evidence": "Horse feed interaction runs both sides; baby && ageUp>0 && !ageLocked produces HAPPY_VILLAGER; ageUp and item consumption server-only. Taming source is handleEntityEvent id 7/6 (success/failure) with 7 emissions on client. Assigned concurrent animal interaction implementation."
+      }
+    },
+    {
+      "csv_index": 39,
+      "java_source_path": "net/minecraft/world/entity/animal/squid/GlowSquid.java",
+      "callsite_records": [
+        {
+          "java_line": 97,
+          "java_method_line": 91,
+          "java_method_signature": "public void aiStep() { super.aiStep(); int darkTicks = this.getDarkTicksRemaining();",
+          "java_invocation": "addParticle(ParticleTypes.GLOW, this.getRandomX(0.6), this.getRandomY(), this.getRandomZ(0.6), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "91:     public void aiStep() {\n92:         super.aiStep();\n93:         int darkTicks = this.getDarkTicksRemaining();\n94:         if (darkTicks > 0) {\n95:             this.setDarkTicks(darkTicks - 1);\n96:         }\n97:         this.level().addParticle(ParticleTypes.GLOW, this.getRandomX(0.6), this.getRandomY(), this.getRandomZ(0.6), 0.0, 0.0, 0.0);\n98:     }\n99: \n100:     @Override\n101:     public boolean hurtServer(ServerLevel level, DamageSource source, float damage) {\n102:         boolean hurt = super.hurtServer(level, source, damage);\n103:         if (hurt) {\n104:             this.setDarkTicks(100);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "java_method": "public void aiStep() { super.aiStep(); int darkTicks = this.getDarkTicksRemaining();",
+            "java_callsite_line": 97,
+            "caller_side_guard_and_state": "GlowSquid client aiStep; darkTicks decremented if positive; then unconditional local emission; server call non-producing.",
+            "kind_options_origin": "GLOW simple; random xyz within x/z radius .6, entity random Y, zero velocity each client aiStep.",
+            "rust_path_function": "entity::EntityStore::client_particle_requests / entity::particle_tick::tick_common",
+            "status": "connected",
+            "evidence": "Java GlowSquid.aiStep() line 91, unconditional GLOW add line 97 after darkTicks decrement; random x/z extent is 0.6 of entity width, y is random entity height, velocity zero. Rust EntityStore::client_particle_requests emits one Kind::Glow for EntityKind::GlowSquid every aggregate client particle tick, with matching x/z 0.6-width range, random y and zero velocity; app/in_game consumes the aggregate requests. Metadata darkTicks is not an emission guard in Java. Previous missing judgment was stale; reproduction: any client-ticked GlowSquid emits one GLOW each tick regardless of darkTicks."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "semantic audit complete: Java callsite/caller and Rust production path compared",
+      "semantic_status": "connected",
+      "audit_summary": {
+        "rust_production_entry": "entity::EntityStore::client_particle_requests / entity::particle_tick::tick_common",
+        "coverage_evidence": "Java GlowSquid.aiStep() line 91, unconditional GLOW add line 97 after darkTicks decrement; random x/z extent is 0.6 of entity width, y is random entity height, velocity zero. Rust EntityStore::client_particle_requests emits one Kind::Glow for EntityKind::GlowSquid every aggregate client particle tick, with matching x/z 0.6-width range, random y and zero velocity; app/in_game consumes the aggregate requests. Metadata darkTicks is not an emission guard in Java. Previous missing judgment was stale; reproduction: any client-ticked GlowSquid emits one GLOW each tick regardless of darkTicks."
+      }
+    },
+    {
+      "csv_index": 47,
+      "java_source_path": "net/minecraft/world/entity/decoration/ArmorStand.java",
+      "callsite_records": [
+        {
+          "java_line": 386,
+          "java_method_line": 384,
+          "java_method_signature": "private void showBreakingParticles() { if (this.level() instanceof ServerLevel) { ((ServerLevel)this.level()).sendParticles(new BlockParticleOption(ParticleTypes.BLOCK, Blocks.OAK_PLANKS.defaultBlockState()), this.getX(), this.getY(0.6666666666666666), this.getZ(), 10, this.getBbWidth() / 4.0f, this.getBbHeight() / 4.0f, this.getBbWidth() / 4.0f, 0.05);",
+          "java_invocation": "sendParticles(new BlockParticleOption(ParticleTypes.BLOCK, Blocks.OAK_PLANKS.defaultBlockState()), this.getX(), this.getY(0.6666666666666666), this.getZ(), 10, this.getBbWidth() / 4.0f, this.getBbHeight() / 4.0f, this.getBbWidth() / 4.0f, 0.05)",
+          "guard_and_state_context": "380:         }\n381:         return distance < (size *= 64.0) * size;\n382:     }\n383: \n384:     private void showBreakingParticles() {\n385:         if (this.level() instanceof ServerLevel) {\n386:             ((ServerLevel)this.level()).sendParticles(new BlockParticleOption(ParticleTypes.BLOCK, Blocks.OAK_PLANKS.defaultBlockState()), this.getX(), this.getY(0.6666666666666666), this.getZ(), 10, this.getBbWidth() / 4.0f, this.getBbHeight() / 4.0f, this.getBbWidth() / 4.0f, 0.05);\n387:         }\n388:     }\n389: \n390:     private void causeDamage(ServerLevel level, DamageSource source, float dmg) {\n391:         float health = this.getHealth();\n392:         if ((health -= dmg) <= 0.5f) {\n393:             this.brokenByAnything(level, source);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate",
+          "semantic_audit": {
+            "java_method": "private void showBreakingParticles() { if (this.level() instanceof ServerLevel) { ((ServerLevel)this.level()).sendParticles(new BlockParticleOption(ParticleTypes.BLOCK, Blocks.OAK_PLANKS.defaultBlockState()), this.getX(), this.getY(0.6666666666666666), this.getZ(), 10, this.getBbWidth() / 4.0f, this.getBbHeight() / 4.0f, this.getBbWidth() / 4.0f, 0.05);",
+            "java_callsite_line": 386,
+            "caller_side_guard_and_state": "Server break/damage branch; explicit ServerLevel guard, server-authoritative damage.",
+            "kind_options_origin": "BLOCK option state oak_planks; count 10; position (x,y(2/3),z), spread width/4,height/4,width/4, speed .05. Packet owner; no local break producer (break work concurrent).",
+            "rust_path_function": "net::handler LevelParticles -> app::core event route -> ParticleStore",
+            "status": "packet_owned",
+            "evidence": "ArmorStand.showBreakingParticles only under ServerLevel during server-authoritative break/damage paths; server sends to tracking clients."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed",
+      "semantic_status": "packet_owned",
+      "audit_summary": {
+        "rust_production_entry": "net::handler LevelParticles -> app::core event route -> ParticleStore",
+        "coverage_evidence": "ArmorStand.showBreakingParticles only under ServerLevel during server-authoritative break/damage paths; server sends to tracking clients."
+      }
+    },
+    {
+      "csv_index": 55,
+      "java_source_path": "net/minecraft/world/entity/monster/Witch.java",
+      "callsite_records": [
+        {
+          "java_line": 173,
+          "java_method_line": 170,
+          "java_method_signature": "public void handleEntityEvent(byte id) { if (id == 15) { for (int i = 0; i < this.random.nextInt(35) + 10; ++i) {",
+          "java_invocation": "addParticle(ParticleTypes.WITCH, this.getX() + this.random.nextGaussian() * (double)0.13f, this.getBoundingBox().maxY + 0.5 + this.random.nextGaussian() * (double)0.13f, this.getZ() + this.random.nextGaussian() * (double)0.13f, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "167:     }\n168: \n169:     @Override\n170:     public void handleEntityEvent(byte id) {\n171:         if (id == 15) {\n172:             for (int i = 0; i < this.random.nextInt(35) + 10; ++i) {\n173:                 this.level().addParticle(ParticleTypes.WITCH, this.getX() + this.random.nextGaussian() * (double)0.13f, this.getBoundingBox().maxY + 0.5 + this.random.nextGaussian() * (double)0.13f, this.getZ() + this.random.nextGaussian() * (double)0.13f, 0.0, 0.0, 0.0);\n174:             }\n175:         } else {\n176:             super.handleEntityEvent(id);\n177:         }\n178:     }\n179: \n180:     @Override",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "java_method": "public void handleEntityEvent(byte id) { if (id == 15) { for (int i = 0; i < this.random.nextInt(35) + 10; ++i) {",
+            "java_callsite_line": 173,
+            "caller_side_guard_and_state": "Witch handleEntityEvent id 15; server tick rare broadcast creates incoming trigger.",
+            "kind_options_origin": "WITCH simple; random count 10..44; position gaussian sigma .13 x/z and bbox maxY+.5+sigma Y; velocity zero. Provider exists, event producer absent.",
+            "rust_path_function": "net::handler EntityParticleEvent -> app::core -> EntityStore event owners",
+            "status": "connected",
+            "evidence": "Java Witch.handleEntityEvent(byte) line 170, event id 15 emits WITCH at lines 171-173 with count nextInt(35)+10 (10..44), Gaussian position sigma .13 around x/z and bbox maxY+.5, zero velocity. Rust app::core NetworkEvent::EntityParticleEvent branch (event id 15, entity kind witch) emits 10..44 WITCH requests with matching gaussian coordinates/height and zero velocity. The event is the server rare-tick broadcast trigger; Rust correctly consumes the packet and does not resample Witch AI. Prior missing judgment overlooked the generic event-id branch; reproduction: deliver entity event 15 for a witch."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "semantic audit complete: Java callsite/caller and Rust production path compared",
+      "semantic_status": "connected",
+      "audit_summary": {
+        "rust_production_entry": "net::handler EntityParticleEvent -> app::core -> EntityStore event owners",
+        "coverage_evidence": "Java Witch.handleEntityEvent(byte) line 170, event id 15 emits WITCH at lines 171-173 with count nextInt(35)+10 (10..44), Gaussian position sigma .13 around x/z and bbox maxY+.5, zero velocity. Rust app::core NetworkEvent::EntityParticleEvent branch (event id 15, entity kind witch) emits 10..44 WITCH requests with matching gaussian coordinates/height and zero velocity. The event is the server rare-tick broadcast trigger; Rust correctly consumes the packet and does not resample Witch AI. Prior missing judgment overlooked the generic event-id branch; reproduction: deliver entity event 15 for a witch."
+      }
+    },
+    {
+      "csv_index": 63,
+      "java_source_path": "net/minecraft/world/entity/npc/villager/Villager.java",
+      "callsite_records": [
+        {
+          "java_line": 659,
+          "java_method_line": 657,
+          "java_method_signature": "public void handleEntityEvent(byte id) { if (id == 12) { this.addParticlesAroundSelf(ParticleTypes.HEART);",
+          "java_invocation": "this.addParticlesAroundSelf(ParticleTypes.HEART)",
+          "guard_and_state_context": "653:         return this.getVillagerData().profession().value().name();\n654:     }\n655: \n656:     @Override\n657:     public void handleEntityEvent(byte id) {\n658:         if (id == 12) {\n659:             this.addParticlesAroundSelf(ParticleTypes.HEART);\n660:         } else if (id == 13) {\n661:             this.addParticlesAroundSelf(ParticleTypes.ANGRY_VILLAGER);\n662:         } else if (id == 14) {\n663:             this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER);\n664:         } else if (id == 42) {\n665:             this.addParticlesAroundSelf(ParticleTypes.SPLASH);\n666:         } else {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "java_method": "public void handleEntityEvent(byte id) { if (id == 12) { this.addParticlesAroundSelf(ParticleTypes.HEART);",
+            "java_callsite_line": 659,
+            "caller_side_guard_and_state": "Villager handleEntityEvent ids 12/13/14/42; server mating/hurt/job/trade/raid broadcasts.",
+            "kind_options_origin": "AbstractVillager helper emits five with gaussian velocity sigma .02, per-event HEART/ANGRY_VILLAGER/HAPPY_VILLAGER/SPLASH; providers available but event mapping absent.",
+            "rust_path_function": "net::handler EntityParticleEvent -> app::core -> EntityStore::animal_particle_event / misc_particle_event",
+            "status": "connected",
+            "evidence": "Java Villager.handleEntityEvent(byte) lines 657-665 maps ids 12/13/14/42 to HEART/ANGRY_VILLAGER/HAPPY_VILLAGER/SPLASH; AbstractVillager.addParticlesAroundSelf lines 215-222 emits five, using random x/z across width, random y +1, Gaussian velocity sigma .02. Rust app::core EntityParticleEvent branch matches ids 12..=14|42 only for entity kind villager, selects those same kinds and emits five with matching spatial/velocity ranges. Earlier missing judgment failed to follow the shared numeric-event dispatcher; packet-owned behavior is connected. Reproduction: deliver each listed entity-event id for a Villager."
+          }
+        },
+        {
+          "java_line": 661,
+          "java_method_line": 657,
+          "java_method_signature": "public void handleEntityEvent(byte id) { if (id == 12) { this.addParticlesAroundSelf(ParticleTypes.HEART);",
+          "java_invocation": "this.addParticlesAroundSelf(ParticleTypes.ANGRY_VILLAGER)",
+          "guard_and_state_context": "655: \n656:     @Override\n657:     public void handleEntityEvent(byte id) {\n658:         if (id == 12) {\n659:             this.addParticlesAroundSelf(ParticleTypes.HEART);\n660:         } else if (id == 13) {\n661:             this.addParticlesAroundSelf(ParticleTypes.ANGRY_VILLAGER);\n662:         } else if (id == 14) {\n663:             this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER);\n664:         } else if (id == 42) {\n665:             this.addParticlesAroundSelf(ParticleTypes.SPLASH);\n666:         } else {\n667:             super.handleEntityEvent(id);\n668:         }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "java_method": "public void handleEntityEvent(byte id) { if (id == 12) { this.addParticlesAroundSelf(ParticleTypes.HEART);",
+            "java_callsite_line": 661,
+            "caller_side_guard_and_state": "Villager handleEntityEvent ids 12/13/14/42; server mating/hurt/job/trade/raid broadcasts.",
+            "kind_options_origin": "AbstractVillager helper emits five with gaussian velocity sigma .02, per-event HEART/ANGRY_VILLAGER/HAPPY_VILLAGER/SPLASH; providers available but event mapping absent.",
+            "rust_path_function": "net::handler EntityParticleEvent -> app::core -> EntityStore::animal_particle_event / misc_particle_event",
+            "status": "connected",
+            "evidence": "Java Villager.handleEntityEvent(byte) lines 657-665 maps ids 12/13/14/42 to HEART/ANGRY_VILLAGER/HAPPY_VILLAGER/SPLASH; AbstractVillager.addParticlesAroundSelf lines 215-222 emits five, using random x/z across width, random y +1, Gaussian velocity sigma .02. Rust app::core EntityParticleEvent branch matches ids 12..=14|42 only for entity kind villager, selects those same kinds and emits five with matching spatial/velocity ranges. Earlier missing judgment failed to follow the shared numeric-event dispatcher; packet-owned behavior is connected. Reproduction: deliver each listed entity-event id for a Villager."
+          }
+        },
+        {
+          "java_line": 663,
+          "java_method_line": 657,
+          "java_method_signature": "public void handleEntityEvent(byte id) { if (id == 12) { this.addParticlesAroundSelf(ParticleTypes.HEART);",
+          "java_invocation": "this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER)",
+          "guard_and_state_context": "657:     public void handleEntityEvent(byte id) {\n658:         if (id == 12) {\n659:             this.addParticlesAroundSelf(ParticleTypes.HEART);\n660:         } else if (id == 13) {\n661:             this.addParticlesAroundSelf(ParticleTypes.ANGRY_VILLAGER);\n662:         } else if (id == 14) {\n663:             this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER);\n664:         } else if (id == 42) {\n665:             this.addParticlesAroundSelf(ParticleTypes.SPLASH);\n666:         } else {\n667:             super.handleEntityEvent(id);\n668:         }\n669:     }\n670: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "java_method": "public void handleEntityEvent(byte id) { if (id == 12) { this.addParticlesAroundSelf(ParticleTypes.HEART);",
+            "java_callsite_line": 663,
+            "caller_side_guard_and_state": "Villager handleEntityEvent ids 12/13/14/42; server mating/hurt/job/trade/raid broadcasts.",
+            "kind_options_origin": "AbstractVillager helper emits five with gaussian velocity sigma .02, per-event HEART/ANGRY_VILLAGER/HAPPY_VILLAGER/SPLASH; providers available but event mapping absent.",
+            "rust_path_function": "net::handler EntityParticleEvent -> app::core -> EntityStore::animal_particle_event / misc_particle_event",
+            "status": "connected",
+            "evidence": "Java Villager.handleEntityEvent(byte) lines 657-665 maps ids 12/13/14/42 to HEART/ANGRY_VILLAGER/HAPPY_VILLAGER/SPLASH; AbstractVillager.addParticlesAroundSelf lines 215-222 emits five, using random x/z across width, random y +1, Gaussian velocity sigma .02. Rust app::core EntityParticleEvent branch matches ids 12..=14|42 only for entity kind villager, selects those same kinds and emits five with matching spatial/velocity ranges. Earlier missing judgment failed to follow the shared numeric-event dispatcher; packet-owned behavior is connected. Reproduction: deliver each listed entity-event id for a Villager."
+          }
+        },
+        {
+          "java_line": 665,
+          "java_method_line": 657,
+          "java_method_signature": "public void handleEntityEvent(byte id) { if (id == 12) { this.addParticlesAroundSelf(ParticleTypes.HEART);",
+          "java_invocation": "this.addParticlesAroundSelf(ParticleTypes.SPLASH)",
+          "guard_and_state_context": "659:             this.addParticlesAroundSelf(ParticleTypes.HEART);\n660:         } else if (id == 13) {\n661:             this.addParticlesAroundSelf(ParticleTypes.ANGRY_VILLAGER);\n662:         } else if (id == 14) {\n663:             this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER);\n664:         } else if (id == 42) {\n665:             this.addParticlesAroundSelf(ParticleTypes.SPLASH);\n666:         } else {\n667:             super.handleEntityEvent(id);\n668:         }\n669:     }\n670: \n671:     @Override\n672:     public @Nullable SpawnGroupData finalizeSpawn(ServerLevelAccessor level, DifficultyInstance difficulty, EntitySpawnReason spawnReason, @Nullable SpawnGroupData groupData) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "java_method": "public void handleEntityEvent(byte id) { if (id == 12) { this.addParticlesAroundSelf(ParticleTypes.HEART);",
+            "java_callsite_line": 665,
+            "caller_side_guard_and_state": "Villager handleEntityEvent ids 12/13/14/42; server mating/hurt/job/trade/raid broadcasts.",
+            "kind_options_origin": "AbstractVillager helper emits five with gaussian velocity sigma .02, per-event HEART/ANGRY_VILLAGER/HAPPY_VILLAGER/SPLASH; providers available but event mapping absent.",
+            "rust_path_function": "net::handler EntityParticleEvent -> app::core -> EntityStore::animal_particle_event / misc_particle_event",
+            "status": "connected",
+            "evidence": "Java Villager.handleEntityEvent(byte) lines 657-665 maps ids 12/13/14/42 to HEART/ANGRY_VILLAGER/HAPPY_VILLAGER/SPLASH; AbstractVillager.addParticlesAroundSelf lines 215-222 emits five, using random x/z across width, random y +1, Gaussian velocity sigma .02. Rust app::core EntityParticleEvent branch matches ids 12..=14|42 only for entity kind villager, selects those same kinds and emits five with matching spatial/velocity ranges. Earlier missing judgment failed to follow the shared numeric-event dispatcher; packet-owned behavior is connected. Reproduction: deliver each listed entity-event id for a Villager."
+          }
+        }
+      ],
+      "record_count": 4,
+      "audit_status": "semantic audit complete: Java callsite/caller and Rust production path compared",
+      "semantic_status": "connected",
+      "audit_summary": {
+        "rust_production_entry": "net::handler EntityParticleEvent -> app::core -> EntityStore::animal_particle_event / misc_particle_event",
+        "coverage_evidence": "Java Villager.handleEntityEvent(byte) lines 657-665 maps ids 12/13/14/42 to HEART/ANGRY_VILLAGER/HAPPY_VILLAGER/SPLASH; AbstractVillager.addParticlesAroundSelf lines 215-222 emits five, using random x/z across width, random y +1, Gaussian velocity sigma .02. Rust app::core EntityParticleEvent branch matches ids 12..=14|42 only for entity kind villager, selects those same kinds and emits five with matching spatial/velocity ranges. Earlier missing judgment failed to follow the shared numeric-event dispatcher; packet-owned behavior is connected. Reproduction: deliver each listed entity-event id for a Villager."
+      }
+    },
+    {
+      "csv_index": 71,
+      "java_source_path": "net/minecraft/world/entity/projectile/ThrowableProjectile.java",
+      "callsite_records": [
+        {
+          "java_line": 71,
+          "java_method_line": 64,
+          "java_method_signature": "private void applyInertia() { float inertia; Vec3 movement = this.getDeltaMovement();",
+          "java_invocation": "addParticle(ParticleTypes.BUBBLE, position.x - movement.x * 0.25, position.y - movement.y * 0.25, position.z - movement.z * 0.25, movement.x, movement.y, movement.z)",
+          "guard_and_state_context": "65:         float inertia;\n66:         Vec3 movement = this.getDeltaMovement();\n67:         Vec3 position = this.position();\n68:         if (this.isInWater()) {\n69:             for (int i = 0; i < 4; ++i) {\n70:                 float s = 0.25f;\n71:                 this.level().addParticle(ParticleTypes.BUBBLE, position.x - movement.x * 0.25, position.y - movement.y * 0.25, position.z - movement.z * 0.25, movement.x, movement.y, movement.z);\n72:             }\n73:             inertia = 0.8f;\n74:         } else {\n75:             inertia = this.getAirDrag();\n76:         }\n77:         this.setDeltaMovement(movement.scale(inertia));\n78:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "java_method": "private void applyInertia() { float inertia; Vec3 movement = this.getDeltaMovement();",
+            "java_callsite_line": 71,
+            "caller_side_guard_and_state": "ThrowableProjectile tick -> applyInertia; isInWater then exactly four local adds; server call non-producing.",
+            "kind_options_origin": "BUBBLE simple; 4 per in-water tick; position entity position - movement*.25, velocity movement.",
+            "rust_path_function": "entity::EntityStore::client_particle_requests / entity::particle_tick::tick_common",
+            "status": "in_progress",
+            "evidence": "Java ThrowableProjectile.applyInertia() lines 64-77: on each in-water client tick it emits exactly four BUBBLE particles at position - movement*0.25 with movement velocity (line 71 inside loop 69-72); server addParticle is a no-op. Rust EntityStore::client_particle_requests projectile branch in entity/mod.rs checks the sampled fluid at current position and covers Arrow/SpectralArrow/Trident/Snowball/Egg/EnderPearl/SmallFireball/Fireball/WitherSkull, but currently calls add once, not four. Thus this is partially connected, not absent; reproduction: keep one supported projectile in water for a tick and compare request count (Rust 1 vs Java 4). Confirmed mismatch is 3 missing BUBBLE requests per qualifying projectile tick; the Java ThrowableProjectile subclass inventory also shows missing underwater coverage for ThrownExperienceBottle, ThrownSplashPotion, and ThrownLingeringPotion, neither of which is in the Rust match."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "semantic audit complete: Java callsite/caller and Rust production path compared",
+      "semantic_status": "in_progress",
+      "audit_summary": {
+        "rust_production_entry": "entity::EntityStore::client_particle_requests / entity::particle_tick::tick_common",
+        "coverage_evidence": "Java ThrowableProjectile.applyInertia() lines 64-77: on each in-water client tick it emits exactly four BUBBLE particles at position - movement*0.25 with movement velocity (line 71 inside loop 69-72); server addParticle is a no-op. Rust EntityStore::client_particle_requests projectile branch in entity/mod.rs checks the sampled fluid at current position and covers Arrow/SpectralArrow/Trident/Snowball/Egg/EnderPearl/SmallFireball/Fireball/WitherSkull, but currently calls add once, not four. Thus this is partially connected, not absent; reproduction: keep one supported projectile in water for a tick and compare request count (Rust 1 vs Java 4). Confirmed mismatch is 3 missing BUBBLE requests per qualifying projectile tick; the Java ThrowableProjectile subclass inventory also shows missing underwater coverage for ThrownExperienceBottle, ThrownSplashPotion, and ThrownLingeringPotion, neither of which is in the Rust match."
+      }
+    },
+    {
+      "csv_index": 79,
+      "java_source_path": "net/minecraft/world/entity/vehicle/boat/AbstractBoat.java",
+      "callsite_records": [
+        {
+          "java_line": 168,
+          "java_method_line": 158,
+          "java_method_signature": "public void onAboveBubbleColumn(boolean dragDown, BlockPos pos) { if (this.level() instanceof ServerLevel) { this.isAboveBubbleColumn = true;",
+          "java_invocation": "addParticle(ParticleTypes.SPLASH, this.getX() + (double)this.random.nextFloat(), this.getY() + 0.7, this.getZ() + (double)this.random.nextFloat(), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "162:             if (this.getBubbleTime() == 0) {\n163:                 this.setBubbleTime(60);\n164:             }\n165:         }\n166:         if (!this.isUnderWater() && this.random.nextInt(100) == 0) {\n167:             this.level().playLocalSound(this.getX(), this.getY(), this.getZ(), this.getSwimSplashSound(), this.getSoundSource(), 1.0f, 0.8f + 0.4f * this.random.nextFloat(), false);\n168:             this.level().addParticle(ParticleTypes.SPLASH, this.getX() + (double)this.random.nextFloat(), this.getY() + 0.7, this.getZ() + (double)this.random.nextFloat(), 0.0, 0.0, 0.0);\n169:             this.gameEvent(GameEvent.SPLASH, this.getControllingPassenger());\n170:         }\n171:     }\n172: \n173:     @Override\n174:     public void push(Entity entity) {\n175:         if (entity instanceof AbstractBoat) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "java_method": "public void onAboveBubbleColumn(boolean dragDown, BlockPos pos) { if (this.level() instanceof ServerLevel) { this.isAboveBubbleColumn = true;",
+            "java_callsite_line": 168,
+            "caller_side_guard_and_state": "AbstractBoat bubble-column callback; server-only state update; !underwater && randomInt(100)==0.",
+            "kind_options_origin": "SPLASH simple at random x/z within block, y+.7, zero velocity; callback guard as above.",
+            "rust_path_function": "entity::EntityStore::client_particle_requests / entity::particle_misc::tick",
+            "status": "connected",
+            "evidence": "Java AbstractBoat.onAboveBubbleColumn line 158+; its callback has the shared !underwater && random.nextInt(100)==0 branch emitting SPLASH at random x/z and y+.7 (line 168), plus local sound/event. Rust entity::particle_misc::boat_above_bubble_columns intersects exact bubble-column cells and checks above collision/fluid; boat_bubble_particles applies the not-underwater and 1/100 gate, then creates SPLASH at boat x/z + random and y+.7. misc_particle_requests invokes this for every boat/raft variant in particle_misc::tick; EntityStore::client_particle_requests aggregates it, and app/in_game emits the requests. The former missing finding is a false negative; 12 focused tests cover callbacks/conditions. Java random stream is not bit-for-bit reproduced (Rust derives deterministic per-entity/tick/cell draws), but trigger, chance, particle and placement are implemented. Reproduction: boat intersects a valid bubble column with no fluid/collision above while not underwater; one callback has 1/100 chance."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "semantic audit complete: Java callsite/caller and Rust production path compared",
+      "semantic_status": "connected",
+      "audit_summary": {
+        "rust_production_entry": "entity::EntityStore::client_particle_requests / entity::particle_misc::tick",
+        "coverage_evidence": "Java AbstractBoat.onAboveBubbleColumn line 158+; its callback has the shared !underwater && random.nextInt(100)==0 branch emitting SPLASH at random x/z and y+.7 (line 168), plus local sound/event. Rust entity::particle_misc::boat_above_bubble_columns intersects exact bubble-column cells and checks above collision/fluid; boat_bubble_particles applies the not-underwater and 1/100 gate, then creates SPLASH at boat x/z + random and y+.7. misc_particle_requests invokes this for every boat/raft variant in particle_misc::tick; EntityStore::client_particle_requests aggregates it, and app/in_game emits the requests. The former missing finding is a false negative; 12 focused tests cover callbacks/conditions. Java random stream is not bit-for-bit reproduced (Rust derives deterministic per-entity/tick/cell draws), but trigger, chance, particle and placement are implemented. Reproduction: boat intersects a valid bubble column with no fluid/collision above while not underwater; one callback has 1/100 chance."
+      }
+    },
+    {
+      "csv_index": 87,
+      "java_source_path": "net/minecraft/world/level/BaseSpawner.java",
+      "callsite_records": [
+        {
+          "java_line": 88,
+          "java_method_line": 80,
+          "java_method_signature": "public void clientTick(Level level, BlockPos pos) { if (!this.isNearPlayer(level, pos)) { this.oSpin = this.spin;",
+          "java_invocation": "level.addParticle(ParticleTypes.SMOKE, xP, yP, zP, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "82:             this.oSpin = this.spin;\n83:         } else if (this.displayEntity != null) {\n84:             RandomSource random = level.getRandom();\n85:             double xP = (double)pos.getX() + random.nextDouble();\n86:             double yP = (double)pos.getY() + random.nextDouble();\n87:             double zP = (double)pos.getZ() + random.nextDouble();\n88:             level.addParticle(ParticleTypes.SMOKE, xP, yP, zP, 0.0, 0.0, 0.0);\n89:             level.addParticle(ParticleTypes.FLAME, xP, yP, zP, 0.0, 0.0, 0.0);\n90:             if (this.spawnDelay > 0) {\n91:                 --this.spawnDelay;\n92:             }\n93:             this.oSpin = this.spin;\n94:             this.spin = (this.spin + (double)(1000.0f / ((float)this.spawnDelay + 200.0f))) % 360.0;\n95:         }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "helper_or_other",
+          "rust_entry_candidate_from_inventory": "StoredBlockEntity/ChunkStore + block entity visual tick in update_game",
+          "rust_gap_candidate_from_inventory": "Java BaseSpawner.clientTick only: near-player + display entity; uses spawnDelay and display entity. Rust retains raw BE NBT but has no spawner-specific parsed/ticked state.",
+          "audit_status": "uncertain",
+          "semantic_audit": {
+            "java_method": "public void clientTick(Level level, BlockPos pos) { if (!this.isNearPlayer(level, pos)) { this.oSpin = this.spin;",
+            "java_callsite_line": 88,
+            "caller_side_guard_and_state": "SpawnerBlockEntity clientTick -> BaseSpawner; near-player && displayEntity != null; client tick mutates spawnDelay/spin.",
+            "kind_options_origin": "SMOKE and FLAME share a random point in block, simple, zero velocity. Rust matches gating and two kinds; decrements positive spawn_delay.",
+            "rust_path_function": "world::block_entity_particle::tick_block_entity_particles -> spawner_particles (app::phases::in_game)",
+            "status": "connected",
+            "evidence": "SpawnerBlockEntity.clientTick delegates to BaseSpawner.clientTick. Java near-player and displayEntity gates; spawnDelay/spin state client-ticked from spawner NBT/display data. Rust parses SpawnerVisualState (spawn_delay, required_player_range, has_display_entity), gates on nearby non-spectator player and emits on in-game client tick. Spin/display fidelity partial."
+          }
+        },
+        {
+          "java_line": 89,
+          "java_method_line": 80,
+          "java_method_signature": "public void clientTick(Level level, BlockPos pos) { if (!this.isNearPlayer(level, pos)) { this.oSpin = this.spin;",
+          "java_invocation": "level.addParticle(ParticleTypes.FLAME, xP, yP, zP, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "83:         } else if (this.displayEntity != null) {\n84:             RandomSource random = level.getRandom();\n85:             double xP = (double)pos.getX() + random.nextDouble();\n86:             double yP = (double)pos.getY() + random.nextDouble();\n87:             double zP = (double)pos.getZ() + random.nextDouble();\n88:             level.addParticle(ParticleTypes.SMOKE, xP, yP, zP, 0.0, 0.0, 0.0);\n89:             level.addParticle(ParticleTypes.FLAME, xP, yP, zP, 0.0, 0.0, 0.0);\n90:             if (this.spawnDelay > 0) {\n91:                 --this.spawnDelay;\n92:             }\n93:             this.oSpin = this.spin;\n94:             this.spin = (this.spin + (double)(1000.0f / ((float)this.spawnDelay + 200.0f))) % 360.0;\n95:         }\n96:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "helper_or_other",
+          "rust_entry_candidate_from_inventory": "StoredBlockEntity/ChunkStore + block entity visual tick in update_game",
+          "rust_gap_candidate_from_inventory": "Java BaseSpawner.clientTick only: near-player + display entity; uses spawnDelay and display entity. Rust retains raw BE NBT but has no spawner-specific parsed/ticked state.",
+          "audit_status": "uncertain",
+          "semantic_audit": {
+            "java_method": "public void clientTick(Level level, BlockPos pos) { if (!this.isNearPlayer(level, pos)) { this.oSpin = this.spin;",
+            "java_callsite_line": 89,
+            "caller_side_guard_and_state": "SpawnerBlockEntity clientTick -> BaseSpawner; near-player && displayEntity != null; client tick mutates spawnDelay/spin.",
+            "kind_options_origin": "SMOKE and FLAME share a random point in block, simple, zero velocity. Rust matches gating and two kinds; decrements positive spawn_delay.",
+            "rust_path_function": "world::block_entity_particle::tick_block_entity_particles -> spawner_particles (app::phases::in_game)",
+            "status": "connected",
+            "evidence": "SpawnerBlockEntity.clientTick delegates to BaseSpawner.clientTick. Java near-player and displayEntity gates; spawnDelay/spin state client-ticked from spawner NBT/display data. Rust parses SpawnerVisualState (spawn_delay, required_player_range, has_display_entity), gates on nearby non-spectator player and emits on in-game client tick. Spin/display fidelity partial."
+          }
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed",
+      "semantic_status": "connected",
+      "audit_summary": {
+        "rust_production_entry": "world::block_entity_particle::tick_block_entity_particles -> spawner_particles (app::phases::in_game)",
+        "coverage_evidence": "SpawnerBlockEntity.clientTick delegates to BaseSpawner.clientTick. Java near-player and displayEntity gates; spawnDelay/spin state client-ticked from spawner NBT/display data. Rust parses SpawnerVisualState (spawn_delay, required_player_range, has_display_entity), gates on nearby non-spectator player and emits on in-game client tick. Spin/display fidelity partial."
+      }
+    },
+    {
+      "csv_index": 95,
+      "java_source_path": "net/minecraft/world/level/block/BrushableBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 111,
+          "java_method_line": 105,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { BlockPos below; if (random.nextInt(16) == 0 && FallingBlock.isFree(level.getBlockState(below = pos.below()))) {",
+          "java_invocation": "level.addParticle(new BlockParticleOption(ParticleTypes.FALLING_DUST, state), xx, yy, zz, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "105:     public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) {\n106:         BlockPos below;\n107:         if (random.nextInt(16) == 0 && FallingBlock.isFree(level.getBlockState(below = pos.below()))) {\n108:             double xx = (double)pos.getX() + random.nextDouble();\n109:             double yy = (double)pos.getY() - 0.05;\n110:             double zz = (double)pos.getZ() + random.nextDouble();\n111:             level.addParticle(new BlockParticleOption(ParticleTypes.FALLING_DUST, state), xx, yy, zz, 0.0, 0.0, 0.0);\n112:         }\n113:     }\n114: \n115:     @Override\n116:     public @Nullable BlockEntity newBlockEntity(BlockPos worldPosition, BlockState blockState) {\n117:         return new BrushableBlockEntity(worldPosition, blockState);\n118:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "java_method": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { BlockPos below; if (random.nextInt(16) == 0 && FallingBlock.isFree(level.getBlockState(below = pos.below()))) {",
+            "java_callsite_line": 111,
+            "caller_side_guard_and_state": "Client animateTick; randomInt(16)==0 && below is free.",
+            "kind_options_origin": "FALLING_DUST Block(state), random x/z and y-.05, zero velocity. Rust emits matching kind/options/position.",
+            "rust_path_function": "world::particle_tick::sample_animate_tick_particles_at_positions -> world::particle_tick::blocks::sample_positions",
+            "status": "connected",
+            "evidence": "Client loaded-block animate sampling; Brushable callback guard randomInt(16)==0 and below isFree. Rust sampled block branch applies same chance and free-below condition; state is loaded client block state, no additional sync timer."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed",
+      "semantic_status": "connected",
+      "audit_summary": {
+        "rust_production_entry": "world::particle_tick::sample_animate_tick_particles_at_positions -> world::particle_tick::blocks::sample_positions",
+        "coverage_evidence": "Client loaded-block animate sampling; Brushable callback guard randomInt(16)==0 and below isFree. Rust sampled block branch applies same chance and free-below condition; state is loaded client block state, no additional sync timer."
+      }
+    },
+    {
+      "csv_index": 103,
+      "java_source_path": "net/minecraft/world/level/block/EnchantingTableBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 73,
+          "java_method_line": 69,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { super.animateTick(state, level, pos, random); for (BlockPos offset : BOOKSHELF_OFFSETS) {",
+          "java_invocation": "level.addParticle(ParticleTypes.ENCHANT, (double)pos.getX() + 0.5, (double)pos.getY() + 2.0, (double)pos.getZ() + 0.5, (double)((float)offset.getX() + random.nextFloat()) - 0.5, (float)offset.getY() - random.nextFloat() - 1.0f, (double)((float)offset.getZ() + random.nextFloat()) - 0.5)",
+          "guard_and_state_context": "67: \n68:     @Override\n69:     public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) {\n70:         super.animateTick(state, level, pos, random);\n71:         for (BlockPos offset : BOOKSHELF_OFFSETS) {\n72:             if (random.nextInt(16) != 0 || !EnchantingTableBlock.isValidBookShelf(level, pos, offset)) continue;\n73:             level.addParticle(ParticleTypes.ENCHANT, (double)pos.getX() + 0.5, (double)pos.getY() + 2.0, (double)pos.getZ() + 0.5, (double)((float)offset.getX() + random.nextFloat()) - 0.5, (float)offset.getY() - random.nextFloat() - 1.0f, (double)((float)offset.getZ() + random.nextFloat()) - 0.5);\n74:         }\n75:     }\n76: \n77:     @Override\n78:     public BlockEntity newBlockEntity(BlockPos worldPosition, BlockState blockState) {\n79:         return new EnchantingTableBlockEntity(worldPosition, blockState);\n80:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "java_method": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { super.animateTick(state, level, pos, random); for (BlockPos offset : BOOKSHELF_OFFSETS) {",
+            "java_callsite_line": 73,
+            "caller_side_guard_and_state": "Client animateTick; per bookshelf offset randomInt(16)==0 && valid bookshelf.",
+            "kind_options_origin": "ENCHANT simple; table center +2 y; velocity from shelf offset/random floats. Rust matches.",
+            "rust_path_function": "world::particle_tick::sample_animate_tick_particles_at_positions -> blocks::enchanting_table",
+            "status": "connected",
+            "evidence": "Client animate callback for bookshelf offsets; 1/16 chance and isValidBookShelf; client loaded blocks are input, no independent synchronized state. Rust samples ring, bookshelf and intervening replaceable block."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed",
+      "semantic_status": "connected",
+      "audit_summary": {
+        "rust_production_entry": "world::particle_tick::sample_animate_tick_particles_at_positions -> blocks::enchanting_table",
+        "coverage_evidence": "Client animate callback for bookshelf offsets; 1/16 chance and isValidBookShelf; client loaded blocks are input, no independent synchronized state. Rust samples ring, bookshelf and intervening replaceable block."
+      }
+    },
+    {
+      "csv_index": 111,
+      "java_source_path": "net/minecraft/world/level/block/HoneyBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 151,
+          "java_method_line": 145,
+          "java_method_signature": "private static void showParticles(Entity entity, int count) { if (!entity.level().isClientSide()) { return;",
+          "java_invocation": "addParticle(new BlockParticleOption(ParticleTypes.BLOCK, blockState), entity.getX(), entity.getY(), entity.getZ(), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "145:     private static void showParticles(Entity entity, int count) {\n146:         if (!entity.level().isClientSide()) {\n147:             return;\n148:         }\n149:         BlockState blockState = Blocks.HONEY_BLOCK.defaultBlockState();\n150:         for (int i = 0; i < count; ++i) {\n151:             entity.level().addParticle(new BlockParticleOption(ParticleTypes.BLOCK, blockState), entity.getX(), entity.getY(), entity.getZ(), 0.0, 0.0, 0.0);\n152:         }\n153:     }\n154: }\n155: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "java_method": "private static void showParticles(Entity entity, int count) { if (!entity.level().isClientSide()) { return;",
+            "java_callsite_line": 151,
+            "caller_side_guard_and_state": "HoneyBlock.showSlideParticles(entity) / showJumpParticles(entity) are invoked by Entity.handleEntityEvent 53 / LivingEntity.handleEntityEvent 54 on client. Helper returns on server, and is the specific client-side event implementation.",
+            "kind_options_origin": "BLOCK BlockParticleOption(honey_block default), zero velocity; Entity event 53/54 carries slide/jump meaning and Rust count 5/10 mapping; helper loop emits count particles at entity xyz.",
+            "rust_path_function": "net::handler EntityEvent 53/54 -> app::core NetworkEvent::EntityHoneyParticles",
+            "status": "connected",
+            "evidence": "net/handler.rs maps 53/54 to EntityHoneyParticles (count 5/10); app/core.rs resolves player or EntityStore living position, obtains honey_block default state, and calls ParticleStore for each particle. Java event/helper and Rust production sink both traced; connected via entity packet, not guessed from kind support."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed",
+      "semantic_status": "connected",
+      "audit_summary": {
+        "rust_production_entry": "net::handler EntityEvent ids 53/54 -> app::core NetworkEvent::EntityHoneyParticles -> ParticleStore",
+        "coverage_evidence": "Java Entity.handleEntityEvent 53 calls HoneyBlock.showSlideParticles(count=5); LivingEntity.handleEntityEvent 54 calls showJumpParticles(count=10). The helper is client-only. Rust handler decodes both ids to EntityHoneyParticles; app::core resolves local/remote entity position and emits honey_block Block particles count times. This is an actual packet-owned entity-event connection, not block animate sampling."
+      }
+    },
+    {
+      "csv_index": 119,
+      "java_source_path": "net/minecraft/world/level/block/RedStoneOreBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 117,
+          "java_method_line": 107,
+          "java_method_signature": "private static void spawnParticles(Level level, BlockPos pos) { double offset = 0.5625; RandomSource random = level.getRandom();",
+          "java_invocation": "level.addParticle(DustParticleOptions.REDSTONE, (double)pos.getX() + dx, (double)pos.getY() + dy, (double)pos.getZ() + dz, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "111:             BlockPos relative = pos.relative(direction);\n112:             if (level.getBlockState(relative).isSolidRender()) continue;\n113:             Direction.Axis axis = direction.getAxis();\n114:             double dx = axis == Direction.Axis.X ? 0.5 + 0.5625 * (double)direction.getStepX() : (double)random.nextFloat();\n115:             double dy = axis == Direction.Axis.Y ? 0.5 + 0.5625 * (double)direction.getStepY() : (double)random.nextFloat();\n116:             double dz = axis == Direction.Axis.Z ? 0.5 + 0.5625 * (double)direction.getStepZ() : (double)random.nextFloat();\n117:             level.addParticle(DustParticleOptions.REDSTONE, (double)pos.getX() + dx, (double)pos.getY() + dy, (double)pos.getZ() + dz, 0.0, 0.0, 0.0);\n118:         }\n119:     }\n120: \n121:     @Override\n122:     protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> builder) {\n123:         builder.add(LIT);\n124:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "java_method": "private static void spawnParticles(Level level, BlockPos pos) { double offset = 0.5625; RandomSource random = level.getRandom();",
+            "java_callsite_line": 117,
+            "caller_side_guard_and_state": "animateTick only lit; additionally client useItemOn and server interact call helper; server local add no-op.",
+            "kind_options_origin": "DUST red 0xff0000 scale1, zero velocity; exposed faces, .5625 face offset and random other coords. Rust implements face scan/options for lit branch; interaction immediate branch partial.",
+            "rust_path_function": "world::particle_tick::sample_animate_tick_particles_at_positions -> blocks::redstone_ore",
+            "status": "in_progress",
+            "evidence": "Java RedStoneOreBlock: attack() calls interact; stepOn() calls interact when not stepping carefully; useItemOn() calls spawnParticles directly on client; animateTick() calls spawnParticles only when LIT. Shared spawnParticles lines 104-118 checks all six exposed faces and emits red DUST at the 0.5625 face offset. Rust world::particle_tick::blocks::sample_positions -> redstone_ore is gated on lit == true and implements exposed-face sampling/options, so lit animateTick is covered. The local attack/stepOn/useItemOn triggers are not connected to a Rust particle request (player::interaction start_destroy/use path has no RedstoneOre particle branch). Not wholly missing, but incomplete. Reproduction: interact with an unlit ore or walk over it without careful movement; Java immediately emits face particles and Rust currently does not. Lit ore ambient animateTick remains covered."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "semantic audit complete: Java callsite/caller and Rust production path compared",
+      "semantic_status": "in_progress",
+      "audit_summary": {
+        "rust_production_entry": "world::particle_tick::sample_animate_tick_particles_at_positions -> blocks::redstone_ore",
+        "coverage_evidence": "Java RedStoneOreBlock: attack() calls interact; stepOn() calls interact when not stepping carefully; useItemOn() calls spawnParticles directly on client; animateTick() calls spawnParticles only when LIT. Shared spawnParticles lines 104-118 checks all six exposed faces and emits red DUST at the 0.5625 face offset. Rust world::particle_tick::blocks::sample_positions -> redstone_ore is gated on lit == true and implements exposed-face sampling/options, so lit animateTick is covered. The local attack/stepOn/useItemOn triggers are not connected to a Rust particle request (player::interaction start_destroy/use path has no RedstoneOre particle branch). Not wholly missing, but incomplete. Reproduction: interact with an unlit ore or walk over it without careful movement; Java immediately emits face particles and Rust currently does not. Lit ore ambient animateTick remains covered."
+      }
+    },
+    {
+      "csv_index": 127,
+      "java_source_path": "net/minecraft/world/level/block/SporeBlossomBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 63,
+          "java_method_line": 56,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { int plantX = pos.getX(); int plantY = pos.getY();",
+          "java_invocation": "level.addParticle(ParticleTypes.FALLING_SPORE_BLOSSOM, xFalling, yFalling, zFalling, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "57:         int plantX = pos.getX();\n58:         int plantY = pos.getY();\n59:         int plantZ = pos.getZ();\n60:         double xFalling = (double)plantX + random.nextDouble();\n61:         double yFalling = (double)plantY + 0.7;\n62:         double zFalling = (double)plantZ + random.nextDouble();\n63:         level.addParticle(ParticleTypes.FALLING_SPORE_BLOSSOM, xFalling, yFalling, zFalling, 0.0, 0.0, 0.0);\n64:         BlockPos.MutableBlockPos ambientPos = new BlockPos.MutableBlockPos();\n65:         for (int i = 0; i < 14; ++i) {\n66:             ambientPos.set(plantX + Mth.nextInt(random, -10, 10), plantY - random.nextInt(10), plantZ + Mth.nextInt(random, -10, 10));\n67:             BlockState particlePosState = level.getBlockState(ambientPos);\n68:             if (particlePosState.isCollisionShapeFullBlock(level, ambientPos)) continue;\n69:             level.addParticle(ParticleTypes.SPORE_BLOSSOM_AIR, (double)ambientPos.getX() + random.nextDouble(), (double)ambientPos.getY() + random.nextDouble(), (double)ambientPos.getZ() + random.nextDouble(), 0.0, 0.0, 0.0);\n70:         }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "java_method": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { int plantX = pos.getX(); int plantY = pos.getY();",
+            "java_callsite_line": 63,
+            "caller_side_guard_and_state": "Client animateTick; falling particle unconditional; then 14 random samples excluding full collision.",
+            "kind_options_origin": "FALLING_SPORE_BLOSSOM simple random x/z,y+.7; SPORE_BLOSSOM_AIR simple for 14 random positions; zero velocity.",
+            "rust_path_function": "world::particle_tick::sample_animate_tick_particles_at_positions -> blocks::spore_blossom",
+            "status": "connected",
+            "evidence": "Client animate callback; first falling particle unconditional, then 14 random points; skip full collision blocks. Rust block sampler runs loaded state and matches first+14 and collision guard."
+          }
+        },
+        {
+          "java_line": 69,
+          "java_method_line": 56,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { int plantX = pos.getX(); int plantY = pos.getY();",
+          "java_invocation": "level.addParticle(ParticleTypes.SPORE_BLOSSOM_AIR, (double)ambientPos.getX() + random.nextDouble(), (double)ambientPos.getY() + random.nextDouble(), (double)ambientPos.getZ() + random.nextDouble(), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "63:         level.addParticle(ParticleTypes.FALLING_SPORE_BLOSSOM, xFalling, yFalling, zFalling, 0.0, 0.0, 0.0);\n64:         BlockPos.MutableBlockPos ambientPos = new BlockPos.MutableBlockPos();\n65:         for (int i = 0; i < 14; ++i) {\n66:             ambientPos.set(plantX + Mth.nextInt(random, -10, 10), plantY - random.nextInt(10), plantZ + Mth.nextInt(random, -10, 10));\n67:             BlockState particlePosState = level.getBlockState(ambientPos);\n68:             if (particlePosState.isCollisionShapeFullBlock(level, ambientPos)) continue;\n69:             level.addParticle(ParticleTypes.SPORE_BLOSSOM_AIR, (double)ambientPos.getX() + random.nextDouble(), (double)ambientPos.getY() + random.nextDouble(), (double)ambientPos.getZ() + random.nextDouble(), 0.0, 0.0, 0.0);\n70:         }\n71:     }\n72: \n73:     @Override\n74:     protected VoxelShape getShape(BlockState state, BlockGetter level, BlockPos pos, CollisionContext context) {\n75:         return SHAPE;\n76:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "java_method": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { int plantX = pos.getX(); int plantY = pos.getY();",
+            "java_callsite_line": 69,
+            "caller_side_guard_and_state": "Client animateTick; falling particle unconditional; then 14 random samples excluding full collision.",
+            "kind_options_origin": "FALLING_SPORE_BLOSSOM simple random x/z,y+.7; SPORE_BLOSSOM_AIR simple for 14 random positions; zero velocity.",
+            "rust_path_function": "world::particle_tick::sample_animate_tick_particles_at_positions -> blocks::spore_blossom",
+            "status": "connected",
+            "evidence": "Client animate callback; first falling particle unconditional, then 14 random points; skip full collision blocks. Rust block sampler runs loaded state and matches first+14 and collision guard."
+          }
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed",
+      "semantic_status": "connected",
+      "audit_summary": {
+        "rust_production_entry": "world::particle_tick::sample_animate_tick_particles_at_positions -> blocks::spore_blossom",
+        "coverage_evidence": "Client animate callback; first falling particle unconditional, then 14 random points; skip full collision blocks. Rust block sampler runs loaded state and matches first+14 and collision guard."
+      }
+    },
+    {
+      "csv_index": 135,
+      "java_source_path": "net/minecraft/world/level/block/entity/CreakingHeartBlockEntity.java",
+      "callsite_records": [
+        {
+          "java_line": 287,
+          "java_method_line": 270,
+          "java_method_signature": "private void emitParticles(ServerLevel serverLevel, int count, boolean towardsCreaking) { Optional<Creaking> creaking = this.getCreakingProtector(); if (creaking.isEmpty()) {",
+          "java_invocation": "serverLevel.sendParticles(particleOption, true, true, source.x, source.y, source.z, 1, 0.0, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "281:             if (towardsCreaking) {\n282:                 Vec3 foo = source;\n283:                 source = destination;\n284:                 destination = foo;\n285:             }\n286:             TrailParticleOption particleOption = new TrailParticleOption(destination, color, random.nextInt(40) + 10);\n287:             serverLevel.sendParticles(particleOption, true, true, source.x, source.y, source.z, 1, 0.0, 0.0, 0.0, 0.0);\n288:         }\n289:     }\n290: \n291:     @Override\n292:     public void preRemoveSideEffects(BlockPos pos, BlockState state) {\n293:         this.removeProtector(null);\n294:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate",
+          "semantic_audit": {
+            "java_method": "private void emitParticles(ServerLevel serverLevel, int count, boolean towardsCreaking) { Optional<Creaking> creaking = this.getCreakingProtector(); if (creaking.isEmpty()) {",
+            "java_callsite_line": 287,
+            "caller_side_guard_and_state": "Server BE/activation sends Trail through ServerLevel; protector guard.",
+            "kind_options_origin": "TRAIL destination/color/random duration 10..49; count 1, zero spread/speed, override/alwaysShow true. Rust packet codec/route owns it if typed option is supported.",
+            "rust_path_function": "net::handler LevelParticles -> app::core network event -> ParticleStore",
+            "status": "packet_owned",
+            "evidence": "Server BE ticker/activation invokes emitParticles when protector exists; server-level sendParticles serializes to clients, not a local client BE tick."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "uncertain: full caller/Rust reachability not confirmed",
+      "semantic_status": "packet_owned",
+      "audit_summary": {
+        "rust_production_entry": "net::handler LevelParticles -> app::core network event -> ParticleStore",
+        "coverage_evidence": "Server BE ticker/activation invokes emitParticles when protector exists; server-level sendParticles serializes to clients, not a local client BE tick."
+      }
+    },
+    {
+      "csv_index": 143,
+      "java_source_path": "net/minecraft/world/level/material/WaterFluid.java",
+      "callsite_records": [
+        {
+          "java_line": 66,
+          "java_method_line": 60,
+          "java_method_signature": "public void animateTick(Level level, BlockPos pos, FluidState fluidState, RandomSource random) { if (!fluidState.isSource() && !fluidState.getValue(FALLING).booleanValue()) { if (random.nextInt(64) == 0) {",
+          "java_invocation": "level.addParticle(ParticleTypes.UNDERWATER, (double)pos.getX() + random.nextDouble(), (double)pos.getY() + random.nextDouble(), (double)pos.getZ() + random.nextDouble(), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "60:     public void animateTick(Level level, BlockPos pos, FluidState fluidState, RandomSource random) {\n61:         if (!fluidState.isSource() && !fluidState.getValue(FALLING).booleanValue()) {\n62:             if (random.nextInt(64) == 0) {\n63:                 level.playLocalSound((double)pos.getX() + 0.5, (double)pos.getY() + 0.5, (double)pos.getZ() + 0.5, SoundEvents.WATER_AMBIENT, SoundSource.AMBIENT, random.nextFloat() * 0.25f + 0.75f, random.nextFloat() + 0.5f, false);\n64:             }\n65:         } else if (random.nextInt(10) == 0) {\n66:             level.addParticle(ParticleTypes.UNDERWATER, (double)pos.getX() + random.nextDouble(), (double)pos.getY() + random.nextDouble(), (double)pos.getZ() + random.nextDouble(), 0.0, 0.0, 0.0);\n67:         }\n68:     }\n69: \n70:     @Override\n71:     public @Nullable ParticleOptions getDripParticle() {\n72:         return ParticleTypes.DRIPPING_WATER;\n73:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "java_method": "public void animateTick(Level level, BlockPos pos, FluidState fluidState, RandomSource random) { if (!fluidState.isSource() && !fluidState.getValue(FALLING).booleanValue()) { if (random.nextInt(64) == 0) {",
+            "java_callsite_line": 66,
+            "caller_side_guard_and_state": "Client fluid animateTick; non-source && !falling takes sound path, otherwise 1/10 particle.",
+            "kind_options_origin": "UNDERWATER simple at random point in cell, zero velocity. Confirmed guard discrepancy: Rust amount==8 does not include falling fluid; probability is 1/10.",
+            "rust_path_function": "world::particle_tick::sample_animate_tick_particles_at_positions fluid branch",
+            "status": "in_progress",
+            "evidence": "Java WaterFluid.animateTick() lines 60-67: only !isSource && !FALLING takes the 1/64 WATER_AMBIENT sound-only branch; otherwise (source OR falling) the 1/10 UNDERWATER particle branch is used (lines 65-66). Rust world::particle_tick::sample_animate_tick_particles_at_positions currently gates UNDERWATER on fluid.amount == 8, without checking fluid.falling; Fluid in world::block::mod.rs retains amount and falling, and falling level-9+ columns have amount 8 with falling=true. Therefore source water is covered, falling flowing water is omitted, while ordinary non-source/non-falling fluid should remain sound-only and must not be treated as a particle gap. Reproduction: loaded falling water fluid state in a sampled animateTick cell; Java has 1/10 UNDERWATER chance, Rust emits none."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "semantic audit complete: Java callsite/caller and Rust production path compared",
+      "semantic_status": "in_progress",
+      "audit_summary": {
+        "rust_production_entry": "world::particle_tick::sample_animate_tick_particles_at_positions fluid branch",
+        "coverage_evidence": "Java WaterFluid.animateTick() lines 60-67: only !isSource && !FALLING takes the 1/64 WATER_AMBIENT sound-only branch; otherwise (source OR falling) the 1/10 UNDERWATER particle branch is used (lines 65-66). Rust world::particle_tick::sample_animate_tick_particles_at_positions currently gates UNDERWATER on fluid.amount == 8, without checking fluid.falling; Fluid in world::block::mod.rs retains amount and falling, and falling level-9+ columns have amount 8 with falling=true. Therefore source water is covered, falling flowing water is omitted, while ordinary non-source/non-falling fluid should remain sound-only and must not be treated as a particle gap. Reproduction: loaded falling water fluid state in a sampled animateTick cell; Java has 1/10 UNDERWATER chance, Rust emits none."
+      }
+    }
+  ],
+  "audit_scope": {
+    "java_root": "minecraft-26.2-decompiled/src/net/minecraft",
+    "rust_root": "Client/pomme-client/src",
+    "expected_rows": 18,
+    "expected_callsites": 24,
+    "status_vocabulary": [
+      "connected",
+      "packet_owned",
+      "in_progress",
+      "missing",
+      "uncertain"
+    ],
+    "constraints": [
+      "no implementation edits",
+      "no cargo commands",
+      "no GUI",
+      "shared CSV untouched"
+    ]
+  }
+}

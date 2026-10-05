@@ -1,0 +1,951 @@
+{
+  "schema": "particle-source-audit-shard-v1",
+  "shard": 6,
+  "index_rule": "0-based current CSV row index modulo 8",
+  "review_level": "targeted false-positive recheck complete; native ExplosionEmitter and EnderPearl paths traced through production to extraction",
+  "source_rows": [
+    {
+      "csv_index": 6,
+      "java_source_path": "net/minecraft/client/particle/HugeExplosionSeedParticle.java",
+      "callsite_records": [
+        {
+          "java_line": 20,
+          "java_method_line": 15,
+          "java_method_signature": "public void tick() { for (int i = 0; i < 6; i++) { double xx = this.x + (this.random.nextDouble() - this.random.nextDouble()) * 4.0;",
+          "java_invocation": "this.level.addParticle(ParticleTypes.EXPLOSION, xx, yy, zz, (float)this.age / this.lifetime, 0.0, 0.0)",
+          "guard_and_state_context": "14: \t@Override\n15: \tpublic void tick() {\n16: \t\tfor (int i = 0; i < 6; i++) {\n17: \t\t\tdouble xx = this.x + (this.random.nextDouble() - this.random.nextDouble()) * 4.0;\n18: \t\t\tdouble yy = this.y + (this.random.nextDouble() - this.random.nextDouble()) * 4.0;\n19: \t\t\tdouble zz = this.z + (this.random.nextDouble() - this.random.nextDouble()) * 4.0;\n20: \t\t\tthis.level.addParticle(ParticleTypes.EXPLOSION, xx, yy, zz, (float)this.age / this.lifetime, 0.0, 0.0);\n21: \t\t}\n22: \n23: \t\tthis.age++;\n24: \t\tif (this.age == this.lifetime) {\n25: \t\t\tthis.remove();\n26: \t\t}\n27: \t}",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "particle_engine_internal_child",
+          "rust_entry_candidate_from_inventory": "particle::ParticleStore tick/provider処理",
+          "rust_gap_candidate_from_inventory": "Storeはtick/追跡管理の入口あり。子粒子/特殊連鎖ごとの完全性は別provider調査中。",
+          "audit_status": "internal_child_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void tick() { for (int i = 0; i < 6; i++) { double xx = this.x + (this.random.nextDouble() - this.random.nextDouble()) * 4.0;",
+            "java_method_line": 15,
+            "java_callsite_line": 20,
+            "caller_side_and_conditions": "14: \t@Override\n15: \tpublic void tick() {\n16: \t\tfor (int i = 0; i < 6; i++) {\n17: \t\t\tdouble xx = this.x + (this.random.nextDouble() - this.random.nextDouble()) * 4.0;\n18: \t\t\tdouble yy = this.y + (this.random.nextDouble() - this.random.nextDouble()) * 4.0;\n19: \t\t\tdouble zz = this.z + (this.random.nextDouble() - this.random.nextDouble()) * 4.0;\n20: \t\t\tthis.level.addParticle(ParticleTypes.EXPLOSION, xx, yy, zz, (float)this.age / this.lifetime, 0.0, 0.0);\n21: \t\t}\n22: \n23: \t\tthis.age++;\n24: \t\tif (this.age == this.lifetime) {\n25: \t\t\tthis.remove();\n26: \t\t}\n27: \t}",
+            "kind_options_origin": "this.level.addParticle(ParticleTypes.EXPLOSION, xx, yy, zz, (float)this.age / this.lifetime, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/particle.rs::ParticleStore::add_server_particle -> tick_with_entity_lookup -> extract",
+            "evidence_and_findings": "Java provider is ParticleResources.java:94 (EXPLOSION_EMITTER -> HugeExplosionSeedParticle.Provider); constructor lifetime=8; tick lines 15-26 emits 6 EXPLOSION children/tick at origin+(nextDouble-nextDouble)*4 and auxiliary x=age/lifetime. Rust stores native ExplosionEmitter {pos,age} in particle.rs:1834,3065-66; tick_with_entity_lookup :3420 appends pending_emitters :3507, creates 6 children for age<8 using matching difference-of-uniforms position and age/8 auxiliary (:1416-30,:3509-19), then Explosion children enter pending/live particle vectors (:3572-74) and `extract` renders them (:3598+). Child EXPLOSION provider uses aux.x as size (:517+). `particle/emitters.rs` is a separate family module; this native chain is owned by particle.rs, not absent due to naming.",
+            "synchronized_state_and_client_initial": "Client ParticleEngine owns parent position/age; constructor lifetime=8; no network synchronization.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "connected",
+      "row_index": 6,
+      "source_path": "net/minecraft/client/particle/HugeExplosionSeedParticle.java",
+      "rust_entry_candidate_from_inventory": "particle.rs ParticleStore native ExplosionEmitter provider/child chain",
+      "rust_gap_candidate_from_inventory": "No gap: eight-tick EXPLOSION_EMITTER state/tick/children/extract path is present."
+    },
+    {
+      "csv_index": 14,
+      "java_source_path": "net/minecraft/server/level/ServerPlayer.java",
+      "callsite_records": [
+        {
+          "java_line": 1260,
+          "java_method_line": 1256,
+          "java_method_signature": "protected void checkFallDamage(double ya, boolean onGround, BlockState onState, BlockPos pos) { if (this.spawnExtraParticlesOnFall && onGround && this.fallDistance > 0.0) { Vec3 centered = Vec3.atCenterOf(pos).add(0.0, 0.5, 0.0);",
+          "java_invocation": "sendParticles(new BlockParticleOption(ParticleTypes.BLOCK, onState), centered.x, centered.y, centered.z, particles, 0.3f, 0.3f, 0.3f, 0.15f)",
+          "guard_and_state_context": "1254: \n1255:     @Override\n1256:     protected void checkFallDamage(double ya, boolean onGround, BlockState onState, BlockPos pos) {\n1257:         if (this.spawnExtraParticlesOnFall && onGround && this.fallDistance > 0.0) {\n1258:             Vec3 centered = Vec3.atCenterOf(pos).add(0.0, 0.5, 0.0);\n1259:             int particles = (int)Mth.clamp(50.0 * this.fallDistance, 0.0, 200.0);\n1260:             this.level().sendParticles(new BlockParticleOption(ParticleTypes.BLOCK, onState), centered.x, centered.y, centered.z, particles, 0.3f, 0.3f, 0.3f, 0.15f);\n1261:             this.spawnExtraParticlesOnFall = false;\n1262:         }\n1263:         super.checkFallDamage(ya, onGround, onState, pos);\n1264:     }\n1265: \n1266:     @Override\n1267:     public void onExplosionHit(@Nullable Entity explosionCausedBy) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate",
+          "semantic_audit": {
+            "status": "packet_owned",
+            "java_method": "protected void checkFallDamage(double ya, boolean onGround, BlockState onState, BlockPos pos) { if (this.spawnExtraParticlesOnFall && onGround && this.fallDistance > 0.0) { Vec3 centered = Vec3.atCenterOf(pos).add(0.0, 0.5, 0.0);",
+            "java_method_line": 1256,
+            "java_callsite_line": 1260,
+            "caller_side_and_conditions": "1254: \n1255:     @Override\n1256:     protected void checkFallDamage(double ya, boolean onGround, BlockState onState, BlockPos pos) {\n1257:         if (this.spawnExtraParticlesOnFall && onGround && this.fallDistance > 0.0) {\n1258:             Vec3 centered = Vec3.atCenterOf(pos).add(0.0, 0.5, 0.0);\n1259:             int particles = (int)Mth.clamp(50.0 * this.fallDistance, 0.0, 200.0);\n1260:             this.level().sendParticles(new BlockParticleOption(ParticleTypes.BLOCK, onState), centered.x, centered.y, centered.z, particles, 0.3f, 0.3f, 0.3f, 0.15f);\n1261:             this.spawnExtraParticlesOnFall = false;\n1262:         }\n1263:         super.checkFallDamage(ya, onGround, onState, pos);\n1264:     }\n1265: \n1266:     @Override\n1267:     public void onExplosionHit(@Nullable Entity explosionCausedBy) {",
+            "kind_options_origin": "sendParticles(new BlockParticleOption(ParticleTypes.BLOCK, onState), centered.x, centered.y, centered.z, particles, 0.3f, 0.3f, 0.3f, 0.15f)",
+            "rust_production_path": "Client/pomme-client/src/net/handler.rs::parse_level_particles -> app/core.rs LevelParticles -> particle.rs::add_particles_from_packet",
+            "evidence_and_findings": "ServerPlayer.checkFallDamage authoritative latch/onGround/fallDistance drives BLOCK option/count clamp 0..200. Real sendParticles; packet owns presentation.",
+            "synchronized_state_and_client_initial": "Server-only transient fall latch and fallDistance/onGround/block state; client receives only emitted particle packet; no client default simulation.",
+            "kind_options_interpretation": "BLOCK kind; BlockParticleOption carries the stated BlockState (callsite expression)."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "reviewed",
+      "row_index": 14,
+      "source_path": "net/minecraft/server/level/ServerPlayer.java"
+    },
+    {
+      "csv_index": 22,
+      "java_source_path": "net/minecraft/world/entity/TamableAnimal.java",
+      "callsite_records": [
+        {
+          "java_line": 112,
+          "java_method_line": 103,
+          "java_method_signature": "protected void spawnTamingParticles(boolean success) { SimpleParticleType particle = ParticleTypes.HEART; if (!success) {",
+          "java_invocation": "addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), xa, ya, za)",
+          "guard_and_state_context": "106:             particle = ParticleTypes.SMOKE;\n107:         }\n108:         for (int i = 0; i < 7; ++i) {\n109:             double xa = this.random.nextGaussian() * 0.02;\n110:             double ya = this.random.nextGaussian() * 0.02;\n111:             double za = this.random.nextGaussian() * 0.02;\n112:             this.level().addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), xa, ya, za);\n113:         }\n114:     }\n115: \n116:     @Override\n117:     public void handleEntityEvent(byte id) {\n118:         if (id == 7) {\n119:             this.spawnTamingParticles(true);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "in_progress",
+            "java_method": "protected void spawnTamingParticles(boolean success) { SimpleParticleType particle = ParticleTypes.HEART; if (!success) {",
+            "java_method_line": 103,
+            "java_callsite_line": 112,
+            "caller_side_and_conditions": "106:             particle = ParticleTypes.SMOKE;\n107:         }\n108:         for (int i = 0; i < 7; ++i) {\n109:             double xa = this.random.nextGaussian() * 0.02;\n110:             double ya = this.random.nextGaussian() * 0.02;\n111:             double za = this.random.nextGaussian() * 0.02;\n112:             this.level().addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), xa, ya, za);\n113:         }\n114:     }\n115: \n116:     @Override\n117:     public void handleEntityEvent(byte id) {\n118:         if (id == 7) {\n119:             this.spawnTamingParticles(true);",
+            "kind_options_origin": "addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.5, this.getRandomZ(1.0), xa, ya, za)",
+            "rust_production_path": "Client/pomme-client/src/app/core.rs EntityParticleEvent -> entity/particle_animals.rs::handle_entity_event",
+            "evidence_and_findings": "TamableAnimal event 7 HEART / 6 SMOKE; 7 particles Gaussian .02. Rust currently only handles Wolf 8/56; animal interaction events explicitly in progress.",
+            "synchronized_state_and_client_initial": "Event id 6/7 is transient client input; entity pose is tracked; no persistent particle flag synchronized.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "reviewed",
+      "row_index": 22,
+      "source_path": "net/minecraft/world/entity/TamableAnimal.java"
+    },
+    {
+      "csv_index": 30,
+      "java_source_path": "net/minecraft/world/entity/animal/dolphin/Dolphin.java",
+      "callsite_records": [
+        {
+          "java_line": 259,
+          "java_method_line": 233,
+          "java_method_signature": "public void tick() { super.tick(); if (this.isNoAi()) {",
+          "java_invocation": "addParticle(ParticleTypes.DOLPHIN, this.getX() - viewVector.x * (double)multiplier + (double)c, this.getY() - viewVector.y, this.getZ() - viewVector.z * (double)multiplier + (double)s, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "253:         if (this.level().isClientSide() && this.isInWater() && this.getDeltaMovement().lengthSqr() > 0.03) {\n254:             Vec3 viewVector = this.getViewVector(0.0f);\n255:             float c = Mth.cos(this.getYRot() * ((float)Math.PI / 180)) * 0.3f;\n256:             float s = Mth.sin(this.getYRot() * ((float)Math.PI / 180)) * 0.3f;\n257:             float multiplier = 1.2f - this.random.nextFloat() * 0.7f;\n258:             for (int i = 0; i < 2; ++i) {\n259:                 this.level().addParticle(ParticleTypes.DOLPHIN, this.getX() - viewVector.x * (double)multiplier + (double)c, this.getY() - viewVector.y, this.getZ() - viewVector.z * (double)multiplier + (double)s, 0.0, 0.0, 0.0);\n260:                 this.level().addParticle(ParticleTypes.DOLPHIN, this.getX() - viewVector.x * (double)multiplier - (double)c, this.getY() - viewVector.y, this.getZ() - viewVector.z * (double)multiplier - (double)s, 0.0, 0.0, 0.0);\n261:             }\n262:         }\n263:     }\n264: \n265:     @Override\n266:     public void handleEntityEvent(byte id) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void tick() { super.tick(); if (this.isNoAi()) {",
+            "java_method_line": 233,
+            "java_callsite_line": 259,
+            "caller_side_and_conditions": "253:         if (this.level().isClientSide() && this.isInWater() && this.getDeltaMovement().lengthSqr() > 0.03) {\n254:             Vec3 viewVector = this.getViewVector(0.0f);\n255:             float c = Mth.cos(this.getYRot() * ((float)Math.PI / 180)) * 0.3f;\n256:             float s = Mth.sin(this.getYRot() * ((float)Math.PI / 180)) * 0.3f;\n257:             float multiplier = 1.2f - this.random.nextFloat() * 0.7f;\n258:             for (int i = 0; i < 2; ++i) {\n259:                 this.level().addParticle(ParticleTypes.DOLPHIN, this.getX() - viewVector.x * (double)multiplier + (double)c, this.getY() - viewVector.y, this.getZ() - viewVector.z * (double)multiplier + (double)s, 0.0, 0.0, 0.0);\n260:                 this.level().addParticle(ParticleTypes.DOLPHIN, this.getX() - viewVector.x * (double)multiplier - (double)c, this.getY() - viewVector.y, this.getZ() - viewVector.z * (double)multiplier - (double)s, 0.0, 0.0, 0.0);\n261:             }\n262:         }\n263:     }\n264: \n265:     @Override\n266:     public void handleEntityEvent(byte id) {",
+            "kind_options_origin": "addParticle(ParticleTypes.DOLPHIN, this.getX() - viewVector.x * (double)multiplier + (double)c, this.getY() - viewVector.y, this.getZ() - viewVector.z * (double)multiplier + (double)s, 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/entity/particle_animals.rs::tick_dolphin via EntityStore::tick_animal_particles",
+            "evidence_and_findings": "Client guard in water and speed²>.03; no-AI returns before visual call. Pair loop uses tracked pose/motion/yaw; DOLPHIN Simple, zero velocity.",
+            "synchronized_state_and_client_initial": "Tracked entity position, motion, in-water/no-AI and look rotation drive local tick; event 38 is transient and requires an interaction packet.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        },
+        {
+          "java_line": 260,
+          "java_method_line": 233,
+          "java_method_signature": "public void tick() { super.tick(); if (this.isNoAi()) {",
+          "java_invocation": "addParticle(ParticleTypes.DOLPHIN, this.getX() - viewVector.x * (double)multiplier - (double)c, this.getY() - viewVector.y, this.getZ() - viewVector.z * (double)multiplier - (double)s, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "254:             Vec3 viewVector = this.getViewVector(0.0f);\n255:             float c = Mth.cos(this.getYRot() * ((float)Math.PI / 180)) * 0.3f;\n256:             float s = Mth.sin(this.getYRot() * ((float)Math.PI / 180)) * 0.3f;\n257:             float multiplier = 1.2f - this.random.nextFloat() * 0.7f;\n258:             for (int i = 0; i < 2; ++i) {\n259:                 this.level().addParticle(ParticleTypes.DOLPHIN, this.getX() - viewVector.x * (double)multiplier + (double)c, this.getY() - viewVector.y, this.getZ() - viewVector.z * (double)multiplier + (double)s, 0.0, 0.0, 0.0);\n260:                 this.level().addParticle(ParticleTypes.DOLPHIN, this.getX() - viewVector.x * (double)multiplier - (double)c, this.getY() - viewVector.y, this.getZ() - viewVector.z * (double)multiplier - (double)s, 0.0, 0.0, 0.0);\n261:             }\n262:         }\n263:     }\n264: \n265:     @Override\n266:     public void handleEntityEvent(byte id) {\n267:         if (id == 38) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void tick() { super.tick(); if (this.isNoAi()) {",
+            "java_method_line": 233,
+            "java_callsite_line": 260,
+            "caller_side_and_conditions": "254:             Vec3 viewVector = this.getViewVector(0.0f);\n255:             float c = Mth.cos(this.getYRot() * ((float)Math.PI / 180)) * 0.3f;\n256:             float s = Mth.sin(this.getYRot() * ((float)Math.PI / 180)) * 0.3f;\n257:             float multiplier = 1.2f - this.random.nextFloat() * 0.7f;\n258:             for (int i = 0; i < 2; ++i) {\n259:                 this.level().addParticle(ParticleTypes.DOLPHIN, this.getX() - viewVector.x * (double)multiplier + (double)c, this.getY() - viewVector.y, this.getZ() - viewVector.z * (double)multiplier + (double)s, 0.0, 0.0, 0.0);\n260:                 this.level().addParticle(ParticleTypes.DOLPHIN, this.getX() - viewVector.x * (double)multiplier - (double)c, this.getY() - viewVector.y, this.getZ() - viewVector.z * (double)multiplier - (double)s, 0.0, 0.0, 0.0);\n261:             }\n262:         }\n263:     }\n264: \n265:     @Override\n266:     public void handleEntityEvent(byte id) {\n267:         if (id == 38) {",
+            "kind_options_origin": "addParticle(ParticleTypes.DOLPHIN, this.getX() - viewVector.x * (double)multiplier - (double)c, this.getY() - viewVector.y, this.getZ() - viewVector.z * (double)multiplier - (double)s, 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/entity/particle_animals.rs::tick_dolphin",
+            "evidence_and_findings": "Second mirror-side DOLPHIN in same i<2 loop, same synchronized inputs/guard as line 259; Rust sign loop covers both.",
+            "synchronized_state_and_client_initial": "Tracked entity position, motion, in-water/no-AI and look rotation drive local tick; event 38 is transient and requires an interaction packet.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        },
+        {
+          "java_line": 268,
+          "java_method_line": 266,
+          "java_method_signature": "public void handleEntityEvent(byte id) { if (id == 38) { this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER);",
+          "java_invocation": "this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER)",
+          "guard_and_state_context": "262:         }\n263:     }\n264: \n265:     @Override\n266:     public void handleEntityEvent(byte id) {\n267:         if (id == 38) {\n268:             this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER);\n269:         } else {\n270:             super.handleEntityEvent(id);\n271:         }\n272:     }\n273: \n274:     private void addParticlesAroundSelf(ParticleOptions particle) {\n275:         for (int i = 0; i < 7; ++i) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "in_progress",
+            "java_method": "public void handleEntityEvent(byte id) { if (id == 38) { this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER);",
+            "java_method_line": 266,
+            "java_callsite_line": 268,
+            "caller_side_and_conditions": "262:         }\n263:     }\n264: \n265:     @Override\n266:     public void handleEntityEvent(byte id) {\n267:         if (id == 38) {\n268:             this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER);\n269:         } else {\n270:             super.handleEntityEvent(id);\n271:         }\n272:     }\n273: \n274:     private void addParticlesAroundSelf(ParticleOptions particle) {\n275:         for (int i = 0; i < 7; ++i) {",
+            "kind_options_origin": "this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER)",
+            "rust_production_path": "Client/pomme-client/src/app/core.rs EntityParticleEvent -> EntityStore::animal_particle_event",
+            "evidence_and_findings": "Dolphin event 38 selects HAPPY_VILLAGER helper burst. Rust animal handler lacks Dolphin 38; interaction event implementation in progress.",
+            "synchronized_state_and_client_initial": "Tracked entity position, motion, in-water/no-AI and look rotation drive local tick; event 38 is transient and requires an interaction packet.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        },
+        {
+          "java_line": 274,
+          "java_method_line": 274,
+          "java_method_signature": "private void addParticlesAroundSelf(ParticleOptions particle) { for (int i = 0; i < 7; ++i) { double xa = this.random.nextGaussian() * 0.01;",
+          "java_invocation": "addParticlesAroundSelf(ParticleOptions particle)",
+          "guard_and_state_context": "268:             this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER);\n269:         } else {\n270:             super.handleEntityEvent(id);\n271:         }\n272:     }\n273: \n274:     private void addParticlesAroundSelf(ParticleOptions particle) {\n275:         for (int i = 0; i < 7; ++i) {\n276:             double xa = this.random.nextGaussian() * 0.01;\n277:             double ya = this.random.nextGaussian() * 0.01;\n278:             double za = this.random.nextGaussian() * 0.01;\n279:             this.level().addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.2, this.getRandomZ(1.0), xa, ya, za);\n280:         }\n281:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "in_progress",
+            "java_method": "private void addParticlesAroundSelf(ParticleOptions particle) { for (int i = 0; i < 7; ++i) { double xa = this.random.nextGaussian() * 0.01;",
+            "java_method_line": 274,
+            "java_callsite_line": 274,
+            "caller_side_and_conditions": "268:             this.addParticlesAroundSelf(ParticleTypes.HAPPY_VILLAGER);\n269:         } else {\n270:             super.handleEntityEvent(id);\n271:         }\n272:     }\n273: \n274:     private void addParticlesAroundSelf(ParticleOptions particle) {\n275:         for (int i = 0; i < 7; ++i) {\n276:             double xa = this.random.nextGaussian() * 0.01;\n277:             double ya = this.random.nextGaussian() * 0.01;\n278:             double za = this.random.nextGaussian() * 0.01;\n279:             this.level().addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.2, this.getRandomZ(1.0), xa, ya, za);\n280:         }\n281:     }",
+            "kind_options_origin": "addParticlesAroundSelf(ParticleOptions particle)",
+            "rust_production_path": "Client/pomme-client/src/No distinct Rust helper; expected from EntityStore::animal_particle_event",
+            "evidence_and_findings": "Helper declaration only; actual caller line 268 id 38 with HAPPY_VILLAGER; 7 random samples, Gaussian .01.",
+            "synchronized_state_and_client_initial": "Tracked entity position, motion, in-water/no-AI and look rotation drive local tick; event 38 is transient and requires an interaction packet.",
+            "kind_options_interpretation": "ParticleOptions parameter; selected by enclosing caller event; caller IDs/values recorded in audit evidence."
+          }
+        },
+        {
+          "java_line": 279,
+          "java_method_line": 274,
+          "java_method_signature": "private void addParticlesAroundSelf(ParticleOptions particle) { for (int i = 0; i < 7; ++i) { double xa = this.random.nextGaussian() * 0.01;",
+          "java_invocation": "addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.2, this.getRandomZ(1.0), xa, ya, za)",
+          "guard_and_state_context": "273: \n274:     private void addParticlesAroundSelf(ParticleOptions particle) {\n275:         for (int i = 0; i < 7; ++i) {\n276:             double xa = this.random.nextGaussian() * 0.01;\n277:             double ya = this.random.nextGaussian() * 0.01;\n278:             double za = this.random.nextGaussian() * 0.01;\n279:             this.level().addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.2, this.getRandomZ(1.0), xa, ya, za);\n280:         }\n281:     }\n282: \n283:     @Override\n284:     protected InteractionResult mobInteract(Player player, InteractionHand hand) {\n285:         ItemStack itemStack = player.getItemInHand(hand);\n286:         if (!itemStack.isEmpty() && itemStack.is(ItemTags.FISHES)) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "in_progress",
+            "java_method": "private void addParticlesAroundSelf(ParticleOptions particle) { for (int i = 0; i < 7; ++i) { double xa = this.random.nextGaussian() * 0.01;",
+            "java_method_line": 274,
+            "java_callsite_line": 279,
+            "caller_side_and_conditions": "273: \n274:     private void addParticlesAroundSelf(ParticleOptions particle) {\n275:         for (int i = 0; i < 7; ++i) {\n276:             double xa = this.random.nextGaussian() * 0.01;\n277:             double ya = this.random.nextGaussian() * 0.01;\n278:             double za = this.random.nextGaussian() * 0.01;\n279:             this.level().addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.2, this.getRandomZ(1.0), xa, ya, za);\n280:         }\n281:     }\n282: \n283:     @Override\n284:     protected InteractionResult mobInteract(Player player, InteractionHand hand) {\n285:         ItemStack itemStack = player.getItemInHand(hand);\n286:         if (!itemStack.isEmpty() && itemStack.is(ItemTags.FISHES)) {",
+            "kind_options_origin": "addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 0.2, this.getRandomZ(1.0), xa, ya, za)",
+            "rust_production_path": "Client/pomme-client/src/No matching local event particle in entity/particle_animals.rs",
+            "evidence_and_findings": "Body reached by event 38; options HAPPY_VILLAGER, seven bounds-random particles, Gaussian .01 velocity; event path is in progress.",
+            "synchronized_state_and_client_initial": "Tracked entity position, motion, in-water/no-AI and look rotation drive local tick; event 38 is transient and requires an interaction packet.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        }
+      ],
+      "record_count": 5,
+      "audit_status": "reviewed",
+      "row_index": 30,
+      "source_path": "net/minecraft/world/entity/animal/dolphin/Dolphin.java"
+    },
+    {
+      "csv_index": 38,
+      "java_source_path": "net/minecraft/world/entity/animal/sniffer/Sniffer.java",
+      "callsite_records": [
+        {
+          "java_line": 311,
+          "java_method_line": 302,
+          "java_method_signature": "private Sniffer emitDiggingParticles(AnimationState state) { boolean emit; boolean bl = emit = state.getTimeInMillis(this.tickCount) > 1700L && state.getTimeInMillis(this.tickCount) < 6000L;",
+          "java_invocation": "addParticle(new BlockParticleOption(ParticleTypes.BLOCK, stateBelow), centered.x, centered.y, centered.z, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "305:         if (emit) {\n306:             BlockPos head = this.getHeadBlock();\n307:             BlockState stateBelow = this.level().getBlockState(head.below());\n308:             if (stateBelow.getRenderShape() != RenderShape.INVISIBLE) {\n309:                 for (int i = 0; i < 30; ++i) {\n310:                     Vec3 centered = Vec3.atCenterOf(head).add(0.0, -0.65f, 0.0);\n311:                     this.level().addParticle(new BlockParticleOption(ParticleTypes.BLOCK, stateBelow), centered.x, centered.y, centered.z, 0.0, 0.0, 0.0);\n312:                 }\n313:                 if (this.tickCount % 10 == 0) {\n314:                     this.level().playLocalSound(this.getX(), this.getY(), this.getZ(), stateBelow.getSoundType().getHitSound(), this.getSoundSource(), 0.5f, 0.5f, false);\n315:                 }\n316:             }\n317:         }\n318:         if (this.tickCount % 10 == 0) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "private Sniffer emitDiggingParticles(AnimationState state) { boolean emit; boolean bl = emit = state.getTimeInMillis(this.tickCount) > 1700L && state.getTimeInMillis(this.tickCount) < 6000L;",
+            "java_method_line": 302,
+            "java_callsite_line": 311,
+            "caller_side_and_conditions": "305:         if (emit) {\n306:             BlockPos head = this.getHeadBlock();\n307:             BlockState stateBelow = this.level().getBlockState(head.below());\n308:             if (stateBelow.getRenderShape() != RenderShape.INVISIBLE) {\n309:                 for (int i = 0; i < 30; ++i) {\n310:                     Vec3 centered = Vec3.atCenterOf(head).add(0.0, -0.65f, 0.0);\n311:                     this.level().addParticle(new BlockParticleOption(ParticleTypes.BLOCK, stateBelow), centered.x, centered.y, centered.z, 0.0, 0.0, 0.0);\n312:                 }\n313:                 if (this.tickCount % 10 == 0) {\n314:                     this.level().playLocalSound(this.getX(), this.getY(), this.getZ(), stateBelow.getSoundType().getHitSound(), this.getSoundSource(), 0.5f, 0.5f, false);\n315:                 }\n316:             }\n317:         }\n318:         if (this.tickCount % 10 == 0) {",
+            "kind_options_origin": "addParticle(new BlockParticleOption(ParticleTypes.BLOCK, stateBelow), centered.x, centered.y, centered.z, 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/entity/particle_animals.rs::tick_sniffer -> EntityStore::tick_animal_particles",
+            "evidence_and_findings": "DIGGING animation strict 1700..6000ms and below block visible; 30 BLOCK options carry stateBelow. Synced sniffer_state/chunk state used; local animation start approximation.",
+            "synchronized_state_and_client_initial": "Sniffer animation enum is metadata-synchronized; local tick age/head pose and loaded block state drive particle; timer origin uses client first observation.",
+            "kind_options_interpretation": "BLOCK kind; BlockParticleOption carries the stated BlockState (callsite expression)."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "reviewed",
+      "row_index": 38,
+      "source_path": "net/minecraft/world/entity/animal/sniffer/Sniffer.java"
+    },
+    {
+      "csv_index": 46,
+      "java_source_path": "net/minecraft/world/entity/boss/wither/WitherBoss.java",
+      "callsite_records": [
+        {
+          "java_line": 215,
+          "java_method_line": 161,
+          "java_method_signature": "public void aiStep() { int i; Entity entity;",
+          "java_invocation": "addParticle(ParticleTypes.SMOKE, hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "209:         boolean isPowered = this.isPowered();\n210:         for (int i2 = 0; i2 < 3; ++i2) {\n211:             double hx = this.getHeadX(i2);\n212:             double hy = this.getHeadY(i2);\n213:             double hz = this.getHeadZ(i2);\n214:             float radius = 0.3f * this.getScale();\n215:             this.level().addParticle(ParticleTypes.SMOKE, hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0);\n216:             if (!isPowered || this.level().getRandom().nextInt(4) != 0) continue;\n217:             this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.5f), hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0);\n218:         }\n219:         if (this.getInvulnerableTicks() > 0) {\n220:             float height = 3.3f * this.getScale();\n221:             for (int i3 = 0; i3 < 3; ++i3) {\n222:                 this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.9f), this.getX() + this.random.nextGaussian(), this.getY() + (double)(this.random.nextFloat() * height), this.getZ() + this.random.nextGaussian(), 0.0, 0.0, 0.0);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void aiStep() { int i; Entity entity;",
+            "java_method_line": 161,
+            "java_callsite_line": 215,
+            "caller_side_and_conditions": "209:         boolean isPowered = this.isPowered();\n210:         for (int i2 = 0; i2 < 3; ++i2) {\n211:             double hx = this.getHeadX(i2);\n212:             double hy = this.getHeadY(i2);\n213:             double hz = this.getHeadZ(i2);\n214:             float radius = 0.3f * this.getScale();\n215:             this.level().addParticle(ParticleTypes.SMOKE, hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0);\n216:             if (!isPowered || this.level().getRandom().nextInt(4) != 0) continue;\n217:             this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.5f), hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0);\n218:         }\n219:         if (this.getInvulnerableTicks() > 0) {\n220:             float height = 3.3f * this.getScale();\n221:             for (int i3 = 0; i3 < 3; ++i3) {\n222:                 this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.9f), this.getX() + this.random.nextGaussian(), this.getY() + (double)(this.random.nextFloat() * height), this.getZ() + this.random.nextGaussian(), 0.0, 0.0, 0.0);",
+            "kind_options_origin": "addParticle(ParticleTypes.SMOKE, hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/entity/particle_bosses.rs::tick_boss_particles -> tick_wither",
+            "evidence_and_findings": "Three SMOKE per Wither tick, Gaussian head offsets radius .3*scale. Tracked pose/metadata used; Rust approximates head transforms/target rotations.",
+            "synchronized_state_and_client_initial": "Entity health/scale/invulnerable metadata and pose are tracked; Rust boss visual state initializes target IDs and rotations to zero; powered currently inferred from health ratio.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        },
+        {
+          "java_line": 217,
+          "java_method_line": 161,
+          "java_method_signature": "public void aiStep() { int i; Entity entity;",
+          "java_invocation": "addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.5f), hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "211:             double hx = this.getHeadX(i2);\n212:             double hy = this.getHeadY(i2);\n213:             double hz = this.getHeadZ(i2);\n214:             float radius = 0.3f * this.getScale();\n215:             this.level().addParticle(ParticleTypes.SMOKE, hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0);\n216:             if (!isPowered || this.level().getRandom().nextInt(4) != 0) continue;\n217:             this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.5f), hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0);\n218:         }\n219:         if (this.getInvulnerableTicks() > 0) {\n220:             float height = 3.3f * this.getScale();\n221:             for (int i3 = 0; i3 < 3; ++i3) {\n222:                 this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.9f), this.getX() + this.random.nextGaussian(), this.getY() + (double)(this.random.nextFloat() * height), this.getZ() + this.random.nextGaussian(), 0.0, 0.0, 0.0);\n223:             }\n224:         }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void aiStep() { int i; Entity entity;",
+            "java_method_line": 161,
+            "java_callsite_line": 217,
+            "caller_side_and_conditions": "211:             double hx = this.getHeadX(i2);\n212:             double hy = this.getHeadY(i2);\n213:             double hz = this.getHeadZ(i2);\n214:             float radius = 0.3f * this.getScale();\n215:             this.level().addParticle(ParticleTypes.SMOKE, hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0);\n216:             if (!isPowered || this.level().getRandom().nextInt(4) != 0) continue;\n217:             this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.5f), hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0);\n218:         }\n219:         if (this.getInvulnerableTicks() > 0) {\n220:             float height = 3.3f * this.getScale();\n221:             for (int i3 = 0; i3 < 3; ++i3) {\n222:                 this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.9f), this.getX() + this.random.nextGaussian(), this.getY() + (double)(this.random.nextFloat() * height), this.getZ() + this.random.nextGaussian(), 0.0, 0.0, 0.0);\n223:             }\n224:         }",
+            "kind_options_origin": "addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.5f), hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/entity/particle_bosses.rs::tick_wither",
+            "evidence_and_findings": "Powered && 1/4 per head, ENTITY_EFFECT RGB .7,.7,.5. Rust uses health<=half as powered proxy (predicate approximation), emits color option.",
+            "synchronized_state_and_client_initial": "Entity health/scale/invulnerable metadata and pose are tracked; Rust boss visual state initializes target IDs and rotations to zero; powered currently inferred from health ratio.",
+            "kind_options_interpretation": "ENTITY_EFFECT kind; ColorParticleOption supplies inline RGB values (callsite expression)."
+          }
+        },
+        {
+          "java_line": 222,
+          "java_method_line": 161,
+          "java_method_signature": "public void aiStep() { int i; Entity entity;",
+          "java_invocation": "addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.9f), this.getX() + this.random.nextGaussian(), this.getY() + (double)(this.random.nextFloat() * height), this.getZ() + this.random.nextGaussian(), 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "216:             if (!isPowered || this.level().getRandom().nextInt(4) != 0) continue;\n217:             this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.5f), hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0);\n218:         }\n219:         if (this.getInvulnerableTicks() > 0) {\n220:             float height = 3.3f * this.getScale();\n221:             for (int i3 = 0; i3 < 3; ++i3) {\n222:                 this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.9f), this.getX() + this.random.nextGaussian(), this.getY() + (double)(this.random.nextFloat() * height), this.getZ() + this.random.nextGaussian(), 0.0, 0.0, 0.0);\n223:             }\n224:         }\n225:     }\n226: \n227:     @Override\n228:     protected void customServerAiStep(ServerLevel level) {\n229:         if (this.getInvulnerableTicks() > 0) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void aiStep() { int i; Entity entity;",
+            "java_method_line": 161,
+            "java_callsite_line": 222,
+            "caller_side_and_conditions": "216:             if (!isPowered || this.level().getRandom().nextInt(4) != 0) continue;\n217:             this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.5f), hx + this.random.nextGaussian() * (double)radius, hy + this.random.nextGaussian() * (double)radius, hz + this.random.nextGaussian() * (double)radius, 0.0, 0.0, 0.0);\n218:         }\n219:         if (this.getInvulnerableTicks() > 0) {\n220:             float height = 3.3f * this.getScale();\n221:             for (int i3 = 0; i3 < 3; ++i3) {\n222:                 this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.9f), this.getX() + this.random.nextGaussian(), this.getY() + (double)(this.random.nextFloat() * height), this.getZ() + this.random.nextGaussian(), 0.0, 0.0, 0.0);\n223:             }\n224:         }\n225:     }\n226: \n227:     @Override\n228:     protected void customServerAiStep(ServerLevel level) {\n229:         if (this.getInvulnerableTicks() > 0) {",
+            "kind_options_origin": "addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.7f, 0.7f, 0.9f), this.getX() + this.random.nextGaussian(), this.getY() + (double)(this.random.nextFloat() * height), this.getZ() + this.random.nextGaussian(), 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/entity/particle_bosses.rs::tick_wither",
+            "evidence_and_findings": "InvulnerableTicks>0: three ENTITY_EFFECT RGB .7,.7,.9, Gaussian x/z, y uniform to 3.3*scale; Rust uses retained wither_invulnerability.",
+            "synchronized_state_and_client_initial": "Entity health/scale/invulnerable metadata and pose are tracked; Rust boss visual state initializes target IDs and rotations to zero; powered currently inferred from health ratio.",
+            "kind_options_interpretation": "ENTITY_EFFECT kind; ColorParticleOption supplies inline RGB values (callsite expression)."
+          }
+        }
+      ],
+      "record_count": 3,
+      "audit_status": "reviewed",
+      "row_index": 46,
+      "source_path": "net/minecraft/world/entity/boss/wither/WitherBoss.java"
+    },
+    {
+      "csv_index": 54,
+      "java_source_path": "net/minecraft/world/entity/monster/Ravager.java",
+      "callsite_records": [
+        {
+          "java_line": 189,
+          "java_method_line": 184,
+          "java_method_signature": "private void stunEffect() { if (this.random.nextInt(6) == 0) { double headX = this.getX() - (double)this.getBbWidth() * Math.sin(this.yBodyRot * ((float)Math.PI / 180)) + (this.random.nextDouble() * 0.6 - 0.3);",
+          "java_invocation": "addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.49803922f, 0.5137255f, 0.57254905f), headX, headY, headZ, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "183: \n184:     private void stunEffect() {\n185:         if (this.random.nextInt(6) == 0) {\n186:             double headX = this.getX() - (double)this.getBbWidth() * Math.sin(this.yBodyRot * ((float)Math.PI / 180)) + (this.random.nextDouble() * 0.6 - 0.3);\n187:             double headY = this.getY() + (double)this.getBbHeight() - 0.3;\n188:             double headZ = this.getZ() + (double)this.getBbWidth() * Math.cos(this.yBodyRot * ((float)Math.PI / 180)) + (this.random.nextDouble() * 0.6 - 0.3);\n189:             this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.49803922f, 0.5137255f, 0.57254905f), headX, headY, headZ, 0.0, 0.0, 0.0);\n190:         }\n191:     }\n192: \n193:     @Override\n194:     protected boolean isImmobile() {\n195:         return super.isImmobile() || this.attackTick > 0 || this.stunnedTick > 0 || this.roarTick > 0;\n196:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "private void stunEffect() { if (this.random.nextInt(6) == 0) { double headX = this.getX() - (double)this.getBbWidth() * Math.sin(this.yBodyRot * ((float)Math.PI / 180)) + (this.random.nextDouble() * 0.6 - 0.3);",
+            "java_method_line": 184,
+            "java_callsite_line": 189,
+            "caller_side_and_conditions": "183: \n184:     private void stunEffect() {\n185:         if (this.random.nextInt(6) == 0) {\n186:             double headX = this.getX() - (double)this.getBbWidth() * Math.sin(this.yBodyRot * ((float)Math.PI / 180)) + (this.random.nextDouble() * 0.6 - 0.3);\n187:             double headY = this.getY() + (double)this.getBbHeight() - 0.3;\n188:             double headZ = this.getZ() + (double)this.getBbWidth() * Math.cos(this.yBodyRot * ((float)Math.PI / 180)) + (this.random.nextDouble() * 0.6 - 0.3);\n189:             this.level().addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.49803922f, 0.5137255f, 0.57254905f), headX, headY, headZ, 0.0, 0.0, 0.0);\n190:         }\n191:     }\n192: \n193:     @Override\n194:     protected boolean isImmobile() {\n195:         return super.isImmobile() || this.attackTick > 0 || this.stunnedTick > 0 || this.roarTick > 0;\n196:     }",
+            "kind_options_origin": "addParticle(ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, 0.49803922f, 0.5137255f, 0.57254905f), headX, headY, headZ, 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/app/core.rs EntityParticleEvent -> entity/particle_mob_phases.rs::handle_particle_mob_event / ravager tick",
+            "evidence_and_findings": "Event 39 starts client stun timer 40; tick emits 1/6 gray ENTITY_EFFECT. Rust owns transient timer and actual tick generation.",
+            "synchronized_state_and_client_initial": "Entity event 39 initializes a client-local 40-tick stun timer; event 69 is one-shot; neither requires persistent particle metadata.",
+            "kind_options_interpretation": "ENTITY_EFFECT kind; ColorParticleOption supplies inline RGB values (callsite expression)."
+          }
+        },
+        {
+          "java_line": 273,
+          "java_method_line": 267,
+          "java_method_signature": "private void addRoarParticleEffects() { Vec3 center = this.getBoundingBox().getCenter(); for (int i = 0; i < 40; ++i) {",
+          "java_invocation": "addParticle(ParticleTypes.POOF, center.x, center.y, center.z, velocityX, velocityY, velocityZ)",
+          "guard_and_state_context": "267:     private void addRoarParticleEffects() {\n268:         Vec3 center = this.getBoundingBox().getCenter();\n269:         for (int i = 0; i < 40; ++i) {\n270:             double velocityX = this.random.nextGaussian() * 0.2;\n271:             double velocityY = this.random.nextGaussian() * 0.2;\n272:             double velocityZ = this.random.nextGaussian() * 0.2;\n273:             this.level().addParticle(ParticleTypes.POOF, center.x, center.y, center.z, velocityX, velocityY, velocityZ);\n274:         }\n275:     }\n276: \n277:     public int getAttackTick() {\n278:         return this.attackTick;\n279:     }\n280: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "private void addRoarParticleEffects() { Vec3 center = this.getBoundingBox().getCenter(); for (int i = 0; i < 40; ++i) {",
+            "java_method_line": 267,
+            "java_callsite_line": 273,
+            "caller_side_and_conditions": "267:     private void addRoarParticleEffects() {\n268:         Vec3 center = this.getBoundingBox().getCenter();\n269:         for (int i = 0; i < 40; ++i) {\n270:             double velocityX = this.random.nextGaussian() * 0.2;\n271:             double velocityY = this.random.nextGaussian() * 0.2;\n272:             double velocityZ = this.random.nextGaussian() * 0.2;\n273:             this.level().addParticle(ParticleTypes.POOF, center.x, center.y, center.z, velocityX, velocityY, velocityZ);\n274:         }\n275:     }\n276: \n277:     public int getAttackTick() {\n278:         return this.attackTick;\n279:     }\n280: ",
+            "kind_options_origin": "addParticle(ParticleTypes.POOF, center.x, center.y, center.z, velocityX, velocityY, velocityZ)",
+            "rust_production_path": "Client/pomme-client/src/app/core.rs EntityParticleEvent -> entity/particle_mob_phases.rs::handle_particle_mob_event",
+            "evidence_and_findings": "Ravager event 69 returns/enqueues 40 POOF at bbox center, Gaussian .2; local event particle, not LevelParticles.",
+            "synchronized_state_and_client_initial": "Entity event 39 initializes a client-local 40-tick stun timer; event 69 is one-shot; neither requires persistent particle metadata.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "reviewed",
+      "row_index": 54,
+      "source_path": "net/minecraft/world/entity/monster/Ravager.java"
+    },
+    {
+      "csv_index": 62,
+      "java_source_path": "net/minecraft/world/entity/npc/villager/AbstractVillager.java",
+      "callsite_records": [
+        {
+          "java_line": 215,
+          "java_method_line": 215,
+          "java_method_signature": "protected void addParticlesAroundSelf(ParticleOptions particle) { for (int i = 0; i < 5; ++i) { double xa = this.random.nextGaussian() * 0.02;",
+          "java_invocation": "addParticlesAroundSelf(ParticleOptions particle)",
+          "guard_and_state_context": "209:     @Override\n210:     public void die(DamageSource source) {\n211:         super.die(source);\n212:         this.stopTrading();\n213:     }\n214: \n215:     protected void addParticlesAroundSelf(ParticleOptions particle) {\n216:         for (int i = 0; i < 5; ++i) {\n217:             double xa = this.random.nextGaussian() * 0.02;\n218:             double ya = this.random.nextGaussian() * 0.02;\n219:             double za = this.random.nextGaussian() * 0.02;\n220:             this.level().addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 1.0, this.getRandomZ(1.0), xa, ya, za);\n221:         }\n222:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "missing",
+            "java_method": "protected void addParticlesAroundSelf(ParticleOptions particle) { for (int i = 0; i < 5; ++i) { double xa = this.random.nextGaussian() * 0.02;",
+            "java_method_line": 215,
+            "java_callsite_line": 215,
+            "caller_side_and_conditions": "209:     @Override\n210:     public void die(DamageSource source) {\n211:         super.die(source);\n212:         this.stopTrading();\n213:     }\n214: \n215:     protected void addParticlesAroundSelf(ParticleOptions particle) {\n216:         for (int i = 0; i < 5; ++i) {\n217:             double xa = this.random.nextGaussian() * 0.02;\n218:             double ya = this.random.nextGaussian() * 0.02;\n219:             double za = this.random.nextGaussian() * 0.02;\n220:             this.level().addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 1.0, this.getRandomZ(1.0), xa, ya, za);\n221:         }\n222:     }",
+            "kind_options_origin": "addParticlesAroundSelf(ParticleOptions particle)",
+            "rust_production_path": "Client/pomme-client/src/net/handler.rs:1934-49 -> app/core.rs:6216-27 -> EntityStore event handlers",
+            "evidence_and_findings": "Java actual callers Villager.handleEntityEvent lines 656-668: events 12/13/14/42 select HEART/ANGRY_VILLAGER/HAPPY_VILLAGER/SPLASH; helper emits five with Gaussian .02. Handler allowlist forwards 12..15 and 40..42 generically; core dispatches misc_particle_event, handle_particle_mob_event and animal_particle_event. But handlers are not generic kind selection: misc path requires vehicle then only handles TntMinecart/EvokerFangs; mob phase returns unless Ravager; animal handler handles Wolf 8/56 only. No Villager event-to-kind/options spawn branch. Generic transport exists, particle production does not.",
+            "synchronized_state_and_client_initial": "Villager entity-event IDs 12/13/14/42 supply the visual kind; event packet is transient; tracked entity position supplies placement.",
+            "kind_options_interpretation": "ParticleOptions parameter; selected by enclosing caller event; caller IDs/values recorded in audit evidence."
+          }
+        },
+        {
+          "java_line": 220,
+          "java_method_line": 215,
+          "java_method_signature": "protected void addParticlesAroundSelf(ParticleOptions particle) { for (int i = 0; i < 5; ++i) { double xa = this.random.nextGaussian() * 0.02;",
+          "java_invocation": "addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 1.0, this.getRandomZ(1.0), xa, ya, za)",
+          "guard_and_state_context": "214: \n215:     protected void addParticlesAroundSelf(ParticleOptions particle) {\n216:         for (int i = 0; i < 5; ++i) {\n217:             double xa = this.random.nextGaussian() * 0.02;\n218:             double ya = this.random.nextGaussian() * 0.02;\n219:             double za = this.random.nextGaussian() * 0.02;\n220:             this.level().addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 1.0, this.getRandomZ(1.0), xa, ya, za);\n221:         }\n222:     }\n223: \n224:     @Override\n225:     public boolean canBeLeashed() {\n226:         return false;\n227:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "missing",
+            "java_method": "protected void addParticlesAroundSelf(ParticleOptions particle) { for (int i = 0; i < 5; ++i) { double xa = this.random.nextGaussian() * 0.02;",
+            "java_method_line": 215,
+            "java_callsite_line": 220,
+            "caller_side_and_conditions": "214: \n215:     protected void addParticlesAroundSelf(ParticleOptions particle) {\n216:         for (int i = 0; i < 5; ++i) {\n217:             double xa = this.random.nextGaussian() * 0.02;\n218:             double ya = this.random.nextGaussian() * 0.02;\n219:             double za = this.random.nextGaussian() * 0.02;\n220:             this.level().addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 1.0, this.getRandomZ(1.0), xa, ya, za);\n221:         }\n222:     }\n223: \n224:     @Override\n225:     public boolean canBeLeashed() {\n226:         return false;\n227:     }",
+            "kind_options_origin": "addParticle(particle, this.getRandomX(1.0), this.getRandomY() + 1.0, this.getRandomZ(1.0), xa, ya, za)",
+            "rust_production_path": "Client/pomme-client/src/net/handler.rs:1934-49 -> app/core.rs:6216-27 -> EntityStore event handlers",
+            "evidence_and_findings": "Actual helper spawn called by Villager events 12/13/14/42 (Villager.java:656-668), five particles, random bounds y+1 and Gaussian .02. Event gets forwarded, but all three core particle owners filter to their other entity kinds; no Villager ParticleSpawnRequest or direct creation branch. Missing despite generic event delivery.",
+            "synchronized_state_and_client_initial": "Villager entity-event IDs 12/13/14/42 supply the visual kind; event packet is transient; tracked entity position supplies placement.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "missing: event transported, Villager particle production absent",
+      "row_index": 62,
+      "source_path": "net/minecraft/world/entity/npc/villager/AbstractVillager.java",
+      "rust_entry_candidate_from_inventory": "net handler generic EntityParticleEvent forwarding -> core owner dispatch; owners filter supported kinds",
+      "rust_gap_candidate_from_inventory": "Villager event 12/13/14/42 kind-selection and five-particle request branch absent."
+    },
+    {
+      "csv_index": 70,
+      "java_source_path": "net/minecraft/world/entity/projectile/ShulkerBullet.java",
+      "callsite_records": [
+        {
+          "java_line": 224,
+          "java_method_line": 193,
+          "java_method_signature": "public void tick() { Vec3 movement; super.tick();",
+          "java_invocation": "addParticle(ParticleTypes.END_ROD, this.getX() - movement.x, this.getY() - movement.y + 0.15, this.getZ() - movement.z, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "218:         }\n219:         if (hitResult != null && this.isAlive() && hitResult.getType() != HitResult.Type.MISS) {\n220:             this.hitTargetOrDeflectSelf(hitResult);\n221:         }\n222:         ProjectileUtil.rotateTowardsMovement(this, 0.5f);\n223:         if (this.level().isClientSide()) {\n224:             this.level().addParticle(ParticleTypes.END_ROD, this.getX() - movement.x, this.getY() - movement.y + 0.15, this.getZ() - movement.z, 0.0, 0.0, 0.0);\n225:         } else if (finalTarget != null) {\n226:             if (this.flightSteps > 0) {\n227:                 --this.flightSteps;\n228:                 if (this.flightSteps == 0) {\n229:                     this.selectNextMoveDirection(this.currentMoveDirection == null ? null : this.currentMoveDirection.getAxis(), finalTarget);\n230:                 }\n231:             }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "entity state/event owner + server packet receive (callsite別に分離)",
+          "rust_gap_candidate_from_inventory": "explicit server sends flow through LevelParticles; direct addParticle is a separate local client implementation and cannot be co-counted.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void tick() { Vec3 movement; super.tick();",
+            "java_method_line": 193,
+            "java_callsite_line": 224,
+            "caller_side_and_conditions": "218:         }\n219:         if (hitResult != null && this.isAlive() && hitResult.getType() != HitResult.Type.MISS) {\n220:             this.hitTargetOrDeflectSelf(hitResult);\n221:         }\n222:         ProjectileUtil.rotateTowardsMovement(this, 0.5f);\n223:         if (this.level().isClientSide()) {\n224:             this.level().addParticle(ParticleTypes.END_ROD, this.getX() - movement.x, this.getY() - movement.y + 0.15, this.getZ() - movement.z, 0.0, 0.0, 0.0);\n225:         } else if (finalTarget != null) {\n226:             if (this.flightSteps > 0) {\n227:                 --this.flightSteps;\n228:                 if (this.flightSteps == 0) {\n229:                     this.selectNextMoveDirection(this.currentMoveDirection == null ? null : this.currentMoveDirection.getAxis(), finalTarget);\n230:                 }\n231:             }",
+            "kind_options_origin": "addParticle(ParticleTypes.END_ROD, this.getX() - movement.x, this.getY() - movement.y + 0.15, this.getZ() - movement.z, 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/entity/mod.rs::EntityStore::client_particle_requests ShulkerBullet branch",
+            "evidence_and_findings": "Client-only END_ROD at pos-movement+(0,.15,0), zero velocity; Rust tracked projectile branch emits local trail.",
+            "synchronized_state_and_client_initial": "Client bullet position/motion arrives from entity spawn/movement updates; server block-hit/hurt outcomes independently emit LevelParticles packets.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        },
+        {
+          "java_line": 297,
+          "java_method_line": 295,
+          "java_method_signature": "protected void onHitBlock(BlockHitResult hitResult) { super.onHitBlock(hitResult); ((ServerLevel)this.level()).sendParticles(ParticleTypes.EXPLOSION, this.getX(), this.getY(), this.getZ(), 2, 0.2, 0.2, 0.2, 0.0);",
+          "java_invocation": "sendParticles(ParticleTypes.EXPLOSION, this.getX(), this.getY(), this.getZ(), 2, 0.2, 0.2, 0.2, 0.0)",
+          "guard_and_state_context": "291:         }\n292:     }\n293: \n294:     @Override\n295:     protected void onHitBlock(BlockHitResult hitResult) {\n296:         super.onHitBlock(hitResult);\n297:         ((ServerLevel)this.level()).sendParticles(ParticleTypes.EXPLOSION, this.getX(), this.getY(), this.getZ(), 2, 0.2, 0.2, 0.2, 0.0);\n298:         this.playSound(SoundEvents.SHULKER_BULLET_HIT, 1.0f, 1.0f);\n299:     }\n300: \n301:     private void destroy() {\n302:         this.discard();\n303:         this.level().gameEvent(GameEvent.ENTITY_DAMAGE, this.position(), GameEvent.Context.of(this));\n304:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "entity state/event owner + server packet receive (callsite別に分離)",
+          "rust_gap_candidate_from_inventory": "explicit server sends flow through LevelParticles; direct addParticle is a separate local client implementation and cannot be co-counted.",
+          "audit_status": "packet_owned_candidate",
+          "semantic_audit": {
+            "status": "packet_owned",
+            "java_method": "protected void onHitBlock(BlockHitResult hitResult) { super.onHitBlock(hitResult); ((ServerLevel)this.level()).sendParticles(ParticleTypes.EXPLOSION, this.getX(), this.getY(), this.getZ(), 2, 0.2, 0.2, 0.2, 0.0);",
+            "java_method_line": 295,
+            "java_callsite_line": 297,
+            "caller_side_and_conditions": "291:         }\n292:     }\n293: \n294:     @Override\n295:     protected void onHitBlock(BlockHitResult hitResult) {\n296:         super.onHitBlock(hitResult);\n297:         ((ServerLevel)this.level()).sendParticles(ParticleTypes.EXPLOSION, this.getX(), this.getY(), this.getZ(), 2, 0.2, 0.2, 0.2, 0.0);\n298:         this.playSound(SoundEvents.SHULKER_BULLET_HIT, 1.0f, 1.0f);\n299:     }\n300: \n301:     private void destroy() {\n302:         this.discard();\n303:         this.level().gameEvent(GameEvent.ENTITY_DAMAGE, this.position(), GameEvent.Context.of(this));\n304:     }",
+            "kind_options_origin": "sendParticles(ParticleTypes.EXPLOSION, this.getX(), this.getY(), this.getZ(), 2, 0.2, 0.2, 0.2, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/net/handler.rs LevelParticles -> app/core.rs -> ParticleStore",
+            "evidence_and_findings": "Server onHitBlock sends EXPLOSION count=2, offsets=.2, speed=0; authoritative collision packet.",
+            "synchronized_state_and_client_initial": "Client bullet position/motion arrives from entity spawn/movement updates; server block-hit/hurt outcomes independently emit LevelParticles packets.",
+            "kind_options_interpretation": "Server sendParticles API invocation; kind/options/count and spread are the server packet payload (expression retained verbatim)."
+          }
+        },
+        {
+          "java_line": 325,
+          "java_method_line": 323,
+          "java_method_signature": "public boolean hurtServer(ServerLevel level, DamageSource source, float damage) { this.playSound(SoundEvents.SHULKER_BULLET_HURT, 1.0f, 1.0f); level.sendParticles(ParticleTypes.CRIT, this.getX(), this.getY(), this.getZ(), 15, 0.2, 0.2, 0.2, 0.0);",
+          "java_invocation": "level.sendParticles(ParticleTypes.CRIT, this.getX(), this.getY(), this.getZ(), 15, 0.2, 0.2, 0.2, 0.0)",
+          "guard_and_state_context": "319:         return true;\n320:     }\n321: \n322:     @Override\n323:     public boolean hurtServer(ServerLevel level, DamageSource source, float damage) {\n324:         this.playSound(SoundEvents.SHULKER_BULLET_HURT, 1.0f, 1.0f);\n325:         level.sendParticles(ParticleTypes.CRIT, this.getX(), this.getY(), this.getZ(), 15, 0.2, 0.2, 0.2, 0.0);\n326:         this.destroy();\n327:         return true;\n328:     }\n329: \n330:     @Override\n331:     public void recreateFromPacket(ClientboundAddEntityPacket packet) {\n332:         super.recreateFromPacket(packet);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "entity state/event owner + server packet receive (callsite別に分離)",
+          "rust_gap_candidate_from_inventory": "explicit server sends flow through LevelParticles; direct addParticle is a separate local client implementation and cannot be co-counted.",
+          "audit_status": "packet_owned_candidate",
+          "semantic_audit": {
+            "status": "packet_owned",
+            "java_method": "public boolean hurtServer(ServerLevel level, DamageSource source, float damage) { this.playSound(SoundEvents.SHULKER_BULLET_HURT, 1.0f, 1.0f); level.sendParticles(ParticleTypes.CRIT, this.getX(), this.getY(), this.getZ(), 15, 0.2, 0.2, 0.2, 0.0);",
+            "java_method_line": 323,
+            "java_callsite_line": 325,
+            "caller_side_and_conditions": "319:         return true;\n320:     }\n321: \n322:     @Override\n323:     public boolean hurtServer(ServerLevel level, DamageSource source, float damage) {\n324:         this.playSound(SoundEvents.SHULKER_BULLET_HURT, 1.0f, 1.0f);\n325:         level.sendParticles(ParticleTypes.CRIT, this.getX(), this.getY(), this.getZ(), 15, 0.2, 0.2, 0.2, 0.0);\n326:         this.destroy();\n327:         return true;\n328:     }\n329: \n330:     @Override\n331:     public void recreateFromPacket(ClientboundAddEntityPacket packet) {\n332:         super.recreateFromPacket(packet);",
+            "kind_options_origin": "level.sendParticles(ParticleTypes.CRIT, this.getX(), this.getY(), this.getZ(), 15, 0.2, 0.2, 0.2, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/net/handler.rs LevelParticles -> app/core.rs -> ParticleStore",
+            "evidence_and_findings": "hurtServer sends CRIT count=15, offsets=.2, speed=0 before destruction; authoritative damage packet.",
+            "synchronized_state_and_client_initial": "Client bullet position/motion arrives from entity spawn/movement updates; server block-hit/hurt outcomes independently emit LevelParticles packets.",
+            "kind_options_interpretation": "Server sendParticles API invocation; kind/options/count and spread are the server packet payload (expression retained verbatim)."
+          }
+        }
+      ],
+      "record_count": 3,
+      "audit_status": "reviewed",
+      "row_index": 70,
+      "source_path": "net/minecraft/world/entity/projectile/ShulkerBullet.java"
+    },
+    {
+      "csv_index": 78,
+      "java_source_path": "net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java",
+      "callsite_records": [
+        {
+          "java_line": 111,
+          "java_method_line": 105,
+          "java_method_signature": "protected void onHit(HitResult hitResult) { ServerLevel level; block15: {",
+          "java_invocation": "addParticle(ParticleTypes.PORTAL, this.getX(), this.getY() + this.random.nextDouble() * 2.0, this.getZ(), this.random.nextGaussian(), 0.0, this.random.nextGaussian())",
+          "guard_and_state_context": "105:     protected void onHit(HitResult hitResult) {\n106:         ServerLevel level;\n107:         block15: {\n108:             block14: {\n109:                 super.onHit(hitResult);\n110:                 for (int i = 0; i < 32; ++i) {\n111:                     this.level().addParticle(ParticleTypes.PORTAL, this.getX(), this.getY() + this.random.nextDouble() * 2.0, this.getZ(), this.random.nextGaussian(), 0.0, this.random.nextGaussian());\n112:                 }\n113:                 Level level2 = this.level();\n114:                 if (!(level2 instanceof ServerLevel)) break block14;\n115:                 level = (ServerLevel)level2;\n116:                 if (!this.isRemoved()) break block15;\n117:             }\n118:             return;",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "entity_callback_or_delegation",
+          "rust_entry_candidate_from_inventory": "EntityStore/LivingEntity/VehicleState client visual tick and metadata/event dispatch in core.rs",
+          "rust_gap_candidate_from_inventory": "positions, kind, selected metadata/effects and projectile timers retained; no general vanilla remote entity AI/aiStep. Unmapped metadata serializers are discarded at handler boundary.",
+          "audit_status": "entity_owner_or_packet_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "protected void onHit(HitResult hitResult) { ServerLevel level; block15: {",
+            "java_method_line": 105,
+            "java_callsite_line": 111,
+            "caller_side_and_conditions": "ThrownEnderpearl.onHit lines 105-118 is reached via ThrowableProjectile.tick 49-61 -> Projectile.hitTargetOrDeflectSelf 207-241 on client as well; no side guard on hit dispatch. addParticle call precedes ServerLevel-only teleport code. Base Level.addParticle no-op; ClientLevel override enqueues locally.",
+            "kind_options_origin": "addParticle(ParticleTypes.PORTAL, this.getX(), this.getY() + this.random.nextDouble() * 2.0, this.getZ(), this.random.nextGaussian(), 0.0, this.random.nextGaussian())",
+            "rust_production_path": "Client/pomme-client/src/entity/particle_misc.rs::ender_pearl_hit -> impact_for_state -> tick; entity/mod.rs::misc_particle_requests -> client_particle_requests -> app/phases/in_game.rs -> ParticleStore",
+            "evidence_and_findings": "Java hit chain: ThrowableProjectile.tick lines 49-61 -> Projectile.hitTargetOrDeflectSelf lines 207-241 -> onHit, no client guard. ThrownEnderpearl.onHit lines 105-118 emits 32 PORTAL addParticle before ServerLevel teleport branch. Level.addParticle base is no-op (Level.java:404-408); ClientLevel override creates particles (ClientLevel.java:877-879). Rust particle_misc.rs::tick :720-733 traces collision in ender_pearl_hit :361+ using player/interaction.rs::raycast_collision :423+, then impact_for_state :575+ emits 32 Portal requests with y in [0,2) and Gaussian x/z velocity, once. EntityStore::client_particle_requests appends misc_particle_requests (:3710); in_game consumes requests with add_particle_spawn_request (:4149+) and ParticleStore extract (:6918). Existing live path matches; previous uncertain/missing assessment was false.",
+            "synchronized_state_and_client_initial": "Tracked pearl pose/movement and owner feed client trace; hit is transient; local ender_pearl_impact_emitted prevents repeats.",
+            "kind_options_interpretation": "ParticleTypes.PORTAL simple particle, count 32, random y offset [0,2), Gaussian x/z velocity, zero y velocity; ClientLevel local emission."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "connected",
+      "row_index": 78,
+      "source_path": "net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java",
+      "rust_entry_candidate_from_inventory": "entity/particle_misc.rs::ender_pearl_hit -> impact_for_state through EntityStore::client_particle_requests into in_game",
+      "rust_gap_candidate_from_inventory": "No gap: EnderPearl local hit trace and 32-particle PORTAL burst are implemented."
+    },
+    {
+      "csv_index": 86,
+      "java_source_path": "net/minecraft/world/item/enchantment/effects/SpawnParticlesEffect.java",
+      "callsite_records": [
+        {
+          "java_line": 60,
+          "java_method_line": 55,
+          "java_method_signature": "public void apply(ServerLevel serverLevel, int enchantmentLevel, EnchantedItemInUse item, Entity entity, Vec3 position) { RandomSource random = entity.getRandom(); Vec3 movement = entity.getKnownMovement();",
+          "java_invocation": "serverLevel.sendParticles(this.particle, this.horizontalPosition.getCoordinate(position.x(), position.x(), bbWidth, random), this.verticalPosition.getCoordinate(position.y(), position.y() + (double)(bbHeight / 2.0f), bbHeight, random), this.horizontalPosition.getCoordinate(position.z(), position.z(), bbWidth, random), 0, this.horizontalVelocity.getVelocity(movement.x(), random), this.verticalVelocity.getVelocity(movement.y(), random), this.horizontalVelocity.getVelocity(movement.z(), random), this.speed.sample(random))",
+          "guard_and_state_context": "54:     @Override\n55:     public void apply(ServerLevel serverLevel, int enchantmentLevel, EnchantedItemInUse item, Entity entity, Vec3 position) {\n56:         RandomSource random = entity.getRandom();\n57:         Vec3 movement = entity.getKnownMovement();\n58:         float bbWidth = entity.getBbWidth();\n59:         float bbHeight = entity.getBbHeight();\n60:         serverLevel.sendParticles(this.particle, this.horizontalPosition.getCoordinate(position.x(), position.x(), bbWidth, random), this.verticalPosition.getCoordinate(position.y(), position.y() + (double)(bbHeight / 2.0f), bbHeight, random), this.horizontalPosition.getCoordinate(position.z(), position.z(), bbWidth, random), 0, this.horizontalVelocity.getVelocity(movement.x(), random), this.verticalVelocity.getVelocity(movement.y(), random), this.horizontalVelocity.getVelocity(movement.z(), random), this.speed.sample(random));\n61:     }\n62: \n63:     public MapCodec<SpawnParticlesEffect> codec() {\n64:         return CODEC;\n65:     }\n66: \n67:     public record PositionSource(PositionSourceType type, float offset, float scale) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "server_particle_sender",
+          "rust_entry_candidate_from_inventory": "net handler LevelParticles → app/core.rs",
+          "rust_gap_candidate_from_inventory": "wire route exists; type/codec coverage is partial and handled by other implementation work.",
+          "audit_status": "packet_owned_candidate",
+          "semantic_audit": {
+            "status": "packet_owned",
+            "java_method": "public void apply(ServerLevel serverLevel, int enchantmentLevel, EnchantedItemInUse item, Entity entity, Vec3 position) { RandomSource random = entity.getRandom(); Vec3 movement = entity.getKnownMovement();",
+            "java_method_line": 55,
+            "java_callsite_line": 60,
+            "caller_side_and_conditions": "54:     @Override\n55:     public void apply(ServerLevel serverLevel, int enchantmentLevel, EnchantedItemInUse item, Entity entity, Vec3 position) {\n56:         RandomSource random = entity.getRandom();\n57:         Vec3 movement = entity.getKnownMovement();\n58:         float bbWidth = entity.getBbWidth();\n59:         float bbHeight = entity.getBbHeight();\n60:         serverLevel.sendParticles(this.particle, this.horizontalPosition.getCoordinate(position.x(), position.x(), bbWidth, random), this.verticalPosition.getCoordinate(position.y(), position.y() + (double)(bbHeight / 2.0f), bbHeight, random), this.horizontalPosition.getCoordinate(position.z(), position.z(), bbWidth, random), 0, this.horizontalVelocity.getVelocity(movement.x(), random), this.verticalVelocity.getVelocity(movement.y(), random), this.horizontalVelocity.getVelocity(movement.z(), random), this.speed.sample(random));\n61:     }\n62: \n63:     public MapCodec<SpawnParticlesEffect> codec() {\n64:         return CODEC;\n65:     }\n66: \n67:     public record PositionSource(PositionSourceType type, float offset, float scale) {",
+            "kind_options_origin": "serverLevel.sendParticles(this.particle, this.horizontalPosition.getCoordinate(position.x(), position.x(), bbWidth, random), this.verticalPosition.getCoordinate(position.y(), position.y() + (double)(bbHeight / 2.0f), bbHeight, random), this.horizontalPosition.getCoordinate(position.z(), position.z(), bbWidth, random), 0, this.horizontalVelocity.getVelocity(movement.x(), random), this.verticalVelocity.getVelocity(movement.y(), random), this.horizontalVelocity.getVelocity(movement.z(), random), this.speed.sample(random))",
+            "rust_production_path": "Client/pomme-client/src/net/handler.rs::parse_level_particles -> app/core.rs LevelParticles",
+            "evidence_and_findings": "SpawnParticlesEffect.apply takes ServerLevel and computes configured position/velocity/speed; count=0 directional packet. Actual server send, not API-only.",
+            "synchronized_state_and_client_initial": "Effect config, random choices and entity known movement are server-owned; client receives computed LevelParticles packet.",
+            "kind_options_interpretation": "Server sendParticles API invocation; kind/options/count and spread are the server packet payload (expression retained verbatim)."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "reviewed",
+      "row_index": 86,
+      "source_path": "net/minecraft/world/item/enchantment/effects/SpawnParticlesEffect.java"
+    },
+    {
+      "csv_index": 94,
+      "java_source_path": "net/minecraft/world/level/block/BrewingStandBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 88,
+          "java_method_line": 84,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { double x = (double)pos.getX() + 0.4 + (double)random.nextFloat() * 0.2; double y = (double)pos.getY() + 0.7 + (double)random.nextFloat() * 0.3;",
+          "java_invocation": "level.addParticle(ParticleTypes.SMOKE, x, y, z, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "82: \n83:     @Override\n84:     public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) {\n85:         double x = (double)pos.getX() + 0.4 + (double)random.nextFloat() * 0.2;\n86:         double y = (double)pos.getY() + 0.7 + (double)random.nextFloat() * 0.3;\n87:         double z = (double)pos.getZ() + 0.4 + (double)random.nextFloat() * 0.2;\n88:         level.addParticle(ParticleTypes.SMOKE, x, y, z, 0.0, 0.0, 0.0);\n89:     }\n90: \n91:     @Override\n92:     protected void affectNeighborsAfterRemoval(BlockState state, ServerLevel level, BlockPos pos, boolean movedByPiston) {\n93:         Containers.updateNeighboursAfterDestroy(state, level, pos);\n94:     }\n95: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { double x = (double)pos.getX() + 0.4 + (double)random.nextFloat() * 0.2; double y = (double)pos.getY() + 0.7 + (double)random.nextFloat() * 0.3;",
+            "java_method_line": 84,
+            "java_callsite_line": 88,
+            "caller_side_and_conditions": "82: \n83:     @Override\n84:     public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) {\n85:         double x = (double)pos.getX() + 0.4 + (double)random.nextFloat() * 0.2;\n86:         double y = (double)pos.getY() + 0.7 + (double)random.nextFloat() * 0.3;\n87:         double z = (double)pos.getZ() + 0.4 + (double)random.nextFloat() * 0.2;\n88:         level.addParticle(ParticleTypes.SMOKE, x, y, z, 0.0, 0.0, 0.0);\n89:     }\n90: \n91:     @Override\n92:     protected void affectNeighborsAfterRemoval(BlockState state, ServerLevel level, BlockPos pos, boolean movedByPiston) {\n93:         Containers.updateNeighboursAfterDestroy(state, level, pos);\n94:     }\n95: ",
+            "kind_options_origin": "level.addParticle(ParticleTypes.SMOKE, x, y, z, 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/app/phases/in_game.rs animate probes -> world/particle_tick/blocks.rs::sample_positions",
+            "evidence_and_findings": "Every sampled brewing stand emits SMOKE (no lit guard), random x/z .4-.6,y .7-1; live client tick calls sampler.",
+            "synchronized_state_and_client_initial": "Loaded client block state sampled locally; no extra synchronized visual state.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "reviewed",
+      "row_index": 94,
+      "source_path": "net/minecraft/world/level/block/BrewingStandBlock.java"
+    },
+    {
+      "csv_index": 102,
+      "java_source_path": "net/minecraft/world/level/block/DriedGhastBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 141,
+          "java_method_line": 132,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { double x = (double)pos.getX() + 0.5; double y = (double)pos.getY() + 0.5;",
+          "java_invocation": "level.addParticle(ParticleTypes.WHITE_SMOKE, x, y, z, 0.0, 0.02, 0.0)",
+          "guard_and_state_context": "135:         double z = (double)pos.getZ() + 0.5;\n136:         if (!state.getValue(WATERLOGGED).booleanValue()) {\n137:             if (random.nextInt(40) == 0 && level.getBlockState(pos.below()).is(BlockTags.TRIGGERS_AMBIENT_DRIED_GHAST_BLOCK_SOUNDS)) {\n138:                 level.playLocalSound(x, y, z, SoundEvents.DRIED_GHAST_AMBIENT, SoundSource.BLOCKS, 1.0f, 1.0f, false);\n139:             }\n140:             if (random.nextInt(6) == 0) {\n141:                 level.addParticle(ParticleTypes.WHITE_SMOKE, x, y, z, 0.0, 0.02, 0.0);\n142:             }\n143:         } else {\n144:             if (random.nextInt(40) == 0) {\n145:                 level.playLocalSound(x, y, z, SoundEvents.DRIED_GHAST_AMBIENT_WATER, SoundSource.BLOCKS, 1.0f, 1.0f, false);\n146:             }\n147:             if (random.nextInt(6) == 0) {\n148:                 level.addParticle(ParticleTypes.HAPPY_VILLAGER, x + (double)((random.nextFloat() * 2.0f - 1.0f) / 3.0f), y + 0.4, z + (double)((random.nextFloat() * 2.0f - 1.0f) / 3.0f), 0.0, random.nextFloat(), 0.0);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { double x = (double)pos.getX() + 0.5; double y = (double)pos.getY() + 0.5;",
+            "java_method_line": 132,
+            "java_callsite_line": 141,
+            "caller_side_and_conditions": "135:         double z = (double)pos.getZ() + 0.5;\n136:         if (!state.getValue(WATERLOGGED).booleanValue()) {\n137:             if (random.nextInt(40) == 0 && level.getBlockState(pos.below()).is(BlockTags.TRIGGERS_AMBIENT_DRIED_GHAST_BLOCK_SOUNDS)) {\n138:                 level.playLocalSound(x, y, z, SoundEvents.DRIED_GHAST_AMBIENT, SoundSource.BLOCKS, 1.0f, 1.0f, false);\n139:             }\n140:             if (random.nextInt(6) == 0) {\n141:                 level.addParticle(ParticleTypes.WHITE_SMOKE, x, y, z, 0.0, 0.02, 0.0);\n142:             }\n143:         } else {\n144:             if (random.nextInt(40) == 0) {\n145:                 level.playLocalSound(x, y, z, SoundEvents.DRIED_GHAST_AMBIENT_WATER, SoundSource.BLOCKS, 1.0f, 1.0f, false);\n146:             }\n147:             if (random.nextInt(6) == 0) {\n148:                 level.addParticle(ParticleTypes.HAPPY_VILLAGER, x + (double)((random.nextFloat() * 2.0f - 1.0f) / 3.0f), y + 0.4, z + (double)((random.nextFloat() * 2.0f - 1.0f) / 3.0f), 0.0, random.nextFloat(), 0.0);",
+            "kind_options_origin": "level.addParticle(ParticleTypes.WHITE_SMOKE, x, y, z, 0.0, 0.02, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/world/particle_tick/blocks.rs::dried_ghast",
+            "evidence_and_findings": "!WATERLOGGED and 1/6 -> WHITE_SMOKE center, y velocity .02; matching branch in production block sampler.",
+            "synchronized_state_and_client_initial": "Loaded block state WATERLOGGED property is synchronized in chunk state; random callback is client-local.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        },
+        {
+          "java_line": 148,
+          "java_method_line": 132,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { double x = (double)pos.getX() + 0.5; double y = (double)pos.getY() + 0.5;",
+          "java_invocation": "level.addParticle(ParticleTypes.HAPPY_VILLAGER, x + (double)((random.nextFloat() * 2.0f - 1.0f) / 3.0f), y + 0.4, z + (double)((random.nextFloat() * 2.0f - 1.0f) / 3.0f), 0.0, random.nextFloat(), 0.0)",
+          "guard_and_state_context": "142:             }\n143:         } else {\n144:             if (random.nextInt(40) == 0) {\n145:                 level.playLocalSound(x, y, z, SoundEvents.DRIED_GHAST_AMBIENT_WATER, SoundSource.BLOCKS, 1.0f, 1.0f, false);\n146:             }\n147:             if (random.nextInt(6) == 0) {\n148:                 level.addParticle(ParticleTypes.HAPPY_VILLAGER, x + (double)((random.nextFloat() * 2.0f - 1.0f) / 3.0f), y + 0.4, z + (double)((random.nextFloat() * 2.0f - 1.0f) / 3.0f), 0.0, random.nextFloat(), 0.0);\n149:             }\n150:         }\n151:     }\n152: \n153:     @Override\n154:     protected void randomTick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {\n155:         if ((state.getValue(WATERLOGGED).booleanValue() || state.getValue(HYDRATION_LEVEL) > 0) && !((LevelTicks)level.getBlockTicks()).hasScheduledTick(pos, this)) {",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { double x = (double)pos.getX() + 0.5; double y = (double)pos.getY() + 0.5;",
+            "java_method_line": 132,
+            "java_callsite_line": 148,
+            "caller_side_and_conditions": "142:             }\n143:         } else {\n144:             if (random.nextInt(40) == 0) {\n145:                 level.playLocalSound(x, y, z, SoundEvents.DRIED_GHAST_AMBIENT_WATER, SoundSource.BLOCKS, 1.0f, 1.0f, false);\n146:             }\n147:             if (random.nextInt(6) == 0) {\n148:                 level.addParticle(ParticleTypes.HAPPY_VILLAGER, x + (double)((random.nextFloat() * 2.0f - 1.0f) / 3.0f), y + 0.4, z + (double)((random.nextFloat() * 2.0f - 1.0f) / 3.0f), 0.0, random.nextFloat(), 0.0);\n149:             }\n150:         }\n151:     }\n152: \n153:     @Override\n154:     protected void randomTick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {\n155:         if ((state.getValue(WATERLOGGED).booleanValue() || state.getValue(HYDRATION_LEVEL) > 0) && !((LevelTicks)level.getBlockTicks()).hasScheduledTick(pos, this)) {",
+            "kind_options_origin": "level.addParticle(ParticleTypes.HAPPY_VILLAGER, x + (double)((random.nextFloat() * 2.0f - 1.0f) / 3.0f), y + 0.4, z + (double)((random.nextFloat() * 2.0f - 1.0f) / 3.0f), 0.0, random.nextFloat(), 0.0)",
+            "rust_production_path": "Client/pomme-client/src/world/particle_tick/blocks.rs::dried_ghast",
+            "evidence_and_findings": "WATERLOGGED and 1/6 -> HAPPY_VILLAGER random x/z ±1/3,y+.4,random y velocity; production branch present.",
+            "synchronized_state_and_client_initial": "Loaded block state WATERLOGGED property is synchronized in chunk state; random callback is client-local.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "reviewed",
+      "row_index": 102,
+      "source_path": "net/minecraft/world/level/block/DriedGhastBlock.java"
+    },
+    {
+      "csv_index": 110,
+      "java_source_path": "net/minecraft/world/level/block/FurnaceBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 80,
+          "java_method_line": 63,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { if (!state.getValue(LIT).booleanValue()) { return;",
+          "java_invocation": "level.addParticle(ParticleTypes.SMOKE, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "74:         Direction.Axis axis = direction.getAxis();\n75:         double r = 0.52;\n76:         double ss = random.nextDouble() * 0.6 - 0.3;\n77:         double dx = axis == Direction.Axis.X ? (double)direction.getStepX() * 0.52 : ss;\n78:         double dy = random.nextDouble() * 6.0 / 16.0;\n79:         double dz = axis == Direction.Axis.Z ? (double)direction.getStepZ() * 0.52 : ss;\n80:         level.addParticle(ParticleTypes.SMOKE, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0);\n81:         level.addParticle(ParticleTypes.FLAME, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0);\n82:     }\n83: }\n84: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { if (!state.getValue(LIT).booleanValue()) { return;",
+            "java_method_line": 63,
+            "java_callsite_line": 80,
+            "caller_side_and_conditions": "74:         Direction.Axis axis = direction.getAxis();\n75:         double r = 0.52;\n76:         double ss = random.nextDouble() * 0.6 - 0.3;\n77:         double dx = axis == Direction.Axis.X ? (double)direction.getStepX() * 0.52 : ss;\n78:         double dy = random.nextDouble() * 6.0 / 16.0;\n79:         double dz = axis == Direction.Axis.Z ? (double)direction.getStepZ() * 0.52 : ss;\n80:         level.addParticle(ParticleTypes.SMOKE, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0);\n81:         level.addParticle(ParticleTypes.FLAME, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0);\n82:     }\n83: }\n84: ",
+            "kind_options_origin": "level.addParticle(ParticleTypes.SMOKE, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/world/particle_tick/blocks.rs::sample_positions furnace branch",
+            "evidence_and_findings": "Lit Furnace only; shared randomized facing offset, emits SMOKE; production sampler tick invokes it.",
+            "synchronized_state_and_client_initial": "Loaded block LIT/FACING properties are synchronized; animate random and sound roll are client-local.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        },
+        {
+          "java_line": 81,
+          "java_method_line": 63,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { if (!state.getValue(LIT).booleanValue()) { return;",
+          "java_invocation": "level.addParticle(ParticleTypes.FLAME, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "75:         double r = 0.52;\n76:         double ss = random.nextDouble() * 0.6 - 0.3;\n77:         double dx = axis == Direction.Axis.X ? (double)direction.getStepX() * 0.52 : ss;\n78:         double dy = random.nextDouble() * 6.0 / 16.0;\n79:         double dz = axis == Direction.Axis.Z ? (double)direction.getStepZ() * 0.52 : ss;\n80:         level.addParticle(ParticleTypes.SMOKE, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0);\n81:         level.addParticle(ParticleTypes.FLAME, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0);\n82:     }\n83: }\n84: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { if (!state.getValue(LIT).booleanValue()) { return;",
+            "java_method_line": 63,
+            "java_callsite_line": 81,
+            "caller_side_and_conditions": "75:         double r = 0.52;\n76:         double ss = random.nextDouble() * 0.6 - 0.3;\n77:         double dx = axis == Direction.Axis.X ? (double)direction.getStepX() * 0.52 : ss;\n78:         double dy = random.nextDouble() * 6.0 / 16.0;\n79:         double dz = axis == Direction.Axis.Z ? (double)direction.getStepZ() * 0.52 : ss;\n80:         level.addParticle(ParticleTypes.SMOKE, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0);\n81:         level.addParticle(ParticleTypes.FLAME, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0);\n82:     }\n83: }\n84: ",
+            "kind_options_origin": "level.addParticle(ParticleTypes.FLAME, x + dx, y + dy, z + dz, 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/world/particle_tick/blocks.rs::sample_positions furnace branch",
+            "evidence_and_findings": "Same lit guard/location as line 80, FLAME; sampler emits flame for furnace (not smoker/blast furnace).",
+            "synchronized_state_and_client_initial": "Loaded block LIT/FACING properties are synchronized; animate random and sound roll are client-local.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "reviewed",
+      "row_index": 110,
+      "source_path": "net/minecraft/world/level/block/FurnaceBlock.java"
+    },
+    {
+      "csv_index": 118,
+      "java_source_path": "net/minecraft/world/level/block/PowderSnowBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 84,
+          "java_method_line": 76,
+          "java_method_signature": "protected void entityInside(BlockState state, Level level, BlockPos pos, Entity entity, InsideBlockEffectApplier effectApplier, boolean isPrecise) { if (!(entity instanceof LivingEntity) || entity.getInBlockState().is(this)) { entity.makeStuckInBlock(state, new Vec3(0.9f, 1.5, 0.9f));",
+          "java_invocation": "level.addParticle(ParticleTypes.SNOWFLAKE, entity.getX(), pos.getY() + 1, entity.getZ(), Mth.randomBetween(random, -1.0f, 1.0f) * 0.083333336f, 0.05f, Mth.randomBetween(random, -1.0f, 1.0f) * 0.083333336f)",
+          "guard_and_state_context": "78:             entity.makeStuckInBlock(state, new Vec3(0.9f, 1.5, 0.9f));\n79:             if (level.isClientSide()) {\n80:                 boolean isMoving;\n81:                 RandomSource random = level.getRandom();\n82:                 boolean bl = isMoving = entity.xOld != entity.getX() || entity.zOld != entity.getZ();\n83:                 if (isMoving && random.nextBoolean()) {\n84:                     level.addParticle(ParticleTypes.SNOWFLAKE, entity.getX(), pos.getY() + 1, entity.getZ(), Mth.randomBetween(random, -1.0f, 1.0f) * 0.083333336f, 0.05f, Mth.randomBetween(random, -1.0f, 1.0f) * 0.083333336f);\n85:                 }\n86:             }\n87:         }\n88:         BlockPos position = pos.immutable();\n89:         effectApplier.runBefore(InsideBlockEffectType.EXTINGUISH, e -> {\n90:             if (level instanceof ServerLevel) {\n91:                 ServerLevel serverLevel = (ServerLevel)level;",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "status": "missing",
+            "java_method": "protected void entityInside(BlockState state, Level level, BlockPos pos, Entity entity, InsideBlockEffectApplier effectApplier, boolean isPrecise) { if (!(entity instanceof LivingEntity) || entity.getInBlockState().is(this)) { entity.makeStuckInBlock(state, new Vec3(0.9f, 1.5, 0.9f));",
+            "java_method_line": 76,
+            "java_callsite_line": 84,
+            "caller_side_and_conditions": "78:             entity.makeStuckInBlock(state, new Vec3(0.9f, 1.5, 0.9f));\n79:             if (level.isClientSide()) {\n80:                 boolean isMoving;\n81:                 RandomSource random = level.getRandom();\n82:                 boolean bl = isMoving = entity.xOld != entity.getX() || entity.zOld != entity.getZ();\n83:                 if (isMoving && random.nextBoolean()) {\n84:                     level.addParticle(ParticleTypes.SNOWFLAKE, entity.getX(), pos.getY() + 1, entity.getZ(), Mth.randomBetween(random, -1.0f, 1.0f) * 0.083333336f, 0.05f, Mth.randomBetween(random, -1.0f, 1.0f) * 0.083333336f);\n85:                 }\n86:             }\n87:         }\n88:         BlockPos position = pos.immutable();\n89:         effectApplier.runBefore(InsideBlockEffectType.EXTINGUISH, e -> {\n90:             if (level instanceof ServerLevel) {\n91:                 ServerLevel serverLevel = (ServerLevel)level;",
+            "kind_options_origin": "level.addParticle(ParticleTypes.SNOWFLAKE, entity.getX(), pos.getY() + 1, entity.getZ(), Mth.randomBetween(random, -1.0f, 1.0f) * 0.083333336f, 0.05f, Mth.randomBetween(random, -1.0f, 1.0f) * 0.083333336f)",
+            "rust_production_path": "Client/pomme-client/src/physics/movement.rs::apply_collision_with_context (local player only); no generic EntityStore entityInside particle hook",
+            "evidence_and_findings": "Java PowderSnowBlock.entityInside:76-87 enters branch for non-LivingEntity or entity.getInBlockState()==this; client-side, xOld/current x or z differs, random.nextBoolean. Then SNOWFLAKE at (entity.x,pos.y+1,entity.z), x/z velocity randomBetween(-1,1)*.083333336 and y=.05. Rust movement.rs:739-744 handles local player AABB intersection only by slowdown/reset (0.9,1.5,0.9); no movement predicate, random roll or particle request. Remote entities have no generic inside-block callback: entity/particle_tick.rs::tick_living :301-350 handles sprint/fluid, tick_vehicle :352-385 fluid only. Snowflake provider exists but no PowderSnow contact source. Missing owner/hook: client entity/block-contact callback to enqueue Snowflake for local and tracked entities; current local slowdown is not visual implementation.",
+            "synchronized_state_and_client_initial": "PowderSnow BlockState is loaded chunk state. Java uses old/current x/z and in-block state per callback; randomness is client-side. Rust local player collision owner has current/pre-move positions but no visual callback; remote tracked entities have no generic block-contact traversal.",
+            "kind_options_interpretation": "Simple SNOWFLAKE; no ParticleOptions payload; x/z velocities each in [-.083333336,.083333336], y=.05."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "missing: movement slowdown exists; Snowflake contact generation absent",
+      "row_index": 118,
+      "source_path": "net/minecraft/world/level/block/PowderSnowBlock.java",
+      "rust_entry_candidate_from_inventory": "physics/movement.rs local-player snow slowdown; EntityStore has no generic entityInside visual callback",
+      "rust_gap_candidate_from_inventory": "Missing PowderSnowBlock.entityInside Snowflake request for local and tracked entities; current slowdown emits no particles."
+    },
+    {
+      "csv_index": 126,
+      "java_source_path": "net/minecraft/world/level/block/SmokerBlock.java",
+      "callsite_records": [
+        {
+          "java_line": 72,
+          "java_method_line": 62,
+          "java_method_signature": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { if (!state.getValue(LIT).booleanValue()) { return;",
+          "java_invocation": "level.addParticle(ParticleTypes.SMOKE, x, y + 1.1, z, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "66:         double x = (double)pos.getX() + 0.5;\n67:         double y = pos.getY();\n68:         double z = (double)pos.getZ() + 0.5;\n69:         if (random.nextDouble() < 0.1) {\n70:             level.playLocalSound(x, y, z, SoundEvents.SMOKER_SMOKE, SoundSource.BLOCKS, 1.0f, 1.0f, false);\n71:         }\n72:         level.addParticle(ParticleTypes.SMOKE, x, y + 1.1, z, 0.0, 0.0, 0.0);\n73:     }\n74: }\n75: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void animateTick(BlockState state, Level level, BlockPos pos, RandomSource random) { if (!state.getValue(LIT).booleanValue()) { return;",
+            "java_method_line": 62,
+            "java_callsite_line": 72,
+            "caller_side_and_conditions": "66:         double x = (double)pos.getX() + 0.5;\n67:         double y = pos.getY();\n68:         double z = (double)pos.getZ() + 0.5;\n69:         if (random.nextDouble() < 0.1) {\n70:             level.playLocalSound(x, y, z, SoundEvents.SMOKER_SMOKE, SoundSource.BLOCKS, 1.0f, 1.0f, false);\n71:         }\n72:         level.addParticle(ParticleTypes.SMOKE, x, y + 1.1, z, 0.0, 0.0, 0.0);\n73:     }\n74: }\n75: ",
+            "kind_options_origin": "level.addParticle(ParticleTypes.SMOKE, x, y + 1.1, z, 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/world/particle_tick/blocks.rs::sample_positions smoker branch",
+            "evidence_and_findings": "Smoker lit guard -> SMOKE at center y+1.1; live block sampler covers smoker.",
+            "synchronized_state_and_client_initial": "Loaded block LIT state synchronized; animate callback/random sound are client-local.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "reviewed",
+      "row_index": 126,
+      "source_path": "net/minecraft/world/level/block/SmokerBlock.java"
+    },
+    {
+      "csv_index": 134,
+      "java_source_path": "net/minecraft/world/level/block/entity/ConduitBlockEntity.java",
+      "callsite_records": [
+        {
+          "java_line": 233,
+          "java_method_line": 222,
+          "java_method_signature": "private static void animationTick(Level level, BlockPos worldPosition, List<BlockPos> effectBlocks, @Nullable Entity destroyTarget, int tickCount) { RandomSource random = level.getRandom(); double hh = Mth.sin((float)(tickCount + 35) * 0.1f) / 2.0f + 0.5f;",
+          "java_invocation": "level.addParticle(ParticleTypes.NAUTILUS, particleEnd.x, particleEnd.y, particleEnd.z, dx, dy, dz)",
+          "guard_and_state_context": "227:         for (BlockPos pos : effectBlocks) {\n228:             if (random.nextInt(50) != 0) continue;\n229:             BlockPos delta = pos.subtract(worldPosition);\n230:             float dx = -0.5f + random.nextFloat() + (float)delta.getX();\n231:             float dy = -2.0f + random.nextFloat() + (float)delta.getY();\n232:             float dz = -0.5f + random.nextFloat() + (float)delta.getZ();\n233:             level.addParticle(ParticleTypes.NAUTILUS, particleEnd.x, particleEnd.y, particleEnd.z, dx, dy, dz);\n234:         }\n235:         if (destroyTarget != null) {\n236:             Vec3 targetPosition = new Vec3(destroyTarget.getX(), destroyTarget.getEyeY(), destroyTarget.getZ());\n237:             float randx = (-0.5f + random.nextFloat()) * (3.0f + destroyTarget.getBbWidth());\n238:             float randy = -1.0f + random.nextFloat() * destroyTarget.getBbHeight();\n239:             float randz = (-0.5f + random.nextFloat()) * (3.0f + destroyTarget.getBbWidth());\n240:             Vec3 velocity = new Vec3(randx, randy, randz);",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "StoredBlockEntity/ChunkStore + NetworkEvent::BlockEvent/LevelEvent; world sampler for state-driven ticks",
+          "rust_gap_candidate_from_inventory": "ChunkStore retains BE NBT; selected fields parsed (campfire slots, bell/book/wobble); most TrialSpawner/Vault/Conduit/PotentSulfur timing/state has no dedicated tick model.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "private static void animationTick(Level level, BlockPos worldPosition, List<BlockPos> effectBlocks, @Nullable Entity destroyTarget, int tickCount) { RandomSource random = level.getRandom(); double hh = Mth.sin((float)(tickCount + 35) * 0.1f) / 2.0f + 0.5f;",
+            "java_method_line": 222,
+            "java_callsite_line": 233,
+            "caller_side_and_conditions": "227:         for (BlockPos pos : effectBlocks) {\n228:             if (random.nextInt(50) != 0) continue;\n229:             BlockPos delta = pos.subtract(worldPosition);\n230:             float dx = -0.5f + random.nextFloat() + (float)delta.getX();\n231:             float dy = -2.0f + random.nextFloat() + (float)delta.getY();\n232:             float dz = -0.5f + random.nextFloat() + (float)delta.getZ();\n233:             level.addParticle(ParticleTypes.NAUTILUS, particleEnd.x, particleEnd.y, particleEnd.z, dx, dy, dz);\n234:         }\n235:         if (destroyTarget != null) {\n236:             Vec3 targetPosition = new Vec3(destroyTarget.getX(), destroyTarget.getEyeY(), destroyTarget.getZ());\n237:             float randx = (-0.5f + random.nextFloat()) * (3.0f + destroyTarget.getBbWidth());\n238:             float randy = -1.0f + random.nextFloat() * destroyTarget.getBbHeight();\n239:             float randz = (-0.5f + random.nextFloat()) * (3.0f + destroyTarget.getBbWidth());\n240:             Vec3 velocity = new Vec3(randx, randy, randz);",
+            "kind_options_origin": "level.addParticle(ParticleTypes.NAUTILUS, particleEnd.x, particleEnd.y, particleEnd.z, dx, dy, dz)",
+            "rust_production_path": "Client/pomme-client/src/world/block_entity_particle.rs::conduit_particles",
+            "evidence_and_findings": "Conduit animation effect-block loop 1/50 -> NAUTILUS at conduit top with randomized block-delta velocity; client block entity visual tick exists.",
+            "synchronized_state_and_client_initial": "Conduit block entity target/effect-block visual state is read from client block entity data; Rust defaults missing conduit visual metadata to no target/no emitter.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        },
+        {
+          "java_line": 241,
+          "java_method_line": 222,
+          "java_method_signature": "private static void animationTick(Level level, BlockPos worldPosition, List<BlockPos> effectBlocks, @Nullable Entity destroyTarget, int tickCount) { RandomSource random = level.getRandom(); double hh = Mth.sin((float)(tickCount + 35) * 0.1f) / 2.0f + 0.5f;",
+          "java_invocation": "level.addParticle(ParticleTypes.NAUTILUS, targetPosition.x, targetPosition.y, targetPosition.z, velocity.x, velocity.y, velocity.z)",
+          "guard_and_state_context": "235:         if (destroyTarget != null) {\n236:             Vec3 targetPosition = new Vec3(destroyTarget.getX(), destroyTarget.getEyeY(), destroyTarget.getZ());\n237:             float randx = (-0.5f + random.nextFloat()) * (3.0f + destroyTarget.getBbWidth());\n238:             float randy = -1.0f + random.nextFloat() * destroyTarget.getBbHeight();\n239:             float randz = (-0.5f + random.nextFloat()) * (3.0f + destroyTarget.getBbWidth());\n240:             Vec3 velocity = new Vec3(randx, randy, randz);\n241:             level.addParticle(ParticleTypes.NAUTILUS, targetPosition.x, targetPosition.y, targetPosition.z, velocity.x, velocity.y, velocity.z);\n242:         }\n243:     }\n244: \n245:     public boolean isActive() {\n246:         return this.isActive;\n247:     }\n248: ",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "StoredBlockEntity/ChunkStore + NetworkEvent::BlockEvent/LevelEvent; world sampler for state-driven ticks",
+          "rust_gap_candidate_from_inventory": "ChunkStore retains BE NBT; selected fields parsed (campfire slots, bell/book/wobble); most TrialSpawner/Vault/Conduit/PotentSulfur timing/state has no dedicated tick model.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "private static void animationTick(Level level, BlockPos worldPosition, List<BlockPos> effectBlocks, @Nullable Entity destroyTarget, int tickCount) { RandomSource random = level.getRandom(); double hh = Mth.sin((float)(tickCount + 35) * 0.1f) / 2.0f + 0.5f;",
+            "java_method_line": 222,
+            "java_callsite_line": 241,
+            "caller_side_and_conditions": "235:         if (destroyTarget != null) {\n236:             Vec3 targetPosition = new Vec3(destroyTarget.getX(), destroyTarget.getEyeY(), destroyTarget.getZ());\n237:             float randx = (-0.5f + random.nextFloat()) * (3.0f + destroyTarget.getBbWidth());\n238:             float randy = -1.0f + random.nextFloat() * destroyTarget.getBbHeight();\n239:             float randz = (-0.5f + random.nextFloat()) * (3.0f + destroyTarget.getBbWidth());\n240:             Vec3 velocity = new Vec3(randx, randy, randz);\n241:             level.addParticle(ParticleTypes.NAUTILUS, targetPosition.x, targetPosition.y, targetPosition.z, velocity.x, velocity.y, velocity.z);\n242:         }\n243:     }\n244: \n245:     public boolean isActive() {\n246:         return this.isActive;\n247:     }\n248: ",
+            "kind_options_origin": "level.addParticle(ParticleTypes.NAUTILUS, targetPosition.x, targetPosition.y, targetPosition.z, velocity.x, velocity.y, velocity.z)",
+            "rust_production_path": "Client/pomme-client/src/world/block_entity_particle.rs::conduit_particles / conduit_target_particle",
+            "evidence_and_findings": "Non-null target emits NAUTILUS from target eye with randomized velocity; Rust resolves ConduitVisualState target UUID against loaded entities.",
+            "synchronized_state_and_client_initial": "Conduit block entity target/effect-block visual state is read from client block entity data; Rust defaults missing conduit visual metadata to no target/no emitter.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        }
+      ],
+      "record_count": 2,
+      "audit_status": "reviewed",
+      "row_index": 134,
+      "source_path": "net/minecraft/world/level/block/entity/ConduitBlockEntity.java"
+    },
+    {
+      "csv_index": 142,
+      "java_source_path": "net/minecraft/world/level/material/LavaFluid.java",
+      "callsite_records": [
+        {
+          "java_line": 70,
+          "java_method_line": 63,
+          "java_method_signature": "public void animateTick(Level level, BlockPos pos, FluidState fluidState, RandomSource random) { BlockPos above = pos.above(); if (level.getBlockState(above).isAir() && !level.getBlockState(above).isSolidRender()) {",
+          "java_invocation": "level.addParticle(ParticleTypes.LAVA, xx, yy, zz, 0.0, 0.0, 0.0)",
+          "guard_and_state_context": "64:         BlockPos above = pos.above();\n65:         if (level.getBlockState(above).isAir() && !level.getBlockState(above).isSolidRender()) {\n66:             if (random.nextInt(100) == 0) {\n67:                 double xx = (double)pos.getX() + random.nextDouble();\n68:                 double yy = (double)pos.getY() + 1.0;\n69:                 double zz = (double)pos.getZ() + random.nextDouble();\n70:                 level.addParticle(ParticleTypes.LAVA, xx, yy, zz, 0.0, 0.0, 0.0);\n71:                 level.playLocalSound(xx, yy, zz, SoundEvents.LAVA_POP, SoundSource.AMBIENT, 0.2f + random.nextFloat() * 0.2f, 0.9f + random.nextFloat() * 0.15f, false);\n72:             }\n73:             if (random.nextInt(200) == 0) {\n74:                 level.playLocalSound(pos.getX(), pos.getY(), pos.getZ(), SoundEvents.LAVA_AMBIENT, SoundSource.AMBIENT, 0.2f + random.nextFloat() * 0.2f, 0.9f + random.nextFloat() * 0.15f, false);\n75:             }\n76:         }\n77:     }",
+          "kind_options_source": "call expression recorded verbatim; dynamic options need assignment tracing in enclosing method",
+          "java_side_category": "block_fluid_callback_or_interaction",
+          "rust_entry_candidate_from_inventory": "world particle sampling unit (ambient/block/fluid) or core LevelEvent/BlockEvent (discrete)",
+          "rust_gap_candidate_from_inventory": "block states/properties/fluid descriptor/local shapes are available; no generic ClientLevel.animateTick scanner; dynamic/random visual block callbacks absent.",
+          "audit_status": "world_sampler_or_event_candidate",
+          "semantic_audit": {
+            "status": "connected",
+            "java_method": "public void animateTick(Level level, BlockPos pos, FluidState fluidState, RandomSource random) { BlockPos above = pos.above(); if (level.getBlockState(above).isAir() && !level.getBlockState(above).isSolidRender()) {",
+            "java_method_line": 63,
+            "java_callsite_line": 70,
+            "caller_side_and_conditions": "64:         BlockPos above = pos.above();\n65:         if (level.getBlockState(above).isAir() && !level.getBlockState(above).isSolidRender()) {\n66:             if (random.nextInt(100) == 0) {\n67:                 double xx = (double)pos.getX() + random.nextDouble();\n68:                 double yy = (double)pos.getY() + 1.0;\n69:                 double zz = (double)pos.getZ() + random.nextDouble();\n70:                 level.addParticle(ParticleTypes.LAVA, xx, yy, zz, 0.0, 0.0, 0.0);\n71:                 level.playLocalSound(xx, yy, zz, SoundEvents.LAVA_POP, SoundSource.AMBIENT, 0.2f + random.nextFloat() * 0.2f, 0.9f + random.nextFloat() * 0.15f, false);\n72:             }\n73:             if (random.nextInt(200) == 0) {\n74:                 level.playLocalSound(pos.getX(), pos.getY(), pos.getZ(), SoundEvents.LAVA_AMBIENT, SoundSource.AMBIENT, 0.2f + random.nextFloat() * 0.2f, 0.9f + random.nextFloat() * 0.15f, false);\n75:             }\n76:         }\n77:     }",
+            "kind_options_origin": "level.addParticle(ParticleTypes.LAVA, xx, yy, zz, 0.0, 0.0, 0.0)",
+            "rust_production_path": "Client/pomme-client/src/world/particle_tick/blocks.rs lava fluid sampling",
+            "evidence_and_findings": "Above must be air and non-solid, 1/100 -> LAVA at random x/z,y+1; production sampler includes lava branch.",
+            "synchronized_state_and_client_initial": "Client fluid/block state above is loaded chunk data; 1/100 random decision is local.",
+            "kind_options_interpretation": "Particle type token or caller-supplied option and numeric auxiliary values are retained verbatim in kind_options_origin."
+          }
+        }
+      ],
+      "record_count": 1,
+      "audit_status": "reviewed",
+      "row_index": 142,
+      "source_path": "net/minecraft/world/level/material/LavaFluid.java"
+    }
+  ],
+  "audit_summary": {
+    "source_row_count": 18,
+    "callsite_record_count": 31,
+    "status_counts": {
+      "connected": 20,
+      "packet_owned": 4,
+      "in_progress": 4,
+      "missing": 3,
+      "uncertain": 0
+    }
+  }
+}
