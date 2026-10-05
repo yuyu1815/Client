@@ -19,7 +19,7 @@ singleplayer-lifecycle""".split()
 ALLOWED = {f"docs/compatibility/plans/{name}.md" for name in PLANS} | {
     "docs/compatibility/plan.md", "tools/check_compatibility_plans.py"
 }
-SOURCE = re.compile(r"(?P<path>(?:[A-Za-z]:/)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.(?:rs|java|ts)):(?P<lines>\d+(?:[-–,]\d+)*)")
+SOURCE = re.compile(r"(?<!\.\.\./)(?P<path>(?:[A-Za-z]:/)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+\.(?:rs|java|ts)):(?P<lines>\d+(?:[-–,]\d+)*)")
 LINK = re.compile(r"\]\(([^)#]+\.md)(?:#[^)]*)?\)")
 
 
