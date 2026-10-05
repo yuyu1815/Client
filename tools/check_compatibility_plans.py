@@ -64,7 +64,10 @@ def check(root, reference):
                                    reference / "Client/pomme-client/src" / name,
                                    reference / "minecraft-26.2-decompiled/src/net/minecraft" / name))
             source = next((p for p in candidates if p.is_file()), None)
-            assert source is not None, f"missing cited source: {match.group(0)}"
+            if source is None and (name.startswith(("Client/", "pomme-client/", "minecraft-26.2-decompiled/", "world/", "audio/")) or len(name) > 2 and name[1:3] == ":/"):
+                raise AssertionError(f"missing cited source: {match.group(0)}")
+            if source is None:  # Incomplete suffixes such as `.../Foo.java` are not citations.
+                continue
             total = len(source.read_text(encoding="utf-8", errors="replace").splitlines())
             lines = line_numbers(match.group("lines"))
             assert max(lines) <= total, f"source line out of range: {match.group(0)} ({total} lines)"
