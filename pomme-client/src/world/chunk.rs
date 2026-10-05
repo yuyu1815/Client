@@ -12,6 +12,7 @@ use azalea_world::palette::PalettedContainer;
 use parking_lot::RwLock;
 use thiserror::Error;
 
+use super::block;
 use super::block_entity::StoredBlockEntity;
 
 const OVERWORLD_HEIGHT: u32 = 384;
@@ -130,6 +131,9 @@ pub struct ChunkStore {
     pub partial_storage: PartialChunkStorage,
     pub light_data: std::collections::HashMap<(i32, i32), Arc<ChunkLightData>>,
     pub block_entities: std::collections::HashMap<BlockPos, StoredBlockEntity>,
+    /// `None` until the server sends block tags; `Some(empty)` is an explicit
+    /// replacement and must not fall back to vanilla membership.
+    pub impermeable_blocks: Option<std::collections::HashSet<String>>,
 }
 
 /// The 128-chunk max extended-view-distance servers allow; server
@@ -150,7 +154,18 @@ impl ChunkStore {
             partial_storage: PartialChunkStorage::new(view_distance.max(MAX_VIEW_DISTANCE)),
             light_data: std::collections::HashMap::new(),
             block_entities: std::collections::HashMap::new(),
+            impermeable_blocks: None,
         }
+    }
+
+    pub fn replace_impermeable_blocks(&mut self, blocks: std::collections::HashSet<String>) {
+        self.impermeable_blocks = Some(blocks);
+    }
+
+    pub fn is_impermeable(&self, block_name: &str) -> Option<bool> {
+        self.impermeable_blocks
+            .as_ref()
+            .map(|blocks| blocks.contains(block_name))
     }
 
     pub fn loaded_positions(&self) -> impl Iterator<Item = ChunkPos> + '_ {
@@ -285,6 +300,41 @@ impl ChunkStore {
         };
         let old = chunk.get_and_set_block_state(&block_pos, state, self.chunk_storage.min_y());
         let is_empty = chunk.sections[section].block_count == 0;
+        for kind in [
+            HeightmapKind::WorldSurface,
+            HeightmapKind::MotionBlockingNoLeaves,
+        ] {
+            if !chunk.heightmaps.contains_key(&kind) {
+                continue;
+            }
+            let height = (self.min_y()..self.min_y() + self.height() as i32)
+                .rev()
+                .find(|&scan_y| {
+                    let candidate = block_state_from_section(
+                        &chunk,
+                        x,
+                        scan_y,
+                        z,
+                        self.min_y(),
+                        self.debug_world,
+                    );
+                    match kind {
+                        HeightmapKind::WorldSurface => !block::is_air(candidate),
+                        HeightmapKind::MotionBlockingNoLeaves => {
+                            !is_leaf_state(candidate)
+                                && (block::blocks_motion(candidate)
+                                    || block::fluid(candidate).kind != block::FluidKind::Empty)
+                        }
+                        _ => unreachable!(),
+                    }
+                })
+                .map_or(self.min_y(), |top| top + 1);
+            chunk
+                .heightmaps
+                .get_mut(&kind)
+                .expect("heightmap checked above")
+                .set_height(x.rem_euclid(16) as u8, z.rem_euclid(16) as u8, height);
+        }
         (old, (was_empty != is_empty).then_some(is_empty))
     }
 
@@ -336,6 +386,67 @@ impl ChunkStore {
         }
     }
 
+    /// Java `ChunkAccess.getHeight` returns the requested type, priming it from
+    /// block states when a CLIENT heightmap was not supplied in chunk data.
+    /// Only the received map of the same type is reused; no other kind is a
+    /// fallback.
+    pub fn heightmap_height(&self, kind: HeightmapKind, x: i32, z: i32) -> Option<i32> {
+        let chunk_pos = ChunkPos::new(x.div_euclid(16), z.div_euclid(16));
+        let chunk_lock = self.get_chunk(&chunk_pos)?;
+        let mut chunk = chunk_lock.write();
+        if !chunk.heightmaps.contains_key(&kind) {
+            if !matches!(
+                kind,
+                HeightmapKind::WorldSurface | HeightmapKind::MotionBlockingNoLeaves
+            ) {
+                return None;
+            }
+            let bits = azalea_core::math::ceil_log2(self.height() + 1) as usize;
+            let values_per_long = 64 / bits;
+            let mut derived = azalea_world::heightmap::Heightmap::new(
+                kind,
+                self.height(),
+                self.min_y(),
+                vec![0; 256_usize.div_ceil(values_per_long)].into_boxed_slice(),
+            );
+            for local_x in 0..16_i32 {
+                for local_z in 0..16_i32 {
+                    let world_x = chunk_pos.x * 16 + local_x;
+                    let world_z = chunk_pos.z * 16 + local_z;
+                    let top = (self.min_y()..self.min_y() + self.height() as i32)
+                        .rev()
+                        .find(|&y| {
+                            let state = block_state_from_section(
+                                &chunk,
+                                world_x,
+                                y,
+                                world_z,
+                                self.min_y(),
+                                self.debug_world,
+                            );
+                            match kind {
+                                HeightmapKind::WorldSurface => !block::is_air(state),
+                                HeightmapKind::MotionBlockingNoLeaves => {
+                                    !block::is_leaves_block(state)
+                                        && (block::blocks_motion(state)
+                                            || block::fluid(state).kind != block::FluidKind::Empty)
+                                }
+                                _ => unreachable!(),
+                            }
+                        })
+                        .map_or(self.min_y(), |y| y + 1);
+                    derived.set_height(local_x as u8, local_z as u8, top);
+                }
+            }
+            // Cache in Chunk's native heightmap table. set_block_state_tracked
+            // recomputes the affected column; chunk unload drops the whole cache.
+            chunk.heightmaps.insert(kind, derived);
+        }
+        chunk.heightmaps.get(&kind).map(|heightmap| {
+            heightmap.get_first_available(x.rem_euclid(16) as u8, z.rem_euclid(16) as u8)
+        })
+    }
+
     /// Top non-motion-blocking Y for the column (vanilla MOTION_BLOCKING
     /// surface, i.e. one above the highest solid block). Used to position
     /// weather columns. Returns `min_y` when the chunk or its heightmap is
@@ -368,6 +479,10 @@ impl ChunkStore {
             .get_biome(biome_pos, self.chunk_storage.min_y())
             .map(u32::from)
     }
+}
+
+fn is_leaf_state(state: BlockState) -> bool {
+    block::is_leaves_block(state)
 }
 
 pub fn block_state_from_section(
@@ -514,6 +629,91 @@ mod tests {
         assert!(chunks.replace_biomes(pos, &payload[..1]).is_err());
         payload.push(0);
         assert!(chunks.replace_biomes(pos, &payload).is_err());
+    }
+
+    #[test]
+    fn absent_client_heightmaps_are_primed_from_exact_java_predicates() {
+        let _protocol = super::super::block::test_protocol_guard();
+        super::super::block::init("26.2");
+        let pos = ChunkPos::new(0, 0);
+        let mut chunks = ChunkStore::new_with_dimension(2, 32, -16);
+        let mut loaded = Chunk::default();
+        loaded.sections = vec![Default::default(); chunks.section_count() as usize].into();
+        chunks
+            .partial_storage
+            .set(&pos, Some(loaded), &mut chunks.chunk_storage);
+
+        let stone = super::super::block::first_state_of("stone").unwrap();
+        let water = super::super::block::first_state_of("water").unwrap();
+        let leaves = super::super::block::first_state_of("oak_leaves").unwrap();
+        let non_solid = super::super::block::first_state_of("redstone_wire").unwrap();
+        assert!(super::super::block::is_leaves_block(leaves));
+        assert!(!super::super::block::blocks_motion(non_solid));
+        chunks.set_block_state(3, -8, 4, stone);
+        chunks.set_block_state(3, -4, 4, water);
+        chunks.set_block_state(3, 0, 4, non_solid);
+        chunks.set_block_state(3, 2, 4, leaves);
+
+        // Each missing CLIENT map is primed from its own Java predicate:
+        // surface sees leaves; no-leaves excludes LeavesBlock but still sees water.
+        assert_eq!(
+            chunks.heightmap_height(HeightmapKind::WorldSurface, 3, 4),
+            Some(3)
+        );
+        assert_eq!(
+            chunks.heightmap_height(HeightmapKind::MotionBlockingNoLeaves, 3, 4),
+            Some(-3)
+        );
+        // NOT_AIR includes redstone wire even though it neither blocks motion nor
+        // contains fluid.
+        chunks.set_block_state(6, 0, 6, non_solid);
+        assert_eq!(
+            chunks.heightmap_height(HeightmapKind::WorldSurface, 6, 6),
+            Some(1)
+        );
+        assert_eq!(
+            chunks.heightmap_height(HeightmapKind::MotionBlockingNoLeaves, 6, 6),
+            Some(-16)
+        );
+
+        // A subsequently received map of the same kind replaces the derived cache.
+        let mut surface = azalea_world::heightmap::Heightmap::new(
+            HeightmapKind::WorldSurface,
+            chunks.height(),
+            chunks.min_y(),
+            vec![0; 26].into_boxed_slice(),
+        );
+        surface.set_height(3, 4, 12);
+        let chunk = chunks.get_chunk(&pos).unwrap();
+        chunk
+            .write()
+            .heightmaps
+            .insert(HeightmapKind::WorldSurface, surface);
+        assert_eq!(
+            chunks.heightmap_height(HeightmapKind::WorldSurface, 3, 4),
+            Some(12)
+        );
+
+        // Empty columns retain negative minY; derived maps are updated after a block
+        // write.
+        assert_eq!(
+            chunks.heightmap_height(HeightmapKind::WorldSurface, 5, 5),
+            Some(-16)
+        );
+        assert_eq!(
+            chunks.heightmap_height(HeightmapKind::MotionBlockingNoLeaves, 5, 5),
+            Some(-16)
+        );
+        chunks.set_block_state(3, 5, 4, stone);
+        assert_eq!(
+            chunks.heightmap_height(HeightmapKind::MotionBlockingNoLeaves, 3, 4),
+            Some(6)
+        );
+        let unloaded = ChunkStore::new(2);
+        assert_eq!(
+            unloaded.heightmap_height(HeightmapKind::MotionBlockingNoLeaves, 3, 4),
+            None
+        );
     }
 
     #[test]

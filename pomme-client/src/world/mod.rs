@@ -1,8 +1,11 @@
 pub mod block;
 pub mod block_entity;
 pub mod block_entity_anim;
+pub mod block_entity_particle;
 pub mod border;
 pub mod chunk;
+pub mod environment_particles;
 pub mod light;
 pub mod maps;
+pub mod particle_tick;
 pub mod waypoints;

@@ -374,6 +374,38 @@ struct StateDumpFile {
     /// `BlockBehaviour.hasCollision`; block-level, so uniform across each
     /// block's states.
     has_collision: Vec<u8>,
+    #[serde(default)]
+    map_color_rgb: Vec<u32>,
+    #[serde(default)]
+    falling_dust_rgb: Vec<u32>,
+    #[serde(default)]
+    is_falling_block: Vec<u8>,
+    #[serde(default)]
+    spawn_terrain_particles: Vec<u8>,
+    #[serde(default)]
+    render_shape_invisible: Vec<u8>,
+    #[serde(default)]
+    solid_render: Vec<u8>,
+    #[serde(default)]
+    blocks_motion: Vec<u8>,
+    #[serde(default)]
+    leaves_block: Vec<u8>,
+    #[serde(default)]
+    liquid_block_container: Vec<u8>,
+    #[serde(default)]
+    can_place_water: Vec<u8>,
+    #[serde(default)]
+    bonemeal_type: Vec<u8>,
+    #[serde(default)]
+    bonemeal_particle_offset: Vec<[i32; 3]>,
+    #[serde(default)]
+    collision_shape_full_block: Vec<u8>,
+    #[serde(default)]
+    can_be_replaced_by_water: Vec<u8>,
+    #[serde(default)]
+    dynamic_shape: Vec<u8>,
+    #[serde(default)]
+    shape_max_y_32nds: Vec<u8>,
     /// State id (as string) -> 6 face masks, 64 hex chars each, present
     /// exactly for states with `can_occlude && use_shape_for_light_occlusion`.
     face_masks: std::collections::HashMap<String, [String; 6]>,
@@ -939,6 +971,49 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
             return Err(format!("{key} has {len} entries, expected {n}").into());
         }
     }
+    for (key, len) in [
+        ("map_color_rgb", dump.map_color_rgb.len()),
+        ("falling_dust_rgb", dump.falling_dust_rgb.len()),
+        ("is_falling_block", dump.is_falling_block.len()),
+        (
+            "spawn_terrain_particles",
+            dump.spawn_terrain_particles.len(),
+        ),
+        ("render_shape_invisible", dump.render_shape_invisible.len()),
+        ("solid_render", dump.solid_render.len()),
+        ("blocks_motion", dump.blocks_motion.len()),
+        ("leaves_block", dump.leaves_block.len()),
+        ("liquid_block_container", dump.liquid_block_container.len()),
+        ("can_place_water", dump.can_place_water.len()),
+        ("bonemeal_type", dump.bonemeal_type.len()),
+        (
+            "bonemeal_particle_offset",
+            dump.bonemeal_particle_offset.len(),
+        ),
+        (
+            "collision_shape_full_block",
+            dump.collision_shape_full_block.len(),
+        ),
+        (
+            "can_be_replaced_by_water",
+            dump.can_be_replaced_by_water.len(),
+        ),
+        ("dynamic_shape", dump.dynamic_shape.len()),
+        ("shape_max_y_32nds", dump.shape_max_y_32nds.len()),
+    ] {
+        if len != 0 && len != n {
+            return Err(format!("{key} has {len} entries, expected {n}").into());
+        }
+    }
+    if !dump.is_falling_block.is_empty() && dump.falling_dust_rgb.is_empty() {
+        return Err("is_falling_block requires falling_dust_rgb state data".into());
+    }
+    if dump.bonemeal_type.is_empty() != dump.bonemeal_particle_offset.is_empty() {
+        return Err("bonemeal_type and bonemeal_particle_offset must be supplied together".into());
+    }
+    if dump.liquid_block_container.is_empty() != dump.can_place_water.is_empty() {
+        return Err("liquid_block_container and can_place_water must be supplied together".into());
+    }
     for i in 0..n {
         if dump.emission[i] > 15 || dump.dampening[i] > 15 {
             return Err(format!("state {i}: light value out of 0..=15 range").into());
@@ -955,6 +1030,68 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
             if v > 1 {
                 return Err(format!("state {i}: {key} is {v}, expected 0/1").into());
             }
+        }
+        for (key, values) in [
+            ("is_falling_block", &dump.is_falling_block),
+            ("spawn_terrain_particles", &dump.spawn_terrain_particles),
+            ("render_shape_invisible", &dump.render_shape_invisible),
+            ("solid_render", &dump.solid_render),
+            ("blocks_motion", &dump.blocks_motion),
+            ("leaves_block", &dump.leaves_block),
+            ("liquid_block_container", &dump.liquid_block_container),
+            ("can_place_water", &dump.can_place_water),
+            (
+                "collision_shape_full_block",
+                &dump.collision_shape_full_block,
+            ),
+            ("can_be_replaced_by_water", &dump.can_be_replaced_by_water),
+            ("dynamic_shape", &dump.dynamic_shape),
+        ] {
+            if !values.is_empty() && values[i] > 1 {
+                return Err(format!("state {i}: {key} is {}, expected 0/1", values[i]).into());
+            }
+        }
+        if !dump.shape_max_y_32nds.is_empty()
+            && dump.shape_max_y_32nds[i] > 64
+            && dump.shape_max_y_32nds[i] != 255
+        {
+            return Err(format!(
+                "state {i}: shape maxY {} exceeds block-height range",
+                dump.shape_max_y_32nds[i]
+            )
+            .into());
+        }
+        if !dump.bonemeal_type.is_empty() && dump.bonemeal_type[i] > 2 {
+            return Err(format!(
+                "state {i}: bonemeal_type is {}, expected 0..=2",
+                dump.bonemeal_type[i]
+            )
+            .into());
+        }
+        if !dump.bonemeal_particle_offset.is_empty()
+            && dump.bonemeal_particle_offset[i]
+                .iter()
+                .any(|offset| !(-1..=1).contains(offset))
+        {
+            return Err(format!(
+                "state {i}: bonemeal particle position is not an adjacent block offset"
+            )
+            .into());
+        }
+        if !dump.bonemeal_type.is_empty()
+            && dump.bonemeal_type[i] == 0
+            && dump.bonemeal_particle_offset[i] != [0, 0, 0]
+        {
+            return Err(format!(
+                "state {i}: non-bonemealable block has a particle-position offset"
+            )
+            .into());
+        }
+        if !dump.map_color_rgb.is_empty() && dump.map_color_rgb[i] > 0x00ff_ffff {
+            return Err(format!("state {i}: map color is not RGB24").into());
+        }
+        if !dump.falling_dust_rgb.is_empty() && dump.falling_dust_rgb[i] > 0x00ff_ffff {
+            return Err(format!("state {i}: falling dust color is not RGB24").into());
         }
     }
 
@@ -1037,6 +1174,121 @@ fn gen_state(dump_path: &str, blocks_path: &str, out_path: &str) -> Result<(), E
             return Err(format!("{}: has_collision varies across states", block.name).into());
         }
         write!(line, ", \"c\": {}", collision[0])?;
+        if !dump.map_color_rgb.is_empty() {
+            write!(
+                line,
+                ", \"m\": {}",
+                scalar_or_array_u32(&dump.map_color_rgb[range.clone()])?
+            )?;
+        }
+        if !dump.spawn_terrain_particles.is_empty() {
+            write!(
+                line,
+                ", \"s\": {}",
+                scalar_or_array(&dump.spawn_terrain_particles[range.clone()])?
+            )?;
+        }
+        if !dump.render_shape_invisible.is_empty() {
+            write!(
+                line,
+                ", \"r\": {}",
+                scalar_or_array(&dump.render_shape_invisible[range.clone()])?
+            )?;
+        }
+        if !dump.solid_render.is_empty() {
+            write!(
+                line,
+                ", \"t\": {}",
+                scalar_or_array(&dump.solid_render[range.clone()])?
+            )?;
+        }
+        if !dump.blocks_motion.is_empty() {
+            write!(
+                line,
+                ", \"v\": {}",
+                scalar_or_array(&dump.blocks_motion[range.clone()])?
+            )?;
+        }
+        if !dump.leaves_block.is_empty() {
+            write!(
+                line,
+                ", \"l\": {}",
+                scalar_or_array(&dump.leaves_block[range.clone()])?
+            )?;
+        }
+        if !dump.liquid_block_container.is_empty() {
+            let container = &dump.liquid_block_container[range.clone()];
+            if container.iter().any(|&value| value != container[0]) {
+                return Err(format!(
+                    "{}: LiquidBlockContainer membership varies across states",
+                    block.name
+                )
+                .into());
+            }
+            if container[0] != 0 {
+                write!(line, ", \"k\": 1")?;
+                write!(
+                    line,
+                    ", \"n\": {}",
+                    scalar_or_array(&dump.can_place_water[range.clone()])?
+                )?;
+            }
+        }
+        if !dump.bonemeal_type.is_empty() {
+            write!(
+                line,
+                ", \"b\": {}",
+                scalar_or_array(&dump.bonemeal_type[range.clone()])?
+            )?;
+            write!(
+                line,
+                ", \"g\": {}",
+                scalar_or_array_offset(&dump.bonemeal_particle_offset[range.clone()])?
+            )?;
+        }
+        if !dump.collision_shape_full_block.is_empty() {
+            write!(
+                line,
+                ", \"h\": {}",
+                scalar_or_array(&dump.collision_shape_full_block[range.clone()])?
+            )?;
+        }
+        if !dump.can_be_replaced_by_water.is_empty() {
+            write!(
+                line,
+                ", \"w\": {}",
+                scalar_or_array(&dump.can_be_replaced_by_water[range.clone()])?
+            )?;
+        }
+        if !dump.dynamic_shape.is_empty() {
+            write!(
+                line,
+                ", \"i\": {}",
+                scalar_or_array(&dump.dynamic_shape[range.clone()])?
+            )?;
+        }
+        if !dump.shape_max_y_32nds.is_empty() {
+            write!(
+                line,
+                ", \"j\": {}",
+                scalar_or_array(&dump.shape_max_y_32nds[range.clone()])?
+            )?;
+        }
+        if !dump.is_falling_block.is_empty() {
+            let falling = &dump.is_falling_block[range.clone()];
+            if falling.iter().any(|&value| value != falling[0]) {
+                return Err(
+                    format!("{}: is_falling_block varies across states", block.name).into(),
+                );
+            }
+            if falling[0] == 1 {
+                write!(
+                    line,
+                    ", \"q\": {}",
+                    scalar_or_array_u32(&dump.falling_dust_rgb[range.clone()])?
+                )?;
+            }
+        }
         let masks = &state_masks[range];
         if masks.iter().any(Option::is_some) {
             if masks.iter().all(|m| *m == masks[0]) {
@@ -1077,6 +1329,50 @@ fn scalar_or_array(values: &[u8]) -> Result<String, Error> {
         Ok(first.to_string())
     } else {
         Ok(serde_json::to_string(values)?)
+    }
+}
+
+fn scalar_or_array_offset(values: &[[i32; 3]]) -> Result<String, Error> {
+    let first = *values.first().ok_or("block with zero states")?;
+    if values.iter().all(|&v| v == first) {
+        Ok(serde_json::to_string(&first)?)
+    } else {
+        Ok(serde_json::to_string(values)?)
+    }
+}
+
+fn scalar_or_array_u32(values: &[u32]) -> Result<String, Error> {
+    let first = *values.first().ok_or("block with zero states")?;
+    if values.iter().all(|&v| v == first) {
+        Ok(first.to_string())
+    } else {
+        Ok(serde_json::to_string(values)?)
+    }
+}
+
+#[cfg(test)]
+mod particle_state_metadata_tests {
+    use super::{scalar_or_array_offset, scalar_or_array_u32};
+
+    #[test]
+    fn rgb_state_metadata_compacts_only_uniform_values() {
+        assert_eq!(
+            scalar_or_array_u32(&[0x707070, 0x707070]).unwrap(),
+            "7368816"
+        );
+        assert_eq!(scalar_or_array_u32(&[0, 0x707070]).unwrap(), "[0,7368816]");
+    }
+
+    #[test]
+    fn bonemeal_offsets_compact_class_defaults_without_losing_per_state_values() {
+        assert_eq!(
+            scalar_or_array_offset(&[[0, 1, 0], [0, 1, 0]]).unwrap(),
+            "[0,1,0]"
+        );
+        assert_eq!(
+            scalar_or_array_offset(&[[0, -1, 0], [0, 0, 0]]).unwrap(),
+            "[[0,-1,0],[0,0,0]]"
+        );
     }
 }
 

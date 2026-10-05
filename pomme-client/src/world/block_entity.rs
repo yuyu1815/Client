@@ -44,8 +44,162 @@ pub struct StoredBlockEntity {
     pub decorated_pot_sherds: [String; 4],
     pub pot_wobble: Option<(u64, bool)>,
     pub bell_swing: Option<BellSwing>,
+    pub bell_resonance: Option<BellResonanceState>,
     pub book: Option<EnchantingBookState>,
     pub player_head_profile_source: Option<PlayerHeadProfileSource>,
+    pub spawner_visual: Option<SpawnerVisualState>,
+    pub vault_visual: Option<VaultVisualState>,
+    pub conduit_visual: Option<ConduitVisualState>,
+    pub potent_sulfur_visual: Option<PotentSulfurVisualState>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PotentSulfurVisualState {
+    /// Java's `eruptionTick`: initialized when the client BE is attached and
+    /// reset by the block's activation `BlockEvent` (not serialized in NBT).
+    pub eruption_tick: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ConduitVisualState {
+    pub tick_count: u32,
+    pub effect_blocks: Vec<BlockPos>,
+    pub target_uuid: Option<uuid::Uuid>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VaultVisualState {
+    pub has_display_item: bool,
+    pub connected_players: Vec<uuid::Uuid>,
+    pub connected_particles_range: f64,
+}
+
+fn vault_visual(nbt: &NbtCompound) -> VaultVisualState {
+    use simdnbt::owned::{NbtList, NbtTag};
+
+    let shared = nbt.get("shared_data").and_then(|tag| match tag {
+        NbtTag::Compound(data) => Some(data),
+        _ => None,
+    });
+    let has_display_item = shared
+        .and_then(|data| data.get("display_item"))
+        .and_then(|tag| match tag {
+            NbtTag::Compound(item) => Some(item),
+            _ => None,
+        })
+        .is_some_and(|item| {
+            item.string("id").is_some_and(|id| !id.to_str().is_empty())
+                && item.int("count").unwrap_or(1) > 0
+        });
+    let connected_players = shared
+        .and_then(|data| data.get("connected_players"))
+        .and_then(|tag| match tag {
+            NbtTag::List(NbtList::IntArray(items)) => Some(
+                items
+                    .iter()
+                    .filter_map(|ints| uuid_from_ints(ints))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    VaultVisualState {
+        has_display_item,
+        connected_players,
+        connected_particles_range: shared
+            .and_then(|data| data.double("connected_particles_range"))
+            .unwrap_or(4.5),
+    }
+}
+
+fn uuid_from_ints(ints: &[i32]) -> Option<uuid::Uuid> {
+    if ints.len() != 4 {
+        return None;
+    }
+    let mut bytes = [0; 16];
+    for (chunk, value) in bytes.chunks_exact_mut(4).zip(ints) {
+        chunk.copy_from_slice(&value.to_be_bytes());
+    }
+    Some(uuid::Uuid::from_bytes(bytes))
+}
+
+fn conduit_target_uuid(nbt: &NbtCompound) -> Option<uuid::Uuid> {
+    use simdnbt::owned::NbtTag;
+    nbt.get("Target").and_then(|tag| match tag {
+        NbtTag::IntArray(ints) => uuid_from_ints(ints),
+        _ => None,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpawnerVisualState {
+    pub spawn_delay: i32,
+    pub required_player_range: i32,
+    pub has_display_entity: bool,
+}
+
+fn spawner_visual(nbt: &NbtCompound) -> SpawnerVisualState {
+    use simdnbt::owned::NbtTag;
+
+    let entity_has_id = |spawn_data: &NbtCompound| {
+        spawn_data
+            .get("entity")
+            .and_then(|tag| match tag {
+                NbtTag::Compound(entity) => entity.string("id"),
+                _ => None,
+            })
+            .is_some_and(|id| {
+                let id = id.to_str();
+                id.strip_prefix("minecraft:").is_some_and(|name| {
+                    pomme_protocol::RegistryTable::native()
+                        .id_of(pomme_protocol::ClientRegistry::EntityType, name)
+                        .is_some()
+                })
+            })
+    };
+    let spawn_data = nbt.get("SpawnData").and_then(|tag| match tag {
+        NbtTag::Compound(data) => Some(data),
+        _ => None,
+    });
+    let has_display_entity = spawn_data.map_or_else(
+        || {
+            nbt.get("SpawnPotentials")
+                .and_then(|tag| match tag {
+                    NbtTag::List(simdnbt::owned::NbtList::Compound(entries)) => Some(entries),
+                    _ => None,
+                })
+                .is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry
+                            .get("data")
+                            .and_then(|tag| match tag {
+                                NbtTag::Compound(data) => Some(data),
+                                _ => None,
+                            })
+                            .is_some_and(entity_has_id)
+                    })
+                })
+        },
+        entity_has_id,
+    );
+    SpawnerVisualState {
+        spawn_delay: nbt.short("Delay").map(i32::from).unwrap_or(20),
+        required_player_range: nbt
+            .short("RequiredPlayerRange")
+            .map(i32::from)
+            .or_else(|| nbt.int("RequiredPlayerRange"))
+            .unwrap_or(16),
+        has_display_entity,
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BellResonanceState {
+    pub nearby_entities: Option<Vec<i32>>,
+    pub local_player_uuid: Option<uuid::Uuid>,
+    pub last_ring_timestamp: i64,
+    pub resonating: bool,
+    pub resonation_ticks: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -197,9 +351,18 @@ impl StoredBlockEntity {
                 direction: 0,
                 shaking: false,
             }),
+            bell_resonance: (kind == BlockEntityKind::Bell).then(BellResonanceState::default),
             book: (kind == BlockEntityKind::EnchantingTable).then(EnchantingBookState::default),
             player_head_profile_source: (kind == BlockEntityKind::Skull)
                 .then(|| player_head_profile_source(&nbt)),
+            spawner_visual: (kind == BlockEntityKind::MobSpawner).then(|| spawner_visual(&nbt)),
+            vault_visual: (kind == BlockEntityKind::Vault).then(|| vault_visual(&nbt)),
+            conduit_visual: (kind == BlockEntityKind::Conduit).then(|| ConduitVisualState {
+                target_uuid: conduit_target_uuid(&nbt),
+                ..ConduitVisualState::default()
+            }),
+            potent_sulfur_visual: (kind == BlockEntityKind::PotentSulfur)
+                .then(PotentSulfurVisualState::default),
             nbt,
         }
     }
@@ -239,6 +402,12 @@ impl StoredBlockEntity {
             .unwrap_or_else(default_pot_sherds);
         self.player_head_profile_source =
             (self.kind == BlockEntityKind::Skull).then(|| player_head_profile_source(&nbt));
+        self.spawner_visual =
+            (self.kind == BlockEntityKind::MobSpawner).then(|| spawner_visual(&nbt));
+        self.vault_visual = (self.kind == BlockEntityKind::Vault).then(|| vault_visual(&nbt));
+        if let Some(conduit) = self.conduit_visual.as_mut() {
+            conduit.target_uuid = conduit_target_uuid(&nbt);
+        }
         self.nbt = nbt;
     }
 }
@@ -722,10 +891,13 @@ pub fn sync_block_entity(
     state: BlockState,
 ) {
     let id = crate::world::block::block_id(state);
-    let kind = if id.ends_with("_hanging_sign") {
-        Some(BlockEntityKind::HangingSign)
-    } else {
-        rendered_kind(id)
+    let kind = match id {
+        "spawner" => Some(BlockEntityKind::MobSpawner),
+        "trial_spawner" => Some(BlockEntityKind::TrialSpawner),
+        "vault" => Some(BlockEntityKind::Vault),
+        "potent_sulfur" => Some(BlockEntityKind::PotentSulfur),
+        _ if id.ends_with("_hanging_sign") => Some(BlockEntityKind::HangingSign),
+        _ => rendered_kind(id),
     };
     if let Some(kind) = kind {
         if map.get(&pos).is_none_or(|e| e.kind != kind) {
@@ -791,7 +963,7 @@ pub fn is_block_entity_block(name: &str) -> bool {
         | "waxed_oxidized_copper_golem_statue"
         // Misc block entities
         | "conduit" | "decorated_pot" | "end_portal" | "end_gateway"
-        | "beacon" | "spawner" | "trial_spawner" | "vault"
+        | "beacon" | "spawner" | "trial_spawner" | "vault" | "potent_sulfur"
         | "brewing_stand" | "lectern" | "campfire" | "soul_campfire"
         | "beehive" | "bee_nest" | "bell" | "suspicious_sand" | "suspicious_gravel"
         | "crafter"
@@ -939,6 +1111,113 @@ mod tests {
 
         entity.update_nbt(NbtCompound::new());
         assert_eq!(entity.campfire_slots, [false; 4]);
+    }
+
+    #[test]
+    fn vault_visual_state_parses_display_item_connected_players_and_range() {
+        use simdnbt::owned::NbtList;
+
+        let uuid = uuid::Uuid::from_u64_pair(0x0123_4567_89AB_CDEF, 0xFEDC_BA98_7654_3210);
+        let ints = uuid
+            .as_bytes()
+            .chunks_exact(4)
+            .map(|chunk| i32::from_be_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        let mut item = NbtCompound::new();
+        item.insert("id", "minecraft:trial_key");
+        item.insert("count", 1i32);
+        let mut shared = NbtCompound::new();
+        shared.insert("display_item", item);
+        shared.insert("connected_players", NbtList::IntArray(vec![ints]));
+        shared.insert("connected_particles_range", 8.5f64);
+        let mut nbt = NbtCompound::new();
+        nbt.insert("shared_data", shared);
+        assert_eq!(
+            vault_visual(&nbt),
+            VaultVisualState {
+                has_display_item: true,
+                connected_players: vec![uuid],
+                connected_particles_range: 8.5,
+            }
+        );
+        assert_eq!(
+            vault_visual(&NbtCompound::new()),
+            VaultVisualState {
+                has_display_item: false,
+                connected_players: Vec::new(),
+                connected_particles_range: 4.5,
+            }
+        );
+    }
+
+    #[test]
+    fn spawner_visual_state_parses_display_entity_and_delay_from_nbt() {
+        let mut entity_tag = NbtCompound::new();
+        entity_tag.insert("id", "minecraft:zombie");
+        let mut spawn_data = NbtCompound::new();
+        spawn_data.insert("entity", entity_tag);
+        let mut nbt = NbtCompound::new();
+        nbt.insert("Delay", 42i16);
+        nbt.insert("SpawnData", spawn_data);
+        let entity = StoredBlockEntity::new(BlockEntityKind::MobSpawner, nbt);
+        assert_eq!(
+            entity.spawner_visual,
+            Some(SpawnerVisualState {
+                spawn_delay: 42,
+                required_player_range: 16,
+                has_display_entity: true,
+            })
+        );
+        let mut potential_entity = NbtCompound::new();
+        potential_entity.insert("id", "minecraft:pig");
+        let mut potential_data = NbtCompound::new();
+        potential_data.insert("entity", potential_entity);
+        let mut potential = NbtCompound::new();
+        potential.insert("data", potential_data);
+        potential.insert("weight", 1i32);
+        let mut potentials_nbt = NbtCompound::new();
+        potentials_nbt.insert(
+            "SpawnPotentials",
+            simdnbt::owned::NbtList::Compound(vec![potential]),
+        );
+        assert!(spawner_visual(&potentials_nbt).has_display_entity);
+        let mut unregistered_entity = NbtCompound::new();
+        unregistered_entity.insert("id", "mod:missing_entity");
+        let mut invalid_data = NbtCompound::new();
+        invalid_data.insert("entity", unregistered_entity);
+        let mut invalid_nbt = NbtCompound::new();
+        invalid_nbt.insert("SpawnData", invalid_data);
+        assert!(!spawner_visual(&invalid_nbt).has_display_entity);
+        let mut entity = entity;
+        entity.update_nbt(NbtCompound::new());
+        assert_eq!(
+            entity.spawner_visual,
+            Some(SpawnerVisualState {
+                spawn_delay: 20,
+                required_player_range: 16,
+                has_display_entity: false,
+            })
+        );
+    }
+
+    #[test]
+    fn conduit_target_reference_is_decoded_as_java_uuid_int_array() {
+        let uuid = uuid::Uuid::from_u64_pair(0x0123_4567_89AB_CDEF, 0xFEDC_BA98_7654_3210);
+        let ints = uuid
+            .as_bytes()
+            .chunks_exact(4)
+            .map(|chunk| i32::from_be_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        let mut nbt = NbtCompound::new();
+        nbt.insert("Target", simdnbt::owned::NbtTag::IntArray(ints));
+        let conduit = StoredBlockEntity::new(BlockEntityKind::Conduit, nbt);
+        assert_eq!(
+            conduit.conduit_visual.as_ref().unwrap().target_uuid,
+            Some(uuid)
+        );
+        let mut conduit = conduit;
+        conduit.update_nbt(NbtCompound::new());
+        assert_eq!(conduit.conduit_visual.unwrap().target_uuid, None);
     }
 
     #[test]
@@ -1315,6 +1594,34 @@ mod tests {
             assert!(entries[&pos].sign_front.is_some());
         }
         assert!(is_block_entity_block("oak_sign"));
+    }
+
+    #[test]
+    fn client_ticked_particle_sources_get_block_entity_entries_on_block_updates() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let mut entries = HashMap::new();
+        let pos = BlockPos::new(3, 64, 5);
+        for (block, kind) in [
+            ("spawner", BlockEntityKind::MobSpawner),
+            ("trial_spawner", BlockEntityKind::TrialSpawner),
+            ("vault", BlockEntityKind::Vault),
+            ("potent_sulfur", BlockEntityKind::PotentSulfur),
+        ] {
+            sync_block_entity(
+                &mut entries,
+                pos,
+                crate::world::block::first_state_of(block).unwrap(),
+            );
+            assert_eq!(entries[&pos].kind, kind, "{block}");
+            assert!(is_block_entity_block(block));
+        }
+        sync_block_entity(
+            &mut entries,
+            pos,
+            crate::world::block::first_state_of("stone").unwrap(),
+        );
+        assert!(!entries.contains_key(&pos));
     }
 
     #[test]

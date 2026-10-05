@@ -749,6 +749,8 @@ pub struct BakedItemModels {
     /// Resolved `particle` material (or generated item's `layer0`), not a mesh
     /// quad.
     pub particle_icons: HashMap<String, String>,
+    pub item_definitions: HashMap<String, serde_json::Value>,
+    pub model_particle_icons: HashMap<String, Vec<Option<String>>>,
     pub flat_tints: HashMap<String, ItemTint>,
     pub ground_transforms: HashMap<String, Mat4>,
     pub fixed_transforms: HashMap<String, Mat4>,
@@ -845,6 +847,7 @@ pub fn bake_item_models(
     let mut ground_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut fixed_transforms: HashMap<String, Mat4> = HashMap::new();
     let mut model_cache: HashMap<String, ModelFile> = HashMap::new();
+    let mut item_definitions = HashMap::new();
     let item_names = item_definition_names(jar_assets_dir, asset_index, packs);
 
     for item_name in &item_names {
@@ -859,6 +862,18 @@ pub fn bake_item_models(
             continue;
         };
 
+        item_definitions.insert(item_name.to_string(), json.clone());
+        let mut model_ids = Vec::new();
+        collect_item_model_ids(&json, &mut model_ids);
+        for model_id in model_ids {
+            let _ = resolve_model(
+                &model_id,
+                jar_assets_dir,
+                asset_index,
+                &mut model_cache,
+                packs,
+            );
+        }
         let parts = collect_model_parts(&json);
         if parts.is_empty() {
             continue;
@@ -1244,11 +1259,24 @@ pub fn bake_item_models(
         flat_keys.len(),
         flat_item_textures.len()
     );
+    let model_particle_icons = model_cache
+        .iter()
+        .filter_map(|(name, model)| {
+            let material = if model.elements.is_empty() {
+                model.textures.get("layer0")
+            } else {
+                model.textures.get("particle")
+            }?;
+            Some((name.clone(), vec![Some(texture_to_name(material)?)]))
+        })
+        .collect();
     BakedItemModels {
         models: item_models,
         generated_textures: flat_item_textures,
         flat_texture_keys: flat_keys,
         particle_icons,
+        item_definitions,
+        model_particle_icons,
         flat_tints,
         ground_transforms,
         fixed_transforms,
@@ -1765,6 +1793,39 @@ fn item_definition_is_static(json: &serde_json::Value) -> bool {
 /// (vanilla `CompositeModel.Unbaked.bake`); anything else keeps the old
 /// first-model-string heuristic, which for select/condition trees picks one
 /// representative state.
+fn collect_item_model_ids(node: &serde_json::Value, ids: &mut Vec<String>) {
+    if node
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| strip_mc_prefix(kind) == "special")
+        && let Some(base) = node.get("base").and_then(serde_json::Value::as_str)
+    {
+        ids.push(strip_mc_prefix(base).to_string());
+    }
+    if node
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| strip_mc_prefix(kind) == "model")
+        && let Some(model) = node.get("model").and_then(serde_json::Value::as_str)
+    {
+        ids.push(strip_mc_prefix(model).to_string());
+        return;
+    }
+    match node {
+        serde_json::Value::Object(fields) => {
+            for value in fields.values() {
+                collect_item_model_ids(value, ids);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_item_model_ids(value, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_model_parts(json: &serde_json::Value) -> Vec<ModelPart> {
     let mut parts = Vec::new();
     if let Some(node) = json.get("model") {
@@ -4035,6 +4096,18 @@ mod tests {
         );
         assert_eq!(baked.models["test_block"].quads[0].texture, "visible_face");
         assert!(!baked.particle_icons.contains_key("dynamic_item"));
+        assert_eq!(
+            baked.item_definitions["dynamic_item"]["model"]["property"],
+            "minecraft:custom_model_data"
+        );
+        assert_eq!(
+            baked.model_particle_icons.get("item/test_block"),
+            Some(&vec![Some("particle_only".into())])
+        );
+        assert_eq!(
+            baked.model_particle_icons.get("other:item/replacement"),
+            Some(&vec![Some("other:item/replacement".into())])
+        );
         let transform = baked.ground_transforms["test_item"];
         let origin = transform.transform_point3(Vec3::ZERO);
         assert!((origin - Vec3::new(0.0, 2.0 / 16.0, 0.0)).length() < 1.0e-6);

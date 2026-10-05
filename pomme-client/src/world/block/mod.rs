@@ -81,6 +81,12 @@ const BEDROCK_LIGHT: LightProps = LightProps {
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BonemealParticleType {
+    NeighborSpreader,
+    Grower,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FluidKind {
     Empty,
     Water,
@@ -139,6 +145,22 @@ struct BlockData {
     /// versions.
     max_horizontal_offset: f32,
     is_air: bool,
+    /// Vanilla particle-provider metadata, optional for pre-metadata generated
+    /// tables.
+    map_color_rgb: Option<u32>,
+    falling_dust_rgb: Option<u32>,
+    spawn_terrain_particles: Option<bool>,
+    render_shape_invisible: Option<bool>,
+    solid_render: Option<bool>,
+    is_leaves_block: bool,
+    liquid_block_container: Option<bool>,
+    can_place_liquid_water: Option<bool>,
+    bonemeal_type: Option<u8>,
+    bonemeal_particle_offset: [i32; 3],
+    collision_shape_full_block: Option<bool>,
+    can_be_replaced_by_water: Option<bool>,
+    dynamic_shape: bool,
+    shape_max_y_32nds: Option<u8>,
     /// Vanilla `hasCollision` (`BlockBehaviour.Properties.noCollision()`).
     collides: bool,
     /// Approximate `BlockStateBase.blocksMotion`: legacy solidity, except
@@ -223,6 +245,47 @@ struct StateEntry {
     c: u8,
     #[serde(default)]
     f: Option<serde_json::Value>,
+    #[serde(default)]
+    m: Option<ScalarOrPerStateU32>,
+    #[serde(default)]
+    q: Option<ScalarOrPerStateU32>,
+    #[serde(default)]
+    s: Option<ScalarOrPerState>,
+    #[serde(default)]
+    r: Option<ScalarOrPerState>,
+    #[serde(default)]
+    t: Option<ScalarOrPerState>,
+    #[serde(default)]
+    v: Option<ScalarOrPerState>,
+    #[serde(default)]
+    l: Option<ScalarOrPerState>,
+    /// Exact Java `block instanceof LiquidBlockContainer` type identity.
+    #[serde(default)]
+    k: Option<ScalarOrPerState>,
+    /// Java `LiquidBlockContainer.canPlaceLiquid(null, ..., Fluids.WATER)`.
+    #[serde(default)]
+    n: Option<ScalarOrPerState>,
+    /// Exact Java `BonemealableBlock.Type`: 0 not bonemealable, 1 spreader, 2
+    /// grower.
+    #[serde(default)]
+    b: Option<ScalarOrPerState>,
+    /// Exact `getParticlePos(BlockPos.ZERO)` offset, uniform tuple or per-state
+    /// tuples.
+    #[serde(default)]
+    g: Option<ScalarOrPerStateOffset>,
+    /// Java `isCollisionShapeFullBlock(EmptyBlockGetter, ZERO)`; exact shape
+    /// union.
+    #[serde(default)]
+    h: Option<ScalarOrPerState>,
+    /// Exact Java `BlockState.canBeReplaced(Fluids.WATER)` result.
+    #[serde(default)]
+    w: Option<ScalarOrPerState>,
+    #[serde(default)]
+    i: Option<ScalarOrPerState>,
+    /// `getShape(EmptyBlockGetter, ZERO).max(Y)` in thirty-seconds; 255 is
+    /// empty.
+    #[serde(default)]
+    j: Option<ScalarOrPerState>,
 }
 
 #[derive(serde::Deserialize)]
@@ -230,6 +293,38 @@ struct StateEntry {
 enum ScalarOrPerState {
     One(u8),
     Many(Vec<u8>),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ScalarOrPerStateOffset {
+    One([i32; 3]),
+    Many(Vec<[i32; 3]>),
+}
+
+impl ScalarOrPerStateOffset {
+    fn get(&self, offset: usize) -> [i32; 3] {
+        match self {
+            Self::One(v) => *v,
+            Self::Many(vs) => vs[offset],
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ScalarOrPerStateU32 {
+    One(u32),
+    Many(Vec<u32>),
+}
+
+impl ScalarOrPerStateU32 {
+    fn get(&self, offset: usize) -> u32 {
+        match self {
+            Self::One(v) => *v,
+            Self::Many(vs) => vs[offset],
+        }
+    }
 }
 
 impl ScalarOrPerState {
@@ -374,6 +469,14 @@ pub fn prewarm_protocol(protocol: i32) -> usize {
     let slot = block_data_slot(protocol).unwrap_or(NATIVE_SLOT);
     BLOCK_TABLES[slot].get_or_init(|| build_table(&BLOCK_DATA[slot]));
     slot
+}
+
+/// Resolve a protocol's block registry entry index to its identity using the
+/// same versioned generated block table used for that protocol's states.
+pub fn block_name_for_registry_id(protocol: i32, id: u32) -> Option<String> {
+    let slot = block_data_slot(protocol)?;
+    let file: BlockFile = serde_json::from_str(BLOCK_DATA[slot].blocks).ok()?;
+    file.blocks.get(id as usize).map(|entry| entry.name.clone())
 }
 
 /// The `BLOCK_DATA` slot serving a protocol, through `SHARED_BLOCK_DATA`.
@@ -679,8 +782,49 @@ fn build_table(data: &EmbeddedBlocks) -> Vec<BlockData> {
                 outline,
                 max_horizontal_offset,
                 is_air,
+                map_color_rgb: state_entry.m.as_ref().map(|v| v.get(offset as usize)),
+                falling_dust_rgb: state_entry.q.as_ref().map(|v| v.get(offset as usize)),
+                spawn_terrain_particles: state_entry
+                    .s
+                    .as_ref()
+                    .map(|v| v.get(offset as usize) != 0),
+                render_shape_invisible: state_entry.r.as_ref().map(|v| v.get(offset as usize) != 0),
+                solid_render: state_entry.t.as_ref().map(|v| v.get(offset as usize) != 0),
+                is_leaves_block: state_entry
+                    .l
+                    .as_ref()
+                    .is_some_and(|v| v.get(offset as usize) != 0),
+                liquid_block_container: state_entry.k.as_ref().map(|v| v.get(offset as usize) != 0),
+                can_place_liquid_water: state_entry.n.as_ref().map(|v| v.get(offset as usize) != 0),
+                bonemeal_type: state_entry
+                    .b
+                    .as_ref()
+                    .map(|v| v.get(offset as usize))
+                    .filter(|&kind| kind != 0),
+                bonemeal_particle_offset: state_entry
+                    .g
+                    .as_ref()
+                    .map(|v| v.get(offset as usize))
+                    .unwrap_or([0, 0, 0]),
+                collision_shape_full_block: state_entry
+                    .h
+                    .as_ref()
+                    .map(|v| v.get(offset as usize) != 0),
+                can_be_replaced_by_water: state_entry
+                    .w
+                    .as_ref()
+                    .map(|v| v.get(offset as usize) != 0),
+                dynamic_shape: state_entry
+                    .i
+                    .as_ref()
+                    .is_some_and(|v| v.get(offset as usize) != 0),
+                shape_max_y_32nds: state_entry.j.as_ref().map(|v| v.get(offset as usize)),
                 collides,
-                blocks_motion,
+                blocks_motion: state_entry
+                    .v
+                    .as_ref()
+                    .map(|v| v.get(offset as usize) != 0)
+                    .unwrap_or(blocks_motion),
                 replaceable: registry::block_is_replaceable(name),
                 fluid,
                 light,
@@ -785,6 +929,20 @@ fn block_data(state: BlockState) -> &'static BlockData {
         outline: None,
         max_horizontal_offset: 0.0,
         is_air: false,
+        map_color_rgb: None,
+        falling_dust_rgb: None,
+        spawn_terrain_particles: None,
+        render_shape_invisible: None,
+        solid_render: None,
+        is_leaves_block: false,
+        liquid_block_container: None,
+        can_place_liquid_water: None,
+        bonemeal_type: None,
+        bonemeal_particle_offset: [0, 0, 0],
+        collision_shape_full_block: None,
+        can_be_replaced_by_water: None,
+        dynamic_shape: false,
+        shape_max_y_32nds: None,
         collides: true,
         blocks_motion: true,
         replaceable: false,
@@ -971,6 +1129,118 @@ pub fn stem_rgb(state: BlockState) -> [f32; 3] {
     ]
 }
 
+/// Java BlockState provider filters backed by BlockBehaviour/Block overrides.
+/// The 26.2 source has only barrier and structure_void opt out of terrain
+/// particles, while invisible render shapes are the named overrides below.
+pub fn should_spawn_terrain_particles(state: BlockState) -> bool {
+    block_data(state)
+        .spawn_terrain_particles
+        .unwrap_or_else(|| !matches!(block_data(state).id, "barrier" | "structure_void"))
+}
+
+/// Vanilla `BlockStateBase.isSolidRender`, when generated metadata is
+/// available.
+pub fn is_solid_render(state: BlockState) -> Option<bool> {
+    block_data(state).solid_render
+}
+
+/// Java 26.2 `state.getBlock() instanceof LeavesBlock`.
+pub fn is_leaves_block(state: BlockState) -> bool {
+    block_data(state).is_leaves_block
+}
+
+pub fn has_invisible_render_shape(state: BlockState) -> bool {
+    block_data(state).render_shape_invisible.unwrap_or_else(|| {
+        matches!(
+            block_data(state).id,
+            "air"
+                | "cave_air"
+                | "void_air"
+                | "barrier"
+                | "bubble_column"
+                | "water"
+                | "lava"
+                | "light"
+                | "end_portal"
+                | "end_gateway"
+                | "moving_piston"
+                | "structure_void"
+        )
+    })
+}
+
+/// Java 26.2 FallingDust provider's FallingBlock.getDustColor overrides.
+pub fn falling_block_dust_color(state: BlockState) -> Option<[u8; 3]> {
+    let data = block_data(state);
+    if let Some(rgb) = data.falling_dust_rgb {
+        return Some([(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
+    }
+    let name = data.id;
+    let rgb = match name {
+        "sand" => 14_406_560u32,            // SandBlock(new ColorRGBA(14406560))
+        "red_sand" => 11_098_145u32,        // SandBlock(new ColorRGBA(11098145))
+        "gravel" => (-8_356_741i32) as u32, // ColoredFallingBlock(new ColorRGBA(...))
+        "dragon_egg" => 0,                  // DragonEggBlock.getDustColor: -16777216
+        "concrete_powder" | "anvil" | "chipped_anvil" | "damaged_anvil" => {
+            return map_color_rgb(state);
+        }
+        _ => return None,
+    };
+    Some([(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8])
+}
+
+/// Java MapColor RGB for common static and dye-derived states. The source
+/// state dump currently does not include map colors; absent mappings are kept
+/// explicit rather than substituted with a terrain tint.
+pub fn map_color_rgb(state: BlockState) -> Option<[u8; 3]> {
+    let data = block_data(state);
+    if let Some(rgb) = data.map_color_rgb {
+        return Some([(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8]);
+    }
+    let name = data.id;
+    let color = match name {
+        "stone" | "andesite" | "polished_andesite" | "cobblestone" | "bedrock" | "iron_ore"
+        | "gold_ore" | "coal_ore" | "copper_ore" | "emerald_ore" | "lapis_ore" => 0x707070,
+        "granite" | "polished_granite" | "dirt" | "coarse_dirt" => 0x976D4D,
+        "diorite" | "polished_diorite" | "quartz_block" | "quartz_bricks" => 0xFFFCF5,
+        "grass_block" => 0x7FB238,
+        "sand" => 0xF7E9A3,
+        "red_sand" => 0xD87F33,
+        "gravel" => 0x707070,
+        "anvil" | "chipped_anvil" | "damaged_anvil" | "iron_block" => 0xA7A7A7,
+        "dragon_egg" => 0x191919,
+        "water" | "bubble_column" => 0x4040FF,
+        "lava" => 0xFF0000,
+        "snow_block" | "powder_snow" => 0xFFFFFF,
+        "wool" | "white_wool" => 0xC7C7C7,
+        _ => return dye_map_color(name.strip_suffix("_concrete_powder")?),
+    };
+    Some([(color >> 16) as u8, (color >> 8) as u8, color as u8])
+}
+
+fn dye_map_color(name: &str) -> Option<[u8; 3]> {
+    let c = match name {
+        "white" => 0xFFFFFF,
+        "orange" => 0xD87F33,
+        "magenta" => 0xB24CD8,
+        "light_blue" => 0x6699D8,
+        "yellow" => 0xE5E533,
+        "lime" => 0x7FCC19,
+        "pink" => 0xF27FA5,
+        "gray" => 0x4C4C4C,
+        "light_gray" => 0x999999,
+        "cyan" => 0x4C7F99,
+        "purple" => 0x7F3FB2,
+        "blue" => 0x334CB2,
+        "brown" => 0x664C33,
+        "green" => 0x667F33,
+        "red" => 0x993333,
+        "black" => 0x191919,
+        _ => return None,
+    };
+    Some([(c >> 16) as u8, (c >> 8) as u8, c as u8])
+}
+
 /// Vanilla `isAir`: includes cave and void air.
 pub fn is_air(state: BlockState) -> bool {
     block_data(state).is_air
@@ -985,6 +1255,72 @@ pub fn has_collision(state: BlockState) -> bool {
 /// caller.
 pub fn is_replaceable(state: BlockState) -> bool {
     block_data(state).replaceable
+}
+
+/// Java block type result used by `BucketItem.use`; `None` means this older
+/// version table predates the generated interface-membership metadata.
+pub fn liquid_block_container_type(state: BlockState) -> Option<bool> {
+    block_data(state).liquid_block_container
+}
+
+/// Exact Java block type check used by `BucketItem.use` before checking whether
+/// the current state accepts water.
+#[cfg(test)]
+pub fn is_liquid_block_container(state: BlockState) -> bool {
+    liquid_block_container_type(state).unwrap_or(false)
+}
+
+/// Java `LiquidBlockContainer.canPlaceLiquid(player, ..., Fluids.WATER)` for
+/// the native 26.2 simple-waterlogged blocks represented by registry state.
+pub fn can_place_water(state: BlockState, creative: bool) -> bool {
+    let data = block_data(state);
+    // BarrierBlock is the only LiquidBlockContainer implementation whose
+    // result depends on the caller; Java requires a creative Player.
+    if data.id == "barrier" {
+        return creative;
+    }
+    data.can_place_liquid_water.unwrap_or_else(|| {
+        // Compatibility fallback for state tables without native call results.
+        let properties = block_properties(state);
+        properties.get("waterlogged") == Some("false") && properties.get("type") != Some("double")
+    })
+}
+
+/// Java `BlockState.canBeReplaced(Fluids.WATER)`, including block overrides.
+pub fn can_be_replaced_by_water(state: BlockState) -> bool {
+    let data = block_data(state);
+    data.can_be_replaced_by_water.unwrap_or_else(|| {
+        // Legacy version tables predate this native per-state query.
+        if matches!(data.id, "end_portal" | "end_gateway") {
+            return false;
+        }
+        data.replaceable || !legacy_solid(state)
+    })
+}
+
+fn legacy_solid(state: BlockState) -> bool {
+    let data = block_data(state);
+    if data.dynamic_shape {
+        return false;
+    }
+    let Some(boxes) = data.shape.as_deref() else {
+        return data.collides;
+    };
+    let Some(first) = boxes.first() else {
+        return false;
+    };
+    let (mut min_x, mut min_y, mut min_z) = (first[0], first[1], first[2]);
+    let (mut max_x, mut max_y, mut max_z) = (first[3], first[4], first[5]);
+    for shape in &boxes[1..] {
+        min_x = min_x.min(shape[0]);
+        min_y = min_y.min(shape[1]);
+        min_z = min_z.min(shape[2]);
+        max_x = max_x.max(shape[3]);
+        max_y = max_y.max(shape[4]);
+        max_z = max_z.max(shape[5]);
+    }
+    let (x, y, z) = (max_x - min_x, max_y - min_y, max_z - min_z);
+    (x + y + z) / 3.0 >= 0.7291666666666666 || y >= 1.0
 }
 
 /// Fluid `FlowingFluid.getFlow` uses this independently of entity collision.
@@ -1038,12 +1374,283 @@ pub(crate) fn block_shape(state: BlockState) -> Option<&'static [LocalBox]> {
     block_data(state).shape.as_deref()
 }
 
+/// Java 26.2 `PotentSulfurBlockEntity.canBeReachedByNoxiousGas` and
+/// `isGeyserPassableBlock`, reduced to the collision/fluid data available here.
+/// Missing world data fails closed rather than treating an unloaded chunk as
+/// air.
+pub fn noxious_gas_reachable(
+    source: BlockPos,
+    target: DVec3,
+    mut block_at: impl FnMut(BlockPos) -> Option<BlockState>,
+) -> bool {
+    let target_pos = BlockPos::new(
+        target.x.floor() as i32,
+        target.y.floor() as i32,
+        target.z.floor() as i32,
+    );
+    if target.distance_squared(DVec3::new(
+        f64::from(source.x) + 0.5,
+        f64::from(source.y) + 0.5,
+        f64::from(source.z) + 0.5,
+    )) > 9.0
+    {
+        return false;
+    }
+    let Some(target_state) = block_at(target_pos) else {
+        return false;
+    };
+    if !noxious_gas_collision_empty(target_state, target_pos, Some(target_pos.y - 1)) {
+        return false;
+    }
+
+    let below = DVec3::new(target.x, target.y - 1.0, target.z);
+    let below_pos = BlockPos::new(
+        below.x.floor() as i32,
+        below.y.floor() as i32,
+        below.z.floor() as i32,
+    );
+    let Some(water_state) = block_at(below_pos) else {
+        return false;
+    };
+    let fluid = fluid(water_state);
+    if fluid.kind != FluidKind::Water || fluid.amount != 8 {
+        return false;
+    }
+
+    let start = DVec3::new(
+        f64::from(source.x) + 0.5,
+        f64::from(source.y) - 0.5,
+        f64::from(source.z) + 0.5,
+    );
+    noxious_gas_line_clear(start, below, &mut block_at)
+}
+
+/// `isGeyserPassableBlock` uses a position context; the LOS clip uses the
+/// empty context. Only scaffolding has a context-dependent collision shape in
+/// the supported block-shape model.
+pub fn noxious_gas_collision_empty(
+    state: BlockState,
+    pos: BlockPos,
+    context_y: Option<i32>,
+) -> bool {
+    let id = block_id(state);
+    if is_air(state) || id == "water" || id == "powder_snow" {
+        return true;
+    }
+    if !has_collision(state) {
+        return true;
+    }
+    if id == "scaffolding" {
+        let Some(y) = context_y else { return true };
+        let above_full = f64::from(y) > f64::from(pos.y) + 1.0 - 1.0e-5;
+        if above_full {
+            return false;
+        }
+        let above_below = f64::from(y) > f64::from(pos.y) - 1.0e-5;
+        let props = block_properties(state);
+        let distance = props
+            .get("distance")
+            .and_then(|v| v.parse::<u8>().ok())
+            .unwrap_or(0);
+        let bottom = props.get("bottom") == Some("true");
+        return !(distance != 0 && bottom && above_below);
+    }
+    block_shape(state).is_some_and(|shape| shape.is_empty())
+}
+
+fn noxious_gas_line_clear(
+    start: DVec3,
+    end: DVec3,
+    block_at: &mut impl FnMut(BlockPos) -> Option<BlockState>,
+) -> bool {
+    let min_x = start.x.min(end.x).floor() as i32;
+    let max_x = start.x.max(end.x).floor() as i32;
+    let min_y = start.y.min(end.y).floor() as i32;
+    let max_y = start.y.max(end.y).floor() as i32;
+    let min_z = start.z.min(end.z).floor() as i32;
+    let max_z = start.z.max(end.z).floor() as i32;
+    for x in min_x..=max_x {
+        for y in min_y..=max_y {
+            for z in min_z..=max_z {
+                let pos = BlockPos::new(x, y, z);
+                let Some(state) = block_at(pos) else {
+                    return false;
+                };
+                if !noxious_gas_collision_empty(state, pos, None)
+                    && block_shape(state)
+                        .unwrap_or(&[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]])
+                        .iter()
+                        .any(|shape| segment_intersects_box(start, end, pos, *shape))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+fn segment_intersects_box(start: DVec3, end: DVec3, pos: BlockPos, b: LocalBox) -> bool {
+    let bounds = [
+        (f64::from(pos.x) + b[0], f64::from(pos.x) + b[3]),
+        (f64::from(pos.y) + b[1], f64::from(pos.y) + b[4]),
+        (f64::from(pos.z) + b[2], f64::from(pos.z) + b[5]),
+    ];
+    let origin = [start.x, start.y, start.z];
+    let delta = [end.x - start.x, end.y - start.y, end.z - start.z];
+    let (mut enter, mut exit) = (0.0_f64, 1.0_f64);
+    for axis in 0..3 {
+        if delta[axis] == 0.0 {
+            if origin[axis] < bounds[axis].0 || origin[axis] > bounds[axis].1 {
+                return false;
+            }
+        } else {
+            let a = (bounds[axis].0 - origin[axis]) / delta[axis];
+            let b = (bounds[axis].1 - origin[axis]) / delta[axis];
+            enter = enter.max(a.min(b));
+            exit = exit.min(a.max(b));
+            if enter > exit {
+                return false;
+            }
+        }
+    }
+    exit >= 0.0 && enter <= 1.0
+}
+
 /// Outline shape for interaction raycasts (vanilla `getShape`), falling back to
 /// the collision shape where the two agree. `None` is a full cube; an empty
 /// slice is a block the pick ray passes through.
 pub(crate) fn block_outline(state: BlockState) -> Option<&'static [LocalBox]> {
     let data = block_data(state);
     data.outline.as_deref().or(data.shape.as_deref())
+}
+
+/// Exact Java interface behavior obtained from the registered block instance;
+/// `None` means the state's block does not implement `BonemealableBlock`.
+pub fn bonemeal_particle_info(state: BlockState) -> Option<(BonemealParticleType, [i32; 3])> {
+    let data = block_data(state);
+    let kind = match data.bonemeal_type? {
+        1 => BonemealParticleType::NeighborSpreader,
+        2 => BonemealParticleType::Grower,
+        _ => unreachable!("validated bonemeal type metadata"),
+    };
+    Some((kind, data.bonemeal_particle_offset))
+}
+
+/// Java `BlockState.getShape(level, pos).max(Y)` for generated 26.2 data.
+/// Older tables fall back to the currently represented outline boxes.
+pub fn outline_shape_max_y(state: BlockState) -> f64 {
+    let data = block_data(state);
+    data.shape_max_y_32nds.map_or_else(
+        || {
+            data.outline
+                .as_deref()
+                .or(data.shape.as_deref())
+                .unwrap_or(&[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]])
+                .iter()
+                .map(|bounds| bounds[4])
+                .fold(0.0, f64::max)
+        },
+        |height| {
+            if height == 255 {
+                f64::NEG_INFINITY
+            } else {
+                f64::from(height) / 32.0
+            }
+        },
+    )
+}
+
+/// World-aware outline height query for event particle positions. Static state
+/// shapes use Java's generated `getShape(...).max(Y)` metadata. Shulker boxes
+/// are the registered dynamic outline shape whose height follows the existing
+/// block-entity openness animation.
+pub fn outline_shape_max_y_at(
+    chunks: &crate::world::chunk::ChunkStore,
+    pos: BlockPos,
+    animations: &crate::world::block_entity_anim::BlockEntityAnimStore,
+) -> f64 {
+    let state = chunks.get_block_state(pos.x, pos.y, pos.z);
+    let progress = animations
+        .container(&pos)
+        .map_or(0.0, |animation| animation.openness(1.0));
+    dynamic_outline_shape_max_y(state, progress).unwrap_or_else(|| outline_shape_max_y(state))
+}
+
+fn dynamic_outline_shape_max_y(state: BlockState, progress: f32) -> Option<f64> {
+    let id = block_id(state);
+    if id != "shulker_box" && !id.ends_with("_shulker_box") {
+        return None;
+    }
+    Some(if block_properties(state).get("facing") == Some("up") {
+        1.0 + f64::from(progress) * 0.5
+    } else {
+        1.0
+    })
+}
+
+/// Collision-shape fullness from Java's `BlockState.isCollisionShapeFullBlock`.
+/// Dynamic shapes use the loaded world query entry point; the generated `h`
+/// cache is Java's exact empty-context result for the state.
+pub fn is_collision_shape_full_block(
+    chunks: &crate::world::chunk::ChunkStore,
+    pos: BlockPos,
+) -> bool {
+    let state = chunks.get_block_state(pos.x, pos.y, pos.z);
+    let data = block_data(state);
+    if data.dynamic_shape {
+        // These vanilla dynamic-shape classes explicitly return false for this
+        // predicate, independent of position.
+        if matches!(data.id, "bamboo" | "pointed_dripstone" | "sulfur_spike") {
+            return false;
+        }
+        if data.id == "moving_piston" {
+            let Some(moving) = chunks.block_entities.get(&pos).and_then(|entity| {
+                crate::world::block_entity::moving_block_render_details(&entity.nbt)
+            }) else {
+                return false;
+            };
+            return moving_piston_collision_is_full(&moving);
+        }
+    }
+    collision_shape_is_full_block(state)
+}
+
+fn moving_piston_collision_is_full(moving: &crate::world::block_entity::MovingBlockRender) -> bool {
+    !moving.source
+        && moving.offset == glam::DVec3::ZERO
+        && collision_shape_is_full_block(moving.state)
+}
+
+pub fn collision_shape_is_full_block(state: BlockState) -> bool {
+    let data = block_data(state);
+    data.collision_shape_full_block
+        .unwrap_or_else(|| collision_shape_union_is_full(data))
+}
+
+fn collision_shape_union_is_full(data: &BlockData) -> bool {
+    if !data.collides {
+        return false;
+    }
+    let Some(boxes) = data.shape.as_deref() else {
+        return true;
+    };
+    let mut occupied = [false; 16 * 16 * 16];
+    for bounds in boxes {
+        let cells = std::array::from_fn::<_, 3, _>(|axis| {
+            let min = (bounds[axis] * 16.0).round() as i32;
+            let max = (bounds[axis + 3] * 16.0).round() as i32;
+            (min.clamp(0, 16), max.clamp(0, 16))
+        });
+        for y in cells[1].0..cells[1].1 {
+            for z in cells[2].0..cells[2].1 {
+                for x in cells[0].0..cells[0].1 {
+                    occupied[(y * 16 * 16 + z * 16 + x) as usize] = true;
+                }
+            }
+        }
+    }
+    occupied.into_iter().all(|cell| cell)
 }
 
 /// Baked light properties for a state (vanilla `BlockStateBase` light cache).
@@ -1099,6 +1706,176 @@ mod tests {
 
     fn setup() {
         init("26.2");
+    }
+
+    #[test]
+    fn water_replacement_uses_vanillas_final_per_state_query() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        setup();
+        for (name, expected) in [
+            ("cobweb", false),
+            ("oak_sign", false),
+            ("ladder", true),
+            ("end_rod", true),
+            ("short_grass", true),
+            ("stone", false),
+            ("end_portal", false),
+            ("end_gateway", false),
+        ] {
+            let state = default_state_of(name).unwrap();
+            assert_eq!(
+                block_data(state).can_be_replaced_by_water,
+                Some(expected),
+                "{name}"
+            );
+            assert_eq!(can_be_replaced_by_water(state), expected, "{name}");
+        }
+        let cobweb = default_state_of("cobweb").unwrap();
+        assert!(is_replaceable(cobweb) || !legacy_solid(cobweb));
+        assert!(!can_be_replaced_by_water(cobweb));
+        let moving_piston = default_state_of("moving_piston").unwrap();
+        assert!(!is_replaceable(moving_piston) && !legacy_solid(moving_piston));
+        assert!(!can_be_replaced_by_water(moving_piston));
+        let big_dripleaf = default_state_of("big_dripleaf").unwrap();
+        assert!(!is_replaceable(big_dripleaf) && legacy_solid(big_dripleaf));
+        assert!(can_be_replaced_by_water(big_dripleaf));
+        for waterlogged in ["false", "true"] {
+            let sign = find_state(
+                "oak_sign",
+                &[("rotation", "0"), ("waterlogged", waterlogged)],
+            );
+            assert!(!can_be_replaced_by_water(sign));
+            assert!(
+                can_place_water(sign, false),
+                "SimpleWaterloggedBlock accepts water at both states"
+            );
+            let ladder = find_state(
+                "ladder",
+                &[("facing", "north"), ("waterlogged", waterlogged)],
+            );
+            assert!(is_liquid_block_container(ladder));
+            assert!(can_be_replaced_by_water(ladder));
+            assert!(can_place_water(ladder, false));
+        }
+
+        for name in ["seagrass", "kelp", "kelp_plant", "tall_seagrass"] {
+            let state = default_state_of(name).unwrap();
+            assert!(is_liquid_block_container(state), "{name}");
+            assert!(
+                block_properties(state).get("waterlogged").is_none(),
+                "{name}"
+            );
+            assert!(!can_place_water(state, false), "{name}");
+        }
+
+        let double_slab = find_state("oak_slab", &[("type", "double"), ("waterlogged", "false")]);
+        assert!(is_liquid_block_container(double_slab));
+        assert!(!can_place_water(double_slab, false));
+        let barrier = default_state_of("barrier").unwrap();
+        assert!(is_liquid_block_container(barrier));
+        assert!(!can_place_water(barrier, false));
+        assert!(can_place_water(barrier, true));
+
+        let wet_sign = find_state("oak_sign", &[("rotation", "0"), ("waterlogged", "true")]);
+        assert!(is_liquid_block_container(wet_sign));
+        assert!(!can_be_replaced_by_water(wet_sign));
+        assert!(can_place_water(wet_sign, false));
+
+        for waterlogged in ["false", "true"] {
+            let state = find_state(
+                "oak_stairs",
+                &[
+                    ("facing", "north"),
+                    ("half", "bottom"),
+                    ("shape", "straight"),
+                    ("waterlogged", waterlogged),
+                ],
+            );
+            assert_eq!(block_data(state).can_be_replaced_by_water, Some(false));
+            assert!(is_liquid_block_container(state));
+            assert!(can_place_water(state, false));
+            assert!(!can_be_replaced_by_water(state));
+        }
+    }
+
+    #[test]
+    fn block_tag_registry_ids_resolve_by_source_protocol_identity_once() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        setup();
+        assert_eq!(
+            block_name_for_registry_id(763, 94).as_deref(),
+            Some("glass")
+        );
+        let glass =
+            default_state_of(block_name_for_registry_id(763, 94).unwrap().as_str()).unwrap();
+        assert_eq!(block_id(glass), "glass");
+        assert_eq!(
+            block_name_for_registry_id(776, 101).as_deref(),
+            Some("glass")
+        );
+        assert_eq!(
+            block_name_for_registry_id(763, 94),
+            block_name_for_registry_id(776, 101)
+        );
+    }
+
+    #[test]
+    fn noxious_gas_reach_uses_java_collision_fluid_and_loaded_world_rules() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        setup();
+        let source = BlockPos::new(0, 66, 0);
+        let target = DVec3::new(2.5, 66.25, 0.5);
+        let water = find_state("water", &[("level", "0")]);
+        let stone = find_state("stone", &[]);
+        let mut states = HashMap::from([(BlockPos::new(2, 65, 0), water)]);
+        let at = |pos: BlockPos, states: &HashMap<BlockPos, BlockState>| {
+            Some(*states.get(&pos).unwrap_or(&BlockState::AIR))
+        };
+        assert!(noxious_gas_reachable(source, target, |p| at(p, &states)));
+
+        states.insert(BlockPos::new(1, 65, 0), stone);
+        assert!(!noxious_gas_reachable(source, target, |p| at(p, &states)));
+        states.remove(&BlockPos::new(1, 65, 0));
+        assert!(!noxious_gas_reachable(source, target, |p| {
+            (p != BlockPos::new(1, 65, 0)).then(|| *states.get(&p).unwrap_or(&BlockState::AIR))
+        }));
+
+        let bottom_slab = find_state("oak_slab", &[("type", "bottom"), ("waterlogged", "false")]);
+        let waterlogged_slab =
+            find_state("oak_slab", &[("type", "bottom"), ("waterlogged", "true")]);
+        let stairs = find_state(
+            "oak_stairs",
+            &[
+                ("facing", "north"),
+                ("half", "bottom"),
+                ("shape", "straight"),
+                ("waterlogged", "false"),
+            ],
+        );
+        assert!(!noxious_gas_collision_empty(
+            bottom_slab,
+            BlockPos::new(1, 65, 0),
+            None
+        ));
+        assert!(!noxious_gas_collision_empty(
+            stairs,
+            BlockPos::new(1, 65, 0),
+            None
+        ));
+        assert!(!noxious_gas_collision_empty(
+            waterlogged_slab,
+            BlockPos::new(1, 65, 0),
+            None
+        ));
+        states.insert(BlockPos::new(2, 65, 0), waterlogged_slab);
+        assert!(!noxious_gas_reachable(source, target, |p| at(p, &states)));
+
+        assert!(!noxious_gas_reachable(source, target, |_| None));
+        assert!(!noxious_gas_collision_empty(
+            stone,
+            BlockPos::new(1, 65, 0),
+            None
+        ));
     }
 
     #[test]
@@ -1470,5 +2247,231 @@ mod tests {
     fn native_slot() {
         let native = pomme_protocol::version::NATIVE.protocol;
         assert_eq!(block_data_slot(native), Some(NATIVE_SLOT));
+    }
+
+    #[test]
+    fn particle_filters_match_java_26_2_special_blocks() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        setup();
+        let state = |name| first_state_of(name).unwrap();
+        assert!(!should_spawn_terrain_particles(state("barrier")));
+        assert!(!should_spawn_terrain_particles(state("structure_void")));
+        assert!(should_spawn_terrain_particles(state("stone")));
+        assert!(has_invisible_render_shape(state("bubble_column")));
+        assert!(has_invisible_render_shape(state("water")));
+        assert!(has_invisible_render_shape(state("moving_piston")));
+        assert!(!has_invisible_render_shape(state("stone")));
+    }
+
+    #[test]
+    fn java_solid_render_metadata_distinguishes_non_full_renderable_states() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        setup();
+        assert_eq!(
+            is_solid_render(first_state_of("stone").unwrap()),
+            Some(true)
+        );
+        assert_eq!(
+            is_solid_render(first_state_of("glass").unwrap()),
+            Some(false)
+        );
+        assert_eq!(
+            is_solid_render(first_state_of("oak_slab").unwrap()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn java_bonemeal_class_type_and_particle_pos_are_generated_from_block_instances() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        setup();
+        let info = |name| bonemeal_particle_info(first_state_of(name).unwrap());
+        assert_eq!(
+            info("grass_block"),
+            Some((BonemealParticleType::NeighborSpreader, [0, 1, 0]))
+        );
+        assert_eq!(
+            info("crimson_nylium"),
+            Some((BonemealParticleType::NeighborSpreader, [0, 1, 0]))
+        );
+        assert_eq!(
+            info("oak_sapling"),
+            Some((BonemealParticleType::Grower, [0, 0, 0]))
+        );
+        assert_eq!(
+            info("rooted_dirt"),
+            Some((BonemealParticleType::Grower, [0, -1, 0]))
+        );
+        assert_eq!(
+            info("mangrove_leaves"),
+            Some((BonemealParticleType::Grower, [0, -1, 0]))
+        );
+        assert_eq!(info("water"), None);
+        let counts = all_states().fold([0usize; 3], |mut counts, (_, data)| {
+            counts[data.bonemeal_type.unwrap_or(0) as usize] += 1;
+            counts
+        });
+        assert_eq!(counts, [31_645, 7, 714]);
+    }
+
+    #[test]
+    fn java_collision_fullness_and_outline_height_use_shape_metadata() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        setup();
+        let stone = find_state("stone", &[]);
+        let slab = find_state("oak_slab", &[("type", "bottom"), ("waterlogged", "false")]);
+        let stairs = find_state(
+            "oak_stairs",
+            &[
+                ("facing", "north"),
+                ("half", "bottom"),
+                ("shape", "straight"),
+                ("waterlogged", "false"),
+            ],
+        );
+        assert!(collision_shape_is_full_block(stone));
+        assert!(!collision_shape_is_full_block(slab));
+        assert!(!collision_shape_is_full_block(stairs));
+        let stationary_moving = crate::world::block_entity::MovingBlockRender {
+            state: stone,
+            offset: glam::DVec3::ZERO,
+            source: false,
+            extending: true,
+            progress: 1.0,
+            direction: glam::DVec3::X,
+        };
+        assert!(moving_piston_collision_is_full(&stationary_moving));
+        let translated_moving = crate::world::block_entity::MovingBlockRender {
+            offset: glam::DVec3::X * 0.5,
+            ..stationary_moving
+        };
+        assert!(!moving_piston_collision_is_full(&translated_moving));
+        let source_piston = crate::world::block_entity::MovingBlockRender {
+            source: true,
+            ..stationary_moving
+        };
+        assert!(!moving_piston_collision_is_full(&source_piston));
+        let mut chunks = crate::world::chunk::ChunkStore::new(2);
+        let mut chunk = azalea_world::chunk::Chunk::default();
+        chunk.sections = vec![Default::default(); chunks.section_count() as usize].into();
+        let column = BlockPos::new(0, 0, 0);
+        chunks.load_decoded_chunk(
+            azalea_core::position::ChunkPos::new(column.x, column.z),
+            chunk,
+        );
+        let pos = BlockPos::new(2, 64, 2);
+        chunks.set_block_state(
+            pos.x,
+            pos.y,
+            pos.z,
+            first_state_of("moving_piston").unwrap(),
+        );
+        let moving_entity = |progress: f32, source: bool| {
+            use simdnbt::owned::NbtTag;
+            let mut moved = simdnbt::owned::NbtCompound::new();
+            moved.insert("Name", "minecraft:stone");
+            let mut nbt = simdnbt::owned::NbtCompound::new();
+            nbt.insert("blockState", NbtTag::Compound(moved));
+            nbt.insert("progress", NbtTag::Float(progress));
+            nbt.insert("extending", NbtTag::Byte(1));
+            nbt.insert("source", NbtTag::Byte(i8::from(source)));
+            nbt.insert("facing", "north");
+            nbt
+        };
+        chunks.block_entities.insert(
+            pos,
+            crate::world::block_entity::StoredBlockEntity::new(
+                azalea_registry::builtin::BlockEntityKind::Piston,
+                moving_entity(1.0, false),
+            ),
+        );
+        assert!(is_collision_shape_full_block(&chunks, pos));
+        chunks
+            .block_entities
+            .get_mut(&pos)
+            .unwrap()
+            .update_nbt(moving_entity(0.5, false));
+        assert!(!is_collision_shape_full_block(&chunks, pos));
+        chunks
+            .block_entities
+            .get_mut(&pos)
+            .unwrap()
+            .update_nbt(moving_entity(1.0, true));
+        assert!(!is_collision_shape_full_block(&chunks, pos));
+        let stairs_shape = crate::physics::block_shape::partial_shape(stairs).unwrap();
+        for axis in 0..3 {
+            assert_eq!(
+                stairs_shape
+                    .iter()
+                    .map(|b| b[axis])
+                    .fold(f64::INFINITY, f64::min),
+                0.0
+            );
+            assert_eq!(
+                stairs_shape
+                    .iter()
+                    .map(|b| b[axis + 3])
+                    .fold(f64::NEG_INFINITY, f64::max),
+                1.0
+            );
+        }
+        assert_eq!(outline_shape_max_y(stone), 1.0);
+        assert_eq!(outline_shape_max_y(find_state("oak_sapling", &[])), 0.75);
+        assert_eq!(
+            outline_shape_max_y(find_state("water", &[("level", "0")])),
+            f64::NEG_INFINITY
+        );
+    }
+
+    #[test]
+    fn shulker_outline_max_y_tracks_world_owned_opening_state() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        setup();
+        let up = find_state("white_shulker_box", &[("facing", "up")]);
+        let north = find_state("white_shulker_box", &[("facing", "north")]);
+        assert_eq!(dynamic_outline_shape_max_y(up, 0.0), Some(1.0));
+        assert_eq!(dynamic_outline_shape_max_y(up, 0.5), Some(1.25));
+        assert_eq!(dynamic_outline_shape_max_y(up, 1.0), Some(1.5));
+        assert_eq!(dynamic_outline_shape_max_y(north, 1.0), Some(1.0));
+        assert_eq!(
+            dynamic_outline_shape_max_y(find_state("stone", &[]), 1.0),
+            None
+        );
+    }
+
+    #[test]
+    fn representative_java_falling_dust_colors() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        setup();
+        let state = |name| first_state_of(name).unwrap();
+        assert_eq!(
+            falling_block_dust_color(state("sand")),
+            Some([219, 211, 160])
+        );
+        assert_eq!(
+            falling_block_dust_color(state("red_sand")),
+            Some([169, 88, 33])
+        );
+        assert_eq!(
+            falling_block_dust_color(state("gravel")),
+            Some([128, 124, 123])
+        );
+        assert_eq!(
+            falling_block_dust_color(state("dragon_egg")),
+            Some([0, 0, 0])
+        );
+        assert_eq!(
+            falling_block_dust_color(state("anvil")),
+            Some([167, 167, 167])
+        );
+        assert_eq!(
+            falling_block_dust_color(state("white_concrete_powder")),
+            Some([255; 3])
+        );
+        assert_eq!(map_color_rgb(state("stone")), Some([112; 3]));
+        assert_eq!(
+            map_color_rgb(state("orange_concrete_powder")),
+            Some([216, 127, 51])
+        );
     }
 }
