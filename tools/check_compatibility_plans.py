@@ -61,7 +61,8 @@ def check(root, reference):
                 candidates.append(reference / "Client" / name)
             else:
                 candidates.extend((reference / "Client" / name,
-                                   reference / "Client/pomme-client/src" / name))
+                                   reference / "Client/pomme-client/src" / name,
+                                   reference / "minecraft-26.2-decompiled/src/net/minecraft" / name))
             source = next((p for p in candidates if p.is_file()), None)
             assert source is not None, f"missing cited source: {match.group(0)}"
             total = len(source.read_text(encoding="utf-8", errors="replace").splitlines())
