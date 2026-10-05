@@ -1,5 +1,16 @@
 pub mod cloak_state;
 pub mod components;
+pub(crate) mod particle_animals;
+pub(crate) mod particle_bosses;
+mod particle_misc;
+pub use particle_misc::LocalPlayerProjectileView;
+mod particle_mob_phases;
+mod particle_mobs;
+mod particle_tick;
+pub(crate) use particle_tick::{
+    living_teleport_particle_requests, local_block_effect_particle_requests,
+    powder_snow_nonliving_requests, teleport_particle_requests,
+};
 mod projectile;
 pub mod villager;
 
@@ -13,8 +24,9 @@ static PROJECTILE_REVISION: AtomicU64 = AtomicU64::new(1);
 
 use azalea_buf::AzBuf;
 use azalea_core::position::{BlockPos, ChunkPos};
+use azalea_registry::Registry;
 use azalea_registry::builtin::EntityKind;
-use glam::DVec3;
+use glam::{DVec3, dvec3};
 
 use crate::entity::components::{LookDirection, Position};
 use crate::entity::villager::{VillagerKind, VillagerProfession};
@@ -59,7 +71,7 @@ pub(crate) fn legacy_effect_particles(
 
 /// `AgeableMob` descendants on every supported version (Slime joined only
 /// in 26.2, so it's excluded here and special-cased where it matters).
-fn is_ageable_mob(kind: EntityKind) -> bool {
+pub(crate) fn is_ageable_mob(kind: EntityKind) -> bool {
     matches!(
         kind,
         EntityKind::Pig
@@ -78,6 +90,22 @@ fn is_ageable_mob(kind: EntityKind) -> bool {
             | EntityKind::Rabbit
             | EntityKind::Squid
             | EntityKind::GlowSquid
+            | EntityKind::Armadillo
+            | EntityKind::Axolotl
+            | EntityKind::Camel
+            | EntityKind::CamelHusk
+            | EntityKind::Dolphin
+            | EntityKind::Fox
+            | EntityKind::Frog
+            | EntityKind::Goat
+            | EntityKind::Nautilus
+            | EntityKind::ZombieNautilus
+            | EntityKind::Panda
+            | EntityKind::PolarBear
+            | EntityKind::Sniffer
+            | EntityKind::Tadpole
+            | EntityKind::Turtle
+            | EntityKind::Strider
     ) || is_equine(&kind)
 }
 
@@ -226,6 +254,15 @@ impl From<u8> for EntityFlags {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ClientEntityParticleState {
+    was_touching_water: bool,
+    was_touching_lava: bool,
+    eye_in_water: bool,
+    eye_in_lava: bool,
+    initialized: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityEffect {
     pub effect_id: u32,
@@ -259,10 +296,22 @@ pub struct LivingEntity {
     pub walk_anim_speed: f32,
     pub prev_walk_anim_speed: f32,
     pub is_baby: bool,
+    /// AgeableMob AGE_LOCKED synced flag (26.2 metadata index 17).
+    pub age_locked: bool,
+    pub panda_sneeze_counter: i32,
+    pub panda_eat_counter: i32,
+    pub panda_flags: u8,
+    pub sniffer_state: u8,
     pub is_crouching: bool,
     pub pose: EntityPose,
     pub sleeping_pos: Option<BlockPos>,
     pub effect_particles: Vec<azalea_entity::particle::Particle>,
+    pub effect_particle_options: Option<
+        Vec<(
+            crate::particle::ServerParticleKind,
+            crate::particle::ServerParticleOptions,
+        )>,
+    >,
     pub effect_particles_ambient: bool,
     pub legacy_effect_color: Option<u32>,
     pub flags: EntityFlags,
@@ -353,8 +402,10 @@ pub struct LivingEntity {
     pub mouth_anim: f32,
     pub prev_mouth_anim: f32,
     pub has_chest: bool,
-    /// Saddle equipment slot occupied (`SetEquipment`); gates the jump bar.
+    /// Saddle equipment slot occupied (`SetEquipment`); gates mount control.
     pub saddled: bool,
+    /// Happy Ghast metadata `STAYS_STILL` (26.x index 19).
+    pub happy_ghast_stays_still: bool,
     /// Latest server equipment updates, including the native body slot.
     pub equipment:
         HashMap<azalea_inventory::components::EquipmentSlot, azalea_inventory::ItemStack>,
@@ -393,6 +444,7 @@ pub struct LivingEntity {
     pub hurt_time: u8,
     pub death_time: u32,
     pub age_in_ticks: u32,
+    client_particle_state: ClientEntityParticleState,
     pub custom_name: Option<String>,
     /// Mob is targeting/attacking (metadata mob-flags bit 0x04). Raises
     /// zombie/skeleton arms.
@@ -430,10 +482,11 @@ impl LivingEntity {
         body_y_rot_deg: f32,
         player_uuid: Option<uuid::Uuid>,
     ) -> Self {
-        let default_health = if entity_type == EntityKind::IronGolem {
-            100.0
-        } else {
-            20.0
+        let default_health = match entity_type {
+            EntityKind::IronGolem => 100.0,
+            EntityKind::EnderDragon => 200.0,
+            EntityKind::Wither => 300.0,
+            _ => 20.0,
         };
         Self {
             position,
@@ -452,10 +505,16 @@ impl LivingEntity {
             walk_anim_speed: 0.0,
             prev_walk_anim_speed: 0.0,
             is_baby: false,
+            age_locked: false,
+            panda_sneeze_counter: 0,
+            panda_eat_counter: 0,
+            panda_flags: 0,
+            sniffer_state: 0,
             is_crouching: false,
             pose: EntityPose::Standing,
             sleeping_pos: None,
             effect_particles: Vec::new(),
+            effect_particle_options: None,
             effect_particles_ambient: false,
             legacy_effect_color: None,
             flags: EntityFlags::default(),
@@ -532,6 +591,7 @@ impl LivingEntity {
             prev_mouth_anim: 0.0,
             has_chest: false,
             saddled: false,
+            happy_ghast_stays_still: false,
             equipment: HashMap::new(),
             horse_jump_pending_scale: 0.0,
             velocity: DVec3::ZERO,
@@ -557,6 +617,7 @@ impl LivingEntity {
             hurt_time: 0,
             death_time: 0,
             age_in_ticks: 0,
+            client_particle_state: ClientEntityParticleState::default(),
             custom_name: None,
             aggressive: false,
             powered: false,
@@ -934,6 +995,8 @@ pub struct ItemEntity {
     pub uuid: uuid::Uuid,
     pub position: Position,
     pub prev_position: Position,
+    /// Previous actual fixed-tick position for block-contact callbacks.
+    pub particle_prev_position: Position,
     pub item_name: String,
     /// Registry id (vanilla `Item.getId`) — part of the copy-scatter seed.
     pub item_id: u32,
@@ -957,24 +1020,72 @@ struct PickupAnimation {
     damage: i32,
     count: i32,
     start_pos: Position,
+    target_id: i32,
     target_pos: Position,
     bob_offset: f32,
     age: u32,
+    entity_view: Option<PickupEntityView>,
     life: u32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum PickupEntityView {
+    ExperienceOrb {
+        value: i32,
+        age: u32,
+        block_light: u8,
+        sky_light: u8,
+    },
+    Arrow {
+        variant_index: u32,
+        body_y_rot_deg: f32,
+        head_x_rot_deg: f32,
+        base_tint: [f32; 4],
+    },
+    Trident {
+        body_y_rot_deg: f32,
+        head_x_rot_deg: f32,
+        projectile_foil: bool,
+        age: u32,
+    },
+}
+
+#[derive(Clone)]
 pub struct PickupRenderInfo {
+    pub entity_view: Option<PickupEntityView>,
     pub item_name: String,
     pub stack: Option<azalea_inventory::ItemStackData>,
     pub item_id: u32,
     pub damage: i32,
     pub count: i32,
     pub position: Position,
+    /// Vanilla captures the source EntityRenderState when the take packet
+    /// arrives, so its packed light remains tied to the original item position.
+    pub light_position: Position,
     pub bob_offset: f32,
     pub age: u32,
 }
 
 const PICKUP_LIFE: u32 = 3;
+
+fn pickup_target(entity: &LivingEntity, partial_tick: f32) -> Position {
+    let eye_height = if entity.entity_type == EntityKind::Player {
+        match entity.pose {
+            EntityPose::Sleeping => f64::from(crate::player::SLEEPING_EYE_HEIGHT),
+            EntityPose::Crouching => f64::from(crate::player::CROUCH_EYE_HEIGHT),
+            EntityPose::Swimming | EntityPose::FallFlying | EntityPose::SpinAttack => {
+                f64::from(crate::player::SWIMMING_EYE_HEIGHT)
+            }
+            _ => f64::from(crate::player::STANDING_EYE_HEIGHT),
+        }
+    } else {
+        f64::from(azalea_entity::dimensions::EntityDimensions::from(entity.entity_type).eye_height)
+    };
+    entity
+        .prev_position
+        .lerp(entity.position, partial_tick as f64)
+        + dvec3(0.0, eye_height * 0.5, 0.0)
+}
 
 pub struct ItemEntityStore {
     items: HashMap<i32, ItemEntity>,
@@ -982,6 +1093,37 @@ pub struct ItemEntityStore {
 }
 
 impl ItemEntityStore {
+    pub(crate) fn powder_snow_positions(
+        &self,
+    ) -> impl Iterator<Item = (i32, Position, Position)> + '_ {
+        self.items
+            .iter()
+            .map(|(&id, item)| (id, item.position, item.particle_prev_position))
+    }
+
+    pub(crate) fn block_contact_particle_requests(
+        &self,
+        chunks: &ChunkStore,
+        tick: u64,
+    ) -> Vec<crate::world::particle_tick::ParticleSpawnRequest> {
+        self.items
+            .iter()
+            .filter(|(_, item)| item.on_ground)
+            .flat_map(|(&id, item)| {
+                let pos = DVec3::from(item.position);
+                crate::world::particle_tick::redstone_ore_interaction_requests(
+                    chunks,
+                    BlockPos::new(
+                        pos.x.floor() as i32,
+                        (pos.y - 0.2).floor() as i32,
+                        pos.z.floor() as i32,
+                    ),
+                    (id as u64).wrapping_mul(0x9e37_79b9) ^ tick,
+                )
+            })
+            .collect()
+    }
+
     pub fn new() -> Self {
         Self {
             items: HashMap::new(),
@@ -1002,6 +1144,7 @@ impl ItemEntityStore {
                 uuid,
                 position,
                 prev_position: position,
+                particle_prev_position: position,
                 item_name: String::new(),
                 item_id: 0,
                 damage: 0,
@@ -1069,6 +1212,7 @@ impl ItemEntityStore {
             }
             entity.server_pos = position;
             entity.position = position;
+            entity.particle_prev_position = position;
             if let Some(velocity) = velocity {
                 entity.velocity = velocity;
             }
@@ -1088,7 +1232,13 @@ impl ItemEntityStore {
     /// when empty (vanilla `handleTakeItemEntity`). Returns the item's
     /// position for the pickup sound, or `None` if there's nothing to pick
     /// up.
-    pub fn pickup(&mut self, item_id: i32, target_pos: Position, amount: i32) -> Option<Position> {
+    pub fn pickup(
+        &mut self,
+        item_id: i32,
+        target_id: i32,
+        target_pos: Position,
+        amount: i32,
+    ) -> Option<Position> {
         let entity = self.items.get_mut(&item_id)?;
         if entity.item_name.is_empty() {
             return None;
@@ -1101,9 +1251,11 @@ impl ItemEntityStore {
             damage: entity.damage,
             count: entity.count,
             start_pos,
+            target_id,
             target_pos,
             bob_offset: entity.bob_offset,
             age: entity.age,
+            entity_view: None,
             life: 0,
         };
         entity.count -= amount;
@@ -1113,6 +1265,30 @@ impl ItemEntityStore {
             self.items.remove(&item_id);
         }
         Some(start_pos)
+    }
+
+    pub fn pickup_entity(
+        &mut self,
+        start_pos: Position,
+        target_id: i32,
+        target_pos: Position,
+        entity_view: PickupEntityView,
+    ) -> Position {
+        self.pickups.push(PickupAnimation {
+            item_name: String::new(),
+            stack: None,
+            item_id: 0,
+            damage: 0,
+            count: 1,
+            start_pos,
+            target_id,
+            target_pos,
+            bob_offset: 0.0,
+            age: 0,
+            entity_view: Some(entity_view),
+            life: 0,
+        });
+        start_pos
     }
 
     pub fn remove(&mut self, ids: &[i32]) {
@@ -1130,6 +1306,7 @@ impl ItemEntityStore {
     pub fn tick(&mut self, chunk_store: &ChunkStore) {
         for (&id, entity) in self.items.iter_mut() {
             entity.prev_position = entity.position;
+            entity.particle_prev_position = entity.position;
             tick_item_physics(id, entity, chunk_store);
         }
         for pickup in &mut self.pickups {
@@ -1148,20 +1325,40 @@ impl ItemEntityStore {
             .collect()
     }
 
-    pub fn active_pickups(&self, partial_tick: f32) -> Vec<PickupRenderInfo> {
+    pub fn active_pickups(
+        &self,
+        partial_tick: f32,
+        entities: &EntityStore,
+        local_player_id: i32,
+        local_player_pos: Position,
+        local_player_eye_height: f32,
+    ) -> Vec<PickupRenderInfo> {
         self.pickups
             .iter()
             .map(|p| {
                 let t = (p.life as f32 + partial_tick) / PICKUP_LIFE as f32;
                 let t = t * t;
-                let pos = p.start_pos.lerp(p.target_pos, t as f64);
+                let target = entities.living.get(&p.target_id).map_or_else(
+                    || {
+                        if p.target_id == local_player_id {
+                            local_player_pos
+                                + dvec3(0.0, f64::from(local_player_eye_height) * 0.5, 0.0)
+                        } else {
+                            p.target_pos
+                        }
+                    },
+                    |entity| pickup_target(entity, partial_tick),
+                );
+                let pos = p.start_pos.lerp(target, t as f64);
                 PickupRenderInfo {
+                    entity_view: p.entity_view.clone(),
                     item_name: p.item_name.clone(),
                     stack: p.stack.clone(),
                     item_id: p.item_id,
                     damage: p.damage,
                     count: p.count,
                     position: pos,
+                    light_position: p.start_pos,
                     bob_offset: p.bob_offset,
                     age: p.age,
                 }
@@ -1176,6 +1373,17 @@ const ITEM_GRAVITY: f64 = 0.04;
 const ITEM_AIR_DRAG: f64 = 0.98;
 /// Item hitbox is 0.25 cubed (`EntityType.ITEM` dimensions).
 const ITEM_HALF_WIDTH: f64 = 0.125;
+
+fn pickup_projectile_angles(velocity: DVec3, look: LookDirection) -> (f32, f32) {
+    if velocity.length_squared() > 1.0e-8 {
+        (
+            velocity.x.atan2(velocity.z).to_degrees() as f32,
+            velocity.y.atan2(velocity.x.hypot(velocity.z)).to_degrees() as f32,
+        )
+    } else {
+        (look.y_rot_deg(), look.x_rot_deg())
+    }
+}
 
 /// Client-side port of `ItemEntity.tick` movement: gravity or fluid drift,
 /// collide-and-slide, friction, then the half-speed landing bounce.
@@ -1256,6 +1464,9 @@ pub struct ProjectileDisplay {
     pub on_ground: bool,
     pub in_ground: bool,
     pub no_gravity: bool,
+    /// AbstractArrow.ID_FLAGS bit 1; separate from Entity shared flags.
+    pub no_physics: bool,
+    pub critical: bool,
     revision: u64,
     drag: f64,
     medium_tick: u64,
@@ -1381,6 +1592,7 @@ pub(crate) fn falling_block_model_matrix(position: Position, camera_anchor: DVec
 
 #[derive(Clone, Debug)]
 pub struct VehicleState {
+    client_particle_state: ClientEntityParticleState,
     /// Vanilla ClientAvatarState cloak motion for Mannequin only.
     pub cloak: cloak_state::CloakState,
     pub cape_motion: cloak_state::CapeMotionState,
@@ -1396,17 +1608,29 @@ pub struct VehicleState {
     pub falling_block: FallingBlockRenderState,
     pub position: Position,
     pub prev_position: Position,
+    /// Previous actual owner transform used by block-contact callbacks, not
+    /// interpolation.
+    pub particle_prev_position: Position,
     pub velocity: DVec3,
+    /// Entity movement packet's grounded bit, used by Java stepOn callbacks.
+    pub on_ground: bool,
     pub prev_look_dir: Option<LookDirection>,
     pub projectile: Option<ProjectileDisplay>,
-    /// Full synchronized stack for ThrownItem entities (26.2 metadata 8).
+    /// Full synchronized item metadata for item projectiles and FireworkRocket.
     pub projectile_item: azalea_inventory::ItemStack,
+    /// Client firework visual age and one-shot event 17 guard.
+    pub firework_life: u32,
+    pub firework_event_handled: bool,
+    pub firework_launch_sound_played: bool,
     /// WitherSkull dangerous/invulnerable metadata (index 8); Trident foil
     /// (12).
     pub projectile_dangerous: bool,
     pub projectile_foil: bool,
     /// Arrow metadata index 11: tipped-arrow color, default -1.
     pub arrow_effect_color: i32,
+    /// Client-side AbstractArrow inGroundTime, incremented on fixed entity
+    /// ticks.
+    pub arrow_in_ground_time: u32,
     /// Primed TNT synchronized fuse and block-state metadata.
     pub tnt_fuse: i32,
     pub tnt_prev_fuse: i32,
@@ -1493,6 +1717,14 @@ pub struct VehicleState {
 
 pub struct EntityStore {
     pub living: HashMap<i32, LivingEntity>,
+    client_particle_game_time: i64,
+    animals_particle_state: HashMap<i32, particle_animals::AnimalParticleState>,
+    phase_particle_state: HashMap<i32, particle_mob_phases::State>,
+    boss_particle_state: HashMap<i32, particle_bosses::BossParticleState>,
+    raider_entity_types: Option<std::collections::HashSet<EntityKind>>,
+    misc_particle_state: HashMap<i32, particle_misc::State>,
+    mob_particle_state: HashMap<i32, particle_mobs::MobParticleState>,
+    living_uuid_index: HashMap<uuid::Uuid, i32>,
     /// Passenger lists and root transforms for all entity kinds, including
     /// nonliving vehicles.
     pub vehicles: HashMap<i32, VehicleState>,
@@ -1503,14 +1735,124 @@ pub struct EntityStore {
 }
 
 impl EntityStore {
+    pub fn set_raider_entity_types(&mut self, types: std::collections::HashSet<EntityKind>) {
+        self.raider_entity_types = Some(types);
+    }
+
+    pub fn is_raider_type(&self, kind: EntityKind) -> bool {
+        self.raider_entity_types.as_ref().map_or_else(
+            || {
+                matches!(
+                    kind,
+                    EntityKind::Evoker
+                        | EntityKind::Pillager
+                        | EntityKind::Ravager
+                        | EntityKind::Vindicator
+                        | EntityKind::Illusioner
+                        | EntityKind::Witch
+                )
+            },
+            |types| types.contains(&kind),
+        )
+    }
+
     pub fn new() -> Self {
         Self {
             living: HashMap::new(),
+            client_particle_game_time: 0,
+            animals_particle_state: HashMap::new(),
+            phase_particle_state: HashMap::new(),
+            boss_particle_state: HashMap::new(),
+            raider_entity_types: None,
+            misc_particle_state: HashMap::new(),
+            mob_particle_state: HashMap::new(),
+            living_uuid_index: HashMap::new(),
             vehicles: HashMap::new(),
             vehicle_of: HashMap::new(),
             tick: 0,
             epoch: WORLD_EPOCH.fetch_add(1, Ordering::Relaxed),
             worker: None,
+        }
+    }
+
+    /// Capture Java `ItemPickupParticle` model inputs without retaining or
+    /// re-registering the source world entity.
+    pub fn pickup_entity_view(
+        &self,
+        id: i32,
+        chunks: &ChunkStore,
+    ) -> Option<(Position, PickupEntityView)> {
+        use azalea_registry::builtin::EntityKind as K;
+
+        let entity = self.vehicles.get(&id)?;
+        let kind = entity.kind?;
+        match kind {
+            K::ExperienceOrb => {
+                let position = entity.position;
+                let x = position.x.floor() as i32;
+                let y = position.y.floor() as i32;
+                let z = position.z.floor() as i32;
+                Some((
+                    position,
+                    PickupEntityView::ExperienceOrb {
+                        value: entity.experience_orb_value,
+                        age: entity.experience_orb_age,
+                        block_light: chunks.get_block_light(x, y, z),
+                        sky_light: chunks.get_sky_light(x, y, z),
+                    },
+                ))
+            }
+            K::Arrow | K::SpectralArrow => {
+                let look = entity.look_dir?;
+                let position = entity
+                    .projectile
+                    .as_ref()
+                    .map_or(entity.position, |projectile| projectile.position(1.0));
+                let velocity = entity.projectile.as_ref().map_or(entity.velocity, |p| {
+                    if p.stopped { DVec3::ZERO } else { p.velocity }
+                });
+                let (yaw, pitch) = pickup_projectile_angles(velocity, look);
+                let variant_index = match kind {
+                    K::Arrow if entity.arrow_effect_color > 0 => 2,
+                    K::Arrow => 0,
+                    K::SpectralArrow => 1,
+                    _ => unreachable!(),
+                };
+                let base_tint = if kind == K::Arrow && entity.arrow_effect_color > 0 {
+                    let rgb = entity.arrow_effect_color as u32;
+                    [
+                        ((rgb >> 16) & 0xff) as f32 / 255.0,
+                        ((rgb >> 8) & 0xff) as f32 / 255.0,
+                        (rgb & 0xff) as f32 / 255.0,
+                        1.0,
+                    ]
+                } else {
+                    [1.0; 4]
+                };
+                Some((
+                    position,
+                    PickupEntityView::Arrow {
+                        variant_index,
+                        body_y_rot_deg: yaw,
+                        head_x_rot_deg: pitch,
+                        base_tint,
+                    },
+                ))
+            }
+            K::Trident => {
+                let look = entity.look_dir?;
+                let (yaw, pitch) = pickup_projectile_angles(entity.velocity, look);
+                Some((
+                    entity.position,
+                    PickupEntityView::Trident {
+                        body_y_rot_deg: yaw,
+                        head_x_rot_deg: pitch,
+                        projectile_foil: entity.projectile_foil,
+                        age: entity.projectile_age,
+                    },
+                ))
+            }
+            _ => None,
         }
     }
 
@@ -1569,6 +1911,7 @@ impl EntityStore {
             }
         }
         let vehicle = self.vehicles.entry(vehicle_id).or_insert(VehicleState {
+            client_particle_state: ClientEntityParticleState::default(),
             cloak: cloak_state::CloakState::default(),
             cape_motion: cloak_state::CapeMotionState::default(),
             position: self
@@ -1579,17 +1922,26 @@ impl EntityStore {
                 .living
                 .get(&vehicle_id)
                 .map_or(Position::default(), |e| e.position),
+            particle_prev_position: self
+                .living
+                .get(&vehicle_id)
+                .map_or(Position::default(), |e| e.position),
             kind: None,
             uuid: None,
             spawn_data: None,
             falling_block: FallingBlockRenderState::default(),
             velocity: DVec3::ZERO,
+            on_ground: false,
             prev_look_dir: None,
             projectile: None,
             projectile_item: azalea_inventory::ItemStack::Empty,
+            firework_life: 0,
+            firework_event_handled: false,
+            firework_launch_sound_played: false,
             projectile_dangerous: false,
             projectile_foil: false,
             arrow_effect_color: -1,
+            arrow_in_ground_time: 0,
             tnt_fuse: 80,
             tnt_prev_fuse: 81,
             tnt_block_state: None,
@@ -1669,21 +2021,28 @@ impl EntityStore {
 
     pub fn set_vehicle_transform(&mut self, id: i32, position: Position, velocity: DVec3) {
         let state = self.vehicles.entry(id).or_insert(VehicleState {
+            client_particle_state: ClientEntityParticleState::default(),
             cloak: cloak_state::CloakState::default(),
             cape_motion: cloak_state::CapeMotionState::default(),
             position,
             prev_position: position,
+            particle_prev_position: position,
             kind: None,
             uuid: None,
             spawn_data: None,
             falling_block: FallingBlockRenderState::default(),
             velocity,
+            on_ground: false,
             prev_look_dir: None,
             projectile: None,
             projectile_item: azalea_inventory::ItemStack::Empty,
+            firework_life: 0,
+            firework_event_handled: false,
+            firework_launch_sound_played: false,
             projectile_dangerous: false,
             projectile_foil: false,
             arrow_effect_color: -1,
+            arrow_in_ground_time: 0,
             tnt_fuse: 80,
             tnt_prev_fuse: 81,
             tnt_block_state: None,
@@ -1748,6 +2107,7 @@ impl EntityStore {
             text_display_view_range: 1.0,
         });
         state.prev_position = state.position;
+        state.particle_prev_position = state.position;
         state.position = position;
         state.velocity = velocity;
         if let Some(display) = &mut state.projectile {
@@ -1780,7 +2140,35 @@ impl EntityStore {
     pub fn set_projectile_item(&mut self, id: i32, stack: azalea_inventory::ItemStackData) {
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.projectile_item = azalea_inventory::ItemStack::Present(stack);
+            if vehicle.kind == Some(EntityKind::FireworkRocket) {
+                vehicle.firework_event_handled = false;
+            }
         }
+    }
+
+    /// Claim Java `FireworkRocketEntity.handleEntityEvent(17)` once and retain
+    /// the synced item stack through the event's local visual request.
+    pub fn take_firework_event(&mut self, id: i32) -> Option<azalea_inventory::ItemStack> {
+        let vehicle = self.vehicles.get_mut(&id)?;
+        if vehicle.kind != Some(EntityKind::FireworkRocket) || vehicle.firework_event_handled {
+            return None;
+        }
+        vehicle.firework_event_handled = true;
+        Some(vehicle.projectile_item.clone())
+    }
+
+    pub fn take_firework_launch_sounds(&mut self) -> Vec<Position> {
+        let mut positions = Vec::new();
+        for vehicle in self.vehicles.values_mut() {
+            if vehicle.kind == Some(EntityKind::FireworkRocket)
+                && vehicle.firework_life == 1
+                && !vehicle.firework_launch_sound_played
+            {
+                vehicle.firework_launch_sound_played = true;
+                positions.push(vehicle.position);
+            }
+        }
+        positions
     }
 
     pub fn set_vehicle_spawn_data(&mut self, id: i32, spawn_data: i32) {
@@ -1791,6 +2179,11 @@ impl EntityStore {
                 spawn_data,
                 crate::version::session_protocol(),
             );
+        }
+        if self.vehicles.get(&id).and_then(|vehicle| vehicle.kind) == Some(EntityKind::EnderPearl)
+            && let Some(state) = self.misc_particle_state.get_mut(&id)
+        {
+            state.owner_id = (spawn_data != 0).then_some(spawn_data);
         }
     }
 
@@ -1963,6 +2356,180 @@ impl EntityStore {
         }
     }
 
+    pub(crate) fn misc_particle_on_spawn(
+        &mut self,
+        id: i32,
+        kind: EntityKind,
+    ) -> Vec<crate::world::particle_tick::ParticleSpawnRequest> {
+        let Some(vehicle) = self.vehicles.get(&id) else {
+            return Vec::new();
+        };
+        particle_misc::on_spawn(
+            &mut self.misc_particle_state,
+            id,
+            kind,
+            DVec3::from(vehicle.position),
+            vehicle.velocity,
+            vehicle.spawn_data,
+        )
+    }
+
+    pub(crate) fn misc_particle_metadata(&mut self, id: i32, index: u8, value: MetaValue) {
+        if let Some(state) = self.misc_particle_state.get_mut(&id) {
+            particle_misc::on_metadata(state, index, value);
+        }
+    }
+
+    pub(crate) fn misc_particle_cloud_options(
+        &mut self,
+        id: i32,
+        kind: crate::particle::ServerParticleKind,
+        options: crate::particle::ServerParticleOptions,
+    ) -> bool {
+        let Some(state) = self.misc_particle_state.get_mut(&id) else {
+            return false;
+        };
+        particle_misc::set_cloud_particle(state, kind, options)
+    }
+
+    pub(crate) fn set_effect_particle_options(
+        &mut self,
+        id: i32,
+        particles: Vec<(
+            crate::particle::ServerParticleKind,
+            crate::particle::ServerParticleOptions,
+        )>,
+    ) {
+        if let Some(entity) = self.living.get_mut(&id) {
+            entity.effect_particle_options = Some(particles);
+        }
+    }
+
+    pub(crate) fn arrow_pickup_particle_event(
+        &self,
+        id: i32,
+        event: u8,
+    ) -> Vec<crate::world::particle_tick::ParticleSpawnRequest> {
+        use crate::particle::{ServerParticleKind as Kind, ServerParticleOptions as Options};
+        use crate::world::particle_tick::ParticleSpawnRequest;
+
+        let Some(vehicle) = self.vehicles.get(&id) else {
+            return Vec::new();
+        };
+        if vehicle.kind != Some(EntityKind::Arrow) || event != 0 || vehicle.arrow_effect_color < 0 {
+            return Vec::new();
+        }
+        let position = vehicle.position;
+        let dimensions = azalea_entity::dimensions::EntityDimensions::from(EntityKind::Arrow);
+        let width = f64::from(dimensions.width);
+        let height = f64::from(dimensions.height);
+        let mut rng = fastrand::Rng::with_seed(
+            (id as u64).wrapping_mul(0x9e37_79b9) ^ self.tick ^ 0x6172_726f_775f_6576,
+        );
+        let options = Options::EntityEffect {
+            color: 0xff00_0000 | vehicle.arrow_effect_color as u32,
+        };
+        (0..20)
+            .map(|_| ParticleSpawnRequest {
+                kind: Kind::EntityEffect,
+                options: options.clone(),
+                position: DVec3::new(
+                    position.x + (rng.f64() * 2.0 - 1.0) * 0.5 * width,
+                    position.y + rng.f64() * height,
+                    position.z + (rng.f64() * 2.0 - 1.0) * 0.5 * width,
+                ),
+                velocity: DVec3::ZERO,
+                always_visible: false,
+            })
+            .collect()
+    }
+
+    pub(crate) fn misc_particle_event(
+        &mut self,
+        id: i32,
+        event: u8,
+    ) -> Vec<crate::world::particle_tick::ParticleSpawnRequest> {
+        use crate::particle::{ServerParticleKind as Kind, ServerParticleOptions as Options};
+        use crate::world::particle_tick::ParticleSpawnRequest;
+
+        let Some(vehicle) = self.vehicles.get(&id) else {
+            return Vec::new();
+        };
+        if event == 3 && matches!(vehicle.kind, Some(EntityKind::Snowball | EntityKind::Egg)) {
+            let kind = vehicle.kind.expect("matched projectile kind");
+            let position = DVec3::from(vehicle.position);
+            let stack = vehicle.projectile_item.as_present().filter(|stack| !stack.is_empty());
+            if kind == EntityKind::Snowball && stack.is_none() {
+                return (0..8)
+                    .map(|_| ParticleSpawnRequest {
+                        kind: Kind::ItemSnowball,
+                        options: Options::Simple,
+                        position,
+                        velocity: DVec3::ZERO,
+                        always_visible: false,
+                    })
+                    .collect();
+            }
+            let Some(stack) = stack else {
+                return Vec::new();
+            };
+            let options = Options::Item {
+                item_id: stack.kind.to_u32(),
+                count: stack.count,
+                components: stack.component_patch.clone(),
+                raw_components: None,
+            };
+            let mut rng = fastrand::Rng::with_seed(
+                (id as u64).wrapping_mul(0x9e37_79b9) ^ self.tick ^ u64::from(kind.to_u32()),
+            );
+            return (0..8)
+                .map(|_| ParticleSpawnRequest {
+                    kind: Kind::Item,
+                    options: options.clone(),
+                    position,
+                    velocity: if kind == EntityKind::Egg {
+                        dvec3(
+                            f64::from((rng.f32() - 0.5) * 0.08_f32),
+                            f64::from((rng.f32() - 0.5) * 0.08_f32),
+                            f64::from((rng.f32() - 0.5) * 0.08_f32),
+                        )
+                    } else {
+                        DVec3::ZERO
+                    },
+                    always_visible: false,
+                })
+                .collect();
+        }
+        particle_misc::on_event(
+            &mut self.misc_particle_state,
+            id,
+            event,
+            DVec3::from(vehicle.position),
+            vehicle.kind.map_or(0.5, |kind| {
+                f64::from(azalea_entity::dimensions::EntityDimensions::from(kind).width)
+            }),
+        )
+    }
+
+    pub(crate) fn misc_particle_requests(
+        &mut self,
+        chunks: &ChunkStore,
+        game_time: i64,
+        spectator_uuids: &std::collections::HashSet<uuid::Uuid>,
+        local_player: Option<LocalPlayerProjectileView>,
+    ) -> Vec<crate::world::particle_tick::ParticleSpawnRequest> {
+        particle_misc::tick(
+            &mut self.misc_particle_state,
+            &self.vehicles,
+            &self.living,
+            &self.vehicle_of,
+            chunks,
+            game_time,
+            spectator_uuids,
+            local_player,
+        )
+    }
+
     pub fn set_vehicle_uuid(&mut self, id: i32, uuid: uuid::Uuid) {
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.uuid = Some(uuid);
@@ -1977,6 +2544,9 @@ impl EntityStore {
                 vehicle.prev_position = vehicle.position;
             }
             vehicle.kind = Some(kind);
+            self.misc_particle_state
+                .entry(id)
+                .or_insert_with(|| particle_misc::State::new(kind));
             vehicle.falling_block = FallingBlockRenderState::default();
             if kind == EntityKind::FallingBlock
                 && crate::version::session_protocol() == pomme_protocol::version::NATIVE.protocol
@@ -1987,6 +2557,13 @@ impl EntityStore {
             }
             vehicle.projectile_age = 0;
             vehicle.projectile_prev_age = 0;
+            vehicle.arrow_in_ground_time = 0;
+            if kind == EntityKind::Arrow {
+                vehicle.arrow_effect_color = -1;
+            }
+            vehicle.firework_life = 0;
+            vehicle.firework_event_handled = false;
+            vehicle.firework_launch_sound_played = false;
             if kind == EntityKind::ChestMinecart {
                 vehicle.minecart_display_offset = 8;
             } else if kind == EntityKind::HopperMinecart {
@@ -1994,7 +2571,10 @@ impl EntityStore {
             }
             vehicle.projectile = matches!(
                 kind,
-                EntityKind::Arrow | EntityKind::SpectralArrow | EntityKind::Snowball
+                EntityKind::Arrow
+                    | EntityKind::SpectralArrow
+                    | EntityKind::Trident
+                    | EntityKind::Snowball
             )
             .then_some(ProjectileDisplay {
                 prev: vehicle.position,
@@ -2009,6 +2589,8 @@ impl EntityStore {
                 on_ground: false,
                 in_ground: false,
                 no_gravity: false,
+                no_physics: false,
+                critical: false,
             });
         }
     }
@@ -2025,9 +2607,23 @@ impl EntityStore {
             if vehicle.kind == Some(EntityKind::ExperienceOrb) {
                 vehicle.experience_orb_age = vehicle.experience_orb_age.wrapping_add(1);
             }
-            if vehicle.kind == Some(EntityKind::ShulkerBullet) {
+            if vehicle.kind == Some(EntityKind::Arrow) {
+                let in_ground = vehicle.projectile.as_ref().is_some_and(|p| p.in_ground);
+                vehicle.arrow_in_ground_time = if in_ground {
+                    vehicle.arrow_in_ground_time.wrapping_add(1)
+                } else {
+                    0
+                };
+            }
+            if matches!(
+                vehicle.kind,
+                Some(EntityKind::ShulkerBullet | EntityKind::FireworkRocket)
+            ) {
                 vehicle.projectile_prev_age = vehicle.projectile_age;
                 vehicle.projectile_age = vehicle.projectile_age.wrapping_add(1);
+                if vehicle.kind == Some(EntityKind::FireworkRocket) {
+                    vehicle.firework_life = vehicle.firework_life.wrapping_add(1);
+                }
             }
             if matches!(
                 vehicle.kind,
@@ -2240,6 +2836,12 @@ impl EntityStore {
         }
     }
 
+    pub fn set_vehicle_on_ground(&mut self, id: i32, on_ground: bool) {
+        if let Some(vehicle) = self.vehicles.get_mut(&id) {
+            vehicle.on_ground = on_ground;
+        }
+    }
+
     pub fn set_projectile_grounded(&mut self, id: i32, on_ground: bool) {
         if let Some(vehicle) = self.vehicles.get_mut(&id)
             && let Some(display) = &mut vehicle.projectile
@@ -2271,7 +2873,20 @@ impl EntityStore {
             // AbstractArrow inGround index 10 is a Boolean in 26.1 and 26.2.
             if matches!(
                 vehicle.kind,
-                Some(EntityKind::Arrow | EntityKind::SpectralArrow)
+                Some(EntityKind::Arrow | EntityKind::SpectralArrow | EntityKind::Trident)
+            ) && let (8, MetaValue::Byte(flags)) = (index, value)
+            {
+                display.critical = flags & 0x01 != 0;
+                let no_physics = flags & 0x02 != 0;
+                if display.no_physics != no_physics {
+                    display.invalidate();
+                }
+                display.no_physics = no_physics;
+            }
+            // AbstractArrow inGround index 10 is a Boolean in 26.1 and 26.2.
+            if matches!(
+                vehicle.kind,
+                Some(EntityKind::Arrow | EntityKind::SpectralArrow | EntityKind::Trident)
             ) && matches!(protocol, 775 | 776)
                 && let (10, MetaValue::Bool(in_ground)) = (index, value)
             {
@@ -2452,6 +3067,14 @@ impl EntityStore {
         if let Some(vehicle) = self.vehicles.get_mut(&id) {
             vehicle.look_dir = Some(look_dir);
             vehicle.prev_look_dir = Some(look_dir);
+            vehicle.particle_prev_position = position;
+        }
+    }
+
+    pub fn set_vehicle_teleport_transform(&mut self, id: i32, position: Position, velocity: DVec3) {
+        self.set_vehicle_transform(id, position, velocity);
+        if let Some(vehicle) = self.vehicles.get_mut(&id) {
+            vehicle.particle_prev_position = position;
         }
     }
 
@@ -2541,6 +3164,25 @@ impl EntityStore {
         body_y_rot_deg: f32,
         player_uuid: Option<uuid::Uuid>,
     ) {
+        self.living_uuid_index
+            .retain(|_, entity_id| *entity_id != id);
+        self.animals_particle_state.remove(&id);
+        self.phase_particle_state.remove(&id);
+        self.boss_particle_state.remove(&id);
+        self.mob_particle_state.remove(&id);
+        if matches!(
+            entity_type,
+            EntityKind::Guardian
+                | EntityKind::ElderGuardian
+                | EntityKind::Evoker
+                | EntityKind::Illusioner
+        ) {
+            self.mob_particle_state
+                .insert(id, particle_mobs::MobParticleState::default());
+        }
+        if let Some(uuid) = player_uuid {
+            self.living_uuid_index.insert(uuid, id);
+        }
         self.living.insert(
             id,
             LivingEntity::new(
@@ -2552,6 +3194,21 @@ impl EntityStore {
                 player_uuid,
             ),
         );
+    }
+
+    /// Record the AddEntity UUID for a live non-player after its synchronized
+    /// living state has been created.
+    pub fn set_living_uuid(&mut self, id: i32, uuid: uuid::Uuid) {
+        if !self.living.contains_key(&id) {
+            return;
+        }
+        self.living_uuid_index
+            .retain(|_, entity_id| *entity_id != id);
+        self.living_uuid_index.insert(uuid, id);
+    }
+
+    pub fn living_by_uuid(&self, uuid: &uuid::Uuid) -> Option<&LivingEntity> {
+        self.living.get(self.living_uuid_index.get(uuid)?)
     }
 
     pub fn move_living_delta(&mut self, id: i32, dx: f64, dy: f64, dz: f64, on_ground: bool) {
@@ -2601,9 +3258,37 @@ impl EntityStore {
         };
         let kind = entity.entity_type;
         let index = normalize_player_index(kind, normalize_ageable_index(kind, index));
+        let cube_size_metadata = matches!(
+            kind,
+            EntityKind::Slime | EntityKind::MagmaCube | EntityKind::SulfurCube
+        ) && matches!(
+            (kind, index, value),
+            (
+                EntityKind::Slime | EntityKind::MagmaCube,
+                16 | 18,
+                MetaValue::Int(_)
+            ) | (EntityKind::SulfurCube, 18, MetaValue::Int(_))
+        );
         match (kind, index, value) {
+            (EntityKind::Guardian | EntityKind::ElderGuardian, 16..=17, value) => {
+                particle_mobs::on_metadata(
+                    self.mob_particle_state.entry(id).or_default(),
+                    kind,
+                    index,
+                    value,
+                );
+            }
+            (EntityKind::Evoker | EntityKind::Illusioner, 17, value @ MetaValue::Byte(_)) => {
+                particle_mobs::on_metadata(
+                    self.mob_particle_state.entry(id).or_default(),
+                    kind,
+                    index,
+                    value,
+                );
+            }
             // Protocols 763-765 stored effect color and ambient separately.
             (_, 10, Int(color)) => {
+                entity.effect_particle_options = None;
                 let color = color as u32 & 0x00ff_ffff;
                 entity.legacy_effect_color = Some(color);
                 entity.effect_particles =
@@ -2625,7 +3310,15 @@ impl EntityStore {
                 entity.using_offhand = f & 0x02 != 0;
                 entity.riptide_spin = f & 0x04 != 0;
             }
-            (_, 9, Float(h)) => entity.health = h,
+            (_, 9, Float(h)) => {
+                entity.health = h;
+                if kind == EntityKind::EnderDragon && h > 0.0 {
+                    self.boss_particle_state
+                        .entry(id)
+                        .or_default()
+                        .dragon_death_time = 0;
+                }
+            }
             // Mob flags byte: bit 0x04 = aggressive. Players aren't mobs;
             // their 15 is Avatar's main hand (a byte on 1.21.9-1.21.10).
             (k, 15, Byte(f)) if k != EntityKind::Player => entity.aggressive = f & 0x04 != 0,
@@ -2633,6 +3326,7 @@ impl EntityStore {
                 entity.skin_parts_mask = Some(mask & 0x7f)
             }
             (k, 16, Bool(b)) if is_baby_kind(k) => entity.is_baby = b,
+            (k, 17, Bool(b)) if is_ageable_mob(k) => entity.age_locked = b,
             // Skeleton: powder-snow stray conversion; drives the vanilla
             // `isShaking` body jitter.
             (EntityKind::Skeleton, 16, Bool(b)) => entity.is_converting = b,
@@ -2647,8 +3341,16 @@ impl EntityStore {
                 entity.sulfur_cube_size = s.max(1);
             }
             (EntityKind::Mooshroom, 18, Int(t)) => entity.variant = t.clamp(0, 1) as u32,
+            (EntityKind::Panda, 19, Int(t)) => entity.panda_sneeze_counter = t.max(0),
+            (EntityKind::Panda, 20, Int(t)) => entity.panda_eat_counter = t.max(0),
+            (EntityKind::Panda, 21, Byte(gene)) => entity.variant = u32::from(gene),
+            (EntityKind::Panda, 23, Byte(f)) => entity.panda_flags = f,
+            (EntityKind::Sniffer, 18, Int(state)) => entity.sniffer_state = state.clamp(0, 6) as u8,
             (EntityKind::Bee, 18, Byte(f)) => entity.bee_flags = f,
             (EntityKind::Bee, 19, Long(t)) => entity.anger_end_time = t,
+            (EntityKind::HappyGhast, 19, Bool(stays_still)) => {
+                entity.happy_ghast_stays_still = stays_still
+            }
             (EntityKind::Ghast, 16, Bool(b)) => entity.ghast_charging = b,
             (EntityKind::Vex, 16, Byte(f)) => entity.vex_charging = f & 0x01 != 0,
             (EntityKind::Phantom, 16, Int(s)) => entity.phantom_size = s.max(0),
@@ -2657,6 +3359,21 @@ impl EntityStore {
             }
             (EntityKind::Shulker, 17, Byte(p)) => entity.shulker_peek = p,
             (EntityKind::Shulker, 18, Byte(c)) => entity.variant = (c & 0xFF) as u32,
+            (EntityKind::EnderDragon, 16, Int(phase)) => {
+                let phase = if (0..=10).contains(&phase) { phase } else { 0 };
+                let state = self.boss_particle_state.entry(id).or_default();
+                if state.dragon_phase != phase {
+                    state.dragon_phase = phase;
+                    state.dragon_phase_ticks = 0;
+                    state.dragon_death_ticks = 0;
+                }
+            }
+            (EntityKind::Wither, 16..=18, Int(target)) => {
+                self.boss_particle_state
+                    .entry(id)
+                    .or_default()
+                    .wither_targets[usize::from(index - 16)] = target;
+            }
             (EntityKind::Wither, 19, Int(t)) => entity.wither_invulnerability = t.max(0),
             // Sheep wool byte: low nibble = DyeColor, bit 0x10 = sheared.
             (EntityKind::Sheep, 18, Byte(w)) => {
@@ -2735,6 +3452,12 @@ impl EntityStore {
             (EntityKind::GlowSquid, 18, Int(t)) => entity.dark_ticks = t,
             _ => {}
         }
+        if cube_size_metadata {
+            let size = self.living.get(&id).map(|entity| entity.slime_size);
+            if let Some(size) = size {
+                self.on_particle_cube_size(id, size);
+            }
+        }
     }
 
     pub fn set_crouching(&mut self, id: i32, is_crouching: bool) {
@@ -2777,6 +3500,7 @@ impl EntityStore {
             entity.pose = pose;
             entity.is_crouching = pose == EntityPose::Crouching;
         }
+        self.on_particle_mob_pose(id, pose);
         if let Some(entity) = self.vehicles.get_mut(&id)
             && entity.kind == Some(EntityKind::Mannequin)
         {
@@ -2983,13 +3707,27 @@ impl EntityStore {
     /// Remove one entity and direct graph edges without deleting passenger
     /// subtrees.
     pub fn remove_entity(&mut self, id: i32) -> Option<LivingEntity> {
+        self.animals_particle_state.remove(&id);
+        self.phase_particle_state.remove(&id);
+        self.boss_particle_state.remove(&id);
+        self.misc_particle_state.remove(&id);
+        if let Some(removed) = self.living.get(&id) {
+            particle_mobs::on_entity_removed(&mut self.mob_particle_state, id, removed);
+        }
+        self.mob_particle_state.remove(&id);
         for vehicle in self.vehicles.values_mut() {
             vehicle.passengers.retain(|&passenger| passenger != id);
         }
         self.vehicle_of.remove(&id);
         self.vehicle_of.retain(|_, vehicle_id| *vehicle_id != id);
         self.vehicles.remove(&id);
+        self.living_uuid_index
+            .retain(|_, entity_id| *entity_id != id);
         self.living.remove(&id)
+    }
+
+    pub(crate) fn set_client_particle_game_time(&mut self, game_time: i64) {
+        self.client_particle_game_time = game_time;
     }
 
     pub fn remove_living(&mut self, id: i32) -> Option<LivingEntity> {
@@ -3004,6 +3742,278 @@ impl EntityStore {
         self.living
             .values()
             .find(|entity| entity.player_uuid == Some(*uuid))
+    }
+
+    /// Client-side `aiStep` visual emissions driven entirely by synchronized
+    /// entity state. Packet/event particle emissions remain owned by the
+    /// network handlers and are deliberately not reproduced here.
+    pub fn client_particle_requests(
+        &mut self,
+        chunks: &ChunkStore,
+        spectator_uuids: &std::collections::HashSet<uuid::Uuid>,
+        local_player: Option<LocalPlayerProjectileView>,
+    ) -> Vec<crate::world::particle_tick::ParticleSpawnRequest> {
+        use crate::particle::{ServerParticleKind as Kind, ServerParticleOptions as Options};
+        use crate::world::particle_tick::ParticleSpawnRequest;
+
+        let mut requests = Vec::new();
+        for (&id, entity) in &self.living {
+            let dimensions = azalea_entity::dimensions::EntityDimensions::from(entity.entity_type);
+            let width = f64::from(dimensions.width);
+            let height = f64::from(dimensions.height);
+            let seed = (id as u64).wrapping_mul(0x9e37_79b9) ^ u64::from(entity.age_in_ticks);
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let mut add = |kind, pos| {
+                requests.push(ParticleSpawnRequest {
+                    kind,
+                    options: Options::Simple,
+                    position: pos,
+                    velocity: DVec3::ZERO,
+                    always_visible: false,
+                });
+            };
+            match entity.entity_type {
+                // Blaze.aiStep: exactly two large-smoke particles per client tick.
+                EntityKind::Blaze => {
+                    for _ in 0..2 {
+                        add(
+                            Kind::LargeSmoke,
+                            DVec3::new(
+                                entity.position.x + (rng.f64() - 0.5) * width * 0.5,
+                                entity.position.y + rng.f64() * height,
+                                entity.position.z + (rng.f64() - 0.5) * width * 0.5,
+                            ),
+                        );
+                    }
+                }
+                // GlowSquid.aiStep emits one glow particle on every client tick.
+                EntityKind::GlowSquid => add(
+                    Kind::Glow,
+                    DVec3::new(
+                        entity.position.x + (rng.f64() - 0.5) * width * 0.6,
+                        entity.position.y + rng.f64() * height,
+                        entity.position.z + (rng.f64() - 0.5) * width * 0.6,
+                    ),
+                ),
+                // Phantom.tick emits the paired mycelium trail; use its synced
+                // yaw and entity dimensions, not a guessed body-center offset.
+                EntityKind::Phantom => {
+                    let yaw = entity.look_dir.y_rot_deg().to_radians();
+                    let anim = (((id * 3) as f32 + entity.age_in_ticks as f32)
+                        * 7.448_451_f32.to_radians()
+                        + std::f32::consts::PI)
+                        .cos();
+                    let side = f64::from(yaw.cos()) * width * 1.48;
+                    let forward = f64::from(yaw.sin()) * width * 1.48;
+                    let y =
+                        entity.position.y + f64::from((0.3 + anim * 0.45) * height as f32 * 2.5);
+                    add(
+                        Kind::Mycelium,
+                        DVec3::new(entity.position.x + side, y, entity.position.z + forward),
+                    );
+                    add(
+                        Kind::Mycelium,
+                        DVec3::new(entity.position.x - side, y, entity.position.z - forward),
+                    );
+                }
+                _ => {}
+            }
+        }
+        // Entity projectile trails from Java client ticks. These are native
+        // local emissions; server sendParticles and hit/event bursts stay on
+        // their existing packet/event paths.
+        for (&id, vehicle) in &self.vehicles {
+            let Some(kind) = vehicle.kind else { continue };
+            let projectile = vehicle.projectile.as_ref();
+            let stopped = projectile.is_some_and(|p| p.stopped);
+            let in_ground = projectile.is_some_and(|p| p.in_ground);
+            let current = projectile.map_or(vehicle.position, |p| p.current);
+            let pos = DVec3::from(current);
+            let velocity = projectile.map_or(vehicle.velocity, |p| p.velocity);
+            let abstract_arrow = matches!(
+                kind,
+                EntityKind::Arrow | EntityKind::SpectralArrow | EntityKind::Trident
+            );
+            let throwable_projectile = matches!(
+                kind,
+                EntityKind::Snowball
+                    | EntityKind::Egg
+                    | EntityKind::EnderPearl
+                    | EntityKind::ExperienceBottle
+                    | EntityKind::SplashPotion
+                    | EntityKind::LingeringPotion
+            );
+            let hurting_projectile = matches!(
+                kind,
+                EntityKind::SmallFireball
+                    | EntityKind::Fireball
+                    | EntityKind::DragonFireball
+                    | EntityKind::WitherSkull
+                    | EntityKind::WindCharge
+                    | EntityKind::BreezeWindCharge
+            );
+            let water = if abstract_arrow || throwable_projectile || hurting_projectile {
+                let dimensions = azalea_entity::dimensions::EntityDimensions::from(kind);
+                let half_width = f64::from(dimensions.width) * 0.5;
+                let bounds = Aabb::new(
+                    dvec3(current.x - half_width, current.y, current.z - half_width),
+                    dvec3(
+                        current.x + half_width,
+                        current.y + f64::from(dimensions.height),
+                        current.z + half_width,
+                    ),
+                );
+                particle_tick::touches_water(chunks, bounds)
+            } else {
+                false
+            };
+            let mut add = |kind, options, position, velocity| {
+                requests.push(ParticleSpawnRequest {
+                    kind,
+                    options,
+                    position,
+                    velocity,
+                    always_visible: false,
+                });
+            };
+            if !stopped && !in_ground {
+                match kind {
+                    EntityKind::FireworkRocket => {
+                        let mut rng = fastrand::Rng::with_seed(
+                            (id as u64).wrapping_mul(0x9e37_79b9) ^ self.tick,
+                        );
+                        let gaussian = |rng: &mut fastrand::Rng| {
+                            (-2.0 * rng.f64().max(f64::MIN_POSITIVE).ln()).sqrt()
+                                * (std::f64::consts::TAU * rng.f64()).cos()
+                        };
+                        add(
+                            Kind::Firework,
+                            Options::Simple,
+                            pos,
+                            DVec3::new(
+                                gaussian(&mut rng) * 0.05,
+                                -velocity.y * 0.5,
+                                gaussian(&mut rng) * 0.05,
+                            ),
+                        );
+                    }
+                    EntityKind::Tnt if vehicle.tnt_fuse > 0 => add(
+                        Kind::Smoke,
+                        Options::Simple,
+                        pos + DVec3::new(0.0, 0.5, 0.0),
+                        DVec3::ZERO,
+                    ),
+                    EntityKind::ShulkerBullet => add(
+                        Kind::EndRod,
+                        Options::Simple,
+                        pos - velocity + DVec3::new(0.0, 0.15, 0.0),
+                        DVec3::ZERO,
+                    ),
+                    _ => {}
+                }
+            }
+            if water
+                && (!abstract_arrow || !in_ground)
+                && (abstract_arrow || throwable_projectile || hurting_projectile)
+            {
+                for _ in 0..4 {
+                    add(
+                        Kind::Bubble,
+                        Options::Simple,
+                        pos - velocity * 0.25,
+                        velocity,
+                    );
+                }
+            }
+            let arrow_particle_count =
+                if kind == EntityKind::Arrow && vehicle.arrow_effect_color >= 0 {
+                    if in_ground && vehicle.arrow_in_ground_time % 5 == 0 {
+                        1
+                    } else if !in_ground {
+                        2
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+            if abstract_arrow && !in_ground && projectile.is_some_and(|p| p.critical) {
+                for i in 0..4 {
+                    let fraction = f64::from(i) / 4.0;
+                    add(
+                        Kind::Crit,
+                        Options::Simple,
+                        pos + velocity * fraction,
+                        dvec3(-velocity.x, -velocity.y + 0.2, -velocity.z),
+                    );
+                }
+            }
+            if arrow_particle_count > 0 {
+                let dimensions = azalea_entity::dimensions::EntityDimensions::from(kind);
+                let mut rng = fastrand::Rng::with_seed(
+                    (id as u64).wrapping_mul(0x9e37_79b9)
+                        ^ u64::from(self.tick as u32)
+                        ^ u64::from(vehicle.arrow_in_ground_time),
+                );
+                for _ in 0..arrow_particle_count {
+                    add(
+                        Kind::EntityEffect,
+                        Options::EntityEffect {
+                            color: 0xff00_0000 | vehicle.arrow_effect_color as u32,
+                        },
+                        DVec3::new(
+                            pos.x + (rng.f64() * 2.0 - 1.0) * 0.5 * f64::from(dimensions.width),
+                            pos.y + rng.f64() * f64::from(dimensions.height),
+                            pos.z + (rng.f64() * 2.0 - 1.0) * 0.5 * f64::from(dimensions.width),
+                        ),
+                        DVec3::ZERO,
+                    );
+                }
+            }
+            if kind == EntityKind::SpectralArrow && !stopped && !in_ground {
+                add(
+                    Kind::Effect,
+                    Options::Spell {
+                        color: -1,
+                        power: 1.0,
+                    },
+                    pos,
+                    DVec3::ZERO,
+                );
+            }
+        }
+        requests.extend(particle_tick::tick_common(
+            self,
+            chunks,
+            spectator_uuids,
+            local_player,
+        ));
+        // Each client-local visual owner is ticked once from this aggregate;
+        // packet-owned LevelParticles and entity-event bursts stay on handlers.
+        let game_time = self.client_particle_game_time;
+        requests.extend(self.tick_animal_particles(chunks, game_time));
+        let guardian_target = local_player.map(|player| particle_mobs::GuardianTargetView {
+            entity_id: player.entity_id,
+            position: player.position,
+            bbox_height: player.bbox_height,
+        });
+        requests.extend(particle_mobs::tick_with_target_view(
+            self,
+            chunks,
+            game_time,
+            guardian_target,
+        ));
+        requests.extend(Self::tick_mob_phase_particles(self, chunks, game_time));
+        requests.extend(particle_bosses::tick_boss_particles(
+            self, chunks, game_time,
+        ));
+        requests.extend(self.misc_particle_requests(
+            chunks,
+            game_time,
+            spectator_uuids,
+            local_player,
+        ));
+        requests
     }
 
     pub fn tick_living(
@@ -3236,6 +4246,324 @@ mod tests {
     use super::*;
 
     #[test]
+    fn synchronized_entity_client_particle_ticks_emit_vanilla_species_trails_once() {
+        let mut store = EntityStore::new();
+        for (id, kind) in [
+            (1, EntityKind::Blaze),
+            (2, EntityKind::GlowSquid),
+            (3, EntityKind::Phantom),
+            (4, EntityKind::Pig),
+        ] {
+            store.spawn_living(
+                id,
+                kind,
+                Position::new(10.0, 20.0, 30.0),
+                LookDirection::default(),
+                0.0,
+                None,
+            );
+        }
+        let requests = store.client_particle_requests(
+            &ChunkStore::new(1),
+            &std::collections::HashSet::new(),
+            None,
+        );
+        assert_eq!(requests.len(), 5); // blaze 2 + glow squid 1 + phantom 2
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.kind == crate::particle::ServerParticleKind::LargeSmoke)
+                .count(),
+            2
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.kind == crate::particle::ServerParticleKind::Glow)
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.kind == crate::particle::ServerParticleKind::Mycelium)
+                .count(),
+            2
+        );
+        assert!(requests.iter().all(|r| r.position.is_finite()));
+    }
+
+    #[test]
+    fn projectile_client_ticks_emit_spectral_and_shulker_bullet_trails() {
+        let chunks = ChunkStore::new(1);
+        let mut store = EntityStore::new();
+        for (id, kind) in [
+            (1, EntityKind::SpectralArrow),
+            (2, EntityKind::ShulkerBullet),
+            (3, EntityKind::Tnt),
+            (4, EntityKind::Arrow),
+        ] {
+            store.set_vehicle_spawn_transform(
+                id,
+                Position::new(2.0, 70.0, 3.0),
+                DVec3::new(0.2, 0.1, 0.0),
+                LookDirection::default(),
+            );
+            store.set_vehicle_kind(id, kind);
+        }
+        store.apply_vehicle_metadata(4, 11, MetaValue::Int(0x0033_6699));
+        let requests =
+            store.client_particle_requests(&chunks, &std::collections::HashSet::new(), None);
+        assert!(requests.iter().any(|r| {
+            r.kind == crate::particle::ServerParticleKind::Effect
+                && matches!(
+                    &r.options,
+                    crate::particle::ServerParticleOptions::Spell { color: -1, .. }
+                )
+        }));
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.kind == crate::particle::ServerParticleKind::EndRod)
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.kind == crate::particle::ServerParticleKind::Smoke)
+        );
+        assert!(requests.iter().any(|r| {
+            r.kind == crate::particle::ServerParticleKind::EntityEffect
+                && matches!(
+                    &r.options,
+                    crate::particle::ServerParticleOptions::EntityEffect { color: 0xff33_6699 }
+                )
+        }));
+        assert_eq!(requests.len(), 5); // spectral, shulker, TNT, two tipped-arrow trail particles
+        assert!(!requests.iter().any(|r| matches!(
+            r.kind,
+            crate::particle::ServerParticleKind::Explosion
+                | crate::particle::ServerParticleKind::Crit
+        )));
+    }
+
+    #[test]
+    fn tipped_arrow_trail_matches_flight_ground_cadence_and_resets_on_reuse() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let chunks = ChunkStore::new(1);
+        let mut store = projectile(EntityKind::Arrow, Position::new(2.0, 70.0, 3.0), DVec3::X);
+        store.apply_vehicle_metadata(1, 11, MetaValue::Int(0x0033_6699));
+        let count_trail = |requests: &[crate::world::particle_tick::ParticleSpawnRequest]| {
+            requests
+                .iter()
+                .filter(|request| {
+                    request.kind == crate::particle::ServerParticleKind::EntityEffect
+                        && matches!(
+                            request.options,
+                            crate::particle::ServerParticleOptions::EntityEffect {
+                                color: 0xff33_6699
+                            }
+                        )
+                })
+                .count()
+        };
+        assert_eq!(
+            count_trail(&store.client_particle_requests(
+                &chunks,
+                &std::collections::HashSet::new(),
+                None
+            )),
+            2
+        );
+        store.set_vehicle_transform(1, store.vehicles[&1].position, DVec3::ZERO);
+        assert_eq!(
+            count_trail(&store.client_particle_requests(
+                &chunks,
+                &std::collections::HashSet::new(),
+                None
+            )),
+            2,
+            "Java emits arrow color particles while flying even at zero motion"
+        );
+        store.set_vehicle_transform(1, store.vehicles[&1].position, DVec3::X);
+
+        store.set_projectile_metadata_at(1, 10, MetaValue::Bool(true), 776);
+        for _ in 0..4 {
+            store.tick_projectile_displays(&chunks);
+            assert_eq!(
+                count_trail(&store.client_particle_requests(
+                    &chunks,
+                    &std::collections::HashSet::new(),
+                    None
+                )),
+                0
+            );
+        }
+        store.tick_projectile_displays(&chunks);
+        assert_eq!(
+            count_trail(&store.client_particle_requests(
+                &chunks,
+                &std::collections::HashSet::new(),
+                None
+            )),
+            1
+        );
+        for _ in 0..4 {
+            store.tick_projectile_displays(&chunks);
+            assert_eq!(
+                count_trail(&store.client_particle_requests(
+                    &chunks,
+                    &std::collections::HashSet::new(),
+                    None
+                )),
+                0
+            );
+        }
+
+        store.set_projectile_metadata_at(1, 10, MetaValue::Bool(false), 776);
+        let requests =
+            store.client_particle_requests(&chunks, &std::collections::HashSet::new(), None);
+        assert_eq!(count_trail(&requests), 2);
+        store.apply_vehicle_metadata(1, 11, MetaValue::Int(-1));
+        assert_eq!(
+            count_trail(&store.client_particle_requests(
+                &chunks,
+                &std::collections::HashSet::new(),
+                None
+            )),
+            0
+        );
+        store.apply_vehicle_metadata(1, 11, MetaValue::Int(0x0033_6699));
+        assert_eq!(
+            count_trail(&store.client_particle_requests(
+                &chunks,
+                &std::collections::HashSet::new(),
+                None
+            )),
+            2
+        );
+
+        store.set_vehicle_spawn_transform(
+            1,
+            Position::default(),
+            DVec3::ZERO,
+            LookDirection::default(),
+        );
+        store.set_vehicle_kind(1, EntityKind::Arrow);
+        assert_eq!(store.vehicles[&1].arrow_in_ground_time, 0);
+        assert_eq!(store.vehicles[&1].arrow_effect_color, -1);
+        assert_eq!(
+            count_trail(&store.client_particle_requests(
+                &chunks,
+                &std::collections::HashSet::new(),
+                None
+            )),
+            0
+        );
+    }
+
+    #[test]
+    fn critical_arrow_metadata_produces_four_crit_particles_per_flying_tick() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        let mut store = projectile(EntityKind::Arrow, Position::new(2.0, 70.0, 3.0), DVec3::new(0.2, -0.4, 0.6));
+        store.set_projectile_metadata_at(1, 8, MetaValue::Byte(1), 776);
+        let requests = store.client_particle_requests(
+            &ChunkStore::new(1),
+            &std::collections::HashSet::new(),
+            None,
+        );
+        let crit: Vec<_> = requests
+            .iter()
+            .filter(|request| request.kind == crate::particle::ServerParticleKind::Crit)
+            .collect();
+        assert_eq!(crit.len(), 4);
+        for (index, request) in crit.iter().enumerate() {
+            assert_eq!(
+                request.position,
+                DVec3::new(2.0, 70.0, 3.0) + DVec3::new(0.2, -0.4, 0.6) * (index as f64 / 4.0)
+            );
+            assert!((request.velocity.x + 0.2).abs() < 1e-12);
+            assert!((request.velocity.y - (-(-0.4) + 0.2)).abs() < 1e-12);
+            assert!((request.velocity.z + 0.6).abs() < 1e-12);
+        }
+        store.set_projectile_metadata_at(1, 10, MetaValue::Bool(true), 776);
+        assert!(!store.client_particle_requests(
+            &ChunkStore::new(1),
+            &std::collections::HashSet::new(),
+            None,
+        ).iter().any(|request| request.kind == crate::particle::ServerParticleKind::Crit));
+    }
+
+    #[test]
+    fn tipped_arrow_entity_event_zero_emits_twenty_color_particles_only_when_colored() {
+        let mut store = projectile(EntityKind::Arrow, Position::new(2.0, 70.0, 3.0), DVec3::ZERO);
+        store.apply_vehicle_metadata(1, 11, MetaValue::Int(0x0033_6699));
+        let requests = store.arrow_pickup_particle_event(1, 0);
+        assert_eq!(requests.len(), 20);
+        assert!(requests.iter().all(|request| {
+            request.kind == crate::particle::ServerParticleKind::EntityEffect
+                && matches!(
+                    request.options,
+                    crate::particle::ServerParticleOptions::EntityEffect { color: 0xff33_6699 }
+                )
+                && request.velocity == DVec3::ZERO
+                && (1.75..=2.25).contains(&request.position.x)
+                && (70.0..=70.5).contains(&request.position.y)
+                && (2.75..=3.25).contains(&request.position.z)
+        }));
+        assert!(store.arrow_pickup_particle_event(1, 1).is_empty());
+        store.apply_vehicle_metadata(1, 11, MetaValue::Int(-1));
+        assert!(store.arrow_pickup_particle_event(1, 0).is_empty());
+        store.set_vehicle_kind(1, EntityKind::SpectralArrow);
+        assert!(store.arrow_pickup_particle_event(1, 0).is_empty());
+    }
+
+    #[test]
+    fn thrown_snowball_and_egg_entity_event_three_keep_item_payloads() {
+        let mut snowball = projectile(EntityKind::Snowball, Position::new(4.0, 65.0, -2.0), DVec3::ZERO);
+        let default_snowball = snowball.misc_particle_event(1, 3);
+        assert_eq!(default_snowball.len(), 8);
+        assert!(default_snowball.iter().all(|request| {
+            request.kind == crate::particle::ServerParticleKind::ItemSnowball
+                && matches!(request.options, crate::particle::ServerParticleOptions::Simple)
+                && request.position == DVec3::new(4.0, 65.0, -2.0)
+                && request.velocity == DVec3::ZERO
+        }));
+        let snowball_stack = azalea_inventory::ItemStackData::new(
+            azalea_registry::builtin::ItemKind::Snowball,
+            1,
+        );
+        snowball.set_projectile_item(1, snowball_stack.clone());
+        let item_snowball = snowball.misc_particle_event(1, 3);
+        assert_eq!(item_snowball.len(), 8);
+        assert!(item_snowball.iter().all(|request| {
+            request.kind == crate::particle::ServerParticleKind::Item
+                && matches!(
+                    &request.options,
+                    crate::particle::ServerParticleOptions::Item { item_id, count, components, .. }
+                        if *item_id == snowball_stack.kind.to_u32()
+                            && *count == 1
+                            && components == &snowball_stack.component_patch
+                )
+                && request.velocity == DVec3::ZERO
+        }));
+
+        let mut egg = projectile(EntityKind::Egg, Position::new(1.0, 70.0, 2.0), DVec3::ZERO);
+        egg.set_projectile_item(1, azalea_inventory::ItemStackData::new(
+            azalea_registry::builtin::ItemKind::Egg,
+            1,
+        ));
+        let egg_particles = egg.misc_particle_event(1, 3);
+        assert_eq!(egg_particles.len(), 8);
+        assert!(egg_particles.iter().all(|request| {
+            request.kind == crate::particle::ServerParticleKind::Item
+                && request.position == DVec3::new(1.0, 70.0, 2.0)
+                && request.velocity.abs().cmple(dvec3(0.04, 0.04, 0.04)).all()
+        }));
+        assert!(egg.misc_particle_event(1, 2).is_empty());
+    }
+
+    #[test]
     fn falling_block_wire_state_gate_retains_raw_data_without_foreign_remapping() {
         let native = pomme_protocol::version::NATIVE.protocol;
         assert!(decode_falling_block_state(Some(EntityKind::FallingBlock), 0, native).is_some());
@@ -3307,6 +4635,190 @@ mod tests {
         store.set_vehicle_spawn_transform(1, position, velocity, LookDirection::default());
         store.set_vehicle_kind(1, kind);
         store
+    }
+
+    #[test]
+    fn projectile_water_bubbles_match_java_families_and_lifecycle() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(2);
+        chunks.load_decoded_chunk(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
+        let water = crate::world::block::default_state_of("water").unwrap();
+        chunks.set_block_state(1, 64, 1, water);
+        let position = Position::new(1.5, 64.1, 1.5);
+        let velocity = dvec3(0.2, -0.4, 0.6);
+        let mut store = EntityStore::new();
+        for (id, kind) in [
+            (1, EntityKind::Arrow),
+            (2, EntityKind::Fireball),
+            (3, EntityKind::Snowball),
+            (4, EntityKind::ExperienceBottle),
+            (5, EntityKind::SplashPotion),
+            (6, EntityKind::LingeringPotion),
+            (8, EntityKind::SmallFireball),
+            (9, EntityKind::DragonFireball),
+            (10, EntityKind::WitherSkull),
+            (11, EntityKind::WindCharge),
+            (12, EntityKind::BreezeWindCharge),
+        ] {
+            store.set_vehicle_spawn_transform(id, position, velocity, LookDirection::default());
+            store.set_vehicle_kind(id, kind);
+        }
+        // Zero movement does not suppress the Java isInWater branch.
+        store.set_vehicle_spawn_transform(7, position, DVec3::ZERO, LookDirection::default());
+        store.set_vehicle_kind(7, EntityKind::Trident);
+        let requests =
+            store.client_particle_requests(&chunks, &std::collections::HashSet::new(), None);
+        let count_projectile_bubbles =
+            |requests: &[crate::world::particle_tick::ParticleSpawnRequest]| {
+                requests
+                    .iter()
+                    .filter(|request| request.kind == crate::particle::ServerParticleKind::Bubble)
+                    .filter(|request| {
+                        (request.position == DVec3::from(position) - velocity * 0.25
+                            && request.velocity == velocity)
+                            || (request.position == DVec3::from(position)
+                                && request.velocity == DVec3::ZERO)
+                    })
+                    .count()
+            };
+        assert_eq!(count_projectile_bubbles(&requests), 12 * 4);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request.kind == crate::particle::ServerParticleKind::Bubble
+                        && request.position == DVec3::from(position) - velocity * 0.25
+                        && request.velocity == velocity
+                })
+                .count(),
+            11 * 4
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request.kind == crate::particle::ServerParticleKind::Bubble
+                        && request.position == DVec3::from(position)
+                        && request.velocity == DVec3::ZERO
+                })
+                .count(),
+            4
+        );
+
+        store.set_projectile_metadata_at(1, 10, MetaValue::Bool(true), 776);
+        let requests =
+            store.client_particle_requests(&chunks, &std::collections::HashSet::new(), None);
+        assert_eq!(count_projectile_bubbles(&requests), 11 * 4);
+        chunks.set_block_state(1, 64, 1, azalea_block::BlockState::AIR);
+        assert!(
+            !store
+                .client_particle_requests(&chunks, &std::collections::HashSet::new(), None)
+                .iter()
+                .any(|request| request.kind == crate::particle::ServerParticleKind::Bubble)
+        );
+        chunks.set_block_state(1, 64, 1, water);
+        store.remove_entity(4);
+        assert!(!store.vehicles.contains_key(&4));
+        let requests =
+            store.client_particle_requests(&chunks, &std::collections::HashSet::new(), None);
+        assert_eq!(count_projectile_bubbles(&requests), 10 * 4);
+        store.set_vehicle_spawn_transform(4, position, velocity, LookDirection::default());
+        store.set_vehicle_kind(4, EntityKind::ExperienceBottle);
+        let requests =
+            store.client_particle_requests(&chunks, &std::collections::HashSet::new(), None);
+        assert_eq!(count_projectile_bubbles(&requests), 11 * 4);
+    }
+
+    #[test]
+    fn eye_of_ender_keeps_its_single_four_bubble_owner() {
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let mut chunks = ChunkStore::new(2);
+        chunks.load_decoded_chunk(ChunkPos::new(0, 0), azalea_world::chunk::Chunk::default());
+        let water = crate::world::block::default_state_of("water").unwrap();
+        chunks.set_block_state(1, 64, 1, water);
+        let mut store = projectile(
+            EntityKind::EyeOfEnder,
+            Position::new(1.5, 64.1, 1.5),
+            dvec3(0.1, 0.2, 0.3),
+        );
+        let requests =
+            store.client_particle_requests(&chunks, &std::collections::HashSet::new(), None);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.kind == crate::particle::ServerParticleKind::Bubble)
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn firework_synced_item_components_are_retained_and_event_17_is_one_shot() {
+        use azalea_inventory::components::{FireworkExplosion, FireworkExplosionShape, Fireworks};
+        use azalea_registry::builtin::ItemKind;
+
+        let explosion = FireworkExplosion {
+            shape: FireworkExplosionShape::Star,
+            colors: vec![0x12_34_56],
+            fade_colors: vec![0x65_43_21],
+            has_trail: true,
+            has_twinkle: true,
+        };
+        let stack = azalea_inventory::ItemStack::Present(azalea_inventory::ItemStackData::new(
+            ItemKind::FireworkRocket,
+            1,
+        ))
+        .with_component(Fireworks {
+            flight_duration: 2,
+            explosions: vec![explosion],
+        });
+        let azalea_inventory::ItemStack::Present(stack) = stack else {
+            panic!("nonempty firework item")
+        };
+        let mut store = projectile(
+            EntityKind::FireworkRocket,
+            Position::new(2.0, 70.0, 4.0),
+            DVec3::new(0.1, 0.2, -0.1),
+        );
+        store.set_projectile_item(1, stack.clone());
+        let retained = match store.take_firework_event(1).expect("first event") {
+            azalea_inventory::ItemStack::Present(stack) => stack,
+            azalea_inventory::ItemStack::Empty => panic!("synced firework stack retained"),
+        };
+        assert_eq!(retained, stack);
+        let component = retained
+            .component_patch
+            .get::<Fireworks>()
+            .expect("Fireworks component retained");
+        assert_eq!(component.explosions.len(), 1);
+        assert_eq!(component.explosions[0].shape, FireworkExplosionShape::Star);
+        assert!(component.explosions[0].has_trail);
+        assert!(component.explosions[0].has_twinkle);
+        assert!(store.take_firework_event(1).is_none(), "event only once");
+    }
+
+    #[test]
+    fn firework_flight_particle_request_is_entity_local_and_life_ticks() {
+        let position = Position::new(2.0, 70.0, 4.0);
+        let velocity = DVec3::new(0.1, 0.2, -0.1);
+        let mut store = projectile(EntityKind::FireworkRocket, position, velocity);
+        let requests = store.client_particle_requests(
+            &ChunkStore::new(1),
+            &std::collections::HashSet::new(),
+            None,
+        );
+        let [request] = requests.as_slice() else {
+            panic!("one local rocket trail particle")
+        };
+        assert_eq!(request.kind, crate::particle::ServerParticleKind::Firework);
+        assert_eq!(request.position, DVec3::from(position));
+        assert!((request.velocity.y + 0.1).abs() < f64::EPSILON);
+        assert!(request.velocity.x.abs() < 0.25 && request.velocity.z.abs() < 0.25);
+        store.tick_projectile_displays(&ChunkStore::new(1));
+        assert_eq!(store.take_firework_launch_sounds(), vec![position]);
+        assert!(store.take_firework_launch_sounds().is_empty());
     }
 
     #[test]
@@ -4375,6 +5887,179 @@ mod tests {
     }
 
     #[test]
+    fn item_pickup_snapshots_orb_arrow_and_trident_without_live_entities() {
+        let mut entities = EntityStore::new();
+        let chunks = ChunkStore::new(1);
+        let start = Position::new(1.0, 64.0, 2.0);
+        let mut snapshots = Vec::new();
+
+        entities.set_vehicle_transform(1, start, DVec3::ZERO);
+        entities.set_vehicle_kind(1, EntityKind::ExperienceOrb);
+        entities.apply_vehicle_metadata(1, 8, MetaValue::Int(149));
+        snapshots.push((1, entities.pickup_entity_view(1, &chunks).unwrap()));
+
+        for (id, kind) in [(2, EntityKind::Arrow), (3, EntityKind::Trident)] {
+            entities.set_vehicle_spawn_transform(
+                id,
+                start,
+                DVec3::new(0.0, 0.0, 1.0),
+                LookDirection::new(15.0, 20.0),
+            );
+            entities.set_vehicle_kind(id, kind);
+            if kind == EntityKind::Trident {
+                entities.apply_vehicle_metadata(id, 12, MetaValue::Bool(true));
+            }
+            snapshots.push((
+                id,
+                entities
+                    .pickup_entity_view(id, &chunks)
+                    .unwrap_or_else(|| panic!("missing pickup snapshot for {kind:?}")),
+            ));
+        }
+
+        assert!(matches!(
+            &snapshots[0].1.1,
+            PickupEntityView::ExperienceOrb { value: 149, .. }
+        ));
+        assert!(matches!(
+            &snapshots[1].1.1,
+            PickupEntityView::Arrow {
+                variant_index: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &snapshots[2].1.1,
+            PickupEntityView::Trident {
+                projectile_foil: true,
+                ..
+            }
+        ));
+
+        let mut pickups = ItemEntityStore::new();
+        let collector = Position::new(0.0, 70.0, 0.0);
+        for (id, (position, view)) in snapshots {
+            pickups.pickup_entity(position, 99, collector, view);
+            entities.remove_entity(id);
+        }
+        assert!(
+            entities.vehicles.is_empty(),
+            "source entities are removed, not re-registered"
+        );
+        let active = pickups.active_pickups(
+            1.0,
+            &entities,
+            99,
+            collector,
+            crate::player::CROUCH_EYE_HEIGHT,
+        );
+        assert_eq!(active.len(), 3);
+        let expected_y = start.y
+            + (collector.y + 0.5 * f64::from(crate::player::CROUCH_EYE_HEIGHT) - start.y) / 9.0;
+        assert!((active[0].position.y - expected_y).abs() < 1.0e-6);
+        assert!(active.iter().all(|pickup| pickup.entity_view.is_some()));
+        for _ in 0..3 {
+            pickups.tick(&ChunkStore::new(1));
+        }
+        assert!(
+            pickups
+                .active_pickups(0.0, &entities, 99, collector, 1.27)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn item_pickup_target_uses_remote_entity_pose_eye_height() {
+        let mut entities = EntityStore::new();
+        let target = Position::new(2.0, 64.0, -3.0);
+        entities.spawn_living(
+            19,
+            EntityKind::Player,
+            target,
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+        let remote = entities.living.get_mut(&19).unwrap();
+        remote.pose = EntityPose::Crouching;
+        remote.prev_position = target;
+        remote.position = target + dvec3(2.0, 0.0, 0.0);
+        let target_at_half = pickup_target(remote, 0.5);
+        assert_eq!(target_at_half.x, 3.0);
+        assert_eq!(
+            target_at_half.y,
+            64.0 + f64::from(crate::player::CROUCH_EYE_HEIGHT) * 0.5
+        );
+        remote.pose = EntityPose::Swimming;
+        assert_eq!(
+            pickup_target(remote, 0.0).y,
+            64.0 + f64::from(crate::player::SWIMMING_EYE_HEIGHT) * 0.5
+        );
+    }
+
+    #[test]
+    fn item_take_keeps_pre_shrink_model_follows_collector_and_expires_after_three_ticks() {
+        let mut items = ItemEntityStore::new();
+        let mut entities = EntityStore::new();
+        let start = Position::new(-2.0, 64.0, 3.0);
+        let target = Position::new(0.0, 65.0, 0.0);
+        items.spawn_item(1, uuid::Uuid::nil(), start, DVec3::ZERO);
+        items.set_item_data(1, "minecraft:stone".into(), 1, 0, 3, None);
+        entities.spawn_living(
+            9,
+            EntityKind::Player,
+            target,
+            LookDirection::default(),
+            0.0,
+            None,
+        );
+
+        assert_eq!(
+            items.pickup(1, 9, target + dvec3(0.0, 0.81, 0.0), 1),
+            Some(start)
+        );
+        assert_eq!(items.visible_items(*start, 8.0)[0].count, 2);
+        let initial = &items.active_pickups(0.0, &entities, 9, target, 1.62)[0];
+        assert_eq!(
+            initial.count, 3,
+            "Java extracts item render state before shrinking"
+        );
+        assert_eq!(initial.item_name, "minecraft:stone");
+        assert_eq!(initial.item_id, 1);
+        assert_eq!(initial.damage, 0);
+        assert_eq!(initial.age, 0);
+        assert_eq!(initial.position, start);
+        assert_eq!(initial.light_position, start);
+
+        let pre_move = &items.active_pickups(1.0, &entities, 9, target, 1.62)[0];
+        let target_entity = entities.living.get_mut(&9).unwrap();
+        target_entity.prev_position = target;
+        target_entity.position = target + dvec3(3.0, 0.0, 0.0);
+        let moving = &items.active_pickups(1.0, &entities, 9, target, 1.62)[0];
+        assert!(
+            moving.position.x > pre_move.position.x,
+            "the target is interpolated from its moving entity"
+        );
+        assert_eq!(
+            moving.light_position, start,
+            "captured model light stays at source"
+        );
+
+        let chunk = ChunkStore::new(1);
+        for _ in 0..3 {
+            items.tick(&chunk);
+        }
+        assert!(
+            items
+                .active_pickups(0.0, &entities, 9, target, 1.62)
+                .is_empty()
+        );
+        assert_eq!(items.visible_items(*start, 8.0)[0].count, 2);
+        assert_eq!(items.pickup(1, 9, target, 2), Some(start));
+        assert!(items.visible_items(*start, 8.0).is_empty());
+    }
+
+    #[test]
     fn same_uuid_stone_shared_invisibility_flag_gates_its_shadow_input() {
         let uuid = uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
         let mut store = ItemEntityStore::new();
@@ -4509,6 +6194,52 @@ mod tests {
         store.set_effect_particles(7, Some(Vec::new()), None);
         assert!(store.living[&7].effect_particles.is_empty());
         assert!(store.living[&7].effect_particles_ambient);
+        store.set_effect_particle_options(
+            7,
+            vec![(
+                crate::particle::ServerParticleKind::Dust,
+                crate::particle::ServerParticleOptions::Dust {
+                    packed_color: 0xff12_3456u32 as i32,
+                    scale: 1.25,
+                },
+            )],
+        );
+        assert_eq!(
+            store.living[&7]
+                .effect_particle_options
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+        store.set_effect_particle_options(7, Vec::new());
+        assert!(
+            store.living[&7]
+                .effect_particle_options
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
+        store.set_effect_particle_options(
+            7,
+            vec![(
+                crate::particle::ServerParticleKind::Vibration,
+                crate::particle::ServerParticleOptions::VibrationBlock {
+                    target: BlockPos::new(2, 3, 4),
+                    arrival_ticks: 7,
+                },
+            )],
+        );
+        assert!(matches!(
+            store.living[&7].effect_particle_options.as_deref().unwrap(),
+            [(
+                crate::particle::ServerParticleKind::Vibration,
+                crate::particle::ServerParticleOptions::VibrationBlock {
+                    arrival_ticks: 7,
+                    ..
+                }
+            )]
+        ));
         store.set_effect_particles(99, Some(particles), Some(false));
         assert_eq!(store.living.len(), 1);
     }
