@@ -3367,8 +3367,7 @@ fn translate_map_item_data_legacy(protocol: i32, id: u32, payload: &[u8]) -> Opt
             } else {
                 LEGACY_764_765_MAX
             };
-            let native_kind = (kind <= source_max && kind <= NATIVE_DECORATION_MAX)
-                .then_some(kind);
+            let native_kind = (kind <= source_max && kind <= NATIVE_DECORATION_MAX).then_some(kind);
             let name = if has_name == 0 {
                 None
             } else if protocol <= 764 {
@@ -5238,8 +5237,8 @@ fn translate_swing_animation_777(animate_id: u32, payload: &[u8]) -> Option<Box<
 /// `maxSpeed` per axis, sends `count` as a varint and appends a
 /// randomization type; 26.2 ends with the particle and reads one speed (the
 /// x axis here — vanilla servers send one value on all three) and an int
-/// count. The particle keeps its wire-space id, remapped by the raw handler
-/// like every version's, so its payload is only sized, never rewritten.
+/// count. The particle keeps its wire-space id for the raw handler's single
+/// registry remap; payloads are normalized for the native packet layout.
 /// TODO: per-axis speed and the randomization type once particles use them.
 fn translate_level_particles_777(
     id: u32,
@@ -5253,10 +5252,7 @@ fn translate_level_particles_777(
         .wire_registries
         .name_of(ClientRegistry::ParticleType, particle)?;
     let mut particle_data = Vec::new();
-    wire::write_varint(
-        &mut particle_data,
-        remaps.remap(ClientRegistry::ParticleType, particle)?,
-    );
+    wire::write_varint(&mut particle_data, particle);
     if PAYLOAD_PARTICLES.contains(&name) {
         copy_particle_payload(
             &mut cur,
@@ -6651,12 +6647,26 @@ mod tests {
         assert!(!fits(serde_json::json!({"text": "a".repeat(65_536)})));
         assert!(fits(serde_json::json!({"nul": "\0".repeat(32_767)})));
         assert!(!fits(serde_json::json!({"nul": "\0".repeat(32_768)})));
-        assert!(fits(serde_json::json!({"nested": {"é": "é".repeat(32_767)}})));
-        assert!(!fits(serde_json::json!({"nested": {"é": "é".repeat(32_768)}})));
-        assert!(fits(serde_json::json!({"nested": {"語": "語".repeat(21_845)}})));
-        assert!(!fits(serde_json::json!({"nested": {"語": "語".repeat(21_846)}})));
-        assert!(fits(serde_json::json!({"nested": {"𝄞": "𝄞".repeat(10_922)}})));
-        assert!(!fits(serde_json::json!({"nested": {"𝄞": "𝄞".repeat(10_923)}})));
-        assert!(!fits(serde_json::json!({"outer": {("k".repeat(65_536)): "ok"}})));
+        assert!(fits(
+            serde_json::json!({"nested": {"é": "é".repeat(32_767)}})
+        ));
+        assert!(!fits(
+            serde_json::json!({"nested": {"é": "é".repeat(32_768)}})
+        ));
+        assert!(fits(
+            serde_json::json!({"nested": {"語": "語".repeat(21_845)}})
+        ));
+        assert!(!fits(
+            serde_json::json!({"nested": {"語": "語".repeat(21_846)}})
+        ));
+        assert!(fits(
+            serde_json::json!({"nested": {"𝄞": "𝄞".repeat(10_922)}})
+        ));
+        assert!(!fits(
+            serde_json::json!({"nested": {"𝄞": "𝄞".repeat(10_923)}})
+        ));
+        assert!(!fits(
+            serde_json::json!({"outer": {("k".repeat(65_536)): "ok"}})
+        ));
     }
 }

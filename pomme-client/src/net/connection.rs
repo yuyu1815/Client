@@ -8,6 +8,7 @@ use azalea_protocol::packets::login::s_key::ServerboundKey;
 use azalea_protocol::packets::login::s_login_acknowledged::ServerboundLoginAcknowledged;
 use azalea_protocol::packets::login::{ClientboundLoginPacket, ServerboundLoginPacket};
 use azalea_protocol::read::{ReadPacketError, deserialize_packet};
+use azalea_registry::Registry;
 use crossbeam_channel::Sender;
 use pomme_protocol::{Direction, PacketTable, Phase};
 use thiserror::Error;
@@ -321,6 +322,8 @@ struct Configured {
         azalea_registry::identifier::Identifier,
         Vec<azalea_registry::identifier::Identifier>,
     >,
+    impermeable_blocks: Option<std::collections::HashSet<String>>,
+    raider_entity_types: Option<std::collections::HashSet<azalea_registry::builtin::EntityKind>>,
     dialogs: std::sync::Arc<DialogRegistry>,
     loom_patterns: std::sync::Arc<crate::ui::loom::PatternData>,
 }
@@ -402,6 +405,64 @@ fn validate_registry_ids(
         )));
     }
     Ok(ids)
+}
+
+pub fn resolve_raider_entity_types(
+    tags: &azalea_protocol::common::tags::TagMap,
+    protocol: i32,
+) -> Option<std::collections::HashSet<azalea_registry::builtin::EntityKind>> {
+    let registry: azalea_registry::identifier::Identifier = "minecraft:entity_type".into();
+    let entries = tags.0.get(&registry)?;
+    let members = entries
+        .iter()
+        .find(|tag| tag.name.to_string() == "minecraft:raiders")
+        .map(|tag| tag.elements.as_slice())
+        .unwrap_or(&[]);
+    let table = pomme_protocol::RegistryTable::for_protocol(protocol)?;
+    Some(
+        members
+            .iter()
+            .filter(|id| **id >= 0)
+            .filter_map(|id| table.name_of(pomme_protocol::ClientRegistry::EntityType, *id as u32))
+            .filter_map(|name| {
+                let native_id = pomme_protocol::RegistryTable::native()
+                    .id_of(pomme_protocol::ClientRegistry::EntityType, name)?;
+                azalea_registry::builtin::EntityKind::from_u32(native_id)
+            })
+            .collect(),
+    )
+}
+
+fn resolve_impermeable_block_tag(
+    tags: &azalea_protocol::common::tags::TagMap,
+    protocol: i32,
+) -> Option<std::collections::HashSet<String>> {
+    let registry: azalea_registry::identifier::Identifier = "minecraft:block".into();
+    resolve_impermeable_tag_entries(tags.0.get(&registry).map(Vec::as_slice), protocol)
+}
+
+fn resolve_impermeable_tag_entries(
+    tags: Option<&[azalea_protocol::common::tags::Tags]>,
+    protocol: i32,
+) -> Option<std::collections::HashSet<String>> {
+    let tags = tags?;
+    let Some(tag) = tags
+        .iter()
+        .find(|tag| tag.name.to_string() == "minecraft:impermeable")
+    else {
+        return Some(std::collections::HashSet::new());
+    };
+    Some(
+        tag.elements
+            .iter()
+            .filter_map(|raw| {
+                let id = u32::try_from(*raw).ok()?;
+                let source_name = crate::world::block::block_name_for_registry_id(protocol, id)?;
+                let native_state = crate::world::block::default_state_of(&source_name)?;
+                Some(crate::world::block::block_id(native_state).to_owned())
+            })
+            .collect(),
+    )
 }
 
 fn resolve_timeline_tags(
@@ -539,6 +600,8 @@ async fn read_inline_registries(conn: &mut Conn) -> Result<Joined, ConnectionErr
             timeline_ids,
             world_clock_ids,
             timeline_tags: Default::default(),
+            impermeable_blocks: None,
+            raider_entity_types: None,
             dialogs: Default::default(),
             loom_patterns: std::sync::Arc::new(loom_patterns),
         },
@@ -761,6 +824,8 @@ async fn config_sequence(
     let mut pending_timeline_tags: Option<
         Vec<(azalea_registry::identifier::Identifier, Vec<i32>)>,
     > = None;
+    let mut impermeable_blocks = previous.and_then(|p| p.impermeable_blocks.clone());
+    let mut raider_entity_types = previous.and_then(|p| p.raider_entity_types.clone());
     let mut loom_patterns = previous
         .map(|p| (*p.loom_patterns).clone())
         .unwrap_or_default();
@@ -830,6 +895,8 @@ async fn config_sequence(
                     timeline_ids,
                     world_clock_ids,
                     timeline_tags,
+                    impermeable_blocks,
+                    raider_entity_types,
                     loom_patterns: std::sync::Arc::new(loom_patterns),
                     dialogs: match received_dialog_tags {
                         Some(tags) => std::sync::Arc::new(previous.dialogs.with_tags(tags)),
@@ -850,6 +917,8 @@ async fn config_sequence(
                         timeline_ids,
                         world_clock_ids,
                         timeline_tags,
+                        impermeable_blocks,
+                        raider_entity_types,
                         loom_patterns: std::sync::Arc::new(loom_patterns),
                     }
                 }
@@ -977,6 +1046,16 @@ async fn config_sequence(
             }
             ClientboundConfigPacket::UpdateTags(p) => {
                 // A later packet replaces an earlier one's tags per registry.
+                if let Some(types) =
+                    resolve_raider_entity_types(&p.tags, crate::version::session_protocol())
+                {
+                    raider_entity_types = Some(types);
+                }
+                if let Some(blocks) =
+                    resolve_impermeable_block_tag(&p.tags, crate::version::session_protocol())
+                {
+                    impermeable_blocks = Some(blocks);
+                }
                 if let Some(tags) = dialog_tags(&p.tags) {
                     received_dialog_tags = Some(tags);
                 }
@@ -1279,10 +1358,18 @@ impl From<crossbeam_channel::SendError<NetworkEvent>> for ConnectionError {
 
 fn extract_biome_climate(
     holder: &azalea_core::registry_holder::RegistryHolder,
-) -> std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate> {
+) -> (
+    std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
+    std::collections::HashMap<u32, Vec<crate::world::environment_particles::AmbientParticle>>,
+    std::collections::HashMap<u32, crate::net::environment::BoolAttributeLayer>,
+    std::collections::HashMap<u32, crate::world::environment_particles::AmbientParticle>,
+) {
     use crate::renderer::chunk::mesher::{BiomeClimate, GrassColorModifier, int_to_rgb};
 
     let mut result = std::collections::HashMap::new();
+    let mut ambient_particles = std::collections::HashMap::new();
+    let mut water_evaporates = std::collections::HashMap::new();
+    let mut default_dripstone_particle = std::collections::HashMap::new();
     let biome_key: azalea_registry::identifier::Identifier = "minecraft:worldgen/biome".into();
     if let Some(registry) = holder.extra.get(&biome_key) {
         for (id, (_, nbt)) in registry.map.iter().enumerate() {
@@ -1320,6 +1407,25 @@ fn extract_biome_climate(
                 })
                 .unwrap_or(GrassColorModifier::None);
 
+            if let Some(particles) = extract_ambient_particles(nbt) {
+                ambient_particles.insert(id as u32, particles);
+            }
+            if let Some(value) = nbt
+                .get("attributes")
+                .and_then(|v| v.compound())
+                .and_then(|a| a.get("minecraft:gameplay/water_evaporates"))
+                .and_then(crate::net::environment::water_evaporates_layer)
+            {
+                water_evaporates.insert(id as u32, value);
+            }
+            if let Some(value) = nbt
+                .get("attributes")
+                .and_then(|v| v.compound())
+                .and_then(|a| a.get("minecraft:visual/default_dripstone_particle"))
+                .and_then(crate::net::environment::dripstone_particle_value)
+            {
+                default_dripstone_particle.insert(id as u32, value);
+            }
             result.insert(
                 id as u32,
                 BiomeClimate {
@@ -1335,8 +1441,368 @@ fn extract_biome_climate(
             );
         }
     }
-    tracing::info!("Extracted {} biome climate entries", result.len());
-    result
+    tracing::info!(
+        "Extracted {} biome climate entries and {} ambient-particle biome entries",
+        result.len(),
+        ambient_particles.len()
+    );
+    (
+        result,
+        ambient_particles,
+        water_evaporates,
+        default_dripstone_particle,
+    )
+}
+
+pub(super) fn extract_ambient_particles(
+    nbt: &simdnbt::owned::NbtCompound,
+) -> Option<Vec<crate::world::environment_particles::AmbientParticle>> {
+    use simdnbt::owned::NbtTag;
+    let attributes = nbt.get("attributes").and_then(|tag| match tag {
+        NbtTag::Compound(compound) => Some(compound),
+        _ => None,
+    })?;
+    extract_ambient_attribute(attributes)
+}
+
+pub(super) fn extract_ambient_attribute(
+    attributes: &simdnbt::owned::NbtCompound,
+) -> Option<Vec<crate::world::environment_particles::AmbientParticle>> {
+    use simdnbt::owned::{NbtList, NbtTag};
+    let value = attributes
+        .get("minecraft:visual/ambient_particles")
+        .or_else(|| attributes.get("visual/ambient_particles"))?;
+    let NbtTag::List(list) = value else {
+        return None;
+    };
+    let entries = match list {
+        NbtList::Compound(entries) => entries,
+        NbtList::Empty => return Some(Vec::new()),
+        _ => return None,
+    };
+    Some(
+        entries
+            .iter()
+            .filter_map(|entry| {
+                let probability = nbt_float_from_compound(entry, "probability")?;
+                if !probability.is_finite() || !(0.0..=1.0).contains(&probability) {
+                    return None;
+                }
+                let particle = entry.get("particle").and_then(|tag| match tag {
+                    NbtTag::Compound(compound) => Some(compound),
+                    _ => None,
+                })?;
+                let name = nbt_string_from_compound(particle, "type")?;
+                let kind = crate::particle::ServerParticleKind::from_name(
+                    name.strip_prefix("minecraft:").unwrap_or(&name),
+                )?;
+                let options = ambient_particle_options(kind, particle)?;
+                Some(crate::world::environment_particles::AmbientParticle {
+                    kind,
+                    options,
+                    probability,
+                })
+            })
+            .collect(),
+    )
+}
+
+pub(super) fn ambient_particle_options(
+    kind: crate::particle::ServerParticleKind,
+    particle: &simdnbt::owned::NbtCompound,
+) -> Option<crate::particle::ServerParticleOptions> {
+    use crate::particle::{ServerParticleKind as K, ServerParticleOptions as O};
+    let float = |key| nbt_float_from_compound(particle, key);
+    let integer = |key| nbt_i32_from_compound(particle, key);
+    Some(match kind {
+        K::Dust => O::Dust {
+            packed_color: nbt_color(particle, "color", false)?,
+            scale: particle_scale(float("scale")?)?,
+        },
+        K::DustColorTransition => O::DustColorTransition {
+            from_color: nbt_color(particle, "from_color", false)?,
+            to_color: nbt_color(particle, "to_color", false)?,
+            scale: particle_scale(float("scale")?)?,
+        },
+        K::EntityEffect => O::EntityEffect {
+            color: nbt_color(particle, "color", true)? as u32,
+        },
+        K::Effect | K::InstantEffect => O::Spell {
+            color: optional_nbt_color(particle, "color", false, -1)?,
+            power: finite_float(optional_nbt_float(particle, "power", 1.0)?)?,
+        },
+        K::DragonBreath => O::Power {
+            power: finite_float(optional_nbt_float(particle, "power", 1.0)?)?,
+        },
+        K::TintedLeaves => O::Color {
+            color: nbt_color(particle, "color", true)?,
+        },
+        K::Flash => O::Color {
+            color: nbt_color(particle, "color", true)?,
+        },
+        K::SculkCharge => O::SculkCharge {
+            roll: finite_float(float("roll")?)?,
+        },
+        K::Geyser | K::GeyserPlume => O::Geyser {
+            water_blocks: positive_int(integer("water_blocks")?)?,
+        },
+        K::GeyserBase | K::GeyserPoof => O::GeyserBase {
+            water_blocks: positive_int(integer("water_blocks")?)?,
+            burst_impulse_base: finite_float(float("burst_impulse_base")?)?,
+        },
+        K::Shriek => O::Shriek {
+            delay: integer("delay")?,
+        },
+        K::Block | K::BlockMarker | K::FallingDust | K::DustPillar | K::BlockCrumble => {
+            O::Block(ambient_block_state(particle)?)
+        }
+        K::Item => ambient_item_options(particle)?,
+        K::Trail => {
+            let target = nbt_vec3(particle, "target")?;
+            let color = nbt_color(particle, "color", false)?;
+            let duration = positive_int(integer("duration")?)?;
+            O::Trail {
+                target,
+                color,
+                duration,
+            }
+        }
+        K::Vibration => ambient_vibration_options(particle)?,
+        _ => O::Simple,
+    })
+}
+
+fn optional_nbt_color(
+    compound: &simdnbt::owned::NbtCompound,
+    key: &str,
+    alpha: bool,
+    default: i32,
+) -> Option<i32> {
+    if compound.get(key).is_some() {
+        nbt_color(compound, key, alpha)
+    } else {
+        Some(default)
+    }
+}
+
+fn optional_nbt_float(
+    compound: &simdnbt::owned::NbtCompound,
+    key: &str,
+    default: f32,
+) -> Option<f32> {
+    if compound.get(key).is_some() {
+        nbt_float_from_compound(compound, key)
+    } else {
+        Some(default)
+    }
+}
+
+fn finite_float(value: f32) -> Option<f32> {
+    value.is_finite().then_some(value)
+}
+
+fn positive_int(value: i32) -> Option<i32> {
+    (value > 0).then_some(value)
+}
+
+fn particle_scale(value: f32) -> Option<f32> {
+    (value.is_finite() && (0.01..=4.0).contains(&value)).then_some(value)
+}
+
+fn nbt_color(compound: &simdnbt::owned::NbtCompound, key: &str, alpha: bool) -> Option<i32> {
+    use simdnbt::owned::NbtTag;
+    let tag = compound.get(key)?;
+    if let Some(value) = nbt_i32_from_compound(compound, key) {
+        return Some(value);
+    }
+    let NbtTag::List(values) = tag else {
+        return None;
+    };
+    let channels: Vec<f32> = values
+        .as_nbt_tags()
+        .iter()
+        .map(|tag| match tag {
+            NbtTag::Float(v) => Some(*v),
+            NbtTag::Double(v) => Some(*v as f32),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    if channels.len() != if alpha { 4 } else { 3 }
+        || channels
+            .iter()
+            .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+    {
+        return None;
+    }
+    let channel = |v: f32| (v * 255.0 + 0.5) as i32;
+    let (r, g, b, a) = if alpha {
+        (
+            channel(channels[0]),
+            channel(channels[1]),
+            channel(channels[2]),
+            channel(channels[3]),
+        )
+    } else {
+        (
+            channel(channels[0]),
+            channel(channels[1]),
+            channel(channels[2]),
+            255,
+        )
+    };
+    Some((a << 24) | (r << 16) | (g << 8) | b)
+}
+
+fn ambient_block_state(particle: &simdnbt::owned::NbtCompound) -> Option<azalea_block::BlockState> {
+    use simdnbt::owned::NbtTag;
+    let tag = particle.get("block_state")?;
+    let (name, properties) = match tag {
+        NbtTag::String(value) => (value.to_string(), None),
+        NbtTag::Compound(state) => {
+            let name = nbt_string_from_compound(state, "Name")?;
+            let properties = match state.get("Properties") {
+                None => None,
+                Some(NbtTag::Compound(properties)) => Some(
+                    properties
+                        .iter()
+                        .map(|(key, value)| match value {
+                            NbtTag::String(value) => Some((key.to_string(), value.to_string())),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+                _ => return None,
+            };
+            (name, properties)
+        }
+        _ => return None,
+    };
+    let name = if name.contains(':') {
+        name
+    } else {
+        format!("minecraft:{name}")
+    };
+    let name = name.strip_prefix("minecraft:").unwrap_or(&name);
+    if let Some(properties) = properties.filter(|properties| !properties.is_empty()) {
+        crate::world::block::state_with_properties(name, &properties)
+    } else {
+        crate::world::block::default_state_of(name)
+    }
+}
+
+fn ambient_item_options(
+    particle: &simdnbt::owned::NbtCompound,
+) -> Option<crate::particle::ServerParticleOptions> {
+    use simdnbt::owned::NbtTag;
+
+    use crate::particle::ServerParticleOptions as O;
+    let stack = particle.get("item")?;
+    let (name, count, raw_components) = match stack {
+        NbtTag::Compound(stack) => {
+            let name = nbt_string_from_compound(stack, "id")?;
+            let count = match stack.get("count") {
+                None => 1,
+                Some(_) => nbt_i32_from_compound(stack, "count")?,
+            };
+            let raw_components = match stack.get("components") {
+                None => None,
+                Some(NbtTag::Compound(values)) => Some(std::sync::Arc::new(values.clone())),
+                Some(_) => return None,
+            };
+            (name, count, raw_components)
+        }
+        _ => return None,
+    };
+    if !(1..=99).contains(&count) {
+        return None;
+    }
+    let name = if name.contains(':') {
+        name
+    } else {
+        format!("minecraft:{name}")
+    };
+    let registry_name = name.strip_prefix("minecraft:").unwrap_or(&name);
+    let id = pomme_protocol::registries::RegistryTable::native().id_of(
+        pomme_protocol::registries::ClientRegistry::Item,
+        registry_name,
+    )?;
+    Some(O::Item {
+        item_id: id,
+        count,
+        components: azalea_inventory::DataComponentPatch::default(),
+        raw_components,
+    })
+}
+
+fn nbt_vec3(compound: &simdnbt::owned::NbtCompound, key: &str) -> Option<glam::DVec3> {
+    use simdnbt::owned::NbtTag;
+    let NbtTag::List(values) = compound.get(key)? else {
+        return None;
+    };
+    let coords: Vec<f64> = values
+        .as_nbt_tags()
+        .iter()
+        .map(|tag| match tag {
+            NbtTag::Double(v) => Some(*v),
+            NbtTag::Float(v) => Some(f64::from(*v)),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    (coords.len() == 3 && coords.iter().all(|v| v.is_finite()))
+        .then(|| glam::dvec3(coords[0], coords[1], coords[2]))
+}
+
+fn ambient_vibration_options(
+    particle: &simdnbt::owned::NbtCompound,
+) -> Option<crate::particle::ServerParticleOptions> {
+    use simdnbt::owned::NbtTag;
+
+    use crate::particle::ServerParticleOptions as O;
+    let destination = match particle.get("destination")? {
+        NbtTag::Compound(source)
+            if matches!(
+                nbt_string_from_compound(source, "type")?.as_str(),
+                "minecraft:block" | "block"
+            ) =>
+        {
+            source
+        }
+        _ => return None,
+    };
+    let NbtTag::List(coords) = destination.get("pos")? else {
+        return None;
+    };
+    let values: Vec<i32> = coords
+        .as_nbt_tags()
+        .iter()
+        .map(|tag| match tag {
+            NbtTag::Int(v) => Some(*v),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    if values.len() != 3 {
+        return None;
+    }
+    Some(O::VibrationBlock {
+        target: azalea_core::position::BlockPos::new(values[0], values[1], values[2]),
+        arrival_ticks: nbt_i32_from_compound(particle, "arrival_in_ticks")?,
+    })
+}
+
+fn nbt_i32_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -> Option<i32> {
+    compound.get(key).and_then(|v| match v {
+        simdnbt::owned::NbtTag::Int(i) => Some(*i),
+        simdnbt::owned::NbtTag::Long(i) => i32::try_from(*i).ok(),
+        _ => None,
+    })
+}
+
+fn nbt_float_from_compound(compound: &simdnbt::owned::NbtCompound, key: &str) -> Option<f32> {
+    compound.get(key).and_then(|v| match v {
+        simdnbt::owned::NbtTag::Float(f) => Some(*f),
+        simdnbt::owned::NbtTag::Double(d) => Some(*d as f32),
+        _ => None,
+    })
 }
 
 fn nbt_bool(nbt: &simdnbt::owned::NbtCompound, key: &str) -> Option<bool> {
@@ -1546,12 +2012,16 @@ async fn game_loop(
         };
     }
     if let Some(profile_name) = connected_profile {
-        pump!(send_event(
-            event_tx,
+        pump!(send_event(event_tx, {
+            let (colors, ambient_particles, water_evaporates, default_dripstone_particle) =
+                extract_biome_climate(&configured.registries);
             NetworkEvent::BiomeColors {
-                colors: extract_biome_climate(&configured.registries),
+                colors,
+                ambient_particles,
+                water_evaporates,
+                default_dripstone_particle,
             }
-        ))?;
+        }))?;
         pump!(send_event(
             event_tx,
             NetworkEvent::Connected { profile_name }
@@ -1570,6 +2040,18 @@ async fn game_loop(
         event_tx,
         NetworkEvent::TimelineTags(configured.timeline_tags.clone())
     ))?;
+    if let Some(blocks) = &configured.impermeable_blocks {
+        pump!(send_event(
+            event_tx,
+            NetworkEvent::BlockImpermeableTag(blocks.clone())
+        ))?;
+    }
+    if let Some(types) = &configured.raider_entity_types {
+        pump!(send_event(
+            event_tx,
+            NetworkEvent::RaiderEntityTypes(types.clone())
+        ))?;
+    }
     pump!(send_event(
         event_tx,
         NetworkEvent::WorldClockRegistry(world_clock_map(configured.world_clock_ids.as_deref()))
@@ -1787,17 +2269,37 @@ async fn game_loop(
                                 timeline_entries_error: next.timeline_entries_error.clone(),
                             }
                         ))?;
-                        pump!(send_event(
-                            event_tx,
+                        pump!(send_event(event_tx, {
+                            let (
+                                colors,
+                                ambient_particles,
+                                water_evaporates,
+                                default_dripstone_particle,
+                            ) = extract_biome_climate(&next.registries);
                             NetworkEvent::BiomeColors {
-                                colors: extract_biome_climate(&next.registries),
+                                colors,
+                                ambient_particles,
+                                water_evaporates,
+                                default_dripstone_particle,
                             }
-                        ))?;
+                        }))?;
                     }
                     pump!(send_event(
                         event_tx,
                         NetworkEvent::TimelineTags(next.timeline_tags.clone())
                     ))?;
+                    if let Some(types) = &next.raider_entity_types {
+                        pump!(send_event(
+                            event_tx,
+                            NetworkEvent::RaiderEntityTypes(types.clone())
+                        ))?;
+                    }
+                    if let Some(blocks) = &next.impermeable_blocks {
+                        pump!(send_event(
+                            event_tx,
+                            NetworkEvent::BlockImpermeableTag(blocks.clone())
+                        ))?;
+                    }
                     pump!(send_event(
                         event_tx,
                         NetworkEvent::WorldClockRegistry(world_clock_map(
@@ -1829,6 +2331,23 @@ async fn game_loop(
                         event_tx,
                         NetworkEvent::TimelineTags(timeline_tags)
                     ))?;
+                    if let Some(raiders) =
+                        resolve_raider_entity_types(&p.tags, crate::version::session_protocol())
+                    {
+                        configured.raider_entity_types = Some(raiders.clone());
+                        pump!(send_event(
+                            event_tx,
+                            NetworkEvent::RaiderEntityTypes(raiders)
+                        ))?;
+                    }
+                    if let Some(blocks) =
+                        resolve_impermeable_block_tag(&p.tags, crate::version::session_protocol())
+                    {
+                        pump!(send_event(
+                            event_tx,
+                            NetworkEvent::BlockImpermeableTag(blocks)
+                        ))?;
+                    }
                 }
                 if let ClientboundGamePacket::UpdateTags(p) = &packet
                     && let Some(tags) = dialog_tags(&p.tags)
@@ -2335,6 +2854,209 @@ mod tests {
     use super::*;
 
     #[test]
+    fn impermeable_block_tag_replaces_empty_and_remaps_old_protocol_ids_by_identity() {
+        use azalea_protocol::common::tags::Tags;
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let old = [Tags {
+            name: "minecraft:impermeable".into(),
+            elements: vec![94],
+        }];
+        assert_eq!(
+            resolve_impermeable_tag_entries(Some(&old), 763),
+            Some(std::collections::HashSet::from(["glass".to_owned()]))
+        );
+        assert_eq!(
+            resolve_impermeable_tag_entries(Some(&[]), 763),
+            Some(std::collections::HashSet::new())
+        );
+        assert_eq!(resolve_impermeable_tag_entries(None, 763), None);
+        let native = [Tags {
+            name: "minecraft:impermeable".into(),
+            elements: vec![101],
+        }];
+        assert_eq!(
+            resolve_impermeable_tag_entries(Some(&native), 776),
+            Some(std::collections::HashSet::from(["glass".to_owned()]))
+        );
+    }
+
+    #[test]
+    fn raider_entity_tag_preserves_absent_empty_and_replaced_membership_by_identity() {
+        use azalea_protocol::common::tags::{TagMap, Tags};
+        let registry: azalea_registry::identifier::Identifier = "minecraft:entity_type".into();
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        assert!(resolve_raider_entity_types(&TagMap(Default::default()), 763).is_none());
+        let empty = TagMap([(registry.clone(), vec![])].into_iter().collect());
+        assert_eq!(
+            resolve_raider_entity_types(&empty, 763),
+            Some(Default::default())
+        );
+        let empty_override = TagMap(
+            [(
+                registry.clone(),
+                vec![Tags {
+                    name: "minecraft:raiders".into(),
+                    elements: vec![],
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            resolve_raider_entity_types(&empty_override, 763),
+            Some(Default::default())
+        );
+        let table = pomme_protocol::RegistryTable::for_protocol(763).unwrap();
+        let witch_id = table
+            .id_of(pomme_protocol::ClientRegistry::EntityType, "witch")
+            .unwrap();
+        let replacement = TagMap(
+            [(
+                registry,
+                vec![Tags {
+                    name: "minecraft:raiders".into(),
+                    elements: vec![witch_id as i32],
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert_eq!(
+            resolve_raider_entity_types(&replacement, 763),
+            Some(
+                [azalea_registry::builtin::EntityKind::Witch]
+                    .into_iter()
+                    .collect()
+            )
+        );
+    }
+
+    #[test]
+    fn ambient_particle_registry_codec_parses_typed_payload_and_rejects_invalid_probability() {
+        use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
+        let mut dust = NbtCompound::new();
+        dust.insert("type", NbtTag::String("minecraft:dust".into()));
+        dust.insert("color", NbtTag::Int(0x12_3456));
+        dust.insert("scale", NbtTag::Float(1.25));
+        let mut valid = NbtCompound::new();
+        valid.insert("particle", NbtTag::Compound(dust));
+        valid.insert("probability", NbtTag::Float(0.25));
+        let mut invalid = NbtCompound::new();
+        invalid.insert(
+            "particle",
+            NbtTag::Compound({
+                let mut p = NbtCompound::new();
+                p.insert("type", NbtTag::String("minecraft:ash".into()));
+                p
+            }),
+        );
+        invalid.insert("probability", NbtTag::Float(1.25));
+        let mut attrs = NbtCompound::new();
+        attrs.insert(
+            "minecraft:visual/ambient_particles",
+            NbtTag::List(NbtList::Compound(vec![valid, invalid])),
+        );
+        let mut biome = NbtCompound::new();
+        biome.insert("attributes", NbtTag::Compound(attrs));
+
+        let parsed = extract_ambient_particles(&biome).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].probability, 0.25);
+        assert!(matches!(parsed[0].options,
+            crate::particle::ServerParticleOptions::Dust { packed_color: 0x12_3456, scale } if scale == 1.25));
+    }
+
+    #[test]
+    fn ambient_item_preserves_raw_components_and_stack_count() {
+        use simdnbt::owned::{NbtCompound, NbtTag};
+        let mut components = NbtCompound::new();
+        components.insert(
+            "minecraft:custom_name",
+            NbtTag::String("kept verbatim".into()),
+        );
+        let mut stack = NbtCompound::new();
+        stack.insert("id", NbtTag::String("minecraft:stone".into()));
+        stack.insert("count", NbtTag::Int(3));
+        stack.insert("components", NbtTag::Compound(components));
+        let mut particle = NbtCompound::new();
+        particle.insert("item", NbtTag::Compound(stack));
+        let Some(crate::particle::ServerParticleOptions::Item {
+            item_id,
+            count,
+            raw_components,
+            ..
+        }) = ambient_item_options(&particle)
+        else {
+            panic!("valid item particle rejected");
+        };
+        assert_eq!(count, 3);
+        assert_eq!(
+            pomme_protocol::registries::RegistryTable::native()
+                .name_of(pomme_protocol::registries::ClientRegistry::Item, item_id),
+            Some("stone")
+        );
+        assert!(
+            raw_components
+                .unwrap()
+                .get("minecraft:custom_name")
+                .is_some()
+        );
+
+        let mut invalid = NbtCompound::new();
+        invalid.insert("id", NbtTag::String("minecraft:not_a_real_item".into()));
+        let mut malformed_count = NbtCompound::new();
+        malformed_count.insert("id", NbtTag::String("minecraft:stone".into()));
+        malformed_count.insert("count", NbtTag::String("three".into()));
+        let mut packet = NbtCompound::new();
+        packet.insert("item", NbtTag::Compound(invalid));
+        assert!(ambient_item_options(&packet).is_none());
+        packet.insert("item", NbtTag::Compound(malformed_count));
+        assert!(ambient_item_options(&packet).is_none());
+    }
+
+    #[test]
+    fn ambient_trail_and_vibration_options_follow_registry_codec_fields() {
+        use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
+        let mut trail = NbtCompound::new();
+        trail.insert(
+            "target",
+            NbtTag::List(NbtList::from(vec![
+                NbtTag::Double(1.0),
+                NbtTag::Double(2.0),
+                NbtTag::Double(3.0),
+            ])),
+        );
+        trail.insert("color", NbtTag::Int(0x123456));
+        trail.insert("duration", NbtTag::Int(20));
+        assert!(
+            matches!(ambient_particle_options(crate::particle::ServerParticleKind::Trail, &trail),
+            Some(crate::particle::ServerParticleOptions::Trail { target, color: 0x123456, duration: 20 })
+                if target == glam::dvec3(1.0, 2.0, 3.0))
+        );
+
+        let mut source = NbtCompound::new();
+        source.insert("type", NbtTag::String("minecraft:block".into()));
+        source.insert(
+            "pos",
+            NbtTag::List(NbtList::from(vec![
+                NbtTag::Int(-1),
+                NbtTag::Int(64),
+                NbtTag::Int(2),
+            ])),
+        );
+        let mut vibration = NbtCompound::new();
+        vibration.insert("destination", NbtTag::Compound(source));
+        vibration.insert("arrival_in_ticks", NbtTag::Int(7));
+        assert!(
+            matches!(ambient_particle_options(crate::particle::ServerParticleKind::Vibration, &vibration),
+            Some(crate::particle::ServerParticleOptions::VibrationBlock { target, arrival_ticks: 7 })
+                if target == azalea_core::position::BlockPos::new(-1, 64, 2))
+        );
+    }
+
+    #[test]
     fn timeline_wire_ids_and_numeric_tags_preserve_protocol_order() {
         let entries = vec![
             ("minecraft:day".into(), Some(())),
@@ -2490,6 +3212,8 @@ mod tests {
                             timeline_ids: None,
                             world_clock_ids: None,
                             timeline_tags: Default::default(),
+                            impermeable_blocks: None,
+                            raider_entity_types: None,
                             dialogs: std::sync::Arc::default(),
                             loom_patterns: std::sync::Arc::default(),
                         },
@@ -2653,6 +3377,8 @@ mod tests {
                             timeline_ids: None,
                             world_clock_ids: None,
                             timeline_tags: Default::default(),
+                            impermeable_blocks: None,
+                            raider_entity_types: None,
                             dialogs: std::sync::Arc::default(),
                             loom_patterns: std::sync::Arc::default(),
                         },
@@ -2958,6 +3684,8 @@ mod tests {
                             timeline_ids: None,
                             world_clock_ids: None,
                             timeline_tags: Default::default(),
+                            impermeable_blocks: None,
+                            raider_entity_types: None,
                             dialogs: Arc::default(),
                             loom_patterns: Arc::default(),
                         },
@@ -3422,7 +4150,7 @@ mod tests {
             .get_index_of(&Identifier::new("minecraft:plains"))
             .expect("plains biome") as u32;
 
-        let plains = &extract_biome_climate(&holder)[&plains_id];
+        let plains = &extract_biome_climate(&holder).0[&plains_id];
         assert_eq!(plains.temperature, 0.8);
         assert_eq!(plains.downfall, 0.4);
     }

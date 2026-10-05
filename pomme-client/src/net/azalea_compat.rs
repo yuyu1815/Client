@@ -601,8 +601,7 @@ fn legacy_map_item_data_763_765_translates_through_native_decode_and_map_store()
         panic!("expected map data with decorations absent");
     };
     assert!(p.decorations.is_none());
-    let ClientboundGamePacket::MapItemData(p) =
-        decode(763, &[0x11, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0])
+    let ClientboundGamePacket::MapItemData(p) = decode(763, &[0x11, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0])
     else {
         panic!("expected unnamed decoration");
     };
@@ -747,13 +746,15 @@ fn legacy_map_item_data_763_765_bounds_nbt_lists_and_json_modified_utf8_names() 
     let mut malicious = vec![17, 0, 0, 1, 1, 99, 0, 0, 0, 1];
     malicious.extend_from_slice(&[10, 0, 0, 9, 0, 1, b'l', 0]);
     malicious.extend_from_slice(&i32::MAX.to_be_bytes());
-    assert!(translation_for(765)
-        .translate_game_frame(fixture(765, &malicious).into_boxed_slice())
-        .is_none());
+    assert!(
+        translation_for(765)
+            .translate_game_frame(fixture(765, &malicious).into_boxed_slice())
+            .is_none()
+    );
     for (elem, count, trailing) in [
         (0u8, -1i32, &[][..]), // negative
-        (13, 0, &[][..]), // invalid element tag
-        (1, 2, &[7][..]), // count exceeds remaining data
+        (13, 0, &[][..]),      // invalid element tag
+        (1, 2, &[7][..]),      // count exceeds remaining data
     ] {
         let mut nbt = vec![10, 9, 0, 1, b'l', elem];
         nbt.extend_from_slice(&count.to_be_bytes());
@@ -761,9 +762,11 @@ fn legacy_map_item_data_763_765_bounds_nbt_lists_and_json_modified_utf8_names() 
         let mut body = vec![17, 0, 0, 1, 1, 99, 0, 0, 0, 1];
         body.extend(nbt);
         body.push(0); // no patch
-        assert!(translation_for(765)
-            .translate_game_frame(fixture(765, &body).into_boxed_slice())
-            .is_none());
+        assert!(
+            translation_for(765)
+                .translate_game_frame(fixture(765, &body).into_boxed_slice())
+                .is_none()
+        );
     }
 
     // The exact u16 modified-UTF-8 boundary survives a full translation and
@@ -810,7 +813,11 @@ fn legacy_map_item_data_763_765_bounds_nbt_lists_and_json_modified_utf8_names() 
         else {
             panic!("map event decorations");
         };
-        assert_eq!(event_decorations.len(), source_max as usize + 1, "protocol {protocol}");
+        assert_eq!(
+            event_decorations.len(),
+            source_max as usize + 1,
+            "protocol {protocol}"
+        );
         for (id, decoration) in event_decorations.iter().enumerate() {
             assert_eq!(
                 decoration.asset,
@@ -822,7 +829,11 @@ fn legacy_map_item_data_763_765_bounds_nbt_lists_and_json_modified_utf8_names() 
             panic!("map item data");
         };
         let decorations = packet.decorations.unwrap();
-        assert_eq!(decorations.len(), source_max as usize + 1, "protocol {protocol}");
+        assert_eq!(
+            decorations.len(),
+            source_max as usize + 1,
+            "protocol {protocol}"
+        );
         for (id, decoration) in decorations.iter().enumerate() {
             assert_eq!(decoration.decoration_type as u32, id as u32);
             assert_eq!(
@@ -853,7 +864,10 @@ fn legacy_map_item_data_763_765_bounds_nbt_lists_and_json_modified_utf8_names() 
             panic!("map item data");
         };
         assert_eq!(cursor.position() as usize, translated.len());
-        assert!(packet.decorations.unwrap().is_empty(), "protocol {protocol}");
+        assert!(
+            packet.decorations.unwrap().is_empty(),
+            "protocol {protocol}"
+        );
         assert_eq!(packet.color_patch.0.unwrap().map_colors, [7]);
     }
 }
@@ -888,8 +902,13 @@ fn legacy_map_item_data_763_764_modified_utf8_boundaries_reach_store() {
         )
         .unwrap();
         let crate::net::NetworkEvent::MapItemData {
-            map_id, scale, locked, patch, decorations,
-        } = crate::net::handler::map_item_data_event(&packet).unwrap() else {
+            map_id,
+            scale,
+            locked,
+            patch,
+            decorations,
+        } = crate::net::handler::map_item_data_event(&packet).unwrap()
+        else {
             unreachable!();
         };
         let decoration = &decorations.as_ref().unwrap()[0];
@@ -970,9 +989,12 @@ fn legacy_map_item_data_765_anonymous_nbt_lists_reject_malformed_and_keep_valid_
             nbt.push(0); // compound end
         }
         let frame = fixture(&body_with_nbt(&nbt, &[0]));
-        assert!(translation_for(765)
-            .translate_game_frame(frame.into_boxed_slice())
-            .is_none(), "accepted malformed list type {element}, count {count}");
+        assert!(
+            translation_for(765)
+                .translate_game_frame(frame.into_boxed_slice())
+                .is_none(),
+            "accepted malformed list type {element}, count {count}"
+        );
     }
 
     // A legal End-element empty list inside an anonymous root compound is
@@ -980,9 +1002,8 @@ fn legacy_map_item_data_765_anonymous_nbt_lists_reject_malformed_and_keep_valid_
     // MapStore along with the component text and a nonzero 2x2 color patch.
     let nbt = [
         10, // anonymous root compound (no root-name bytes)
-        8, 0, 4, b't', b'e', b'x', b't', 0, 2, b'o', b'k',
-        9, 0, 5, b'e', b'x', b't', b'r', b'a', 0, 0, 0, 0, 0,
-        0, // root compound end
+        8, 0, 4, b't', b'e', b'x', b't', 0, 2, b'o', b'k', 9, 0, 5, b'e', b'x', b't', b'r', b'a',
+        0, 0, 0, 0, 0, 0, // root compound end
     ];
     let mut body = vec![17, 0, 0, 1, 1, 1, 16, 32, 3, 1];
     body.extend_from_slice(&nbt);
@@ -995,11 +1016,19 @@ fn legacy_map_item_data_765_anonymous_nbt_lists_reject_malformed_and_keep_valid_
     )
     .unwrap();
     let crate::net::NetworkEvent::MapItemData {
-        map_id, scale, locked, patch, decorations,
-    } = crate::net::handler::map_item_data_event(&packet).unwrap() else {
+        map_id,
+        scale,
+        locked,
+        patch,
+        decorations,
+    } = crate::net::handler::map_item_data_event(&packet).unwrap()
+    else {
         unreachable!();
     };
-    assert_eq!(decorations.as_ref().unwrap()[0].asset, MapDecorationAsset::Frame);
+    assert_eq!(
+        decorations.as_ref().unwrap()[0].asset,
+        MapDecorationAsset::Frame
+    );
     assert_eq!(decorations.as_ref().unwrap()[0].name.as_deref(), Some("ok"));
     let mut maps = MapStore::default();
     maps.apply(map_id, scale, locked, patch, decorations);
@@ -1011,13 +1040,14 @@ fn legacy_map_item_data_765_anonymous_nbt_lists_reject_malformed_and_keep_valid_
 
 #[test]
 fn map_item_data_native_ids_0_through_34_decode_to_assets_and_store() {
-    use crate::world::maps::{MapDecorationAsset, MapStore};
     use azalea_protocol::packets::game::c_map_item_data::DecorationType;
+
+    use crate::world::maps::{MapDecorationAsset, MapStore};
 
     for id in 0..=34u32 {
         let bytes = [id as u8]; // all known ids are one-byte VarInts
-        let typed = DecorationType::azalea_read(&mut std::io::Cursor::new(bytes.as_slice()))
-            .unwrap();
+        let typed =
+            DecorationType::azalea_read(&mut std::io::Cursor::new(bytes.as_slice())).unwrap();
         assert_eq!(typed as u32, id, "typed enum id {id}");
         let mut encoded = Vec::new();
         typed.azalea_write(&mut encoded).unwrap();
@@ -1039,7 +1069,10 @@ fn map_item_data_native_ids_0_through_34_decode_to_assets_and_store() {
             let mut name = Vec::new();
             simdnbt::owned::NbtTag::Compound({
                 let mut compound = simdnbt::owned::NbtCompound::new();
-                compound.insert("text", simdnbt::owned::NbtTag::String("trial-chambers".into()));
+                compound.insert(
+                    "text",
+                    simdnbt::owned::NbtTag::String("trial-chambers".into()),
+                );
                 compound
             })
             .azalea_write(&mut name)
@@ -1064,10 +1097,18 @@ fn map_item_data_native_ids_0_through_34_decode_to_assets_and_store() {
         let ClientboundGamePacket::MapItemData(map) = &packet else {
             panic!("expected map item data for icon {id}");
         };
-        assert_eq!(map.decorations.as_ref().unwrap()[0].decoration_type as u32, id);
+        assert_eq!(
+            map.decorations.as_ref().unwrap()[0].decoration_type as u32,
+            id
+        );
         let crate::net::NetworkEvent::MapItemData {
-            map_id, scale, locked, patch, decorations,
-        } = crate::net::handler::map_item_data_event(&packet).unwrap() else {
+            map_id,
+            scale,
+            locked,
+            patch,
+            decorations,
+        } = crate::net::handler::map_item_data_event(&packet).unwrap()
+        else {
             unreachable!();
         };
         maps.apply(map_id, scale, locked, patch, decorations);
@@ -1094,17 +1135,28 @@ fn map_item_data_native_ids_0_through_34_decode_to_assets_and_store() {
             )
             .unwrap();
             let crate::net::NetworkEvent::MapItemData {
-                map_id, scale, locked, patch, decorations,
-            } = crate::net::handler::map_item_data_event(&packet).unwrap() else {
+                map_id,
+                scale,
+                locked,
+                patch,
+                decorations,
+            } = crate::net::handler::map_item_data_event(&packet).unwrap()
+            else {
                 unreachable!();
             };
-            assert!(decorations.as_ref().is_some_and(|items| items.iter().any(|item|
-                item.asset == MapDecorationAsset::from_registry_id(id))),
-                "event decoration asset for protocol {protocol}, id {id}");
+            assert!(
+                decorations.as_ref().is_some_and(|items| items
+                    .iter()
+                    .any(|item| item.asset == MapDecorationAsset::from_registry_id(id))),
+                "event decoration asset for protocol {protocol}, id {id}"
+            );
             let mut maps = MapStore::default();
             maps.apply(map_id, scale, locked, patch, decorations);
-            assert_eq!(maps.0[&(200 + id)].decorations[0].asset,
-                MapDecorationAsset::from_registry_id(id), "protocol {protocol}, id {id}");
+            assert_eq!(
+                maps.0[&(200 + id)].decorations[0].asset,
+                MapDecorationAsset::from_registry_id(id),
+                "protocol {protocol}, id {id}"
+            );
         }
     }
     assert!(crate::net::translate::Translation::for_protocol(776).is_none());
@@ -1115,13 +1167,20 @@ fn map_item_data_native_ids_0_through_34_decode_to_assets_and_store() {
         )
         .unwrap();
         let crate::net::NetworkEvent::MapItemData {
-            map_id, scale, locked, patch, decorations,
-        } = crate::net::handler::map_item_data_event(&packet).unwrap() else {
+            map_id,
+            scale,
+            locked,
+            patch,
+            decorations,
+        } = crate::net::handler::map_item_data_event(&packet).unwrap()
+        else {
             unreachable!();
         };
         maps.apply(map_id, scale, locked, patch, decorations);
-        assert_eq!(maps.0[&(300 + id)].decorations[0].asset,
-            MapDecorationAsset::from_registry_id(id));
+        assert_eq!(
+            maps.0[&(300 + id)].decorations[0].asset,
+            MapDecorationAsset::from_registry_id(id)
+        );
     }
 
     let bytes = packet_bytes(34, 34, true);
@@ -1129,32 +1188,74 @@ fn map_item_data_native_ids_0_through_34_decode_to_assets_and_store() {
         &mut std::io::Cursor::new(&bytes),
     )
     .unwrap();
-    let ClientboundGamePacket::MapItemData(map) = &packet else { unreachable!() };
+    let ClientboundGamePacket::MapItemData(map) = &packet else {
+        unreachable!()
+    };
     let typed = &map.decorations.as_ref().unwrap()[0];
     assert_eq!((typed.x, typed.y, typed.rot), (16, 32, 3));
-    assert!(typed.name.as_ref().unwrap().to_string().contains("trial-chambers"));
+    assert!(
+        typed
+            .name
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .contains("trial-chambers")
+    );
     let crate::net::NetworkEvent::MapItemData {
-        map_id, scale, locked, patch, decorations,
-    } = crate::net::handler::map_item_data_event(&packet).unwrap() else {
+        map_id,
+        scale,
+        locked,
+        patch,
+        decorations,
+    } = crate::net::handler::map_item_data_event(&packet).unwrap()
+    else {
         unreachable!();
     };
     let event_decoration = &decorations.as_ref().unwrap()[0];
     assert_eq!(event_decoration.asset, MapDecorationAsset::TrialChambers);
-    assert_eq!((event_decoration.x, event_decoration.y, event_decoration.rotation), (16, 32, 3));
-    assert!(event_decoration.name.as_ref().unwrap().contains("trial-chambers"));
+    assert_eq!(
+        (
+            event_decoration.x,
+            event_decoration.y,
+            event_decoration.rotation
+        ),
+        (16, 32, 3)
+    );
+    assert!(
+        event_decoration
+            .name
+            .as_ref()
+            .unwrap()
+            .contains("trial-chambers")
+    );
     let mut store = MapStore::default();
     store.apply(map_id, scale, locked, patch, decorations);
-    assert_eq!(store.0[&34].decorations[0].asset, MapDecorationAsset::TrialChambers);
-    assert_eq!(store.0[&34].decorations[0].name.as_deref(), Some("trial-chambers"));
-    assert_eq!((store.0[&34].decorations[0].x, store.0[&34].decorations[0].y,
-        store.0[&34].decorations[0].rotation), (16, 32, 3));
+    assert_eq!(
+        store.0[&34].decorations[0].asset,
+        MapDecorationAsset::TrialChambers
+    );
+    assert_eq!(
+        store.0[&34].decorations[0].name.as_deref(),
+        Some("trial-chambers")
+    );
+    assert_eq!(
+        (
+            store.0[&34].decorations[0].x,
+            store.0[&34].decorations[0].y,
+            store.0[&34].decorations[0].rotation
+        ),
+        (16, 32, 3)
+    );
     assert_eq!(&store.0[&34].colors[5 * 128 + 4..5 * 128 + 6], &[9, 8]);
     assert_eq!(&store.0[&34].colors[6 * 128 + 4..6 * 128 + 6], &[7, 6]);
 }
 
 fn native_map_id_size() -> usize {
     let mut bytes = Vec::new();
-    wire::write_varint(&mut bytes, table_id(Phase::Game, Direction::Clientbound, "map_item_data"));
+    wire::write_varint(
+        &mut bytes,
+        table_id(Phase::Game, Direction::Clientbound, "map_item_data"),
+    );
     bytes.len()
 }
 
@@ -1343,9 +1444,11 @@ fn legacy_filled_map_frame_metadata_runs_translation_decode_remap_event_and_stor
     use azalea_protocol::packets::game::c_set_entity_data::ClientboundSetEntityData;
     use azalea_registry::builtin::{DataComponentKind, EntityKind, ItemKind};
     use glam::DVec3;
+
     use crate::net::NetworkEvent;
 
-    let encode = |packet: &ClientboundGamePacket| azalea_protocol::write::serialize_packet(packet).unwrap();
+    let encode =
+        |packet: &ClientboundGamePacket| azalea_protocol::write::serialize_packet(packet).unwrap();
     for protocol in [770, 771, 776] {
         let translation = crate::net::translate::Translation::for_protocol(protocol);
         if protocol == 776 {
@@ -1371,39 +1474,73 @@ fn legacy_filled_map_frame_metadata_runs_translation_decode_remap_event_and_stor
             encode(&packet)
         } else {
             let mut old = Vec::new();
-            wire::write_varint(&mut old, old_id(protocol, Direction::Clientbound, "add_entity"));
+            wire::write_varint(
+                &mut old,
+                old_id(protocol, Direction::Clientbound, "add_entity"),
+            );
             wire::write_varint(&mut old, 17);
             old.extend_from_slice(&[0; 16]);
-            wire::write_varint(&mut old, registry_id(table, ClientRegistry::EntityType, "item_frame"));
-            for c in [4.0f64, 5.0, 6.0] { old.extend_from_slice(&c.to_be_bytes()); }
+            wire::write_varint(
+                &mut old,
+                registry_id(table, ClientRegistry::EntityType, "item_frame"),
+            );
+            for c in [4.0f64, 5.0, 6.0] {
+                old.extend_from_slice(&c.to_be_bytes());
+            }
             old.extend_from_slice(&[0, 0, 0]);
             wire::write_varint(&mut old, 4);
             old.extend_from_slice(&[0; 6]);
-            translation.as_ref().unwrap().translate_game_frame(old.into_boxed_slice()).unwrap()
+            translation
+                .as_ref()
+                .unwrap()
+                .translate_game_frame(old.into_boxed_slice())
+                .unwrap()
         };
-        let mut spawn_packet: ClientboundGamePacket = azalea_protocol::read::deserialize_packet(
-            &mut std::io::Cursor::new(&spawn_frame),
-        ).unwrap();
+        let mut spawn_packet: ClientboundGamePacket =
+            azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&spawn_frame))
+                .unwrap();
         if let Some(translation) = &translation {
             assert!(translation.remap_inbound(&mut spawn_packet));
         }
-        let ClientboundGamePacket::AddEntity(spawn_packet) = spawn_packet else { panic!("add entity") };
+        let ClientboundGamePacket::AddEntity(spawn_packet) = spawn_packet else {
+            panic!("add entity")
+        };
         assert_eq!(spawn_packet.entity_type, EntityKind::ItemFrame);
         let spawn_event = crate::net::handler::entity_spawn_event(&spawn_packet);
         let NetworkEvent::EntitySpawned {
-            id, entity_type, position, velocity, y_rot_deg, x_rot_deg,
-            item_frame_direction: Some(spawn_direction), spawn_data, ..
-        } = spawn_event else { panic!("spawn event") };
+            id,
+            entity_type,
+            position,
+            velocity,
+            y_rot_deg,
+            x_rot_deg,
+            item_frame_direction: Some(spawn_direction),
+            spawn_data,
+            ..
+        } = spawn_event
+        else {
+            panic!("spawn event")
+        };
         assert_eq!(spawn_direction, FrameDirection::West, "protocol {protocol}");
         assert_eq!(spawn_data, 4);
         let mut entities = crate::entity::EntityStore::new();
         crate::app::core::register_nonliving_spawn_event(
-            &mut entities, id, position, velocity, y_rot_deg, x_rot_deg,
-            entity_type, spawn_data, Some(spawn_direction),
+            &mut entities,
+            id,
+            position,
+            velocity,
+            y_rot_deg,
+            x_rot_deg,
+            entity_type,
+            spawn_data,
+            Some(spawn_direction),
         );
         assert_eq!(entities.vehicles[&17].kind, Some(EntityKind::ItemFrame));
         assert_eq!(entities.vehicles[&17].spawn_data, Some(4));
-        assert_eq!(entities.vehicles[&17].item_frame_direction, Some(FrameDirection::West));
+        assert_eq!(
+            entities.vehicles[&17].item_frame_direction,
+            Some(FrameDirection::West)
+        );
         let spawn_position = if native {
             crate::entity::components::Position::new(0.96875, 0.5, 0.5)
         } else {
@@ -1414,17 +1551,33 @@ fn legacy_filled_map_frame_metadata_runs_translation_decode_remap_event_and_stor
         let metadata_frame = if native {
             let mut patch = DataComponentPatch::default();
             // SAFETY: MapId is inserted under its matching component kind.
-            unsafe { patch.unchecked_insert_component(DataComponentKind::MapId, Some(MapId { id: 17 }.into())); }
+            unsafe {
+                patch.unchecked_insert_component(
+                    DataComponentKind::MapId,
+                    Some(MapId { id: 17 }.into()),
+                );
+            }
             let mut stack = ItemStackData::new(ItemKind::FilledMap, 1);
             stack.component_patch = patch;
-            encode(&ClientboundGamePacket::SetEntityData(ClientboundSetEntityData {
-                id: MinecraftEntityId(17),
-                packed_items: EntityMetadataItems(vec![
-                    EntityDataItem { index: 8, value: V::Direction(FrameDirection::North) },
-                    EntityDataItem { index: 9, value: V::ItemStack(ItemStack::Present(stack)) },
-                    EntityDataItem { index: 10, value: V::Int(3) },
-                ]),
-            }))
+            encode(&ClientboundGamePacket::SetEntityData(
+                ClientboundSetEntityData {
+                    id: MinecraftEntityId(17),
+                    packed_items: EntityMetadataItems(vec![
+                        EntityDataItem {
+                            index: 8,
+                            value: V::Direction(FrameDirection::North),
+                        },
+                        EntityDataItem {
+                            index: 9,
+                            value: V::ItemStack(ItemStack::Present(stack)),
+                        },
+                        EntityDataItem {
+                            index: 10,
+                            value: V::Int(3),
+                        },
+                    ]),
+                },
+            ))
         } else {
             let translation = translation.as_ref().unwrap();
             let map_item = registry_id(table, ClientRegistry::Item, "filled_map");
@@ -1432,7 +1585,10 @@ fn legacy_filled_map_frame_metadata_runs_translation_decode_remap_event_and_stor
             let item_index = if protocol == 770 { 8 } else { 9 };
             let rotation_index = if protocol == 770 { 9 } else { 10 };
             let mut old = Vec::new();
-            wire::write_varint(&mut old, old_id(protocol, Direction::Clientbound, "set_entity_data"));
+            wire::write_varint(
+                &mut old,
+                old_id(protocol, Direction::Clientbound, "set_entity_data"),
+            );
             wire::write_varint(&mut old, 17);
             if protocol == 771 {
                 // 1.21.6 EntityDataSerializers: direction=12; North is enum VarInt 2.
@@ -1449,28 +1605,48 @@ fn legacy_filled_map_frame_metadata_runs_translation_decode_remap_event_and_stor
             old.extend_from_slice(&[rotation_index, 1]);
             wire::write_varint(&mut old, 3);
             old.push(0xff);
-            translation.translate_game_frame(old.into_boxed_slice()).unwrap()
+            translation
+                .translate_game_frame(old.into_boxed_slice())
+                .unwrap()
         };
-        let mut metadata: ClientboundGamePacket = azalea_protocol::read::deserialize_packet(
-            &mut std::io::Cursor::new(&metadata_frame),
-        ).unwrap();
+        let mut metadata: ClientboundGamePacket =
+            azalea_protocol::read::deserialize_packet(&mut std::io::Cursor::new(&metadata_frame))
+                .unwrap();
         if let Some(translation) = &translation {
             assert!(translation.remap_inbound(&mut metadata));
         }
-        let ClientboundGamePacket::SetEntityData(metadata) = metadata else { panic!("typed metadata") };
+        let ClientboundGamePacket::SetEntityData(metadata) = metadata else {
+            panic!("typed metadata")
+        };
         let item_offset = if native || protocol == 771 { 1 } else { 0 };
-        let V::ItemStack(ItemStack::Present(stack)) = &metadata.packed_items.0[item_offset].value else {
+        let V::ItemStack(ItemStack::Present(stack)) = &metadata.packed_items.0[item_offset].value
+        else {
             panic!("filled map stack")
         };
         assert_eq!(stack.kind, ItemKind::FilledMap);
-        assert_eq!(stack.component_patch.get::<MapId>(), Some(&MapId { id: 17 }));
+        assert_eq!(
+            stack.component_patch.get::<MapId>(),
+            Some(&MapId { id: 17 })
+        );
         let rotation_entry = metadata.packed_items.0.last().unwrap();
         assert_eq!(rotation_entry.value, V::Int(3), "protocol {protocol}");
-        assert_eq!(rotation_entry.index, if native || protocol == 771 { 10 } else { 9 });
+        assert_eq!(
+            rotation_entry.index,
+            if native || protocol == 771 { 10 } else { 9 }
+        );
 
-        let events: Vec<_> = metadata.packed_items.iter().flat_map(|item| {
-            crate::net::handler::entity_item_metadata_events(protocol, metadata.id.0, item.index, &item.value)
-        }).collect();
+        let events: Vec<_> = metadata
+            .packed_items
+            .iter()
+            .flat_map(|item| {
+                crate::net::handler::entity_item_metadata_events(
+                    protocol,
+                    metadata.id.0,
+                    item.index,
+                    &item.value,
+                )
+            })
+            .collect();
         assert_eq!(events.len(), 3, "protocol {protocol}");
         let mut item_entities = crate::entity::ItemEntityStore::new();
         for event in &events {
@@ -1478,12 +1654,28 @@ fn legacy_filled_map_frame_metadata_runs_translation_decode_remap_event_and_stor
                 NetworkEvent::ItemFrameItem { id, .. }
                 | NetworkEvent::ItemFrameRotation { id, .. }
                 | NetworkEvent::ItemFrameDirection { id, .. } => {
-                    assert!(crate::app::core::apply_item_frame_metadata(&mut entities, *id, event).is_some());
+                    assert!(
+                        crate::app::core::apply_item_frame_metadata(&mut entities, *id, event)
+                            .is_some()
+                    );
                 }
-                NetworkEvent::EntityItemData { id, item_name, item_id, damage, count, stack } => {
+                NetworkEvent::EntityItemData {
+                    id,
+                    item_name,
+                    item_id,
+                    damage,
+                    count,
+                    stack,
+                } => {
                     let _ = crate::app::core::apply_entity_item_data(
-                        &entities, &mut item_entities, *id, item_name.clone(), *item_id,
-                        *damage, *count, stack.clone(),
+                        &entities,
+                        &mut item_entities,
+                        *id,
+                        item_name.clone(),
+                        *item_id,
+                        *damage,
+                        *count,
+                        stack.clone(),
                     );
                 }
                 _ => panic!("unexpected metadata event"),
@@ -1493,17 +1685,36 @@ fn legacy_filled_map_frame_metadata_runs_translation_decode_remap_event_and_stor
         let frame = &entities.vehicles[&17];
         assert_eq!(frame.item_frame_item, ItemStack::Present(stack.clone()));
         assert_eq!(frame.item_frame_rotation, 3);
-        assert_eq!(frame.item_frame_direction, Some(if protocol == 770 { FrameDirection::West } else { FrameDirection::North }));
-        let expected_quad_center = if native { DVec3::new(0.5, 0.5, 0.5) } else { DVec3::new(4.5, 5.5, 6.5) };
+        assert_eq!(
+            frame.item_frame_direction,
+            Some(if protocol == 770 {
+                FrameDirection::West
+            } else {
+                FrameDirection::North
+            })
+        );
+        let expected_quad_center = if native {
+            DVec3::new(0.5, 0.5, 0.5)
+        } else {
+            DVec3::new(4.5, 5.5, 6.5)
+        };
         let mut maps = crate::world::maps::MapStore::default();
         maps.apply(17, 0, false, Some((1, 1, 2, 3, vec![0x31])), None);
         let quads = crate::app::phases::in_game::extract_map_frame_quads(
-            &entities, &maps, DVec3::ZERO, 1.0, DVec3::ZERO,
+            &entities,
+            &maps,
+            DVec3::ZERO,
+            1.0,
+            DVec3::ZERO,
         );
         assert_eq!(quads.len(), 1, "protocol {protocol}");
         assert_eq!(quads[0].map_id, 17);
         assert_eq!(quads[0].position, expected_quad_center.as_vec3());
-        let expected_normal = if protocol == 770 { glam::Vec3::X } else { glam::Vec3::Z };
+        let expected_normal = if protocol == 770 {
+            glam::Vec3::X
+        } else {
+            glam::Vec3::Z
+        };
         assert!(
             (quads[0].rotation * glam::Vec3::Z).abs_diff_eq(expected_normal, 1e-6),
             "quad normal/facing protocol {protocol}"
@@ -1519,9 +1730,16 @@ fn legacy_filled_map_frame_metadata_runs_translation_decode_remap_event_and_stor
             );
         }
         assert_eq!(quads[0].map_data.colors[3 * 128 + 2], 0x31);
-        assert!(crate::app::phases::in_game::extract_map_frame_quads(
-            &entities, &crate::world::maps::MapStore::default(), DVec3::ZERO, 1.0, DVec3::ZERO,
-        ).is_empty());
+        assert!(
+            crate::app::phases::in_game::extract_map_frame_quads(
+                &entities,
+                &crate::world::maps::MapStore::default(),
+                DVec3::ZERO,
+                1.0,
+                DVec3::ZERO,
+            )
+            .is_empty()
+        );
     }
 }
 #[test]
@@ -1962,6 +2180,17 @@ fn registry_table_matches_azalea() {
     assert_eq!(
         BlockEntityKind::PotentSulfur.to_u32(),
         index(ClientRegistry::BlockEntityType, "potent_sulfur")
+    );
+    assert_eq!(
+        BlockEntityKind::MobSpawner.to_u32(),
+        index(ClientRegistry::BlockEntityType, "mob_spawner")
+    );
+    assert_eq!(
+        t.name_of(
+            ClientRegistry::BlockEntityType,
+            BlockEntityKind::MobSpawner.to_u32()
+        ),
+        Some("mob_spawner")
     );
 }
 
@@ -2447,7 +2676,9 @@ fn translate_entity_data_compound_tag_old_versions() {
         old.extend_from_slice(&[0, 0, 2]); // index 0, serializer byte, value 2
         // Anonymous compound with a legal empty End-element list, skipped
         // from this removed `compound_tag` serializer before the live Boolean.
-        old.extend_from_slice(&[19, 16, 0x0A, 9, 0, 5, b'e', b'm', b'p', b't', b'y', 0, 0, 0, 0, 0, 0]);
+        old.extend_from_slice(&[
+            19, 16, 0x0A, 9, 0, 5, b'e', b'm', b'p', b't', b'y', 0, 0, 0, 0, 0, 0,
+        ]);
         old.extend_from_slice(&[8, 8, 1]); // index 8, boolean, true
         old.push(0xFF);
 
@@ -5247,11 +5478,8 @@ fn translate_level_particles_777() {
     let expect = |particle: &[u8]| {
         let mut input = Cursor::new(particle);
         let old_particle = u32::azalea_read_var(&mut input).unwrap();
-        let name = old_table
-            .name_of(ClientRegistry::ParticleType, old_particle)
-            .unwrap();
-        let native_table = RegistryTable::for_protocol(776).unwrap();
-        let native_particle = registry_id(native_table, ClientRegistry::ParticleType, name);
+        // Preserve wire identity until the raw handler performs the one registry remap.
+        let native_particle = old_particle;
         let mut expected = Vec::new();
         wire::write_varint(
             &mut expected,

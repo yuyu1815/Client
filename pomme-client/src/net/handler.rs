@@ -73,7 +73,9 @@ pub(crate) fn entity_item_metadata_events(
     index: u8,
     value: &azalea_entity::EntityDataValue,
 ) -> Vec<NetworkEvent> {
-    let mut events = item_frame_metadata_event(protocol, id, index, value).into_iter().collect::<Vec<_>>();
+    let mut events = item_frame_metadata_event(protocol, id, index, value)
+        .into_iter()
+        .collect::<Vec<_>>();
     if index == 8
         && let azalea_entity::EntityDataValue::ItemStack(stack) = value
     {
@@ -86,7 +88,9 @@ pub(crate) fn entity_item_metadata_events(
         });
         let item_id = data.map_or(0, |data| data.kind.to_u32());
         let damage = data
-            .and_then(|data| crate::player::menu_click::component::<azalea_inventory::components::Damage>(data))
+            .and_then(|data| {
+                crate::player::menu_click::component::<azalea_inventory::components::Damage>(data)
+            })
             .map_or(0, |component| component.amount);
         let count = data.map_or(0, |data| data.count);
         events.push(NetworkEvent::EntityItemData {
@@ -240,6 +244,23 @@ fn dimension_info(
     timeline_entries_error: Option<&str>,
     world_clock_ids: Option<&[Identifier]>,
 ) -> NetworkEvent {
+    let attrs = dim._extra.get("attributes").and_then(|tag| tag.compound());
+    let lightmap_attributes = super::environment::LightmapAttributes {
+        sky_light_factor: attrs
+            .and_then(|a| a.float(super::environment::SKY_LIGHT_FACTOR_ATTRIBUTE)),
+        block_light_tint: attrs
+            .and_then(|a| a.get(super::environment::BLOCK_LIGHT_TINT_ATTRIBUTE))
+            .and_then(super::environment::rgb_attribute_value),
+        sky_light_color: attrs
+            .and_then(|a| a.get(super::environment::SKY_LIGHT_COLOR_ATTRIBUTE))
+            .and_then(super::environment::rgb_attribute_value),
+        ambient_light_color: attrs
+            .and_then(|a| a.get(super::environment::AMBIENT_LIGHT_COLOR_ATTRIBUTE))
+            .and_then(super::environment::rgb_attribute_value),
+        night_vision_color: attrs
+            .and_then(|a| a.get(super::environment::NIGHT_VISION_COLOR_ATTRIBUTE))
+            .and_then(super::environment::rgb_attribute_value),
+    };
     NetworkEvent::DimensionInfo {
         is_debug,
         height: dim.height,
@@ -251,6 +272,16 @@ fn dimension_info(
                 .map(|(id, key)| (key.to_string(), id as u32))
                 .collect()
         }),
+        ambient_particles: dim
+            ._extra
+            .get("attributes")
+            .and_then(|tag| match tag {
+                simdnbt::owned::NbtTag::Compound(attributes) => {
+                    super::connection::extract_ambient_attribute(attributes)
+                }
+                _ => None,
+            })
+            .unwrap_or_default(),
         has_skylight: dim
             ._extra
             .get("has_skylight")
@@ -270,12 +301,32 @@ fn dimension_info(
                 .and_then(|tag| tag.byte())
                 .is_some_and(|b| b != 0),
             is_end_world: world_key == "minecraft:the_end",
+            has_end_flashes: dim
+                ._extra
+                .get("skybox")
+                .and_then(|tag| match tag {
+                    simdnbt::owned::NbtTag::String(value) => Some(value.to_str() == "end"),
+                    _ => None,
+                })
+                .unwrap_or(world_key == "minecraft:the_end"),
             ambient_light: dim._extra.get("ambient_light").and_then(|tag| tag.float()),
-            sky_light_level: dim
+            sky_light_level: attrs
+                .and_then(|attrs| attrs.float(super::environment::SKY_LIGHT_LEVEL_ATTRIBUTE)),
+            lightmap_attributes,
+            water_evaporates: dim
                 ._extra
                 .get("attributes")
                 .and_then(|tag| tag.compound())
-                .and_then(|attrs| attrs.float(super::environment::SKY_LIGHT_LEVEL_ATTRIBUTE)),
+                .and_then(|attrs| attrs.get(super::environment::WATER_EVAPORATES_ATTRIBUTE))
+                .and_then(|value| super::environment::water_evaporates_value(value, false)),
+            default_dripstone_particle: dim
+                ._extra
+                .get("attributes")
+                .and_then(|tag| tag.compound())
+                .and_then(|attrs| {
+                    attrs.get(super::environment::DEFAULT_DRIPSTONE_PARTICLE_ATTRIBUTE)
+                })
+                .and_then(super::environment::dripstone_particle_value),
             timeline_refs: dim
                 ._extra
                 .get("timelines")
@@ -498,6 +549,7 @@ pub(super) async fn handle_game_packet_with_display_text(
                 event_tx,
                 NetworkEvent::BlockEvent {
                     pos: p.pos,
+                    block: p.block,
                     action_id: p.action_id,
                     action_parameter: p.action_parameter,
                 },
@@ -1328,7 +1380,7 @@ pub(super) async fn handle_game_packet_with_display_text(
             .await?;
         }
         ClientboundGamePacket::AddEntity(p) => {
-            send_event(event_tx, entity_spawn_event(p),).await?;
+            send_event(event_tx, entity_spawn_event(p)).await?;
         }
         ClientboundGamePacket::DamageEvent(p) => {
             send_event(event_tx, NetworkEvent::EntityDamaged { id: p.entity_id.0 }).await?;
@@ -1491,7 +1543,8 @@ pub(super) async fn handle_game_packet_with_display_text(
             for item in p.packed_items.iter() {
                 // The classifier takes the protocol explicitly so fixture tests
                 // don't mutate shared session state or race parallel tests.
-                for event in entity_item_metadata_events(protocol, p.id.0, item.index, &item.value) {
+                for event in entity_item_metadata_events(protocol, p.id.0, item.index, &item.value)
+                {
                     send_event(event_tx, event).await?;
                 }
                 // Mannequin DATA_PROFILE follows Avatar's main-arm and
@@ -1678,18 +1731,41 @@ pub(super) async fn handle_game_packet_with_display_text(
                     )
                     .await?;
                 }
-                if item.index == 10
-                    && let azalea_entity::EntityDataValue::Particles(particles) = &item.value
-                {
-                    send_event(
-                        event_tx,
-                        NetworkEvent::EntityEffectParticles {
-                            id: p.id.0,
-                            particles: Some(particles.to_vec()),
-                            ambient: None,
-                        },
-                    )
-                    .await?;
+                if item.index == 10 {
+                    let particles = match &item.value {
+                        azalea_entity::EntityDataValue::Particle(particle) => {
+                            Some(std::slice::from_ref(particle))
+                        }
+                        azalea_entity::EntityDataValue::Particles(particles) => {
+                            Some(particles.as_ref())
+                        }
+                        _ => None,
+                    };
+                    if let Some(particles) = particles {
+                        let options = particles
+                            .iter()
+                            .filter_map(particle_options_from_typed)
+                            .collect::<Vec<_>>();
+                        send_event(
+                            event_tx,
+                            NetworkEvent::ParticleMetadata {
+                                id: p.id.0,
+                                particles: options,
+                            },
+                        )
+                        .await?;
+                        if let azalea_entity::EntityDataValue::Particles(particles) = &item.value {
+                            send_event(
+                                event_tx,
+                                NetworkEvent::EntityEffectParticles {
+                                    id: p.id.0,
+                                    particles: Some(particles.to_vec()),
+                                    ambient: None,
+                                },
+                            )
+                            .await?;
+                        }
+                    }
                 }
                 if item.index == 11
                     && let azalea_entity::EntityDataValue::Boolean(ambient) = &item.value
@@ -1710,6 +1786,9 @@ pub(super) async fn handle_game_packet_with_display_text(
                 let scalar = match &item.value {
                     azalea_entity::EntityDataValue::Boolean(v) => Some(MetaValue::Bool(*v)),
                     azalea_entity::EntityDataValue::Int(v) => Some(MetaValue::Int(*v)),
+                    azalea_entity::EntityDataValue::SnifferState(state) => {
+                        Some(MetaValue::Int(*state as i32))
+                    }
                     azalea_entity::EntityDataValue::Byte(v) => Some(MetaValue::Byte(*v)),
                     azalea_entity::EntityDataValue::Float(v) => Some(MetaValue::Float(*v)),
                     azalea_entity::EntityDataValue::Long(v) => Some(MetaValue::Long(*v)),
@@ -1856,12 +1935,54 @@ pub(super) async fn handle_game_packet_with_display_text(
                 }
             }
         }
-        // Event id 3 = living entity death or snowball impact.
-        // TODO: event 60 (`makePoofParticles`) when a mob's death clock hits 20.
+        // Entity event particles are client-local in Java; keep their source ID
+        // so the main-thread entity owner can select the kind-specific request.
+        ClientboundGamePacket::EntityEvent(p) if matches!(p.event_id, 0 | 6 | 7 | 12..=15 | 17 | 18 | 38 | 39 | 40..=42 | 45..=52 | 65 | 68 | 69) =>
+        {
+            send_event(
+                event_tx,
+                NetworkEvent::EntityParticleEvent {
+                    id: p.entity_id.0,
+                    event_id: p.event_id,
+                },
+            )
+            .await?;
+        }
+        // Event id 3 is both a death/impact and (for snowball / egg) a local particle trigger.
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 3 => {
+            send_event(
+                event_tx,
+                NetworkEvent::EntityParticleEvent {
+                    id: p.entity_id.0,
+                    event_id: 3,
+                },
+            )
+            .await?;
             send_event(event_tx, NetworkEvent::EntityDied { id: p.entity_id.0 }).await?;
         }
         // Event id 9 = finished using an item (vanilla `completeUsingItem`).
+        // Event 20 and 60 both produce the same Java Poof burst.
+        ClientboundGamePacket::EntityEvent(p) if matches!(p.event_id, 20 | 60) => {
+            send_event(event_tx, NetworkEvent::EntityPoof { id: p.entity_id.0 }).await?;
+        }
+        // Honey block slide/jump uses 53/54; drowning feedback uses 67.
+        ClientboundGamePacket::EntityEvent(p) if matches!(p.event_id, 53 | 54) => {
+            send_event(
+                event_tx,
+                NetworkEvent::EntityHoneyParticles {
+                    id: p.entity_id.0,
+                    count: if p.event_id == 53 { 5 } else { 10 },
+                },
+            )
+            .await?;
+        }
+        ClientboundGamePacket::EntityEvent(p) if p.event_id == 67 => {
+            send_event(
+                event_tx,
+                NetworkEvent::EntityDrownParticles { id: p.entity_id.0 },
+            )
+            .await?;
+        }
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 9 => {
             send_event(event_tx, NetworkEvent::FinishUseItem { id: p.entity_id.0 }).await?;
         }
@@ -1869,8 +1990,16 @@ pub(super) async fn handle_game_packet_with_display_text(
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 10 => {
             send_event(event_tx, NetworkEvent::SheepEatStart { id: p.entity_id.0 }).await?;
         }
-        // Event id 1 = rabbit jump start (15-tick hop).
+        // Event id 1 = rabbit jump start and its block sprint particle.
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 1 => {
+            send_event(
+                event_tx,
+                NetworkEvent::EntityParticleEvent {
+                    id: p.entity_id.0,
+                    event_id: 1,
+                },
+            )
+            .await?;
             send_event(event_tx, NetworkEvent::RabbitJump { id: p.entity_id.0 }).await?;
         }
         // Event id 19 = squid tentacle-clock rollover.
@@ -1881,8 +2010,17 @@ pub(super) async fn handle_game_packet_with_display_text(
             )
             .await?;
         }
-        // Event id 4 = iron golem punch (10-tick swing).
+        // Event 4 is also the Ravager attack phase; keep the legacy GolemPunch
+        // event while the entity owner filters the particle request by kind.
         ClientboundGamePacket::EntityEvent(p) if p.event_id == 4 => {
+            send_event(
+                event_tx,
+                NetworkEvent::EntityParticleEvent {
+                    id: p.entity_id.0,
+                    event_id: 4,
+                },
+            )
+            .await?;
             send_event(event_tx, NetworkEvent::GolemPunch { id: p.entity_id.0 }).await?;
         }
         // Event id 35 = Totem activation, emitted by the entity that used it.
@@ -2475,8 +2613,9 @@ async fn handle_raw_game_packet_with_translation(
             }
             parse_legacy_team(&mut cur).map(Some)
         }
-        Some("level_particles") => parse_level_particles_with_translation(&mut cur, translation)
-            .map_err(|e| e.to_string()),
+        Some("level_particles") => {
+            parse_level_particles_with_translation(&mut cur, translation).map_err(|e| e.to_string())
+        }
         Some("sound" | "sound_entity" | "stop_sound") => {
             let result = match name {
                 Some("sound") => handle_raw_ui_sound(&mut cur),
@@ -2624,6 +2763,28 @@ fn sound_packet_ids() -> SoundPacketIds {
     })
 }
 
+/// Decode metadata particles by round-tripping Azalea's typed value through the
+/// same native option codec used for LevelParticles. Registry ids are already
+/// native here: translate.rs remaps metadata particle/state/item ids once.
+pub(crate) fn particle_options_from_typed(
+    particle: &azalea_entity::particle::Particle,
+) -> Option<(
+    crate::particle::ServerParticleKind,
+    crate::particle::ServerParticleOptions,
+)> {
+    let mut raw = vec![0, 0]; // overrideLimiter, alwaysShow
+    raw.extend_from_slice(&[0; 24]); // position
+    raw.extend_from_slice(&[0; 16]); // per-axis distance and max speed
+    raw.extend_from_slice(&0i32.to_be_bytes()); // count
+    particle.azalea_write(&mut raw).ok()?;
+    let NetworkEvent::LevelParticles { kind, options, .. } =
+        parse_level_particles(&mut std::io::Cursor::new(raw.as_slice())).ok()??
+    else {
+        return None;
+    };
+    Some((kind, options))
+}
+
 /// The wire layout of vanilla `ClientboundLevelParticlesPacket.write`, up to
 /// the particle type id.
 fn parse_level_particles(
@@ -2717,29 +2878,65 @@ fn parse_level_particles_impl(
                     scale: f32::azalea_read(cur)?,
                 }
             }
-        },
-        crate::particle::ServerParticleKind::Block => {
+        }
+        crate::particle::ServerParticleKind::Block
+        | crate::particle::ServerParticleKind::BlockMarker
+        | crate::particle::ServerParticleKind::FallingDust
+        | crate::particle::ServerParticleKind::DustPillar
+        | crate::particle::ServerParticleKind::BlockCrumble => {
             let id = u32::azalea_read_var(cur)?;
             let Some(state) = crate::world::block::try_state(id) else {
                 return Ok(None);
             };
             crate::particle::ServerParticleOptions::Block(state)
         }
+        crate::particle::ServerParticleKind::DustColorTransition => {
+            crate::particle::ServerParticleOptions::DustColorTransition {
+                from_color: i32::azalea_read(cur)?,
+                to_color: i32::azalea_read(cur)?,
+                scale: f32::azalea_read(cur)?,
+            }
+        }
+        crate::particle::ServerParticleKind::TintedLeaves
+        | crate::particle::ServerParticleKind::Flash => {
+            crate::particle::ServerParticleOptions::Color {
+                color: i32::azalea_read(cur)?,
+            }
+        }
+        crate::particle::ServerParticleKind::DragonBreath => {
+            crate::particle::ServerParticleOptions::Power {
+                power: f32::azalea_read(cur)?,
+            }
+        }
+        crate::particle::ServerParticleKind::SculkCharge => {
+            crate::particle::ServerParticleOptions::SculkCharge {
+                roll: f32::azalea_read(cur)?,
+            }
+        }
+        crate::particle::ServerParticleKind::Geyser
+        | crate::particle::ServerParticleKind::GeyserPlume => {
+            crate::particle::ServerParticleOptions::Geyser {
+                water_blocks: i32::azalea_read(cur)?,
+            }
+        }
+        crate::particle::ServerParticleKind::GeyserBase
+        | crate::particle::ServerParticleKind::GeyserPoof => {
+            crate::particle::ServerParticleOptions::GeyserBase {
+                water_blocks: i32::azalea_read(cur)?,
+                burst_impulse_base: f32::azalea_read(cur)?,
+            }
+        }
         crate::particle::ServerParticleKind::Item => {
-            let (item_id, count) = if translation.is_some() {
-                // Translated payloads use Azalea ItemStack's count/id ordering.
-                let count = i32::azalea_read_var(cur)?;
-                (u32::azalea_read_var(cur)?, count)
-            } else {
-                // 26.2 ItemStackTemplate writes item id, then count.
-                let item_id = u32::azalea_read_var(cur)?;
-                (item_id, i32::azalea_read_var(cur)?)
-            };
+            // Translation normalizes every supported wire version to the
+            // native 26.2 ItemStackTemplate layout: item id, then count.
+            let item_id = u32::azalea_read_var(cur)?;
+            let count = i32::azalea_read_var(cur)?;
             let components = azalea_inventory::DataComponentPatch::azalea_read(cur)?;
             crate::particle::ServerParticleOptions::Item {
                 item_id,
                 count,
                 components,
+                raw_components: None,
             }
         }
         crate::particle::ServerParticleKind::Shriek => {
@@ -2773,7 +2970,111 @@ fn parse_level_particles_impl(
                 _ => return Ok(None),
             }
         }
-        _ => crate::particle::ServerParticleOptions::Simple,
+        crate::particle::ServerParticleKind::EndRod
+        | crate::particle::ServerParticleKind::ExplosionEmitter
+        | crate::particle::ServerParticleKind::Explosion
+        | crate::particle::ServerParticleKind::Poof
+        | crate::particle::ServerParticleKind::Smoke
+        | crate::particle::ServerParticleKind::CampfireCosySmoke
+        | crate::particle::ServerParticleKind::CampfireSignalSmoke
+        | crate::particle::ServerParticleKind::Totem
+        | crate::particle::ServerParticleKind::Witch
+        | crate::particle::ServerParticleKind::RaidOmen
+        | crate::particle::ServerParticleKind::TrialOmen
+        | crate::particle::ServerParticleKind::AngryVillager
+        | crate::particle::ServerParticleKind::Bubble
+        | crate::particle::ServerParticleKind::SulfurBubbles
+        | crate::particle::ServerParticleKind::NoxiousGas
+        | crate::particle::ServerParticleKind::NoxiousGasCloud
+        | crate::particle::ServerParticleKind::Cloud
+        | crate::particle::ServerParticleKind::CopperFireFlame
+        | crate::particle::ServerParticleKind::Crit
+        | crate::particle::ServerParticleKind::DamageIndicator
+        | crate::particle::ServerParticleKind::DrippingLava
+        | crate::particle::ServerParticleKind::FallingLava
+        | crate::particle::ServerParticleKind::LandingLava
+        | crate::particle::ServerParticleKind::DrippingWater
+        | crate::particle::ServerParticleKind::FallingWater
+        | crate::particle::ServerParticleKind::ElderGuardian
+        | crate::particle::ServerParticleKind::EnchantedHit
+        | crate::particle::ServerParticleKind::Enchant
+        | crate::particle::ServerParticleKind::Gust
+        | crate::particle::ServerParticleKind::SmallGust
+        | crate::particle::ServerParticleKind::GustEmitterLarge
+        | crate::particle::ServerParticleKind::GustEmitterSmall
+        | crate::particle::ServerParticleKind::SonicBoom
+        | crate::particle::ServerParticleKind::Firework
+        | crate::particle::ServerParticleKind::Fishing
+        | crate::particle::ServerParticleKind::Flame
+        | crate::particle::ServerParticleKind::Infested
+        | crate::particle::ServerParticleKind::CherryLeaves
+        | crate::particle::ServerParticleKind::PaleOakLeaves
+        | crate::particle::ServerParticleKind::SculkSoul
+        | crate::particle::ServerParticleKind::SculkChargePop
+        | crate::particle::ServerParticleKind::SoulFireFlame
+        | crate::particle::ServerParticleKind::Soul
+        | crate::particle::ServerParticleKind::HappyVillager
+        | crate::particle::ServerParticleKind::Composter
+        | crate::particle::ServerParticleKind::Heart
+        | crate::particle::ServerParticleKind::PauseMobGrowth
+        | crate::particle::ServerParticleKind::ResetMobGrowth
+        | crate::particle::ServerParticleKind::ItemSlime
+        | crate::particle::ServerParticleKind::ItemCobweb
+        | crate::particle::ServerParticleKind::ItemSnowball
+        | crate::particle::ServerParticleKind::LargeSmoke
+        | crate::particle::ServerParticleKind::Lava
+        | crate::particle::ServerParticleKind::Mycelium
+        | crate::particle::ServerParticleKind::Note
+        | crate::particle::ServerParticleKind::Portal
+        | crate::particle::ServerParticleKind::Rain
+        | crate::particle::ServerParticleKind::WhiteSmoke
+        | crate::particle::ServerParticleKind::Sneeze
+        | crate::particle::ServerParticleKind::Spit
+        | crate::particle::ServerParticleKind::SquidInk
+        | crate::particle::ServerParticleKind::SweepAttack
+        | crate::particle::ServerParticleKind::Underwater
+        | crate::particle::ServerParticleKind::Splash
+        | crate::particle::ServerParticleKind::BubblePop
+        | crate::particle::ServerParticleKind::CurrentDown
+        | crate::particle::ServerParticleKind::BubbleColumnUp
+        | crate::particle::ServerParticleKind::Nautilus
+        | crate::particle::ServerParticleKind::Dolphin
+        | crate::particle::ServerParticleKind::DrippingHoney
+        | crate::particle::ServerParticleKind::FallingHoney
+        | crate::particle::ServerParticleKind::LandingHoney
+        | crate::particle::ServerParticleKind::FallingNectar
+        | crate::particle::ServerParticleKind::FallingSporeBlossom
+        | crate::particle::ServerParticleKind::Ash
+        | crate::particle::ServerParticleKind::CrimsonSpore
+        | crate::particle::ServerParticleKind::WarpedSpore
+        | crate::particle::ServerParticleKind::SporeBlossomAir
+        | crate::particle::ServerParticleKind::DrippingObsidianTear
+        | crate::particle::ServerParticleKind::FallingObsidianTear
+        | crate::particle::ServerParticleKind::LandingObsidianTear
+        | crate::particle::ServerParticleKind::ReversePortal
+        | crate::particle::ServerParticleKind::WhiteAsh
+        | crate::particle::ServerParticleKind::SmallFlame
+        | crate::particle::ServerParticleKind::Snowflake
+        | crate::particle::ServerParticleKind::DrippingDripstoneLava
+        | crate::particle::ServerParticleKind::FallingDripstoneLava
+        | crate::particle::ServerParticleKind::DrippingDripstoneWater
+        | crate::particle::ServerParticleKind::FallingDripstoneWater
+        | crate::particle::ServerParticleKind::GlowSquidInk
+        | crate::particle::ServerParticleKind::Glow
+        | crate::particle::ServerParticleKind::WaxOn
+        | crate::particle::ServerParticleKind::WaxOff
+        | crate::particle::ServerParticleKind::ElectricSpark
+        | crate::particle::ServerParticleKind::Scrape
+        | crate::particle::ServerParticleKind::EggCrack
+        | crate::particle::ServerParticleKind::DustPlume
+        | crate::particle::ServerParticleKind::TrialSpawnerDetection
+        | crate::particle::ServerParticleKind::TrialSpawnerDetectionOminous
+        | crate::particle::ServerParticleKind::VaultConnection
+        | crate::particle::ServerParticleKind::OminousSpawning
+        | crate::particle::ServerParticleKind::Firefly
+        | crate::particle::ServerParticleKind::SulfurCubeGoo => {
+            crate::particle::ServerParticleOptions::Simple
+        }
     };
     Ok(Some(NetworkEvent::LevelParticles {
         kind,
@@ -3087,6 +3388,118 @@ mod tests {
     };
 
     #[test]
+    fn typed_metadata_particles_use_the_level_particle_option_codec() {
+        use azalea_core::color::RgbColor;
+        use azalea_entity::particle::{
+            BlockParticle, ColorParticle, DustParticle, ItemParticle, Particle, PositionSource,
+            TrailParticle, VibrationParticle,
+        };
+        use azalea_inventory::{DataComponentPatch, ItemStack, ItemStackData};
+
+        let _block_guard = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let cases = [
+            (
+                Particle::Dust(DustParticle {
+                    color: RgbColor::new(12, 34, 56),
+                    scale: 1.25,
+                }),
+                crate::particle::ServerParticleKind::Dust,
+            ),
+            (
+                Particle::EntityEffect(ColorParticle {
+                    color: RgbColor::new(12, 34, 56),
+                }),
+                crate::particle::ServerParticleKind::EntityEffect,
+            ),
+            (
+                Particle::Block(BlockParticle {
+                    block_state: azalea_block::BlockState::default(),
+                }),
+                crate::particle::ServerParticleKind::Block,
+            ),
+            (
+                Particle::Trail(Box::new(TrailParticle {
+                    target: azalea_core::position::Vec3 {
+                        x: 1.0,
+                        y: 2.0,
+                        z: 3.0,
+                    },
+                    color: 0xff12_3456u32 as i32,
+                    duration: 17,
+                })),
+                crate::particle::ServerParticleKind::Trail,
+            ),
+            (
+                Particle::Vibration(Box::new(VibrationParticle {
+                    position: PositionSource::Block(BlockPos::new(4, 5, 6)),
+                    ticks: 23,
+                })),
+                crate::particle::ServerParticleKind::Vibration,
+            ),
+        ];
+        for (particle, expected_kind) in cases {
+            let (kind, options) =
+                particle_options_from_typed(&particle).expect("registered typed particle");
+            assert_eq!(kind, expected_kind);
+            match (&particle, options) {
+                (
+                    Particle::Dust(_),
+                    crate::particle::ServerParticleOptions::Dust {
+                        packed_color,
+                        scale,
+                    },
+                ) => {
+                    assert_eq!(packed_color as u32 & 0x00ff_ffff, 0x000c_2238);
+                    assert_eq!(scale, 1.25);
+                }
+                (
+                    Particle::EntityEffect(_),
+                    crate::particle::ServerParticleOptions::EntityEffect { color },
+                ) => {
+                    assert_eq!(color as u32 & 0x00ff_ffff, 0x000c_2238);
+                }
+                (Particle::Block(_), crate::particle::ServerParticleOptions::Block(_)) => {}
+                (
+                    Particle::Trail(_),
+                    crate::particle::ServerParticleOptions::Trail {
+                        target,
+                        color,
+                        duration,
+                    },
+                ) => {
+                    assert_eq!(target, glam::dvec3(1.0, 2.0, 3.0));
+                    assert_eq!(color, 0xff12_3456u32 as i32);
+                    assert_eq!(duration, 17);
+                }
+                (
+                    Particle::Vibration(_),
+                    crate::particle::ServerParticleOptions::VibrationBlock {
+                        target,
+                        arrival_ticks,
+                    },
+                ) => {
+                    assert_eq!(target, BlockPos::new(4, 5, 6));
+                    assert_eq!(arrival_ticks, 23);
+                }
+                (particle, options) => panic!("wrong codec result for {particle:?}: {options:?}"),
+            }
+        }
+        let stack = ItemStack::Present(ItemStackData {
+            kind: azalea_registry::builtin::ItemKind::Diamond,
+            count: 3,
+            component_patch: DataComponentPatch::default(),
+        });
+        let item = particle_options_from_typed(&Particle::Item(ItemParticle { item: stack }))
+            .expect("typed item metadata codec");
+        assert_eq!(item.0, crate::particle::ServerParticleKind::Item);
+        assert!(matches!(
+            item.1,
+            crate::particle::ServerParticleOptions::Item { count: 3, .. }
+        ));
+    }
+
+    #[test]
     fn item_frame_metadata_events_follow_protocol_boundary_without_global_shift() {
         use azalea_entity::EntityDataValue as V;
         use azalea_inventory::ItemStack;
@@ -3217,10 +3630,348 @@ mod tests {
     }
 
     #[test]
+    fn protocol_777_particle_id_is_remapped_once_by_raw_decoder() {
+        use pomme_protocol::registries::{ClientRegistry, RegistryTable};
+        use pomme_protocol::{Direction, PacketTable, Phase};
+
+        let translation = super::super::translate::Translation::for_protocol(777).unwrap();
+        let source_registry = RegistryTable::for_protocol(777).unwrap();
+        let wire_particle = source_registry
+            .id_of(ClientRegistry::ParticleType, "raid_omen")
+            .unwrap();
+        assert_ne!(wire_particle, 120); // native 26.2 raid_omen ID
+        let mut raw = Vec::new();
+        wire::write_varint(
+            &mut raw,
+            PacketTable::for_protocol(777)
+                .unwrap()
+                .id(Phase::Game, Direction::Clientbound, "level_particles")
+                .unwrap(),
+        );
+        wire::write_varint(&mut raw, wire_particle);
+        raw.extend_from_slice(&[0, 0]); // overrideLimiter, alwaysShow
+        raw.extend_from_slice(&[0; 24]); // position
+        raw.extend_from_slice(&[0; 12]); // spread
+        raw.extend_from_slice(&[0; 12]); // per-axis maxSpeed
+        wire::write_varint(&mut raw, 1); // count
+        wire::write_varint(&mut raw, 0); // randomization type
+
+        let raw = translation
+            .translate_game_frame(raw.into_boxed_slice())
+            .unwrap();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(
+            runtime
+                .block_on(handle_raw_game_packet_with_translation(
+                    &raw,
+                    &tx,
+                    Some(&translation)
+                ))
+                .unwrap()
+        );
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::LevelParticles {
+                kind: crate::particle::ServerParticleKind::RaidOmen,
+                count: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn translated_protocol_777_item_particle_uses_native_item_stack_layout() {
+        use pomme_protocol::registries::{ClientRegistry, RegistryTable};
+        use pomme_protocol::{Direction, PacketTable, Phase};
+
+        let _block_guard = crate::world::block::test_protocol_guard();
+        let protocol = 777;
+        let translation = super::super::translate::Translation::for_protocol(protocol).unwrap();
+        let source = RegistryTable::for_protocol(protocol).unwrap();
+        let native = RegistryTable::native();
+        let source_item = source.id_of(ClientRegistry::Item, "diamond").unwrap();
+        let native_item = native.id_of(ClientRegistry::Item, "diamond").unwrap();
+        assert_ne!(
+            source_item, native_item,
+            "fixture must exercise item remapping"
+        );
+        let source_component = source
+            .id_of(ClientRegistry::DataComponentType, "max_stack_size")
+            .unwrap();
+        let source_particle = source.id_of(ClientRegistry::ParticleType, "item").unwrap();
+
+        let mut frame = Vec::new();
+        wire::write_varint(
+            &mut frame,
+            PacketTable::for_protocol(protocol)
+                .unwrap()
+                .id(Phase::Game, Direction::Clientbound, "level_particles")
+                .unwrap(),
+        );
+        wire::write_varint(&mut frame, source_particle);
+        let stack_start = frame.len();
+        wire::write_varint(&mut frame, 3); // ItemStack count (wire order)
+        wire::write_varint(&mut frame, source_item);
+        wire::write_varint(&mut frame, 0); // added components
+        wire::write_varint(&mut frame, 1); // removed components
+        wire::write_varint(&mut frame, source_component);
+        let stack_end = frame.len();
+        frame.extend_from_slice(&[0, 0]); // overrideLimiter, alwaysShow
+        frame.extend_from_slice(&[0; 24]); // position
+        frame.extend_from_slice(&[0; 24]); // spread + per-axis speed
+        wire::write_varint(&mut frame, 1); // count
+        wire::write_varint(&mut frame, 0); // randomization type
+
+        let translated = translation
+            .translate_game_frame(frame.clone().into_boxed_slice())
+            .unwrap();
+        assert_eq!(
+            translation.remap_particle(source_particle),
+            Some(native.id_of(ClientRegistry::ParticleType, "item").unwrap())
+        );
+        let mut translated_cursor = std::io::Cursor::new(translated.as_ref());
+        let _native_packet_id = u32::azalea_read_var(&mut translated_cursor).unwrap();
+        let parsed =
+            parse_level_particles_with_translation(&mut translated_cursor, Some(&translation));
+        assert!(
+            parsed.unwrap().is_some(),
+            "translated payload was not decoded"
+        );
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(
+            runtime
+                .block_on(handle_raw_game_packet_with_translation(
+                    &translated,
+                    &tx,
+                    Some(&translation),
+                ))
+                .unwrap()
+        );
+        let NetworkEvent::LevelParticles {
+            kind: crate::particle::ServerParticleKind::Item,
+            options:
+                crate::particle::ServerParticleOptions::Item {
+                    item_id,
+                    count,
+                    components,
+                    ..
+                },
+            ..
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("expected translated item particle");
+        };
+        assert_eq!(item_id, native_item);
+        assert_eq!(count, 3);
+        assert_ne!(
+            format!("{components:?}"),
+            format!("{:?}", azalea_inventory::DataComponentPatch::default())
+        );
+        let mut empty_stack = frame[..stack_start].to_vec();
+        wire::write_varint(&mut empty_stack, 0); // empty ItemStack sentinel
+        empty_stack.extend_from_slice(&frame[stack_end..]);
+        assert!(
+            translation
+                .translate_game_frame(empty_stack.into_boxed_slice())
+                .is_none()
+        );
+        let mut truncated_patch = frame[..stack_end - 1].to_vec();
+        truncated_patch.extend_from_slice(&frame[stack_end..]);
+        assert!(
+            translation
+                .translate_game_frame(truncated_patch.into_boxed_slice())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn normalized_item_particle_layout_is_native_for_protocols_763_through_776() {
+        use pomme_protocol::registries::{ClientRegistry, RegistryTable};
+
+        let _block_guard = crate::world::block::test_protocol_guard();
+        let native_registry = RegistryTable::native();
+        let particle_id = native_registry
+            .id_of(ClientRegistry::ParticleType, "item")
+            .unwrap();
+        for protocol in 763..=776 {
+            let mut frame = vec![0, 0]; // flags
+            frame.extend_from_slice(&[0; 24]); // position
+            frame.extend_from_slice(&[0; 16]); // spread + maxSpeed
+            frame.extend_from_slice(&1i32.to_be_bytes()); // count
+            wire::write_varint(&mut frame, particle_id);
+            wire::write_varint(&mut frame, 37); // normalized native item id
+            wire::write_varint(&mut frame, 4); // count
+            frame.extend_from_slice(&[0, 0]); // empty component patch
+
+            let mut cur = std::io::Cursor::new(frame.as_slice());
+            let event = parse_level_particles_for_protocol(&mut cur, Some(protocol))
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(event,
+                    NetworkEvent::LevelParticles {
+                        options: crate::particle::ServerParticleOptions::Item {
+                            item_id: 37,
+                            count: 4,
+                            ref components,
+                            ..
+                        },
+                        ..
+                    } if format!("{components:?}") == format!("{:?}", azalea_inventory::DataComponentPatch::default())
+                ),
+                "protocol {protocol}"
+            );
+            assert_eq!(cur.position() as usize, frame.len(), "protocol {protocol}");
+        }
+    }
+
+    #[test]
+    fn level_particles_decodes_typed_options_and_rejects_truncation() {
+        use pomme_protocol::registries::{ClientRegistry, RegistryTable};
+
+        use crate::particle::{ServerParticleKind as K, ServerParticleOptions as O};
+
+        let _block_guard = crate::world::block::test_protocol_guard();
+        let registry = RegistryTable::native();
+        let cases: &[(K, &[u8], fn(&O) -> bool)] = &[
+            (
+                K::DustColorTransition,
+                &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                |o| matches!(o, O::DustColorTransition { from_color: 0x01020304, to_color: 0x05060708, scale } if *scale == f32::from_bits(0x090a0b0c)),
+            ),
+            (K::TintedLeaves, &[1, 2, 3, 4], |o| {
+                matches!(o, O::Color { color: 0x01020304 })
+            }),
+            (K::Flash, &[1, 2, 3, 4], |o| {
+                matches!(o, O::Color { color: 0x01020304 })
+            }),
+            (
+                K::DragonBreath,
+                &[0x3f, 0x80, 0, 0],
+                |o| matches!(o, O::Power { power } if *power == 1.0),
+            ),
+            (
+                K::SculkCharge,
+                &[0x40, 0, 0, 0],
+                |o| matches!(o, O::SculkCharge { roll } if *roll == 2.0),
+            ),
+            (K::Geyser, &[0, 0, 0, 7], |o| {
+                matches!(o, O::Geyser { water_blocks: 7 })
+            }),
+            (K::GeyserPlume, &[0, 0, 0, 7], |o| {
+                matches!(o, O::Geyser { water_blocks: 7 })
+            }),
+            (
+                K::GeyserBase,
+                &[0, 0, 0, 7, 0x3f, 0x80, 0, 0],
+                |o| matches!(o, O::GeyserBase { water_blocks: 7, burst_impulse_base } if *burst_impulse_base == 1.0),
+            ),
+            (
+                K::GeyserPoof,
+                &[0, 0, 0, 7, 0x3f, 0x80, 0, 0],
+                |o| matches!(o, O::GeyserBase { water_blocks: 7, burst_impulse_base } if *burst_impulse_base == 1.0),
+            ),
+            (K::Block, &[0], |o| matches!(o, O::Block(_))),
+            (K::BlockMarker, &[0], |o| matches!(o, O::Block(_))),
+            (K::FallingDust, &[0], |o| matches!(o, O::Block(_))),
+            (K::DustPillar, &[0], |o| matches!(o, O::Block(_))),
+            (K::BlockCrumble, &[0], |o| matches!(o, O::Block(_))),
+            (K::Shriek, &[7], |o| matches!(o, O::Shriek { delay: 7 })),
+            (
+                K::Trail,
+                &[0; 29],
+                |o| matches!(o, O::Trail { target, color: 0, duration: 0 } if *target == glam::DVec3::ZERO),
+            ),
+            (
+                K::Vibration,
+                &[0, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+                |o| matches!(o, O::VibrationBlock { target, arrival_ticks: 3 } if *target == azalea_core::position::BlockPos::default()),
+            ),
+            (K::Vibration, &[1, 5, 0, 0, 0, 0, 3], |o| {
+                matches!(
+                    o,
+                    O::VibrationEntity {
+                        entity_id: 5,
+                        y_offset: 0.0,
+                        arrival_ticks: 3
+                    }
+                )
+            }),
+            (K::Item, &[1, 1, 0, 0], |o| {
+                matches!(
+                    o,
+                    O::Item {
+                        item_id: 1,
+                        count: 1,
+                        ..
+                    }
+                )
+            }),
+        ];
+        for (kind, bytes, check) in cases {
+            let id = registry
+                .id_of(
+                    ClientRegistry::ParticleType,
+                    match kind {
+                        K::DustColorTransition => "dust_color_transition",
+                        K::TintedLeaves => "tinted_leaves",
+                        K::Flash => "flash",
+                        K::Block => "block",
+                        K::BlockMarker => "block_marker",
+                        K::FallingDust => "falling_dust",
+                        K::DustPillar => "dust_pillar",
+                        K::BlockCrumble => "block_crumble",
+                        K::Shriek => "shriek",
+                        K::Trail => "trail",
+                        K::Vibration => "vibration",
+                        K::Item => "item",
+                        K::DragonBreath => "dragon_breath",
+                        K::SculkCharge => "sculk_charge",
+                        K::Geyser | K::GeyserPlume => "geyser",
+                        K::GeyserBase => "geyser_base",
+                        K::GeyserPoof => "geyser_poof",
+                        _ => unreachable!(),
+                    },
+                )
+                .unwrap();
+            let mut frame = vec![0, 0]; // flags
+            frame.extend_from_slice(&[0; 24]); // position
+            frame.extend_from_slice(&[0; 16]); // spread + maxSpeed
+            frame.extend_from_slice(&0i32.to_be_bytes()); // count=0
+            wire::write_varint(&mut frame, id);
+            let start = frame.len();
+            frame.extend_from_slice(bytes);
+            frame.push(0x5a);
+            let mut cur = std::io::Cursor::new(frame.as_slice());
+            let event = parse_level_particles_for_protocol(&mut cur, Some(776))
+                .unwrap()
+                .unwrap();
+            let NetworkEvent::LevelParticles { options, .. } = event else {
+                unreachable!()
+            };
+            assert!(check(&options));
+            assert_eq!(cur.position() as usize, start + bytes.len());
+            assert_eq!(frame[cur.position() as usize], 0x5a);
+            for len in 0..bytes.len() {
+                let truncated = frame[..start + len].to_vec();
+                let mut cur = std::io::Cursor::new(truncated.as_slice());
+                assert!(
+                    parse_level_particles_for_protocol(&mut cur, Some(776)).is_err(),
+                    "{kind:?}, {len}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn level_particles_dust_wire_options_follow_protocol_boundary() {
         let dust_id = (0..2048)
-            .find(|&id| crate::particle::ServerParticleKind::from_id(id)
-                == Some(crate::particle::ServerParticleKind::Dust))
+            .find(|&id| {
+                crate::particle::ServerParticleKind::from_id(id)
+                    == Some(crate::particle::ServerParticleKind::Dust)
+            })
             .expect("native dust particle id");
         for (protocol, expected_color, legacy) in [
             (765, 0xffff_007f, true),
@@ -3256,22 +4007,29 @@ mod tests {
             let event = parse_level_particles_for_protocol(&mut cur, Some(protocol))
                 .unwrap()
                 .unwrap();
-            assert!(matches!(event, NetworkEvent::LevelParticles {
+            assert!(
+                matches!(event, NetworkEvent::LevelParticles {
                 options: crate::particle::ServerParticleOptions::Dust { packed_color, scale }, ..
-            } if packed_color as u32 == expected_color && scale == 1.25), "protocol {protocol}");
-            assert_eq!(cur.position() as usize, options_start + if legacy { 16 } else { 8 });
+            } if packed_color as u32 == expected_color && scale == 1.25),
+                "protocol {protocol}"
+            );
+            assert_eq!(
+                cur.position() as usize,
+                options_start + if legacy { 16 } else { 8 }
+            );
             assert_eq!(cur.get_ref()[cur.position() as usize], 0x5a);
         }
     }
 
     #[test]
     fn translated_level_particles_reach_raw_handler_and_particle_store() {
+        use pomme_protocol::{Direction, PacketTable, Phase};
+
         use crate::particle::{ParticleMode, ParticleStore, ServerParticleKind};
         use crate::renderer::chunk::atlas::AtlasUVMap;
         use crate::renderer::chunk::mesher::Colormap;
         use crate::world::block::registry::BlockRegistry;
         use crate::world::chunk::ChunkStore;
-        use pomme_protocol::{Direction, PacketTable, Phase};
 
         let colors = Arc::new(Colormap::test_empty());
         let mut store = ParticleStore::new(
@@ -3294,13 +4052,12 @@ mod tests {
             }),
         );
 
-        for (protocol, source_id, legacy) in [
-            (765, 14, true),
-            (767, 13, true),
-            (768, 13, false),
-            (769, 13, false),
-            (776, 21, false),
-        ] {
+        for protocol in 763..=776 {
+            let legacy = protocol < 768;
+            let source_id = pomme_protocol::RegistryTable::for_protocol(protocol)
+                .unwrap()
+                .id_of(pomme_protocol::ClientRegistry::ParticleType, "dust")
+                .unwrap();
             let translation = (protocol != 776)
                 .then(|| super::super::translate::Translation::for_protocol(protocol).unwrap());
             let table = if protocol == 776 {
@@ -3315,7 +4072,7 @@ mod tests {
                     .id(Phase::Game, Direction::Clientbound, "level_particles")
                     .unwrap(),
             );
-            if protocol == 765 {
+            if protocol <= 765 {
                 wire::write_varint(&mut frame, source_id);
             }
             frame.push(1); // override limiter
@@ -3329,7 +4086,7 @@ mod tests {
                 frame.extend_from_slice(&value.to_be_bytes());
             }
             frame.extend_from_slice(&0i32.to_be_bytes()); // one directional particle
-            if protocol != 765 {
+            if protocol > 765 {
                 wire::write_varint(&mut frame, source_id);
             }
             if legacy {
@@ -3342,7 +4099,9 @@ mod tests {
             }
 
             let native_frame = if let Some(translation) = &translation {
-                translation.translate_game_frame(frame.clone().into_boxed_slice()).unwrap()
+                translation
+                    .translate_game_frame(frame.clone().into_boxed_slice())
+                    .unwrap()
             } else {
                 frame.into_boxed_slice()
             };
@@ -3351,7 +4110,7 @@ mod tests {
                 native_frame[native_frame.len() - option_len - 1],
                 source_id as u8
             ); // Translation preserves wire id; raw parser remaps it to native Dust.
-            if protocol == 765 {
+            if protocol <= 765 {
                 assert_eq!(native_frame[1], 1); // overrideLimiter
                 assert_eq!(native_frame[2], 0); // synthesized alwaysShow
                 assert_eq!(
@@ -3378,7 +4137,11 @@ mod tests {
             assert!(handled, "protocol {protocol}");
             let NetworkEvent::LevelParticles {
                 kind: ServerParticleKind::Dust,
-                options: crate::particle::ServerParticleOptions::Dust { packed_color, scale },
+                options:
+                    crate::particle::ServerParticleOptions::Dust {
+                        packed_color,
+                        scale,
+                    },
                 pos,
                 x_dist,
                 y_dist,
@@ -3387,9 +4150,9 @@ mod tests {
                 count,
                 override_limiter,
                 always_show,
-            } = rx
-                .try_recv()
-                .expect(&format!("protocol {protocol}: expected translated Dust event"))
+            } = rx.try_recv().expect(&format!(
+                "protocol {protocol}: expected translated Dust event"
+            ))
             else {
                 panic!("protocol {protocol}: expected translated Dust event");
             };
@@ -3399,12 +4162,18 @@ mod tests {
             assert_eq!(override_limiter, true);
             assert_eq!(always_show, protocol == 776);
             assert_eq!(pos, glam::dvec3(1.0, 2.0, 3.0));
-            assert_eq!((x_dist, y_dist, z_dist, max_speed, count), (0.0, 0.0, 0.0, 1.0, 0));
+            assert_eq!(
+                (x_dist, y_dist, z_dist, max_speed, count),
+                (0.0, 0.0, 0.0, 1.0, 0)
+            );
 
             store.clear();
             store.add_particles_from_packet(
                 ServerParticleKind::Dust,
-                crate::particle::ServerParticleOptions::Dust { packed_color, scale },
+                crate::particle::ServerParticleOptions::Dust {
+                    packed_color,
+                    scale,
+                },
                 true,
                 always_show,
                 pos,
@@ -3419,7 +4188,7 @@ mod tests {
             assert_eq!(store.test_pending().len(), 1, "protocol {protocol}");
             store.tick(&chunks);
             store.tick(&chunks);
-            let quads = store.extract(0.0, glam::dvec3(0.0, 0.0, 0.0));
+            let quads = store.extract(0.0, glam::dvec3(0.0, 0.0, 0.0), &chunks);
             assert_eq!(quads.len(), 1, "protocol {protocol}");
             let quad = &quads[0];
             assert!(quad.u0 < quad.u1 && quad.v0 < quad.v1);
@@ -3463,9 +4232,13 @@ mod tests {
         let complete = {
             let mut frame = frame.clone();
             frame.push(0); // one more byte makes the required 16-byte options
-            translation.translate_game_frame(frame.into_boxed_slice()).unwrap()
+            translation
+                .translate_game_frame(frame.into_boxed_slice())
+                .unwrap()
         };
-        let translated = translation.translate_game_frame(frame.into_boxed_slice()).unwrap();
+        let translated = translation
+            .translate_game_frame(frame.into_boxed_slice())
+            .unwrap();
         assert_eq!(complete.len(), translated.len() + 1);
         let (tx, rx) = crossbeam_channel::bounded(1);
         let result = tokio::runtime::Runtime::new()
@@ -3483,8 +4256,10 @@ mod tests {
     #[test]
     fn level_particles_truncated_dust_options_are_rejected() {
         let dust_id = (0..2048)
-            .find(|&id| crate::particle::ServerParticleKind::from_id(id)
-                == Some(crate::particle::ServerParticleKind::Dust))
+            .find(|&id| {
+                crate::particle::ServerParticleKind::from_id(id)
+                    == Some(crate::particle::ServerParticleKind::Dust)
+            })
             .unwrap();
         for (protocol, option_len) in [(767, 15), (768, 7)] {
             let mut raw = Vec::new();
@@ -3499,11 +4274,13 @@ mod tests {
             1i32.azalea_write(&mut raw).unwrap();
             dust_id.azalea_write_var(&mut raw).unwrap();
             raw.extend(std::iter::repeat_n(0, option_len));
-            assert!(parse_level_particles_for_protocol(
-                &mut std::io::Cursor::new(raw.as_slice()),
-                Some(protocol),
-            )
-            .is_err());
+            assert!(
+                parse_level_particles_for_protocol(
+                    &mut std::io::Cursor::new(raw.as_slice()),
+                    Some(protocol),
+                )
+                .is_err()
+            );
         }
     }
 
@@ -3670,6 +4447,11 @@ mod tests {
         dispatch_world_packet(&packet, &tx).await.unwrap();
         assert!(matches!(
             rx.try_recv().unwrap(),
+            NetworkEvent::ParticleMetadata { id: 12, particles }
+                if matches!(particles.as_slice(), [(crate::particle::ServerParticleKind::EntityEffect, crate::particle::ServerParticleOptions::EntityEffect { .. })])
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
             NetworkEvent::EntityEffectParticles { id: 12, particles: Some(v), ambient: None }
                 if v == particles
         ));
@@ -3688,6 +4470,25 @@ mod tests {
                 index: 11,
                 value: MetaValue::Bool(true)
             }
+        ));
+        assert!(rx.is_empty());
+
+        let empty = ClientboundGamePacket::SetEntityData(ClientboundSetEntityData {
+            id: MinecraftEntityId(12),
+            packed_items: EntityMetadataItems(vec![EntityDataItem {
+                index: 10,
+                value: EntityDataValue::Particles(Vec::new().into_boxed_slice()),
+            }]),
+        });
+        dispatch_world_packet(&empty, &tx).await.unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::ParticleMetadata { id: 12, particles } if particles.is_empty()
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            NetworkEvent::EntityEffectParticles { id: 12, particles: Some(particles), ambient: None }
+                if particles.is_empty()
         ));
         assert!(rx.is_empty());
     }
@@ -3750,7 +4551,63 @@ mod tests {
                     crate::net::azalea_compat::test_translate_decode_and_remap(protocol, frame);
                 let (tx, rx) = crossbeam_channel::bounded(2);
                 dispatch_world_packet(&packet, &tx).await.unwrap();
-                let event = rx.try_recv().expect("handler emits effect particle event");
+                let exact = rx.try_recv().expect("handler emits exact particle options");
+                let NetworkEvent::ParticleMetadata {
+                    id: exact_id,
+                    particles: exact_options,
+                } = exact
+                else {
+                    panic!("handler did not emit typed particle metadata");
+                };
+                assert_eq!(exact_id, id);
+                assert!(matches!(exact_options.as_slice(), [
+                    (crate::particle::ServerParticleKind::Effect | crate::particle::ServerParticleKind::InstantEffect,
+                     crate::particle::ServerParticleOptions::Spell { color: 0x123456, power: actual })
+                ] if *actual == power));
+                crate::app::core::apply_particle_metadata(
+                    &mut player,
+                    &mut entities,
+                    id,
+                    exact_options.clone(),
+                );
+                let saved_len = if id == player.entity_id {
+                    player.effect_particle_options.as_ref().map(Vec::len)
+                } else {
+                    entities.living[&id]
+                        .effect_particle_options
+                        .as_ref()
+                        .map(Vec::len)
+                };
+                assert_eq!(saved_len, Some(exact_options.len()));
+                particles.clear();
+                let registry = crate::world::block::registry::BlockRegistry::test_empty();
+                let chunks = crate::world::chunk::ChunkStore::new(1);
+                for seed in 0..256 {
+                    particles.clear();
+                    fastrand::seed(seed);
+                    particles.add_living_effect_server_particles(
+                        DVec3::ZERO,
+                        0.6,
+                        1.8,
+                        &exact_options,
+                        false,
+                        false,
+                        DVec3::ZERO,
+                        &registry,
+                        &chunks,
+                        &Default::default(),
+                    );
+                    if particles.test_particle_count() > 0 {
+                        break;
+                    }
+                }
+                assert!(
+                    particles.test_particle_count() > 0,
+                    "typed metadata reaches the actual particle provider"
+                );
+                let event = rx
+                    .try_recv()
+                    .expect("handler retains Azalea effect compatibility event");
                 let NetworkEvent::EntityEffectParticles {
                     id,
                     particles: Some(saved),
@@ -3862,34 +4719,86 @@ mod tests {
             entity_id: MinecraftEntityId(34),
             event_id: 3,
         });
+        async fn recv_event(rx: &crossbeam_channel::Receiver<NetworkEvent>) -> NetworkEvent {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    match rx.try_recv() {
+                        Ok(event) => break event,
+                        Err(crossbeam_channel::TryRecvError::Empty) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        }
+                        Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                            panic!("network event channel disconnected");
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("timed out waiting for network event")
+        }
+
         let (tx, rx) = crossbeam_channel::bounded(2);
-        dispatch_world_packet(&metadata, &tx).await.unwrap();
-        dispatch_world_packet(&impact, &tx).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            dispatch_world_packet(&metadata, &tx),
+        )
+        .await
+        .expect("metadata dispatch timed out")
+        .unwrap();
+
+        let impact_dispatch = dispatch_world_packet(&impact, &tx);
+        tokio::pin!(impact_dispatch);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut impact_dispatch,)
+                .await
+                .is_err(),
+            "event 3 must wait after its particle fills the queue"
+        );
+        assert!(rx.is_full());
         assert!(matches!(
-            rx.try_recv().unwrap(),
+            recv_event(&rx).await,
             NetworkEvent::EntityData {
                 id: 12,
                 index: 10,
                 value: MetaValue::Bool(true)
             }
         ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), &mut impact_dispatch)
+            .await
+            .expect("impact dispatch timed out after making queue space")
+            .unwrap();
         assert!(matches!(
-            rx.try_recv().unwrap(),
+            recv_event(&rx).await,
+            NetworkEvent::EntityParticleEvent {
+                id: 34,
+                event_id: 3
+            }
+        ));
+        assert!(matches!(
+            recv_event(&rx).await,
             NetworkEvent::EntityDied { id: 34 }
         ));
-        for packet in [&metadata, &impact] {
-            tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
-            tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
-            let event = resume_full_dispatch(packet, &tx, &rx).await;
-            assert!(matches!(
-                event,
-                NetworkEvent::EntityData { .. } | NetworkEvent::EntityDied { .. }
-            ));
-        }
+        assert!(rx.is_empty());
+
+        tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+        tx.try_send(NetworkEvent::LevelChunksLoadStart).unwrap();
+        assert!(matches!(
+            resume_full_dispatch(&metadata, &tx, &rx).await,
+            NetworkEvent::EntityData { id: 12, .. }
+        ));
+
         drop(rx);
         assert!(matches!(
-            dispatch_world_packet(&impact, &tx).await,
-            Err(SendError(NetworkEvent::EntityDied { id: 34 }))
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                dispatch_world_packet(&impact, &tx),
+            )
+            .await
+            .expect("disconnected dispatch timed out"),
+            Err(SendError(NetworkEvent::EntityParticleEvent {
+                id: 34,
+                event_id: 3
+            }))
         ));
     }
 
@@ -4160,6 +5069,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mob_spawner_nbt_is_preserved_from_chunk_and_standalone_be_packets() {
+        use azalea_protocol::packets::game::c_block_entity_data::ClientboundBlockEntityData;
+
+        let mut nbt = simdnbt::owned::NbtCompound::new();
+        nbt.insert("Delay", 37i16);
+        let mut entity = simdnbt::owned::NbtCompound::new();
+        entity.insert("id", "minecraft:zombie");
+        let mut spawn_data = simdnbt::owned::NbtCompound::new();
+        spawn_data.insert("entity", entity);
+        nbt.insert("SpawnData", spawn_data);
+
+        let mut chunk_packet =
+            statue_chunk_packet(simdnbt::owned::Nbt::new("".into(), nbt.clone()));
+        let ClientboundGamePacket::LevelChunkWithLight(packet) = &mut chunk_packet else {
+            unreachable!();
+        };
+        packet.chunk_data.block_entities[0].kind =
+            azalea_registry::builtin::BlockEntityKind::MobSpawner;
+        let (tx, rx) = crossbeam_channel::bounded(2);
+        dispatch_world_packet(&chunk_packet, &tx).await.unwrap();
+        let NetworkEvent::ChunkLoaded { block_entities, .. } = rx.try_recv().unwrap() else {
+            panic!("expected loaded chunk snapshot");
+        };
+        assert_eq!(block_entities.len(), 1);
+        assert_eq!(
+            block_entities[0].1,
+            azalea_registry::builtin::BlockEntityKind::MobSpawner
+        );
+        assert_eq!(block_entities[0].2.short("Delay"), Some(37));
+
+        let standalone = ClientboundGamePacket::BlockEntityData(ClientboundBlockEntityData {
+            pos: BlockPos::new(-17, -64, 17),
+            block_entity_type: azalea_registry::builtin::BlockEntityKind::MobSpawner,
+            tag: simdnbt::owned::Nbt::new("".into(), nbt),
+        });
+        dispatch_world_packet(&standalone, &tx).await.unwrap();
+        let NetworkEvent::BlockEntityUpdate { kind, nbt, .. } = rx.try_recv().unwrap() else {
+            panic!("expected standalone block-entity update");
+        };
+        assert_eq!(kind, azalea_registry::builtin::BlockEntityKind::MobSpawner);
+        assert_eq!(nbt.unwrap().short("Delay"), Some(37));
+    }
+
+    #[tokio::test]
     async fn mandatory_world_packets_wait_on_full_and_stop_on_disconnected_queue() {
         use azalea_protocol::packets::game::c_block_entity_data::ClientboundBlockEntityData;
         use azalea_protocol::packets::game::c_block_update::ClientboundBlockUpdate;
@@ -4265,7 +5218,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn animate_critical_actions_dispatch_distinct_events_and_other_actions_do_not() {
+    async fn client_entity_and_level_events_dispatch_particle_sources() {
         use azalea_core::entity_id::MinecraftEntityId;
         use azalea_protocol::packets::game::c_animate::{AnimationAction, ClientboundAnimate};
 
@@ -4322,7 +5275,7 @@ mod tests {
             event_rx.recv().unwrap(),
             NetworkEvent::EntityWakeUp { id: 41 }
         ));
-        for (event_id, expected) in [(35, Some(41)), (255, None)] {
+        for (event_id, expected) in [(35, Some(41)), (20, Some(20)), (60, Some(60)), (255, None)] {
             handle_game_packet(
                 &ClientboundGamePacket::EntityEvent(
                     azalea_protocol::packets::game::c_entity_event::ClientboundEntityEvent {
@@ -4340,12 +5293,329 @@ mod tests {
             .await
             .unwrap();
             if let Some(id) = expected {
-                assert!(
-                    matches!(event_rx.recv().unwrap(), NetworkEvent::TotemUsed { entity_id } if entity_id == id)
-                );
+                if event_id == 35 {
+                    assert!(
+                        matches!(event_rx.recv().unwrap(), NetworkEvent::TotemUsed { entity_id } if entity_id == id)
+                    );
+                } else {
+                    assert!(
+                        matches!(event_rx.recv().unwrap(), NetworkEvent::EntityPoof { id: entity_id } if entity_id == 41)
+                    );
+                }
             } else {
                 assert!(event_rx.try_recv().is_err());
             }
+        }
+        for (event_id, expected_count) in [(53, 5), (54, 10), (67, 0)] {
+            handle_game_packet(
+                &ClientboundGamePacket::EntityEvent(
+                    azalea_protocol::packets::game::c_entity_event::ClientboundEntityEvent {
+                        entity_id: MinecraftEntityId(41),
+                        event_id,
+                    },
+                ),
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+                &mut batches,
+                &mut cookies,
+            )
+            .await
+            .unwrap();
+            match event_rx.recv().unwrap() {
+                NetworkEvent::EntityHoneyParticles { id: 41, count }
+                    if event_id != 67 && count == expected_count => {}
+                NetworkEvent::EntityDrownParticles { id: 41 } if event_id == 67 => {}
+                _ => panic!("unexpected entity visual event for packet id {event_id}"),
+            }
+        }
+        for event_id in [
+            0, 1, 3, 4, 6, 7, 12, 13, 14, 15, 17, 18, 38, 39, 40, 41, 42, 45, 46, 47, 48, 49, 50,
+            51, 52, 65, 68, 69,
+        ] {
+            handle_game_packet(
+                &ClientboundGamePacket::EntityEvent(
+                    azalea_protocol::packets::game::c_entity_event::ClientboundEntityEvent {
+                        entity_id: MinecraftEntityId(41),
+                        event_id,
+                    },
+                ),
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+                &mut batches,
+                &mut cookies,
+            )
+            .await
+            .unwrap();
+            let mut saw_particle = false;
+            let mut saw_death = false;
+            for _ in 0..if event_id == 3 { 2 } else { 1 } {
+                match event_rx.recv().unwrap() {
+                    NetworkEvent::EntityParticleEvent {
+                        id: 41,
+                        event_id: actual,
+                    } if actual == event_id => saw_particle = true,
+                    NetworkEvent::EntityDied { id: 41 } if event_id == 3 => saw_death = true,
+                    other => panic!(
+                        "unexpected network event for entity event {event_id}: {:?}",
+                        std::mem::discriminant(&other)
+                    ),
+                }
+            }
+            assert!(saw_particle, "event {event_id} particle request");
+            if event_id == 3 {
+                assert!(saw_death, "event 3 keeps its entity-death side effect");
+            }
+            if event_id == 1 {
+                assert!(matches!(
+                    event_rx.recv().unwrap(),
+                    NetworkEvent::RabbitJump { id: 41 }
+                ));
+            }
+            if event_id == 4 {
+                assert!(matches!(
+                    event_rx.recv().unwrap(),
+                    NetworkEvent::GolemPunch { id: 41 }
+                ));
+            }
+        }
+        for event_type in [
+            1500,
+            1501,
+            1502,
+            1503,
+            1504,
+            1505,
+            2000,
+            2001,
+            2002,
+            2003,
+            2004,
+            2005,
+            2006,
+            2007,
+            2008,
+            2009,
+            2010,
+            2011,
+            2012,
+            2013,
+            3000,
+            3001,
+            3002,
+            3003,
+            3004,
+            3005,
+            3006,
+            3007,
+            3008,
+            3009,
+            3010,
+            3011,
+            3012,
+            3013,
+            3014,
+            3015,
+            3016,
+            3017,
+            3018,
+            3019,
+            3020,
+            3021,
+            u32::MAX,
+        ] {
+            let packet = ClientboundGamePacket::LevelEvent(
+                azalea_protocol::packets::game::c_level_event::ClientboundLevelEvent {
+                    event_type,
+                    pos: BlockPos::new(-3, 70, 4),
+                    data: 0x1234,
+                    global_event: false,
+                },
+            );
+            handle_game_packet(
+                &packet,
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+                &mut batches,
+                &mut cookies,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                event_rx.recv().unwrap(),
+                NetworkEvent::LevelEvent { event_type: actual, pos, data: 0x1234 }
+                    if actual == event_type && pos == BlockPos::new(-3, 70, 4)
+            ));
+        }
+        handle_game_packet(
+            &ClientboundGamePacket::BlockEvent(
+                azalea_protocol::packets::game::c_block_event::ClientboundBlockEvent {
+                    pos: BlockPos::new(1, 2, 3),
+                    block: azalea_registry::builtin::BlockKind::NoteBlock,
+                    action_id: 0,
+                    action_parameter: 0,
+                },
+            ),
+            &sender,
+            &event_tx,
+            &registries,
+            &command_tree,
+            &mut batches,
+            &mut cookies,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::BlockEvent {
+                block: azalea_registry::builtin::BlockKind::NoteBlock,
+                action_id: 0,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn equipment_break_event_is_dispatched_before_the_following_empty_slot_update() {
+        use azalea_core::entity_id::MinecraftEntityId;
+        use azalea_inventory::components::EquipmentSlot;
+        use azalea_protocol::packets::game::c_entity_event::ClientboundEntityEvent;
+        use azalea_protocol::packets::game::c_set_equipment::{
+            ClientboundSetEquipment, EquipmentSlots,
+        };
+
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(out_tx);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(2);
+        let registries = RegistryHolder::default();
+        let command_tree = Arc::new(Mutex::new(None));
+        let mut batches = ChunkBatchSizeCalculator::default();
+        let mut cookies = std::collections::HashMap::new();
+
+        for packet in [
+            ClientboundGamePacket::EntityEvent(ClientboundEntityEvent {
+                entity_id: MinecraftEntityId(41),
+                event_id: 47,
+            }),
+            ClientboundGamePacket::SetEquipment(ClientboundSetEquipment {
+                entity_id: MinecraftEntityId(41),
+                slots: EquipmentSlots {
+                    slots: vec![(EquipmentSlot::Mainhand, azalea_inventory::ItemStack::Empty)],
+                },
+            }),
+        ] {
+            handle_game_packet(
+                &packet,
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+                &mut batches,
+                &mut cookies,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::EntityParticleEvent {
+                id: 41,
+                event_id: 47
+            }
+        ));
+        assert!(matches!(
+            event_rx.recv().unwrap(),
+            NetworkEvent::ArmorStandEquipment { id: 41, slots }
+                if matches!(slots.as_slice(), [(EquipmentSlot::Mainhand, azalea_inventory::ItemStack::Empty)])
+        ));
+    }
+
+    #[tokio::test]
+    async fn level_event_packet_ids_preserve_type_position_data_for_unknown_ids_too() {
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = PacketSender::new(out_tx);
+        let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+        let registries = RegistryHolder::default();
+        let command_tree = Arc::new(Mutex::new(None));
+        let mut batches = ChunkBatchSizeCalculator::default();
+        let mut cookies = std::collections::HashMap::new();
+        for event_type in [
+            1500,
+            1501,
+            1502,
+            1503,
+            1504,
+            1505,
+            2000,
+            2001,
+            2002,
+            2003,
+            2004,
+            2005,
+            2006,
+            2007,
+            2008,
+            2009,
+            2010,
+            2011,
+            2012,
+            2013,
+            3000,
+            3001,
+            3002,
+            3003,
+            3004,
+            3005,
+            3006,
+            3007,
+            3008,
+            3009,
+            3010,
+            3011,
+            3012,
+            3013,
+            3014,
+            3015,
+            3016,
+            3017,
+            3018,
+            3019,
+            3020,
+            3021,
+            u32::MAX,
+        ] {
+            let pos = BlockPos::new(-3, 70, 4);
+            handle_game_packet(
+                &ClientboundGamePacket::LevelEvent(
+                    azalea_protocol::packets::game::c_level_event::ClientboundLevelEvent {
+                        event_type,
+                        pos,
+                        data: 0x1234,
+                        global_event: false,
+                    },
+                ),
+                &sender,
+                &event_tx,
+                &registries,
+                &command_tree,
+                &mut batches,
+                &mut cookies,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                event_rx.recv().unwrap(),
+                NetworkEvent::LevelEvent {
+                    event_type: actual,
+                    pos: actual_pos,
+                    data: 0x1234
+                } if actual == event_type && actual_pos == pos
+            ));
         }
     }
 
@@ -4369,7 +5639,7 @@ mod tests {
             radius: 4.5,
             block_count: 23,
             player_knockback: Some(Vec3::new(0.25, -0.5, 0.75)),
-            explosion_particle: Particle::ExplosionEmitter,
+            explosion_particle: Particle::Gust,
             explosion_sound: SoundEvent::AmbientCave,
             block_particles: vec![Weighted {
                 value: ExplosionParticleInfo {
@@ -4401,6 +5671,38 @@ mod tests {
         assert_eq!(event.explosion_particle, packet.explosion_particle);
         assert_eq!(event.block_particles, packet.block_particles);
         assert_eq!(event.explosion_sound.event_name(), "minecraft:ambient.cave");
+
+        let _protocol = crate::world::block::test_protocol_guard();
+        crate::world::block::init("26.2");
+        let colors = std::sync::Arc::new(crate::renderer::chunk::mesher::Colormap::test_empty());
+        let mut atlas = crate::renderer::chunk::atlas::AtlasUVMap::test_empty();
+        atlas.test_insert_particle_sprites("gust", vec!["particle/gust_test".into()]);
+        let mut store = crate::particle::ParticleStore::new(
+            atlas,
+            colors.clone(),
+            colors.clone(),
+            colors,
+        );
+        let chunks = crate::world::chunk::ChunkStore::new(2);
+        let registry = crate::world::block::registry::BlockRegistry::test_empty();
+        assert!(store.queue_explosion_packet_particles(
+            &event,
+            glam::dvec3(1.0, 2.0, 3.0),
+            &registry,
+            &chunks,
+            &std::collections::HashMap::new(),
+        ));
+        assert_eq!(store.test_pending().len(), 1, "primary GUST output");
+        store.spawn_tracked_explosion_particles(
+            glam::dvec3(1.0, 2.0, 3.0),
+            &registry,
+            &chunks,
+            &std::collections::HashMap::new(),
+        );
+        assert!(
+            store.test_pending().len() > 1,
+            "weighted packet options reach the store"
+        );
     }
 
     #[tokio::test]
@@ -5142,6 +6444,60 @@ mod dimension_info_tests {
         assert!(has_skylight);
         assert_eq!(cardinal_light, CardinalLightType::Nether);
         assert_eq!(environment_input.ambient_light, None);
+    }
+
+    #[test]
+    fn dimension_lightmap_attributes_are_retained_from_registry_data() {
+        let mut attrs = simdnbt::owned::NbtCompound::new();
+        attrs.insert("minecraft:visual/sky_light_factor", 0.35_f32);
+        attrs.insert("minecraft:visual/block_light_tint", 0x0012_3456_i32);
+        attrs.insert("minecraft:visual/sky_light_color", "#654321");
+        attrs.insert("minecraft:visual/ambient_light_color", 0x0001_0203_i32);
+        attrs.insert("minecraft:visual/night_vision_color", 0x000a_0b0c_i32);
+        let dim = azalea_core::registry_holder::dimension_type::DimensionKindElement {
+            height: 384,
+            min_y: -64,
+            ultrawarm: None,
+            _extra: HashMap::from([
+                ("attributes".to_string(), NbtTag::Compound(attrs)),
+                ("skybox".to_string(), NbtTag::String("end".into())),
+            ]),
+        };
+        let NetworkEvent::DimensionInfo {
+            environment_input, ..
+        } = dimension_info(
+            &dim,
+            false,
+            None,
+            "minecraft:overworld",
+            &std::sync::Arc::new(Vec::new()),
+            None,
+            None,
+        )
+        else {
+            panic!("dimension_info returned the wrong event variant");
+        };
+        assert_eq!(
+            environment_input.lightmap_attributes.sky_light_factor,
+            Some(0.35)
+        );
+        assert_eq!(
+            environment_input.lightmap_attributes.block_light_tint,
+            Some(0x0012_3456)
+        );
+        assert_eq!(
+            environment_input.lightmap_attributes.sky_light_color,
+            Some(0x0065_4321)
+        );
+        assert_eq!(
+            environment_input.lightmap_attributes.ambient_light_color,
+            Some(0x0001_0203)
+        );
+        assert_eq!(
+            environment_input.lightmap_attributes.night_vision_color,
+            Some(0x000a_0b0c)
+        );
+        assert!(environment_input.has_end_flashes);
     }
 
     #[test]

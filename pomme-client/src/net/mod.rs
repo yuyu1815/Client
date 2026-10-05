@@ -153,7 +153,20 @@ pub enum NetworkEvent {
     ),
     BiomeColors {
         colors: std::collections::HashMap<u32, crate::renderer::chunk::mesher::BiomeClimate>,
+        ambient_particles: std::collections::HashMap<
+            u32,
+            Vec<crate::world::environment_particles::AmbientParticle>,
+        >,
+        water_evaporates: std::collections::HashMap<u32, environment::BoolAttributeLayer>,
+        default_dripstone_particle:
+            std::collections::HashMap<u32, crate::world::environment_particles::AmbientParticle>,
     },
+    /// Complete replacement of the server's `minecraft:entity_type` raiders
+    /// tag.
+    RaiderEntityTypes(std::collections::HashSet<azalea_registry::builtin::EntityKind>),
+    /// Complete replacement of the server's `minecraft:block` tag members
+    /// for the sampler-owned tags. Empty set means explicit empty override.
+    BlockImpermeableTag(std::collections::HashSet<String>),
     /// `LEVEL_CHUNKS_LOAD_START`: the server has started sending the level.
     LevelChunksLoadStart,
     DimensionInfo {
@@ -168,6 +181,7 @@ pub enum NetworkEvent {
         /// Wire-order snapshot; `None` means no registry was received, distinct
         /// from an empty registry.
         world_clock_ids: Option<std::collections::HashMap<String, u32>>,
+        ambient_particles: Vec<crate::world::environment_particles::AmbientParticle>,
         environment_input: environment::DimensionEnvironmentInput,
     },
     ChunkLoaded {
@@ -475,6 +489,7 @@ pub enum NetworkEvent {
     },
     BlockEvent {
         pos: BlockPos,
+        block: azalea_registry::builtin::BlockKind,
         action_id: u8,
         action_parameter: u8,
     },
@@ -699,6 +714,15 @@ pub enum NetworkEvent {
         particles: Option<Vec<azalea_entity::particle::Particle>>,
         ambient: Option<bool>,
     },
+    /// Exact native 26.2 particle codec payloads from Particle / ParticleList
+    /// metadata.
+    ParticleMetadata {
+        id: i32,
+        particles: Vec<(
+            crate::particle::ServerParticleKind,
+            crate::particle::ServerParticleOptions,
+        )>,
+    },
     EntityProjectileItem {
         id: i32,
         stack: azalea_inventory::ItemStackData,
@@ -781,6 +805,25 @@ pub enum NetworkEvent {
         id: i32,
     },
     EntityDied {
+        id: i32,
+    },
+    /// Entity events 20 / 60: Java Mob.spawnAnim /
+    /// LivingEntity.makePoofParticles.
+    EntityPoof {
+        id: i32,
+    },
+    /// Entity event whose Java kind-specific handler emits local particles.
+    EntityParticleEvent {
+        id: i32,
+        event_id: u8,
+    },
+    /// Entity event 53/54: honey-block slide/jump particles.
+    EntityHoneyParticles {
+        id: i32,
+        count: u8,
+    },
+    /// Entity event 67: LivingEntity.makeDrownParticles.
+    EntityDrownParticles {
         id: i32,
     },
     HurtAnimation {
